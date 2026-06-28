@@ -15,7 +15,7 @@ mod sidebar;
 mod state;
 
 pub use category::{normalize_category, normalized_category_label, NormalizedCategory};
-pub use filter::{compute_filter_result, FilterCounts, FilterResult};
+pub use filter::{compute_filter_result, picker_perf_debug, FilterCounts, FilterResult};
 pub use insert::{validate_insert, InsertValidation, PluginInsertKind, PluginInsertTarget};
 pub use overlay::{
     page_size_for_height, plugin_picker_overlay, plugin_picker_panel, visible_plugin_id_at,
@@ -82,6 +82,12 @@ pub fn ensure_default_highlight(
     );
     state.clamp_highlight(result.indices.len());
     if state.selected_id.is_none() && !result.indices.is_empty() {
-        sync_selection_from_highlight(state, index, prefs);
+        // Reuse the pass we just ran rather than recomputing it inside
+        // `visible_plugin_id_at` — this is on the per-keystroke path.
+        state.selected_id = result
+            .indices
+            .get(state.highlighted_index)
+            .and_then(|&i| index.plugin_at(i))
+            .map(|plugin| plugin.id.clone());
     }
 }

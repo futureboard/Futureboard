@@ -7,9 +7,9 @@ use gpui::{
 };
 
 use crate::components::plugin_picker::{
-    compute_filter_result, ensure_default_highlight, plugin_picker_panel, CatalogStatus,
-    PickerFilter, PluginPickerCallbacks, PluginPickerPrefs, PluginPickerScrollHandles,
-    PluginPickerState, PluginSearchIndex,
+    compute_filter_result, ensure_default_highlight, picker_perf_debug, plugin_picker_panel,
+    CatalogStatus, PickerFilter, PluginPickerCallbacks, PluginPickerPrefs,
+    PluginPickerScrollHandles, PluginPickerState, PluginSearchIndex,
 };
 use crate::components::text_input::TextInputCallbacks;
 use crate::components::title_bar::external_window_titlebar;
@@ -34,7 +34,9 @@ pub(crate) struct InsertPickerWindow {
 #[derive(Clone)]
 pub(crate) struct InsertPickerSnapshot {
     pub picker: PluginPickerState,
-    pub index: Option<PluginSearchIndex>,
+    // Cheap `Arc` clone — the snapshot is rebuilt on every keystroke, so it must
+    // not deep-copy the plugin index.
+    pub index: Option<std::sync::Arc<PluginSearchIndex>>,
     pub prefs: PluginPickerPrefs,
     pub catalog_status: CatalogStatus,
     pub search_input: crate::components::text_input::TextInputState,
@@ -69,6 +71,8 @@ impl InsertPickerWindow {
     }
 
     fn handle_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let perf = picker_perf_debug();
+        let started = perf.then(std::time::Instant::now);
         let search_focused = self.snapshot.search_input.is_focused(window);
         let (handled, snapshot) = self.owner.update(cx, |layout, cx| {
             if event.keystroke.key.as_str() == "escape" {
@@ -81,6 +85,14 @@ impl InsertPickerWindow {
             (handled, layout.insert_picker_snapshot())
         });
         self.set_snapshot(snapshot);
+        cx.notify();
+        if let Some(started) = started {
+            eprintln!(
+                "[picker-perf] handle_key key={:?} handled={handled} took_us={}",
+                event.keystroke.key,
+                started.elapsed().as_micros()
+            );
+        }
         if handled {
             cx.stop_propagation();
         }
@@ -107,6 +119,7 @@ impl InsertPickerWindow {
 
 impl Render for InsertPickerWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let build_started = picker_perf_debug().then(std::time::Instant::now);
         let target = cx.entity().clone();
         let snapshot = self.snapshot.clone();
         let search_focused = snapshot.search_input.is_focused(window);
@@ -264,7 +277,20 @@ impl Render for InsertPickerWindow {
             on_mouse: None,
         };
 
-        div()
+        let panel = div().flex_1().min_h(px(0.0)).child(plugin_picker_panel(
+            &snapshot.picker,
+            snapshot.index.clone(),
+            &snapshot.prefs,
+            snapshot.catalog_status,
+            &snapshot.search_input,
+            search_focused,
+            search_callbacks,
+            picker_callbacks,
+            snapshot.au_error.as_deref(),
+            &self.scroll,
+        ));
+
+        let root = div()
             .flex()
             .flex_col()
             .size_full()
@@ -284,18 +310,15 @@ impl Render for InsertPickerWindow {
                     }
                 },
             ))
-            .child(div().flex_1().min_h(px(0.0)).child(plugin_picker_panel(
-                &snapshot.picker,
-                snapshot.index.as_ref(),
-                &snapshot.prefs,
-                snapshot.catalog_status,
-                &snapshot.search_input,
-                search_focused,
-                search_callbacks,
-                picker_callbacks,
-                snapshot.au_error.as_deref(),
-                &self.scroll,
-            )))
+            .child(panel);
+
+        if let Some(started) = build_started {
+            eprintln!(
+                "[picker-perf] render_build took_us={}",
+                started.elapsed().as_micros()
+            );
+        }
+        root
     }
 }
 

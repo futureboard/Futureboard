@@ -188,6 +188,14 @@ pub(crate) struct AudioBridgeState {
     pub last_sync_reason: &'static str,
     /// Start transport once the current background sync completes.
     pub play_after_sync: bool,
+    /// Last `EngineStats::dropout_count` seen, to detect new dropouts in the poll.
+    pub last_dropout_count: u64,
+    /// While set in the future, the status bar shows a coalesced "Audio dropout
+    /// detected" notice. Refreshed each time the dropout counter advances, so a
+    /// burst of dropouts shows one steady notice instead of flickering per poll.
+    pub dropout_notice_until: Option<Instant>,
+    /// Reason of the most recent dropout, for the status notice.
+    pub last_dropout_reason: String,
 }
 
 impl Default for AudioBridgeState {
@@ -223,6 +231,9 @@ impl Default for AudioBridgeState {
             sync_timeout_count: 0,
             last_sync_reason: "init",
             play_after_sync: false,
+            last_dropout_count: 0,
+            dropout_notice_until: None,
+            last_dropout_reason: String::new(),
         }
     }
 }
@@ -693,6 +704,18 @@ impl StudioLayout {
                     cx.notify();
                 }
             });
+        }
+
+        // Coalesced dropout notice: when the realtime dropout counter advances,
+        // hold a short status notice (refreshed on each new dropout) instead of
+        // spamming the UI. Counters/atomics only — no audio-thread interaction.
+        if stats.dropout_count > self.audio_bridge.last_dropout_count {
+            let new_dropouts = stats.dropout_count - self.audio_bridge.last_dropout_count;
+            self.audio_bridge.last_dropout_count = stats.dropout_count;
+            self.audio_bridge.last_dropout_reason = stats.dropout_last_reason.clone();
+            self.audio_bridge.dropout_notice_until = Some(Instant::now() + Duration::from_secs(4));
+            crate::perf::count("audio_dropout_count", stats.dropout_count);
+            crate::perf::count("audio_dropout_recent", new_dropouts);
         }
 
         let was_playing = stats.transport_playing;

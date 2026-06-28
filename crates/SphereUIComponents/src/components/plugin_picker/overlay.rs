@@ -34,7 +34,7 @@ type VoidCb = Arc<dyn Fn(&(), &mut Window, &mut App) + 'static>;
 
 pub fn plugin_picker_overlay(
     state: &PluginPickerState,
-    index: Option<&PluginSearchIndex>,
+    index: Option<Arc<PluginSearchIndex>>,
     prefs: &PluginPickerPrefs,
     catalog_status: CatalogStatus,
     search_input: &TextInputState,
@@ -51,27 +51,31 @@ pub fn plugin_picker_overlay(
     let debug = std::env::var_os("FUTUREBOARD_PLUGIN_PICKER_DEBUG").is_some();
     let stub_enabled = debug || std::env::var_os("FUTUREBOARD_PLUGIN_INSERT_STUB").is_some();
 
-    let empty_index = PluginSearchIndex::from_plugins(Vec::new());
-    let index_ref = index.unwrap_or(&empty_index);
+    let index_arc = index.unwrap_or_else(|| Arc::new(PluginSearchIndex::from_plugins(Vec::new())));
+    let index_ref: &PluginSearchIndex = &index_arc;
     let filter_result =
         compute_filter_result(index_ref, &state.query, &state.filters, prefs, debug);
-    let visible_count = filter_result.indices.len();
+    let FilterResult {
+        indices,
+        counts,
+        vendors,
+        categories,
+    } = filter_result;
+    let visible_count = indices.len();
     let total = index_ref.len();
 
-    let visible_plugins: Arc<Vec<RegistryPlugin>> = Arc::new(
-        filter_result
-            .indices
-            .iter()
-            .filter_map(|&i| index_ref.plugin_at(i).cloned())
-            .collect(),
-    );
-
     let highlighted = state.highlighted_index.min(visible_count.saturating_sub(1));
-    let selected_plugin = visible_plugins.get(highlighted);
+    // Rows are resolved by index on demand inside the virtualized list — no
+    // per-render deep clone of every matching plugin.
+    let selected_plugin = indices
+        .get(highlighted)
+        .copied()
+        .and_then(|i| index_ref.plugin_at(i));
     let validation = selected_plugin
         .map(|plugin| validate_insert(plugin, &state.insert_target))
         .unwrap_or(InsertValidation::NotInsertable);
     let can_add = validation == InsertValidation::Ok;
+    let row_indices = Arc::new(indices);
 
     let modal_width = prefs.window_width.max(760.0);
     let modal_height = prefs.window_height.max(480.0);
@@ -81,8 +85,8 @@ pub fn plugin_picker_overlay(
         visible_count,
         total,
         state,
-        &filter_result,
-        &visible_plugins,
+        index_arc.clone(),
+        row_indices,
         highlighted,
         &callbacks,
         prefs,
@@ -92,11 +96,11 @@ pub fn plugin_picker_overlay(
 
     let sidebar = plugin_filter_sidebar(
         &state.filters.sidebar,
-        &filter_result.counts,
-        &filter_result.vendors,
-        &filter_result.categories,
+        &counts,
+        &vendors,
+        &categories,
         debug,
-        cfg!(target_os = "macos") || filter_result.counts.au > 0,
+        cfg!(target_os = "macos") || counts.au > 0,
         callbacks.on_select_filter.clone(),
         &scroll.sidebar,
     );
@@ -236,7 +240,7 @@ pub fn plugin_picker_overlay(
 
 pub fn plugin_picker_panel(
     state: &PluginPickerState,
-    index: Option<&PluginSearchIndex>,
+    index: Option<Arc<PluginSearchIndex>>,
     prefs: &PluginPickerPrefs,
     catalog_status: CatalogStatus,
     search_input: &TextInputState,
@@ -251,35 +255,37 @@ pub fn plugin_picker_panel(
     let debug = std::env::var_os("FUTUREBOARD_PLUGIN_PICKER_DEBUG").is_some();
     let stub_enabled = debug || std::env::var_os("FUTUREBOARD_PLUGIN_INSERT_STUB").is_some();
 
-    let empty_index = PluginSearchIndex::from_plugins(Vec::new());
-    let index_ref = index.unwrap_or(&empty_index);
+    let index_arc = index.unwrap_or_else(|| Arc::new(PluginSearchIndex::from_plugins(Vec::new())));
+    let index_ref: &PluginSearchIndex = &index_arc;
     let filter_result =
         compute_filter_result(index_ref, &state.query, &state.filters, prefs, debug);
-    let visible_count = filter_result.indices.len();
+    let FilterResult {
+        indices,
+        counts,
+        vendors,
+        categories,
+    } = filter_result;
+    let visible_count = indices.len();
     let total = index_ref.len();
 
-    let visible_plugins: Arc<Vec<RegistryPlugin>> = Arc::new(
-        filter_result
-            .indices
-            .iter()
-            .filter_map(|&i| index_ref.plugin_at(i).cloned())
-            .collect(),
-    );
-
     let highlighted = state.highlighted_index.min(visible_count.saturating_sub(1));
-    let selected_plugin = visible_plugins.get(highlighted);
+    let selected_plugin = indices
+        .get(highlighted)
+        .copied()
+        .and_then(|i| index_ref.plugin_at(i));
     let validation = selected_plugin
         .map(|plugin| validate_insert(plugin, &state.insert_target))
         .unwrap_or(InsertValidation::NotInsertable);
     let can_add = validation == InsertValidation::Ok;
+    let row_indices = Arc::new(indices);
 
     let list_body = build_list_body(
         catalog_status.clone(),
         visible_count,
         total,
         state,
-        &filter_result,
-        &visible_plugins,
+        index_arc.clone(),
+        row_indices,
         highlighted,
         &callbacks,
         prefs,
@@ -289,11 +295,11 @@ pub fn plugin_picker_panel(
 
     let sidebar = plugin_filter_sidebar(
         &state.filters.sidebar,
-        &filter_result.counts,
-        &filter_result.vendors,
-        &filter_result.categories,
+        &counts,
+        &vendors,
+        &categories,
         debug,
-        cfg!(target_os = "macos") || filter_result.counts.au > 0,
+        cfg!(target_os = "macos") || counts.au > 0,
         callbacks.on_select_filter.clone(),
         &scroll.sidebar,
     );
@@ -441,13 +447,14 @@ fn build_header(close_button: VoidCb) -> impl IntoElement {
         )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_list_body(
     catalog_status: CatalogStatus,
     visible_count: usize,
     total: usize,
     state: &PluginPickerState,
-    _filter_result: &FilterResult,
-    visible_plugins: &Arc<Vec<RegistryPlugin>>,
+    index: Arc<PluginSearchIndex>,
+    indices: Arc<Vec<usize>>,
     highlighted: usize,
     callbacks: &PluginPickerCallbacks,
     prefs: &PluginPickerPrefs,
@@ -461,9 +468,10 @@ fn build_list_body(
         let on_select_cb = callbacks.on_select.clone();
         let on_pick_cb = callbacks.on_pick.clone();
         let on_fav_cb = callbacks.on_toggle_favorite.clone();
-        let rows = visible_plugins.clone();
-        let favorites = std::sync::Arc::new(prefs.favorites.clone());
+        let favorites = Arc::new(prefs.favorites.clone());
         let highlighted_row = highlighted;
+        let index_for_rows = index;
+        let indices_for_rows = indices;
         let scroll_for_thumb = list_scroll.0.borrow().base_handle.clone();
         let list = uniform_list(
             "plugin-picker-list",
@@ -472,21 +480,28 @@ fn build_list_body(
                 let on_select = on_select_cb.clone();
                 let on_pick = on_pick_cb.clone();
                 let on_fav = on_fav_cb.clone();
-                let rows = rows.clone();
                 let favorites = favorites.clone();
+                let index = index_for_rows.clone();
+                let indices = indices_for_rows.clone();
+                // Only the visible range is materialized, and each row resolves
+                // its plugin from the shared index by id — no per-row clone of
+                // the whole catalog.
                 range
-                    .map(|i| {
-                        let p = &rows[i];
-                        plugin_row(
-                            i,
-                            p,
-                            i == highlighted_row,
-                            favorites.contains(&p.id),
-                            on_select.clone(),
-                            on_pick.clone(),
-                            on_fav.clone(),
+                    .filter_map(|i| {
+                        let plugin_idx = *indices.get(i)?;
+                        let p = index.plugin_at(plugin_idx)?;
+                        Some(
+                            plugin_row(
+                                i,
+                                p,
+                                i == highlighted_row,
+                                favorites.contains(&p.id),
+                                on_select.clone(),
+                                on_pick.clone(),
+                                on_fav.clone(),
+                            )
+                            .into_any_element(),
                         )
-                        .into_any_element()
                     })
                     .collect::<Vec<_>>()
             },

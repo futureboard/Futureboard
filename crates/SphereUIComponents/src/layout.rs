@@ -266,6 +266,19 @@ fn native_audio_backend_from_driver_type(driver_type: &str) -> DirectAudio::Audi
     }
 }
 
+/// Map the persisted Dropout Protection setting to the engine's mode enum.
+fn engine_dropout_mode(
+    mode: crate::settings::DropoutProtectionMode,
+) -> DirectAudio::DropoutProtectionMode {
+    use crate::settings::DropoutProtectionMode as Ui;
+    match mode {
+        Ui::Off => DirectAudio::DropoutProtectionMode::Off,
+        Ui::Light => DirectAudio::DropoutProtectionMode::Light,
+        Ui::Medium => DirectAudio::DropoutProtectionMode::Medium,
+        Ui::High => DirectAudio::DropoutProtectionMode::High,
+    }
+}
+
 fn resolve_output_device_for_backend(
     engine: &DirectAudio::AudioEngine,
     backend: DirectAudio::AudioBackend,
@@ -317,6 +330,7 @@ pub(crate) fn build_and_warm_audio_engine(
     }
 
     engine.set_pdc_enabled(schema.playback.latency_compensation);
+    engine.set_dropout_protection_mode(engine_dropout_mode(schema.playback.dropout_protection));
     match engine.start() {
         Ok(()) => {
             let stats = engine.stats();
@@ -402,7 +416,9 @@ pub struct StudioLayout {
     plugin_picker_search_input: TextInputState,
     plugin_picker_prefs: PluginPickerPrefs,
     plugin_picker_scroll: PluginPickerScrollHandles,
-    plugin_search_index: Option<PluginSearchIndex>,
+    // Shared via `Arc` so the picker window snapshot and per-keypress handlers
+    // bump a refcount instead of deep-cloning the whole 1000+ plugin index.
+    plugin_search_index: Option<std::sync::Arc<PluginSearchIndex>>,
     plugin_picker_au_error: Option<String>,
     plugin_picker_window: Option<WindowHandle<plugin_picker_window::InsertPickerWindow>>,
     /// Automation target picker search query + input state.
@@ -686,7 +702,18 @@ impl StudioLayout {
                     let target = target.clone();
                     cx.defer(move |cx| {
                         let _ = target.update(cx, |this, cx| {
-                            this.mark_dirty();
+                            // Loop region is transport/control state, NOT audio
+                            // graph structure. It reaches the engine live through
+                            // `sync_loop_controls` (`engine.set_loop` → atomics)
+                            // and is persisted in timeline transport state for
+                            // save. Dragging the loop handles fires this per
+                            // mouse-move, so it must NOT call `mark_dirty()` —
+                            // that sets `audio_bridge.project_dirty`, which the
+                            // ~16ms poll turns into a full `load_project` engine
+                            // sync (route-graph rebuild) per move and stutters
+                            // playback. Use view-only dirty (session-dirty for
+                            // save, no engine sync). Mirrors the mixer fader fix.
+                            this.mark_dirty_view_only();
                             this.sync_loop_controls(cx);
                         });
                     });
@@ -1967,6 +1994,14 @@ impl StudioLayout {
         let schema = self.settings.read(cx).current.clone();
 
         if let Some(ref engine) = self.audio_bridge.engine {
+            // Dropout Protection is a lightweight atomic — push it every sync; no
+            // engine graph rebuild (it never changes the audio graph). Done before
+            // the PDC block so the (immutable) engine borrow ends before the
+            // `schedule_audio_project_sync` mutable-self call below.
+            engine.set_dropout_protection_mode(engine_dropout_mode(
+                schema.playback.dropout_protection,
+            ));
+
             let desired_pdc = schema.playback.latency_compensation;
             if engine.pdc_enabled() != desired_pdc {
                 engine.set_pdc_enabled(desired_pdc);

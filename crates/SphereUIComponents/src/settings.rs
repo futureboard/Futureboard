@@ -506,17 +506,60 @@ pub struct PerformanceSettings {
     pub show_performance_overlay: bool,
 }
 
+/// Dropout Protection mode (Settings → Playback). Keeps internal headroom
+/// against control/UI/plugin jitter, independent of the device buffer size.
+/// Maps 1:1 to `DirectAudio::DropoutProtectionMode`.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum DropoutProtectionMode {
+    /// Lowest latency, minimal safety margin.
+    Off,
+    /// Small safety margin / conservative scheduling.
+    Light,
+    /// Default recommended mode — better protection during UI activity.
+    Medium,
+    /// Maximum stability (may add internal latency).
+    High,
+}
+
+impl Default for DropoutProtectionMode {
+    fn default() -> Self {
+        DropoutProtectionMode::Medium
+    }
+}
+
+impl DropoutProtectionMode {
+    pub fn label(self) -> &'static str {
+        match self {
+            DropoutProtectionMode::Off => "Off",
+            DropoutProtectionMode::Light => "Light",
+            DropoutProtectionMode::Medium => "Medium (Recommended)",
+            DropoutProtectionMode::High => "High",
+        }
+    }
+
+    pub const ALL: [DropoutProtectionMode; 4] = [
+        DropoutProtectionMode::Off,
+        DropoutProtectionMode::Light,
+        DropoutProtectionMode::Medium,
+        DropoutProtectionMode::High,
+    ];
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct PlaybackSettings {
     /// Align parallel track paths at the master bus (Phase W PDC).
     #[serde(default = "default_true")]
     pub latency_compensation: bool,
+    /// Realtime dropout protection mode.
+    #[serde(default)]
+    pub dropout_protection: DropoutProtectionMode,
 }
 
 impl Default for PlaybackSettings {
     fn default() -> Self {
         Self {
             latency_compensation: default_true(),
+            dropout_protection: DropoutProtectionMode::default(),
         }
     }
 }

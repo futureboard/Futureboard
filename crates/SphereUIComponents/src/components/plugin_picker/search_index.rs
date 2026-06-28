@@ -1,8 +1,17 @@
 //! Cached search documents for fast picker filtering.
+//!
+//! Built once per plugin-scan/catalog load and shared via `Arc`, so typing in
+//! the picker never rebuilds it and never re-derives the sidebar vendor/category
+//! lists (those are library-wide and query-independent — precomputed here).
+
+use std::collections::BTreeSet;
 
 use SpherePluginHost::RegistryPlugin;
 
 use crate::components::plugin_picker::category::normalized_category_label;
+
+/// Cap on distinct vendors / categories surfaced in the sidebar rail.
+const SIDEBAR_FACET_CAP: usize = 48;
 
 #[derive(Debug, Clone)]
 pub struct PluginSearchIndex {
@@ -11,6 +20,11 @@ pub struct PluginSearchIndex {
     vendors_lower: Vec<String>,
     categories: Vec<String>,
     categories_lower: Vec<String>,
+    /// Distinct non-empty vendor labels (original case), sorted + capped. Static
+    /// for the library, so the sidebar never recomputes them per keypress.
+    sidebar_vendors: Vec<String>,
+    /// Distinct normalized category labels, sorted + capped. Static like above.
+    sidebar_categories: Vec<String>,
 }
 
 impl PluginSearchIndex {
@@ -28,17 +42,41 @@ impl PluginSearchIndex {
             .iter()
             .map(|plugin| plugin.vendor.to_ascii_lowercase())
             .collect::<Vec<_>>();
+        // Precompute the deduped sidebar facets once (the per-keypress filter
+        // path used to rebuild these BTreeSets over every plugin — the bulk of
+        // the typing-freeze allocation).
+        let mut vendor_set = BTreeSet::new();
+        for plugin in &plugins {
+            if !plugin.vendor.is_empty() {
+                vendor_set.insert(plugin.vendor.clone());
+            }
+        }
+        let sidebar_vendors = vendor_set.into_iter().take(SIDEBAR_FACET_CAP).collect();
+        let category_set: BTreeSet<String> = categories.iter().cloned().collect();
+        let sidebar_categories = category_set.into_iter().take(SIDEBAR_FACET_CAP).collect();
         Self {
             plugins,
             search_text,
             vendors_lower,
             categories,
             categories_lower,
+            sidebar_vendors,
+            sidebar_categories,
         }
     }
 
     pub fn plugins(&self) -> &[RegistryPlugin] {
         &self.plugins
+    }
+
+    /// Library-wide distinct vendor labels for the sidebar (precomputed).
+    pub fn sidebar_vendors(&self) -> &[String] {
+        &self.sidebar_vendors
+    }
+
+    /// Library-wide distinct category labels for the sidebar (precomputed).
+    pub fn sidebar_categories(&self) -> &[String] {
+        &self.sidebar_categories
     }
 
     pub fn plugin_at(&self, index: usize) -> Option<&RegistryPlugin> {

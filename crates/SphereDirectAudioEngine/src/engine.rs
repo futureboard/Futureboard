@@ -180,6 +180,146 @@ impl AudioEngineState {
     }
 }
 
+/// Dropout Protection mode (Settings → Playback). Controls how much internal
+/// headroom the engine keeps against control/UI/plugin jitter, independent of
+/// the device buffer size. In this slice the mode sets the dropout-detection
+/// warn fraction (how early a block approaching its deadline is flagged) and is
+/// delivered to the engine so the deferred render-ahead safety buffer can read
+/// it. `Medium` is the recommended default.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DropoutProtectionMode {
+    /// Lowest latency, minimal safety margin — flag only true overruns.
+    Off = 0,
+    /// Small safety margin / conservative scheduling.
+    Light = 1,
+    /// Default recommended mode — better protection during UI activity.
+    Medium = 2,
+    /// Maximum stability — widest margin (may add internal latency later).
+    High = 3,
+}
+
+impl DropoutProtectionMode {
+    pub fn from_u8(v: u8) -> Self {
+        match v {
+            0 => Self::Off,
+            1 => Self::Light,
+            3 => Self::High,
+            _ => Self::Medium,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "Off",
+            Self::Light => "Light",
+            Self::Medium => "Medium",
+            Self::High => "High",
+        }
+    }
+
+    /// Fraction `(num, den)` of the per-block deadline at or above which a block
+    /// is counted as a dropout-risk. Stricter modes tolerate less headroom
+    /// erosion before flagging, so the UI surfaces trouble earlier and the user
+    /// can react (or, in the deferred render-ahead slice, the buffer absorbs it).
+    #[inline]
+    pub fn dropout_threshold_ratio(self) -> (u64, u64) {
+        match self {
+            Self::Off => (100, 100),
+            Self::Light => (90, 100),
+            Self::Medium => (80, 100),
+            Self::High => (70, 100),
+        }
+    }
+}
+
+/// Why the most recent dropout-risk block was flagged. Stored as a `u8` in
+/// [`SharedState`] (audio → control); only `CallbackOverrun` is detected in this
+/// slice — the rest are reserved for the plugin-watchdog / disk-streaming slices.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DropoutReason {
+    None = 0,
+    CallbackOverrun = 1,
+    GraphSwapLate = 2,
+    DiskCacheMiss = 3,
+    PluginOverrun = 4,
+}
+
+impl DropoutReason {
+    pub fn from_u8(v: u8) -> Self {
+        match v {
+            1 => Self::CallbackOverrun,
+            2 => Self::GraphSwapLate,
+            3 => Self::DiskCacheMiss,
+            4 => Self::PluginOverrun,
+            _ => Self::None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::CallbackOverrun => "callback-overrun",
+            Self::GraphSwapLate => "graph-swap-late",
+            Self::DiskCacheMiss => "disk-cache-miss",
+            Self::PluginOverrun => "plugin-overrun",
+        }
+    }
+}
+
+/// Snapshot of dropout-protection diagnostics, read off the control thread.
+#[derive(Clone, Copy, Debug)]
+pub struct DropoutDiagnostics {
+    pub protection_mode: DropoutProtectionMode,
+    pub dropout_count: u64,
+    pub last_reason: DropoutReason,
+    pub callback_last_us: u32,
+    pub callback_max_us: u32,
+    pub callback_deadline_us: u32,
+    pub slow_callback_count: u64,
+}
+
+/// Realtime-safe output-callback timing + dropout detection. Atomics only — no
+/// allocation, lock, logging, or syscall — so it is safe to call at the end of
+/// every audio callback. Shared by the legacy in-process callback and the DAUx
+/// backend so both paths report identical diagnostics.
+#[inline]
+pub(crate) fn record_output_callback_timing(
+    shared: &SharedState,
+    elapsed_us: u32,
+    block_frames: usize,
+    sample_rate: u32,
+) {
+    shared.last_callback_us.store(elapsed_us, Ordering::Relaxed);
+    if elapsed_us > shared.max_callback_us.load(Ordering::Relaxed) {
+        shared.max_callback_us.store(elapsed_us, Ordering::Relaxed);
+    }
+    // Wall-clock budget for this block: it must render in less time than it takes
+    // to play, or the device starves (xrun).
+    let deadline_us = if sample_rate > 0 {
+        ((block_frames as u64 * 1_000_000) / sample_rate as u64).min(u32::MAX as u64) as u32
+    } else {
+        0
+    };
+    shared
+        .callback_deadline_us
+        .store(deadline_us, Ordering::Relaxed);
+    if elapsed_us >= 2_000 {
+        shared.slow_callback_count.fetch_add(1, Ordering::Relaxed);
+    }
+    if deadline_us > 0 {
+        let mode =
+            DropoutProtectionMode::from_u8(shared.dropout_protection_mode.load(Ordering::Relaxed));
+        let (num, den) = mode.dropout_threshold_ratio();
+        let threshold = ((deadline_us as u64 * num) / den).min(u32::MAX as u64) as u32;
+        if elapsed_us >= threshold {
+            shared.dropout_count.fetch_add(1, Ordering::Relaxed);
+            shared
+                .dropout_last_reason
+                .store(DropoutReason::CallbackOverrun as u8, Ordering::Relaxed);
+        }
+    }
+}
+
 // ── Shared state (accessed by both control and audio threads) ─────────────────
 
 pub struct SharedState {
@@ -268,6 +408,18 @@ pub struct SharedState {
     /// Blocks that exceeded the 2 ms debug threshold.
     pub slow_callback_count: AtomicU64,
 
+    // ── Dropout protection (Part 2; audio ↔ control) ──────────────────────
+    /// Active [`DropoutProtectionMode`] as `u8` (control → audio). Default
+    /// `Medium`. Read by [`record_output_callback_timing`] to pick the warn
+    /// fraction; reserved for the deferred render-ahead safety buffer.
+    pub dropout_protection_mode: AtomicU8,
+    /// Blocks flagged as dropout-risk (elapsed ≥ mode fraction of the deadline).
+    pub dropout_count: AtomicU64,
+    /// [`DropoutReason`] of the most recent flagged block, as `u8`.
+    pub dropout_last_reason: AtomicU8,
+    /// Per-block wall-clock budget published each callback, microseconds.
+    pub callback_deadline_us: AtomicU32,
+
     // DAUx diagnostics (incremented by audio thread, read by control thread)
     pub glitch_count: AtomicU64,
     pub mmcss_active: AtomicBool,
@@ -337,6 +489,10 @@ impl Default for SharedState {
             last_callback_us: AtomicU32::new(0),
             max_callback_us: AtomicU32::new(0),
             slow_callback_count: AtomicU64::new(0),
+            dropout_protection_mode: AtomicU8::new(DropoutProtectionMode::Medium as u8),
+            dropout_count: AtomicU64::new(0),
+            dropout_last_reason: AtomicU8::new(DropoutReason::None as u8),
+            callback_deadline_us: AtomicU32::new(0),
             glitch_count: AtomicU64::new(0),
             mmcss_active: AtomicBool::new(false),
             device_lost: AtomicBool::new(false),
@@ -571,6 +727,36 @@ impl EngineInner {
     #[inline]
     pub fn latency_graph_version(&self) -> u64 {
         self.shared.latency_graph_version.load(Ordering::Relaxed)
+    }
+
+    /// Active Dropout Protection mode (Settings → Playback).
+    pub fn dropout_protection_mode(&self) -> DropoutProtectionMode {
+        DropoutProtectionMode::from_u8(self.shared.dropout_protection_mode.load(Ordering::Relaxed))
+    }
+
+    /// Set the Dropout Protection mode. Control → audio via a single relaxed
+    /// store; the audio callback reads it when classifying each block.
+    pub fn set_dropout_protection_mode(&self, mode: DropoutProtectionMode) {
+        self.shared
+            .dropout_protection_mode
+            .store(mode as u8, Ordering::Relaxed);
+    }
+
+    /// Snapshot the realtime dropout-protection counters for the control thread
+    /// (status bar / settings). Pure atomic reads — never blocks the callback.
+    pub fn dropout_diagnostics(&self) -> DropoutDiagnostics {
+        let s = &self.shared;
+        DropoutDiagnostics {
+            protection_mode: DropoutProtectionMode::from_u8(
+                s.dropout_protection_mode.load(Ordering::Relaxed),
+            ),
+            dropout_count: s.dropout_count.load(Ordering::Relaxed),
+            last_reason: DropoutReason::from_u8(s.dropout_last_reason.load(Ordering::Relaxed)),
+            callback_last_us: s.last_callback_us.load(Ordering::Relaxed),
+            callback_max_us: s.max_callback_us.load(Ordering::Relaxed),
+            callback_deadline_us: s.callback_deadline_us.load(Ordering::Relaxed),
+            slow_callback_count: s.slow_callback_count.load(Ordering::Relaxed),
+        }
     }
 
     /// Current transport play flag (set/cleared only by Start/StopTransport).
@@ -2769,6 +2955,10 @@ where
         .build_output_stream::<T, _, _>(
             config,
             move |data: &mut [T], _info: &cpal::OutputCallbackInfo| {
+                // Dropout watchdog: time the whole callback (atomics only). The
+                // legacy in-process callback previously had no timing — only the
+                // DAUx backend did — so realtime dropouts went undetected here.
+                let cb_started = std::time::Instant::now();
                 if ch > 0 {
                     for track in &mut runtime.tracks {
                         track.midi_block_events.clear();
@@ -2859,6 +3049,17 @@ where
                             // Position MIDI cursors at the start beat and clear
                             // any stale active notes so play-from is clean.
                             runtime.reset_midi_playback(pos);
+                            // Clear stale PDC delay-line audio so the compensated
+                            // (lower-latency / audio) tracks start settled and stay
+                            // aligned with plugin/VSTi-latency tracks from the first
+                            // audible block — parity with the DAUx backend and with
+                            // offline export's fresh-runtime + warmup start. Without
+                            // this, the legacy realtime callback replays pre-stop
+                            // audio out of the delay rings, desyncing audio vs VSTi
+                            // tracks at the start of every play (export was fine
+                            // because it builds a fresh zeroed runtime). Realtime-safe
+                            // zero-fill; runs only on Start.
+                            runtime.reset_pdc_delay_lines();
                         }
                         EngineCommand::StopTransport => {
                             if command_debug_enabled() {
@@ -2884,6 +3085,12 @@ where
                             metronome.reset_metronome_schedule(pos, output_sample_rate);
                             // Re-seek MIDI cursors + flush held notes.
                             runtime.reset_midi_playback(pos);
+                            // A seek repositions the playhead; the PDC delay rings
+                            // still hold audio from the pre-seek position. Clear them
+                            // so the compensated tracks refill from the new position
+                            // and stay aligned with plugin/VSTi-latency tracks (same
+                            // reset the DAUx backend and export already do).
+                            runtime.reset_pdc_delay_lines();
                         }
                         EngineCommand::SetMetronomeEnabled(enabled) => {
                             let pos = shared.position_samples.load(Ordering::Relaxed);
@@ -3435,6 +3642,17 @@ where
                         metronome.reset_metronome_schedule(reset_sample, output_sample_rate);
                     }
                 }
+
+                // ── Dropout watchdog: publish timing + classify this block ────
+                shared.output_cb_count.fetch_add(1, Ordering::Relaxed);
+                let elapsed_us = cb_started.elapsed().as_micros().min(u32::MAX as u128) as u32;
+                let block_frames = if ch > 0 { data.len() / ch } else { 0 };
+                crate::engine::record_output_callback_timing(
+                    &shared,
+                    elapsed_us,
+                    block_frames,
+                    output_sample_rate,
+                );
             },
             move |err| {
                 eprintln!("[SphereAudio] Stream error: {err}");
@@ -3719,6 +3937,8 @@ mod bridge_insert_tests {
             pdc_delay_l: Vec::new(),
             pdc_delay_r: Vec::new(),
             pdc_write_pos: 0,
+            smoothed_gain_l: 1.0,
+            smoothed_gain_r: 1.0,
         }
     }
 
@@ -3993,6 +4213,8 @@ mod bridge_insert_tests {
             pdc_delay_l: Vec::new(),
             pdc_delay_r: Vec::new(),
             pdc_write_pos: 0,
+            smoothed_gain_l: 1.0,
+            smoothed_gain_r: 1.0,
         };
         let sink_a = Arc::new(MultSink {
             mult: 2.0,
@@ -4109,6 +4331,8 @@ mod bridge_insert_tests {
             pdc_delay_l: Vec::new(),
             pdc_delay_r: Vec::new(),
             pdc_write_pos: 0,
+            smoothed_gain_l: 1.0,
+            smoothed_gain_r: 1.0,
         };
         let sink_a = Arc::new(MultSink {
             mult: 2.0,
@@ -4183,6 +4407,8 @@ mod routing_tests {
             pdc_delay_l: Vec::new(),
             pdc_delay_r: Vec::new(),
             pdc_write_pos: 0,
+            smoothed_gain_l: 1.0,
+            smoothed_gain_r: 1.0,
         }
     }
 
@@ -4599,5 +4825,73 @@ mod routing_tests {
         // Not a routing target → summed to master, "b" untouched.
         assert!(output.iter().all(|&v| (v - 1.0).abs() < 1e-6));
         assert!(p.tracks[1].recv_l[..frames].iter().all(|&v| v == 0.0));
+    }
+}
+
+#[cfg(test)]
+mod dropout_tests {
+    use super::*;
+    use std::sync::atomic::Ordering;
+
+    // 512 frames @ 48 kHz: per-block budget = 512 * 1e6 / 48000 ≈ 10_666 µs.
+    const FRAMES: usize = 512;
+    const SR: u32 = 48_000;
+
+    #[test]
+    fn threshold_ratios_are_ordered() {
+        // Stricter modes flag at a smaller fraction of the deadline.
+        let frac = |m: DropoutProtectionMode| {
+            let (n, d) = m.dropout_threshold_ratio();
+            n as f64 / d as f64
+        };
+        assert!(frac(DropoutProtectionMode::High) < frac(DropoutProtectionMode::Medium));
+        assert!(frac(DropoutProtectionMode::Medium) < frac(DropoutProtectionMode::Light));
+        assert!(frac(DropoutProtectionMode::Light) < frac(DropoutProtectionMode::Off));
+        assert_eq!(frac(DropoutProtectionMode::Off), 1.0);
+    }
+
+    #[test]
+    fn fast_block_never_flags_dropout() {
+        let shared = SharedState::default();
+        shared
+            .dropout_protection_mode
+            .store(DropoutProtectionMode::Medium as u8, Ordering::Relaxed);
+        record_output_callback_timing(&shared, 1_000, FRAMES, SR);
+        assert_eq!(shared.dropout_count.load(Ordering::Relaxed), 0);
+        assert_eq!(
+            shared.dropout_last_reason.load(Ordering::Relaxed),
+            DropoutReason::None as u8
+        );
+        // Deadline is published regardless.
+        assert!(shared.callback_deadline_us.load(Ordering::Relaxed) > 10_000);
+    }
+
+    #[test]
+    fn medium_flags_block_over_eighty_percent_of_deadline() {
+        let shared = SharedState::default();
+        shared
+            .dropout_protection_mode
+            .store(DropoutProtectionMode::Medium as u8, Ordering::Relaxed);
+        // 9_000 µs > 80% of 10_666 µs (≈ 8_533) → dropout under Medium.
+        record_output_callback_timing(&shared, 9_000, FRAMES, SR);
+        assert_eq!(shared.dropout_count.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            shared.dropout_last_reason.load(Ordering::Relaxed),
+            DropoutReason::CallbackOverrun as u8
+        );
+    }
+
+    #[test]
+    fn off_only_flags_true_overruns() {
+        let shared = SharedState::default();
+        shared
+            .dropout_protection_mode
+            .store(DropoutProtectionMode::Off as u8, Ordering::Relaxed);
+        // Same 9_000 µs is < the full 10_666 µs deadline → no dropout under Off.
+        record_output_callback_timing(&shared, 9_000, FRAMES, SR);
+        assert_eq!(shared.dropout_count.load(Ordering::Relaxed), 0);
+        // A genuine overrun past the deadline does flag, even under Off.
+        record_output_callback_timing(&shared, 12_000, FRAMES, SR);
+        assert_eq!(shared.dropout_count.load(Ordering::Relaxed), 1);
     }
 }

@@ -9,6 +9,15 @@ impl Render for StudioLayout {
 
         publish_studio_main_hwnd(window);
 
+        // Perf probe: if the MAIN DAW window re-renders while the insert picker is
+        // open, that points the typing-stutter at a full StudioLayout repaint
+        // rather than the picker window. Gated by the existing picker debug flag.
+        if self.plugin_picker.is_open && crate::components::plugin_picker::picker_perf_debug() {
+            eprintln!(
+                "[picker-perf] StudioLayout::render (main DAW window repainted while picker open)"
+            );
+        }
+
         let _root_scope = crate::perf::PerfScope::enter("StudioLayout");
         // Frame pacing tick. See FrameDiagnostics docs — only counts
         // real repaints, not display refreshes.
@@ -1107,7 +1116,7 @@ impl Render for StudioLayout {
             Some(
                 plugin_picker_overlay(
                     &self.plugin_picker,
-                    self.plugin_search_index.as_ref(),
+                    self.plugin_search_index.clone(),
                     &self.plugin_picker_prefs,
                     catalog_status,
                     &self.plugin_picker_search_input,
@@ -1165,8 +1174,15 @@ impl Render for StudioLayout {
         // is capturing the keyboard. This is intentionally stricter than
         // `window.focused().is_none()`: it also recovers from orphaned focus,
         // while never stealing focus from a field the user is actively typing in.
+        // Only treat the docked piano roll as keyboard owner while its tab is
+        // actually visible. Once the Editor tab is hidden/closed, GPUI still
+        // reports its `FocusHandle` as focused (orphaned), which would otherwise
+        // block this reclaim and leave Space/transport shortcuts dead until the
+        // user clicks a control. See `docked_midi_editor_visible`.
+        let docked_editor_owns_keyboard =
+            self.docked_midi_editor_visible() && midi_editor.read(cx).is_focused(window);
         if !self.focus_handle.is_focused(window)
-            && !midi_editor.read(cx).is_focused(window)
+            && !docked_editor_owns_keyboard
             && !self.keyboard_text_capture_live(window)
         {
             self.focus_handle.focus(window, cx);
@@ -1334,6 +1350,7 @@ impl Render for StudioLayout {
                     // could nested-update) and let the event bubble to the piano
                     // roll's `on_key_down`. See PART D/E of the shortcuts task.
                     if is_midi_routable_edit_command(&normalize_command_id(&command_id))
+                        && shortcut_keydown_target.read(cx).docked_midi_editor_visible()
                         && midi_editor.read(cx).is_focused(window)
                     {
                         if edit_command_debug() {

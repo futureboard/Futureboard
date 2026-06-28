@@ -17,6 +17,18 @@ impl StudioLayout {
         self.active_bottom_tab
     }
 
+    /// Whether the docked piano-roll MIDI editor is actually on screen — the
+    /// bottom panel is open AND the Editor tab is active. Used to gate keyboard
+    /// focus routing: GPUI keeps a closed element's `FocusHandle` reporting
+    /// "focused" (orphaned focus), so once the editor tab is hidden we must NOT
+    /// treat `self.piano_roll.is_focused()` as the keyboard owner — otherwise the
+    /// studio shortcut anchor never reclaims focus and Space/transport shortcuts
+    /// silently die until the user clicks a control. See the reclaim guard in
+    /// `studio_render`.
+    pub(crate) fn docked_midi_editor_visible(&self) -> bool {
+        self.panels.mixer_docked && self.active_bottom_tab == BottomTab::Editor
+    }
+
     pub(crate) fn bottom_panel_state(&self) -> BottomPanelState {
         self.bottom_panel_state
     }

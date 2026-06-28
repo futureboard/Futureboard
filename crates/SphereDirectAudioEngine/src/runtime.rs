@@ -97,6 +97,15 @@ pub struct RuntimeTrack {
     pub pdc_delay_l: Vec<f32>,
     pub pdc_delay_r: Vec<f32>,
     pub pdc_write_pos: usize,
+    /// Smoothed per-channel fader gain (volume × pan) actually applied to audio.
+    /// In the realtime path the applied gain ramps from these values toward the
+    /// new target across each block so dragging the fader/pan knob does not step
+    /// at block boundaries (zipper noise / clicks). Initialized to the build-time
+    /// target so playback starts at the correct level with no startup fade. Only
+    /// consulted when [`RuntimeProject::fader_smoothing`] is set (realtime);
+    /// offline export applies the exact constant per-block gain unchanged.
+    pub smoothed_gain_l: f32,
+    pub smoothed_gain_r: f32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -807,6 +816,15 @@ pub struct RuntimeProject {
     pub latency_graph: RuntimeLatencyGraph,
     /// Effective playback PDC flag used when this runtime graph was built.
     pub pdc_enabled: bool,
+    /// When set, the render path ramps track/master fader gains across each block
+    /// toward their target (anti-zipper smoothing for live fader/pan drags). The
+    /// realtime engine sets this `true`; the offline exporter sets it `false` so
+    /// the bounce applies the exact constant per-block gain (deterministic, and
+    /// byte-for-byte unchanged from before smoothing existed). See `apply_fader`.
+    pub fader_smoothing: bool,
+    /// Smoothed master gain, ramped toward the live master volume each block when
+    /// [`Self::fader_smoothing`] is set. Mirrors per-track `smoothed_gain_*`.
+    pub smoothed_master_gain: f32,
     /// Stage 3b: realtime sinks for external plugin-host DSP output, keyed by
     /// insert `id` (one region + handshake per insert). Set via
     /// [`crate::command::EngineCommand::SetPluginBridgeSink`]
@@ -1255,11 +1273,20 @@ impl RuntimeProject {
 
             let midi_instrument_insert_ix = find_midi_instrument_insert_ix(&inserts, &t.track_type);
 
+            // Seed the fader smoother at the build-time target so the first
+            // realtime block plays at the correct level (no startup ramp).
+            let init_volume = t.volume.clamp(0.0, 2.0);
+            let init_pan = t.pan.clamp(-1.0, 1.0);
+            let (init_pan_l, init_pan_r) = if init_pan < 0.0 {
+                (1.0, 1.0 + init_pan)
+            } else {
+                (1.0 - init_pan, 1.0)
+            };
             tracks.push(RuntimeTrack {
                 id: t.id.clone(),
                 track_type: t.track_type.clone(),
-                volume: t.volume.clamp(0.0, 2.0),
-                pan: t.pan.clamp(-1.0, 1.0),
+                volume: init_volume,
+                pan: init_pan,
                 muted: t.muted,
                 solo: t.solo,
                 record_armed: t.armed,
@@ -1305,6 +1332,8 @@ impl RuntimeProject {
                 pdc_delay_l: Vec::new(),
                 pdc_delay_r: Vec::new(),
                 pdc_write_pos: 0,
+                smoothed_gain_l: init_volume * init_pan_l,
+                smoothed_gain_r: init_volume * init_pan_r,
             });
         }
         let has_solo = tracks.iter().any(|t| t.solo);
@@ -1523,6 +1552,11 @@ impl RuntimeProject {
             audio_graph,
             latency_graph,
             pdc_enabled: pdc_active,
+            // Realtime default: smooth fader/pan drags. The offline exporter
+            // overrides this to `false` right after `build()` for a deterministic,
+            // byte-identical bounce.
+            fader_smoothing: true,
+            smoothed_master_gain: 1.0,
             // Installed by the control thread after build; never carried in a
             // freshly built project (preserved across reloads in drain_commands).
             plugin_bridge_sinks: std::collections::HashMap::new(),
@@ -3743,7 +3777,10 @@ mod midi_tests {
         // +k and -k are reflections across the diagonal (inverse power curves):
         // ease_out(ease_in(t)) == t.
         let reflected = automation_curve_factor(0, -1.0, automation_curve_factor(0, 1.0, 0.3));
-        assert!((reflected - 0.3).abs() < 1e-5, "ease-in/out are mirror curves");
+        assert!(
+            (reflected - 0.3).abs() < 1e-5,
+            "ease-in/out are mirror curves"
+        );
         // Endpoints are always pinned regardless of shape/tension.
         for tag in [0u8, 1, 2] {
             for tension in [-1.0f32, -0.3, 0.0, 0.6, 1.0] {
@@ -3815,7 +3852,11 @@ mod midi_tests {
             curve: RuntimeAutomationCurve::Linear,
             tension: 0.0,
         };
-        let lane = |id: &str, insert: &str, param: &str, enabled: bool, points: Vec<RuntimeAutomationPoint>| {
+        let lane = |id: &str,
+                    insert: &str,
+                    param: &str,
+                    enabled: bool,
+                    points: Vec<RuntimeAutomationPoint>| {
             RuntimeAutomationLane {
                 id: id.to_string(),
                 name: "p".to_string(),
@@ -3933,6 +3974,8 @@ mod midi_tests {
             pdc_delay_l: Vec::new(),
             pdc_delay_r: Vec::new(),
             pdc_write_pos: 0,
+            smoothed_gain_l: 1.0,
+            smoothed_gain_r: 1.0,
         }
     }
 

@@ -507,6 +507,12 @@ impl StudioLayout {
     }
 
     pub(super) fn status_bar_content(&self, show_perf_metrics: bool) -> StatusBarContent {
+        // Coalesced dropout notice — outranks the idle/playing labels but never a
+        // recording status or a hard audio error.
+        let dropout_active = self
+            .audio_bridge
+            .dropout_notice_until
+            .is_some_and(|until| until > std::time::Instant::now());
         let left = match (
             self.recording.ui_state.status_text(),
             &self.audio_bridge.last_error,
@@ -514,6 +520,7 @@ impl StudioLayout {
         ) {
             (Some(status), _, _) => status,
             (None, Some(error), _) => format!("Audio: {error}"),
+            (None, None, _) if dropout_active => "Audio dropout detected".to_string(),
             (None, _, Some(stats)) if stats.transport_playing => "Playing".to_string(),
             (None, _, Some(stats)) if stats.running => "Audio ready".to_string(),
             (None, _, _) => "Ready".to_string(),

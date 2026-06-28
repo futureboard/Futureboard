@@ -3,11 +3,11 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <chrono>
 #include <memory>
 #include <mutex>
 #include <sstream>
@@ -20,18 +20,19 @@
 #include "pluginterfaces/gui/iplugviewcontentscalesupport.h"
 
 #ifdef _WIN32
-#  define WIN32_LEAN_AND_MEAN
-#  define NOMINMAX
-#  include <windows.h>
-#  include <libloaderapi.h>
-#  include <objbase.h>
-#  include <dwmapi.h>
-#  include <dwrite.h>
-#  pragma comment(lib, "dwmapi.lib")
-#  pragma comment(lib, "dwrite.lib")
-#  pragma comment(lib, "ole32.lib")
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <dwmapi.h>
+#include <dwrite.h>
+#include <libloaderapi.h>
+#include <objbase.h>
+#include <windows.h>
+#pragma comment(lib, "dwmapi.lib")
+#pragma comment(lib, "dwrite.lib")
+#pragma comment(lib, "ole32.lib")
 #endif
 
+#include "editor_windows.hpp"
 #include "pluginterfaces/base/ipluginbase.h"
 #include "pluginterfaces/vst/ivstaudioprocessor.h"
 #include "pluginterfaces/vst/ivstcomponent.h"
@@ -45,7 +46,6 @@
 #include "public.sdk/source/vst/hosting/module.h"
 #include "public.sdk/source/vst/utility/uid.h"
 #include "sphere_daux_editor_bridge.h"
-#include "editor_windows.hpp"
 
 // IPlugFrame is a GUI-layer interface whose class IID is not emitted by the
 // SDK IID TUs we compile (coreiids.cpp / vstinitiids.cpp). Our IPlugFrame
@@ -54,17 +54,15 @@
 namespace Steinberg {
 DEF_CLASS_IID(IPlugFrame)
 DEF_CLASS_IID(IPlugViewContentScaleSupport)
-}  // namespace Steinberg
+} // namespace Steinberg
 
 namespace {
 
-constexpr const char* kVst3AudioModuleClass = "Audio Module Class";
+constexpr const char *kVst3AudioModuleClass = "Audio Module Class";
 thread_local std::string g_last_error;
 std::atomic<unsigned long long> g_next_editor_handle{1};
 
-void set_last_error(std::string value) {
-  g_last_error = std::move(value);
-}
+void set_last_error(std::string value) { g_last_error = std::move(value); }
 
 bool daux_vst3_bus_debug() {
   static const bool enabled =
@@ -75,8 +73,9 @@ bool daux_vst3_bus_debug() {
   return enabled;
 }
 
-std::string vst3_tchar_to_utf8(const Steinberg::Vst::TChar* value) {
-  if (!value) return {};
+std::string vst3_tchar_to_utf8(const Steinberg::Vst::TChar *value) {
+  if (!value)
+    return {};
   std::string out;
   for (int i = 0; i < 128 && value[i] != 0; ++i) {
     const auto ch = static_cast<unsigned int>(value[i]);
@@ -85,11 +84,14 @@ std::string vst3_tchar_to_utf8(const Steinberg::Vst::TChar* value) {
   return out;
 }
 
-const char* vst3_bus_type_name(Steinberg::Vst::BusType type) {
+const char *vst3_bus_type_name(Steinberg::Vst::BusType type) {
   switch (type) {
-    case Steinberg::Vst::kMain: return "main";
-    case Steinberg::Vst::kAux: return "aux";
-    default: return "unknown";
+  case Steinberg::Vst::kMain:
+    return "main";
+  case Steinberg::Vst::kAux:
+    return "aux";
+  default:
+    return "unknown";
   }
 }
 
@@ -103,14 +105,19 @@ struct Vst3BusAudioStats {
 };
 
 #ifdef _WIN32
-constexpr const wchar_t* kDauxEditorWindowClass = L"FutureboardDauxVst3EditorWindow";
-constexpr const wchar_t* kDauxEditorChildClass = L"FutureboardDauxVst3EditorAttach";
-constexpr const wchar_t* kDauxEditorContentClass = L"FutureboardDauxVst3EditorContent";
+constexpr const wchar_t *kDauxEditorWindowClass =
+    L"FutureboardDauxVst3EditorWindow";
+constexpr const wchar_t *kDauxEditorChildClass =
+    L"FutureboardDauxVst3EditorAttach";
+constexpr const wchar_t *kDauxEditorContentClass =
+    L"FutureboardDauxVst3EditorContent";
 // Detached top-level editor host (kind==2). Modeled on the VST3 SDK editorhost
 // sample (public.sdk/samples/vst-hosting/editorhost): no background brush, host
-// never paints its client area, WM_SIZE forwards onSize, WM_CLOSE asks the shell
-// to tear down. A normal, independent OS window — no GPUI compositor over it.
-constexpr const wchar_t* kDauxEditorDetachedClass = L"FutureboardDauxVst3EditorDetached";
+// never paints its client area, WM_SIZE forwards onSize, WM_CLOSE asks the
+// shell to tear down. A normal, independent OS window — no GPUI compositor over
+// it.
+constexpr const wchar_t *kDauxEditorDetachedClass =
+    L"FutureboardDauxVst3EditorDetached";
 constexpr COLORREF kDauxTitlebarDark = RGB(14, 19, 25);
 constexpr int kDauxFallbackReloadId = 4101;
 constexpr int kDauxFallbackGenericId = 4102;
@@ -119,18 +126,22 @@ constexpr int kDauxFallbackCloseId = 4103;
 // Posted to the HWND's own thread when destroy is requested cross-thread.
 constexpr UINT WM_DAUX_DESTROY = WM_APP + 50;
 
-std::wstring widen_utf8(const char* value) {
-  if (!value || !*value) return L"Plugin Editor";
+std::wstring widen_utf8(const char *value) {
+  if (!value || !*value)
+    return L"Plugin Editor";
   const int needed = MultiByteToWideChar(CP_UTF8, 0, value, -1, nullptr, 0);
-  if (needed <= 0) return L"Plugin Editor";
+  if (needed <= 0)
+    return L"Plugin Editor";
   std::wstring out(static_cast<size_t>(needed), L'\0');
   MultiByteToWideChar(CP_UTF8, 0, value, -1, out.data(), needed);
-  if (!out.empty() && out.back() == L'\0') out.pop_back();
+  if (!out.empty() && out.back() == L'\0')
+    out.pop_back();
   return out;
 }
 
 void set_daux_dark_titlebar(HWND hwnd) {
-  if (!hwnd) return;
+  if (!hwnd)
+    return;
   BOOL dark = TRUE;
   HRESULT dark_hr = DwmSetWindowAttribute(
       hwnd, 20, &dark, sizeof(dark)); // DWMWA_USE_IMMERSIVE_DARK_MODE
@@ -138,13 +149,12 @@ void set_daux_dark_titlebar(HWND hwnd) {
     dark_hr = DwmSetWindowAttribute(
         hwnd, 19, &dark, sizeof(dark)); // older Win10 dark-mode attribute
   }
-  std::fprintf(stderr,
-               "[NativeEditorShell] dwm dark_mode=%s hr=0x%08lx\n",
+  std::fprintf(stderr, "[NativeEditorShell] dwm dark_mode=%s hr=0x%08lx\n",
                SUCCEEDED(dark_hr) ? "ok" : "fail",
                static_cast<unsigned long>(dark_hr));
 
   const bool rounded_disabled = [] {
-    const char* v = std::getenv("FUTUREBOARD_EDITOR_ROUNDED");
+    const char *v = std::getenv("FUTUREBOARD_EDITOR_ROUNDED");
     return v && (_stricmp(v, "0") == 0 || _stricmp(v, "false") == 0 ||
                  _stricmp(v, "off") == 0);
   }();
@@ -153,30 +163,29 @@ void set_daux_dark_titlebar(HWND hwnd) {
   } else {
     // DWMWCP_ROUND. Use numeric constants so older SDK headers still compile.
     const int preference = 2;
-    const HRESULT rounded_hr = DwmSetWindowAttribute(
-        hwnd, 33 /* DWMWA_WINDOW_CORNER_PREFERENCE */, &preference, sizeof(preference));
-    std::fprintf(stderr,
-                 "[NativeEditorShell] rounded=%s\n",
+    const HRESULT rounded_hr =
+        DwmSetWindowAttribute(hwnd, 33 /* DWMWA_WINDOW_CORNER_PREFERENCE */,
+                              &preference, sizeof(preference));
+    std::fprintf(stderr, "[NativeEditorShell] rounded=%s\n",
                  SUCCEEDED(rounded_hr) ? "enabled" : "unsupported");
   }
 
   COLORREF border = RGB(44, 46, 51);
   const HRESULT border_hr = DwmSetWindowAttribute(
       hwnd, 34 /* DWMWA_BORDER_COLOR */, &border, sizeof(border));
-  std::fprintf(stderr,
-               "[NativeEditorShell] dwm border_color=%s\n",
+  std::fprintf(stderr, "[NativeEditorShell] dwm border_color=%s\n",
                SUCCEEDED(border_hr) ? "ok" : "fail");
 
-  const HRESULT caption_hr =
-      DwmSetWindowAttribute(hwnd, DWMWA_CAPTION_COLOR, &kDauxTitlebarDark, sizeof(kDauxTitlebarDark));
-  std::fprintf(stderr,
-               "[NativeEditorShell] dwm caption_color=%s\n",
+  const HRESULT caption_hr = DwmSetWindowAttribute(
+      hwnd, DWMWA_CAPTION_COLOR, &kDauxTitlebarDark, sizeof(kDauxTitlebarDark));
+  std::fprintf(stderr, "[NativeEditorShell] dwm caption_color=%s\n",
                SUCCEEDED(caption_hr) ? "ok" : "fail");
 }
 
 void paint_dark_child(HWND hwnd) {
   HDC dc = GetDC(hwnd);
-  if (!dc) return;
+  if (!dc)
+    return;
   RECT rc{};
   GetClientRect(hwnd, &rc);
   HBRUSH brush = CreateSolidBrush(RGB(11, 15, 20));
@@ -195,31 +204,52 @@ bool daux_plugin_view_message_debug() {
   return enabled;
 }
 
-void daux_log_window_message(const char* tag, HWND hwnd, UINT msg) {
-  if (!daux_plugin_view_message_debug()) return;
-  const char* name = nullptr;
+void daux_log_window_message(const char *tag, HWND hwnd, UINT msg) {
+  if (!daux_plugin_view_message_debug())
+    return;
+  const char *name = nullptr;
   switch (msg) {
-    case WM_CREATE: name = "WM_CREATE"; break;
-    case WM_SHOWWINDOW: name = "WM_SHOWWINDOW"; break;
-    case WM_SIZE: name = "WM_SIZE"; break;
-    case WM_CLOSE: name = "WM_CLOSE"; break;
-    case WM_DESTROY: name = "WM_DESTROY"; break;
-    case WM_DPICHANGED: name = "WM_DPICHANGED"; break;
-    case WM_PAINT: name = "WM_PAINT"; break;
-    case WM_ERASEBKGND: name = "WM_ERASEBKGND"; break;
-    case WM_TIMER: name = "WM_TIMER"; break;
-    default: break;
+  case WM_CREATE:
+    name = "WM_CREATE";
+    break;
+  case WM_SHOWWINDOW:
+    name = "WM_SHOWWINDOW";
+    break;
+  case WM_SIZE:
+    name = "WM_SIZE";
+    break;
+  case WM_CLOSE:
+    name = "WM_CLOSE";
+    break;
+  case WM_DESTROY:
+    name = "WM_DESTROY";
+    break;
+  case WM_DPICHANGED:
+    name = "WM_DPICHANGED";
+    break;
+  case WM_PAINT:
+    name = "WM_PAINT";
+    break;
+  case WM_ERASEBKGND:
+    name = "WM_ERASEBKGND";
+    break;
+  case WM_TIMER:
+    name = "WM_TIMER";
+    break;
+  default:
+    break;
   }
   if (name) {
-    std::fprintf(stderr, "[%s] %s hwnd=0x%p tid=%lu\n",
-                 tag, name, static_cast<void*>(hwnd), GetCurrentThreadId());
+    std::fprintf(stderr, "[%s] %s hwnd=0x%p tid=%lu\n", tag, name,
+                 static_cast<void *>(hwnd), GetCurrentThreadId());
   }
 }
 
-void daux_log_hwnd_state(const char* label, HWND top, HWND content) {
-  const auto log_one = [label](const char* name, HWND hwnd) {
+void daux_log_hwnd_state(const char *label, HWND top, HWND content) {
+  const auto log_one = [label](const char *name, HWND hwnd) {
     if (!hwnd) {
-      std::fprintf(stderr, "[plugin-view] hwnd_state label=%s %s=null\n", label, name);
+      std::fprintf(stderr, "[plugin-view] hwnd_state label=%s %s=null\n", label,
+                   name);
       return;
     }
     RECT client{};
@@ -228,35 +258,26 @@ void daux_log_hwnd_state(const char* label, HWND top, HWND content) {
     GetWindowRect(hwnd, &screen);
     const LONG_PTR style = GetWindowLongPtrW(hwnd, GWL_STYLE);
     const LONG_PTR ex_style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
-    std::fprintf(
-        stderr,
-        "[plugin-view] hwnd_state label=%s %s=0x%p parent=0x%p style=0x%Ix ex_style=0x%Ix "
-        "client=(%ld,%ld,%ld,%ld) screen=(%ld,%ld,%ld,%ld) visible=%d iconic=%d\n",
-        label,
-        name,
-        static_cast<void*>(hwnd),
-        static_cast<void*>(GetParent(hwnd)),
-        static_cast<std::uintptr_t>(style),
-        static_cast<std::uintptr_t>(ex_style),
-        client.left,
-        client.top,
-        client.right,
-        client.bottom,
-        screen.left,
-        screen.top,
-        screen.right,
-        screen.bottom,
-        IsWindowVisible(hwnd) ? 1 : 0,
-        IsIconic(hwnd) ? 1 : 0);
+    std::fprintf(stderr,
+                 "[plugin-view] hwnd_state label=%s %s=0x%p parent=0x%p "
+                 "style=0x%Ix ex_style=0x%Ix "
+                 "client=(%ld,%ld,%ld,%ld) screen=(%ld,%ld,%ld,%ld) visible=%d "
+                 "iconic=%d\n",
+                 label, name, static_cast<void *>(hwnd),
+                 static_cast<void *>(GetParent(hwnd)),
+                 static_cast<std::uintptr_t>(style),
+                 static_cast<std::uintptr_t>(ex_style), client.left, client.top,
+                 client.right, client.bottom, screen.left, screen.top,
+                 screen.right, screen.bottom, IsWindowVisible(hwnd) ? 1 : 0,
+                 IsIconic(hwnd) ? 1 : 0);
   };
-  std::fprintf(stderr,
-               "[plugin-view] hwnd_hierarchy label=%s top_hwnd=0x%p content_hwnd=0x%p "
-               "content_hwnd_ne_top=%s content_parent=0x%p\n",
-               label,
-               static_cast<void*>(top),
-               static_cast<void*>(content),
-               (top && content && top != content) ? "true" : "false",
-               static_cast<void*>(content ? GetParent(content) : nullptr));
+  std::fprintf(
+      stderr,
+      "[plugin-view] hwnd_hierarchy label=%s top_hwnd=0x%p content_hwnd=0x%p "
+      "content_hwnd_ne_top=%s content_parent=0x%p\n",
+      label, static_cast<void *>(top), static_cast<void *>(content),
+      (top && content && top != content) ? "true" : "false",
+      static_cast<void *>(content ? GetParent(content) : nullptr));
   log_one("top", top);
   log_one("content", content);
 }
@@ -269,53 +290,56 @@ void daux_log_hwnd_state(const char* label, HWND top, HWND content) {
 constexpr UINT_PTR kDauxWakeTimerTop = 0xDA01;
 constexpr UINT_PTR kDauxWakeTimerContent = 0xDA02;
 
-LRESULT CALLBACK daux_editor_content_wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
+LRESULT CALLBACK daux_editor_content_wnd_proc(HWND hwnd, UINT msg,
+                                              WPARAM wparam, LPARAM lparam) {
   daux_log_window_message("plugin-content-hwnd", hwnd, msg);
   switch (msg) {
-    case WM_TIMER:
-      if (wparam == kDauxWakeTimerTop || wparam == kDauxWakeTimerContent) {
-        KillTimer(hwnd, wparam);
-        return 0;
-      }
-      break; // plugin-installed timer — let DefWindowProc / subclass chain run
-    case WM_ERASEBKGND:
-      return 1; // do not repaint over GPU/WebView/OpenGL plug-in output
-    case WM_PAINT: {
-      PAINTSTRUCT ps{};
-      BeginPaint(hwnd, &ps);
-      EndPaint(hwnd, &ps);
+  case WM_TIMER:
+    if (wparam == kDauxWakeTimerTop || wparam == kDauxWakeTimerContent) {
+      KillTimer(hwnd, wparam);
       return 0;
     }
-    case WM_MOUSEACTIVATE:
-      // Plugin content clicks must activate without being eaten — the wrapper
-      // (cross-process shell) handles the titlebar only.
-      if (daux_plugin_view_message_debug()) {
-        std::fprintf(stderr,
-                     "[PluginEditorInput] mouse_activate result=MA_ACTIVATE hwnd=0x%p\n",
-                     static_cast<void*>(hwnd));
-      }
-      return MA_ACTIVATE;
-    case WM_LBUTTONDOWN: {
-      // Generic rule: clicking plugin content focuses the plugin child under
-      // the point so keyboard input follows the mouse (no vendor logic).
-      const POINT pt{static_cast<short>(LOWORD(lparam)), static_cast<short>(HIWORD(lparam))};
-      HWND target = ChildWindowFromPointEx(
-          hwnd, pt, CWP_SKIPINVISIBLE | CWP_SKIPDISABLED | CWP_SKIPTRANSPARENT);
-      if (!target) target = hwnd;
-      const HWND focus_before = GetFocus();
-      SetFocus(target);
-      if (daux_plugin_view_message_debug()) {
-        std::fprintf(stderr,
-                     "[PluginEditorInput] hit_test area=content point=(%ld,%ld) "
-                     "focus_before=0x%p focus_after=0x%p\n",
-                     pt.x, pt.y,
-                     static_cast<void*>(focus_before),
-                     static_cast<void*>(GetFocus()));
-      }
-      break; // fall through to DefWindowProc so the click still routes
+    break; // plugin-installed timer — let DefWindowProc / subclass chain run
+  case WM_ERASEBKGND:
+    return 1; // do not repaint over GPU/WebView/OpenGL plug-in output
+  case WM_PAINT: {
+    PAINTSTRUCT ps{};
+    BeginPaint(hwnd, &ps);
+    EndPaint(hwnd, &ps);
+    return 0;
+  }
+  case WM_MOUSEACTIVATE:
+    // Plugin content clicks must activate without being eaten — the wrapper
+    // (cross-process shell) handles the titlebar only.
+    if (daux_plugin_view_message_debug()) {
+      std::fprintf(
+          stderr,
+          "[PluginEditorInput] mouse_activate result=MA_ACTIVATE hwnd=0x%p\n",
+          static_cast<void *>(hwnd));
     }
-    default:
-      break;
+    return MA_ACTIVATE;
+  case WM_LBUTTONDOWN: {
+    // Generic rule: clicking plugin content focuses the plugin child under
+    // the point so keyboard input follows the mouse (no vendor logic).
+    const POINT pt{static_cast<short>(LOWORD(lparam)),
+                   static_cast<short>(HIWORD(lparam))};
+    HWND target = ChildWindowFromPointEx(
+        hwnd, pt, CWP_SKIPINVISIBLE | CWP_SKIPDISABLED | CWP_SKIPTRANSPARENT);
+    if (!target)
+      target = hwnd;
+    const HWND focus_before = GetFocus();
+    SetFocus(target);
+    if (daux_plugin_view_message_debug()) {
+      std::fprintf(stderr,
+                   "[PluginEditorInput] hit_test area=content point=(%ld,%ld) "
+                   "focus_before=0x%p focus_after=0x%p\n",
+                   pt.x, pt.y, static_cast<void *>(focus_before),
+                   static_cast<void *>(GetFocus()));
+    }
+    break; // fall through to DefWindowProc so the click still routes
+  }
+  default:
+    break;
   }
   return DefWindowProcW(hwnd, msg, wparam, lparam);
 }
@@ -346,31 +370,34 @@ void register_editor_window_classes() {
 }
 #endif
 
-bool looks_like_zero_class_id(const std::string& value) {
-  if (value.empty()) return true;
+bool looks_like_zero_class_id(const std::string &value) {
+  if (value.empty())
+    return true;
   for (char c : value) {
-    if (c != '0' && c != '-' && c != '{' && c != '}') return false;
+    if (c != '0' && c != '-' && c != '{' && c != '}')
+      return false;
   }
   return true;
 }
 
-VST3::Optional<VST3::UID> first_audio_module_uid(const VST3::Hosting::PluginFactory& factory) {
-  for (const auto& info : factory.classInfos()) {
-    if (info.category() != kVst3AudioModuleClass) continue;
+VST3::Optional<VST3::UID>
+first_audio_module_uid(const VST3::Hosting::PluginFactory &factory) {
+  for (const auto &info : factory.classInfos()) {
+    if (info.category() != kVst3AudioModuleClass)
+      continue;
     return VST3::Optional<VST3::UID>(info.ID());
   }
   return {};
 }
 
-void log_factory_classes(const VST3::Hosting::PluginFactory& factory) {
+void log_factory_classes(const VST3::Hosting::PluginFactory &factory) {
   int index = 0;
-  for (const auto& info : factory.classInfos()) {
-    std::fprintf(stderr,
-                 "[DAUx VST3] factory class[%d] name='%s' category='%s' uid=%s\n",
-                 index++,
-                 info.name().c_str(),
-                 info.category().c_str(),
-                 info.ID().toString().c_str());
+  for (const auto &info : factory.classInfos()) {
+    std::fprintf(
+        stderr,
+        "[DAUx VST3] factory class[%d] name='%s' category='%s' uid=%s\n",
+        index++, info.name().c_str(), info.category().c_str(),
+        info.ID().toString().c_str());
   }
 }
 
@@ -380,18 +407,18 @@ void log_factory_classes(const VST3::Hosting::PluginFactory& factory) {
 
 /// One pending parameter change (id + normalized value 0..1).
 struct PendingParam {
-  Steinberg::Vst::ParamID    id{0};
+  Steinberg::Vst::ParamID id{0};
   Steinberg::Vst::ParamValue value{0.0};
 };
 
 /// Minimal IParamValueQueue: single value at sample-offset 0.
 /// No heap allocation — lives inside SimpleParamChanges::queues[].
 struct SimpleParamValueQueue final : Steinberg::Vst::IParamValueQueue {
-  Steinberg::Vst::ParamID    param_id{0};
+  Steinberg::Vst::ParamID param_id{0};
   Steinberg::Vst::ParamValue param_value{0.0};
 
-  Steinberg::tresult PLUGIN_API queryInterface(
-      const Steinberg::TUID iid, void** obj) override {
+  Steinberg::tresult PLUGIN_API queryInterface(const Steinberg::TUID iid,
+                                               void **obj) override {
     if (std::memcmp(iid, Steinberg::Vst::IParamValueQueue::iid,
                     sizeof(Steinberg::TUID)) == 0) {
       *obj = this;
@@ -400,25 +427,26 @@ struct SimpleParamValueQueue final : Steinberg::Vst::IParamValueQueue {
     *obj = nullptr;
     return Steinberg::kNoInterface;
   }
-  Steinberg::uint32 PLUGIN_API addRef()  override { return 1; }
+  Steinberg::uint32 PLUGIN_API addRef() override { return 1; }
   Steinberg::uint32 PLUGIN_API release() override { return 1; }
 
-  Steinberg::Vst::ParamID PLUGIN_API getParameterId() override { return param_id; }
-  Steinberg::int32        PLUGIN_API getPointCount()  override { return 1; }
+  Steinberg::Vst::ParamID PLUGIN_API getParameterId() override {
+    return param_id;
+  }
+  Steinberg::int32 PLUGIN_API getPointCount() override { return 1; }
 
-  Steinberg::tresult PLUGIN_API getPoint(
-      Steinberg::int32 index,
-      Steinberg::int32& sample_offset,
-      Steinberg::Vst::ParamValue& value) override {
-    if (index != 0) return Steinberg::kResultFalse;
+  Steinberg::tresult PLUGIN_API
+  getPoint(Steinberg::int32 index, Steinberg::int32 &sample_offset,
+           Steinberg::Vst::ParamValue &value) override {
+    if (index != 0)
+      return Steinberg::kResultFalse;
     sample_offset = 0;
     value = param_value;
     return Steinberg::kResultOk;
   }
-  Steinberg::tresult PLUGIN_API addPoint(
-      Steinberg::int32,
-      Steinberg::Vst::ParamValue v,
-      Steinberg::int32& idx) override {
+  Steinberg::tresult PLUGIN_API addPoint(Steinberg::int32,
+                                         Steinberg::Vst::ParamValue v,
+                                         Steinberg::int32 &idx) override {
     param_value = v;
     idx = 0;
     return Steinberg::kResultOk;
@@ -433,8 +461,8 @@ struct SimpleParamChanges final : Steinberg::Vst::IParameterChanges {
   std::array<SimpleParamValueQueue, kMaxQueues> queues{};
   int count{0};
 
-  Steinberg::tresult PLUGIN_API queryInterface(
-      const Steinberg::TUID iid, void** obj) override {
+  Steinberg::tresult PLUGIN_API queryInterface(const Steinberg::TUID iid,
+                                               void **obj) override {
     if (std::memcmp(iid, Steinberg::Vst::IParameterChanges::iid,
                     sizeof(Steinberg::TUID)) == 0) {
       *obj = this;
@@ -443,23 +471,24 @@ struct SimpleParamChanges final : Steinberg::Vst::IParameterChanges {
     *obj = nullptr;
     return Steinberg::kNoInterface;
   }
-  Steinberg::uint32 PLUGIN_API addRef()  override { return 1; }
+  Steinberg::uint32 PLUGIN_API addRef() override { return 1; }
   Steinberg::uint32 PLUGIN_API release() override { return 1; }
 
   Steinberg::int32 PLUGIN_API getParameterCount() override { return count; }
 
-  Steinberg::Vst::IParamValueQueue* PLUGIN_API getParameterData(
-      Steinberg::int32 index) override {
-    if (index < 0 || index >= count) return nullptr;
+  Steinberg::Vst::IParamValueQueue *PLUGIN_API
+  getParameterData(Steinberg::int32 index) override {
+    if (index < 0 || index >= count)
+      return nullptr;
     return &queues[index];
   }
 
-  Steinberg::Vst::IParamValueQueue* PLUGIN_API addParameterData(
-      const Steinberg::Vst::ParamID& id,
-      Steinberg::int32& index) override {
-    if (count >= kMaxQueues) return nullptr;
+  Steinberg::Vst::IParamValueQueue *PLUGIN_API addParameterData(
+      const Steinberg::Vst::ParamID &id, Steinberg::int32 &index) override {
+    if (count >= kMaxQueues)
+      return nullptr;
     index = count;
-    queues[count].param_id    = id;
+    queues[count].param_id = id;
     queues[count].param_value = 0.0;
     return &queues[count++];
   }
@@ -474,8 +503,8 @@ struct SimpleEventList final : Steinberg::Vst::IEventList {
   std::array<Steinberg::Vst::Event, kMaxEvents> events{};
   int count{0};
 
-  Steinberg::tresult PLUGIN_API queryInterface(
-      const Steinberg::TUID iid, void** obj) override {
+  Steinberg::tresult PLUGIN_API queryInterface(const Steinberg::TUID iid,
+                                               void **obj) override {
     if (std::memcmp(iid, Steinberg::Vst::IEventList::iid,
                     sizeof(Steinberg::TUID)) == 0) {
       *obj = this;
@@ -484,20 +513,22 @@ struct SimpleEventList final : Steinberg::Vst::IEventList {
     *obj = nullptr;
     return Steinberg::kNoInterface;
   }
-  Steinberg::uint32 PLUGIN_API addRef()  override { return 1; }
+  Steinberg::uint32 PLUGIN_API addRef() override { return 1; }
   Steinberg::uint32 PLUGIN_API release() override { return 1; }
 
   Steinberg::int32 PLUGIN_API getEventCount() override { return count; }
 
-  Steinberg::tresult PLUGIN_API getEvent(
-      Steinberg::int32 index, Steinberg::Vst::Event& e) override {
-    if (index < 0 || index >= count) return Steinberg::kResultFalse;
+  Steinberg::tresult PLUGIN_API getEvent(Steinberg::int32 index,
+                                         Steinberg::Vst::Event &e) override {
+    if (index < 0 || index >= count)
+      return Steinberg::kResultFalse;
     e = events[index];
     return Steinberg::kResultOk;
   }
 
-  Steinberg::tresult PLUGIN_API addEvent(Steinberg::Vst::Event& e) override {
-    if (count >= kMaxEvents) return Steinberg::kResultFalse;
+  Steinberg::tresult PLUGIN_API addEvent(Steinberg::Vst::Event &e) override {
+    if (count >= kMaxEvents)
+      return Steinberg::kResultFalse;
     events[count++] = e;
     return Steinberg::kResultOk;
   }
@@ -506,8 +537,9 @@ struct SimpleEventList final : Steinberg::Vst::IEventList {
 
   bool push_note_on(Steinberg::int32 sample_offset, Steinberg::int16 channel,
                     Steinberg::int16 pitch, float velocity) {
-    if (count >= kMaxEvents) return false;
-    auto& e = events[count++];
+    if (count >= kMaxEvents)
+      return false;
+    auto &e = events[count++];
     e = {};
     e.busIndex = 0;
     e.sampleOffset = sample_offset;
@@ -523,8 +555,9 @@ struct SimpleEventList final : Steinberg::Vst::IEventList {
 
   bool push_note_off(Steinberg::int32 sample_offset, Steinberg::int16 channel,
                      Steinberg::int16 pitch, float velocity) {
-    if (count >= kMaxEvents) return false;
-    auto& e = events[count++];
+    if (count >= kMaxEvents)
+      return false;
+    auto &e = events[count++];
     e = {};
     e.busIndex = 0;
     e.sampleOffset = sample_offset;
@@ -538,11 +571,13 @@ struct SimpleEventList final : Steinberg::Vst::IEventList {
   }
 
   void sort_by_sample_offset() {
-    if (count <= 1) return;
-    std::sort(events.begin(), events.begin() + count,
-              [](const Steinberg::Vst::Event& a, const Steinberg::Vst::Event& b) {
-                return a.sampleOffset < b.sampleOffset;
-              });
+    if (count <= 1)
+      return;
+    std::sort(
+        events.begin(), events.begin() + count,
+        [](const Steinberg::Vst::Event &a, const Steinberg::Vst::Event &b) {
+          return a.sampleOffset < b.sampleOffset;
+        });
   }
 };
 
@@ -555,7 +590,7 @@ bool daux_vst3_midi_debug() {
   return enabled;
 }
 
-}  // namespace
+} // namespace
 
 // Forward declaration so ComponentHandlerImpl can hold a back-pointer.
 struct SphereDauxVst3Processor;
@@ -569,10 +604,10 @@ class PluginEditorFrame;
 /// IComponentHandler that captures performEdit() callbacks from the plugin GUI
 /// and enqueues them for delivery to IAudioProcessor on the next process call.
 struct ComponentHandlerImpl final : Steinberg::Vst::IComponentHandler {
-  SphereDauxVst3Processor* owner{nullptr};
+  SphereDauxVst3Processor *owner{nullptr};
 
-  Steinberg::tresult PLUGIN_API queryInterface(
-      const Steinberg::TUID iid, void** obj) override {
+  Steinberg::tresult PLUGIN_API queryInterface(const Steinberg::TUID iid,
+                                               void **obj) override {
     if (std::memcmp(iid, Steinberg::Vst::IComponentHandler::iid,
                     sizeof(Steinberg::TUID)) == 0) {
       *obj = this;
@@ -581,7 +616,7 @@ struct ComponentHandlerImpl final : Steinberg::Vst::IComponentHandler {
     *obj = nullptr;
     return Steinberg::kNoInterface;
   }
-  Steinberg::uint32 PLUGIN_API addRef()  override { return 1; }
+  Steinberg::uint32 PLUGIN_API addRef() override { return 1; }
   Steinberg::uint32 PLUGIN_API release() override { return 1; }
 
   Steinberg::tresult PLUGIN_API beginEdit(Steinberg::Vst::ParamID) override {
@@ -596,26 +631,29 @@ struct ComponentHandlerImpl final : Steinberg::Vst::IComponentHandler {
 
   // Defined below, after SphereDauxVst3Processor is complete.
   Steinberg::tresult PLUGIN_API performEdit(
-      Steinberg::Vst::ParamID id,
-      Steinberg::Vst::ParamValue value) override;
+      Steinberg::Vst::ParamID id, Steinberg::Vst::ParamValue value) override;
 };
 
-// ── Platform editor function forward declarations ─────────────────────────────
-// Implementations live in editor_mac.mm (macOS) and editor_linux.cpp (Linux).
+// ── Platform editor function forward declarations
+// ───────────────────────────── Implementations live in editor_mac.mm (macOS)
+// and editor_linux.cpp (Linux).
 
 #if defined(__APPLE__)
-unsigned long long open_editor_mac(SphereDauxVst3Processor*, const char*, const char*, int, int);
-void  close_editor_mac(SphereDauxVst3Processor*);
-int   focus_editor_mac(SphereDauxVst3Processor*);
-void  shutdown_editor_mac(SphereDauxVst3Processor*);
+unsigned long long open_editor_mac(SphereDauxVst3Processor *, const char *,
+                                   const char *, int, int);
+void close_editor_mac(SphereDauxVst3Processor *);
+int focus_editor_mac(SphereDauxVst3Processor *);
+void shutdown_editor_mac(SphereDauxVst3Processor *);
 #elif defined(__linux__)
-unsigned long long open_editor_linux(SphereDauxVst3Processor*, const char*, const char*, int, int);
-void  close_editor_linux(SphereDauxVst3Processor*);
-int   focus_editor_linux(SphereDauxVst3Processor*);
-void  shutdown_editor_linux(SphereDauxVst3Processor*);
+unsigned long long open_editor_linux(SphereDauxVst3Processor *, const char *,
+                                     const char *, int, int);
+void close_editor_linux(SphereDauxVst3Processor *);
+int focus_editor_linux(SphereDauxVst3Processor *);
+void shutdown_editor_linux(SphereDauxVst3Processor *);
 #endif
 
-// ── Main processor struct ─────────────────────────────────────────────────────
+// ── Main processor struct
+// ─────────────────────────────────────────────────────
 
 struct SphereDauxVst3Processor {
   static constexpr int kMaxPending = 64;
@@ -623,29 +661,31 @@ struct SphereDauxVst3Processor {
   static constexpr int kMaxBridgeBuses = 16;
   static constexpr int kMaxProcessFrames = 8192;
 
-  VST3::Hosting::Module::Ptr                        module;
-  Steinberg::Vst::HostApplication                   host_context;
-  Steinberg::IPtr<Steinberg::Vst::IComponent>       component;
-  Steinberg::IPtr<Steinberg::Vst::IAudioProcessor>  processor;
-  Steinberg::IPtr<Steinberg::Vst::IEditController>  controller;
+  VST3::Hosting::Module::Ptr module;
+  Steinberg::Vst::HostApplication host_context;
+  Steinberg::IPtr<Steinberg::Vst::IComponent> component;
+  Steinberg::IPtr<Steinberg::Vst::IAudioProcessor> processor;
+  Steinberg::IPtr<Steinberg::Vst::IEditController> controller;
   /// MIDI controller → parameter mapping (queried from `controller`). Null when
   /// the plugin exposes no IMidiMapping; CC events are then ignored.
-  Steinberg::IPtr<Steinberg::Vst::IMidiMapping>     midi_mapping;
+  Steinberg::IPtr<Steinberg::Vst::IMidiMapping> midi_mapping;
   Steinberg::IPtr<Steinberg::Vst::IConnectionPoint> component_connection;
   Steinberg::IPtr<Steinberg::Vst::IConnectionPoint> controller_connection;
   bool controller_is_component{false};
 
   // Stereo single-sample I/O buffers
-  Steinberg::Vst::SpeakerArrangement input_arrangement  = Steinberg::Vst::SpeakerArr::kStereo;
-  Steinberg::Vst::SpeakerArrangement output_arrangement = Steinberg::Vst::SpeakerArr::kStereo;
-  float  input_l{0.f}, input_r{0.f};
-  float  output_l{0.f}, output_r{0.f};
-  float* input_channels[2]  = {&input_l,  &input_r};
-  float* output_channels[2] = {&output_l, &output_r};
+  Steinberg::Vst::SpeakerArrangement input_arrangement =
+      Steinberg::Vst::SpeakerArr::kStereo;
+  Steinberg::Vst::SpeakerArrangement output_arrangement =
+      Steinberg::Vst::SpeakerArr::kStereo;
+  float input_l{0.f}, input_r{0.f};
+  float output_l{0.f}, output_r{0.f};
+  float *input_channels[2] = {&input_l, &input_r};
+  float *output_channels[2] = {&output_l, &output_r};
   Steinberg::Vst::AudioBusBuffers input_bus{};
   Steinberg::Vst::AudioBusBuffers output_bus{};
-  Steinberg::Vst::ProcessContext  process_context{};
-  Steinberg::Vst::ProcessData     process_data{};
+  Steinberg::Vst::ProcessContext process_context{};
+  Steinberg::Vst::ProcessData process_data{};
   int audio_input_bus_count{0};
   int audio_output_bus_count{0};
   int main_audio_input_channel_count{2};
@@ -654,10 +694,12 @@ struct SphereDauxVst3Processor {
   std::array<int, kMaxBridgeBuses> audio_output_bus_channel_counts{};
   std::array<std::string, kMaxBridgeBuses> audio_output_bus_names{};
   std::array<Steinberg::Vst::BusType, kMaxBridgeBuses> audio_output_bus_types{};
-  std::array<Steinberg::Vst::SpeakerArrangement, kMaxBridgeBuses> audio_output_bus_arrangements{};
+  std::array<Steinberg::Vst::SpeakerArrangement, kMaxBridgeBuses>
+      audio_output_bus_arrangements{};
   std::array<bool, kMaxBridgeBuses> audio_output_bus_active_before{};
   std::array<bool, kMaxBridgeBuses> audio_output_bus_active_after{};
-  std::array<Steinberg::tresult, kMaxBridgeBuses> audio_output_bus_activate_results{};
+  std::array<Steinberg::tresult, kMaxBridgeBuses>
+      audio_output_bus_activate_results{};
   int active_audio_output_bus_count{0};
   bool processing{false};
 
@@ -666,18 +708,18 @@ struct SphereDauxVst3Processor {
   double last_input_peak{0.0};
   double last_output_peak{0.0};
   double last_difference_peak{0.0};
-  bool   first_process_done{false};
-  bool   process_audio_out_logged{false};
+  bool first_process_done{false};
+  bool process_audio_out_logged{false};
 
   // Thread-safe parameter change queue (no dynamic allocation)
   std::array<PendingParam, kMaxPending> pending_buf{};
-  int                                   pending_count{0};
-  std::mutex                            pending_mutex;  // protects pending_buf/count
+  int pending_count{0};
+  std::mutex pending_mutex; // protects pending_buf/count
 
-  SimpleParamChanges   param_changes_obj;  // reused per process call
-  SimpleEventList      input_events_obj;   // reused per process call
-  int                  event_input_bus_count{0};
-  ComponentHandlerImpl component_handler;  // installed on IEditController
+  SimpleParamChanges param_changes_obj; // reused per process call
+  SimpleEventList input_events_obj;     // reused per process call
+  int event_input_bus_count{0};
+  ComponentHandlerImpl component_handler; // installed on IEditController
   /// Owned copy of the loaded module path (survives after create() returns).
   std::string plugin_path;
 
@@ -687,7 +729,7 @@ struct SphereDauxVst3Processor {
   // this processor; created on attach, destroyed on detach. Required for
   // WebView/CEF-backed editors (UAD Native) to bootstrap and to honour
   // plug-in-driven resizeView() requests.
-  PluginEditorFrame* editor_frame{nullptr};
+  PluginEditorFrame *editor_frame{nullptr};
   HWND editor_hwnd{nullptr};
   HWND editor_attach_hwnd{nullptr};
   HWND editor_fallback_label_hwnd{nullptr};
@@ -710,21 +752,23 @@ struct SphereDauxVst3Processor {
   HWND editor_parent_hwnd{nullptr};
   HWND editor_embed_top_hwnd{nullptr};
   DauxEditorWindow editor_window{};
-  int  embed_host_kind{1};        // 0 = WS_CHILD, 1 = owned tool window, 2 = detached top-level
+  int embed_host_kind{
+      1}; // 0 = WS_CHILD, 1 = owned tool window, 2 = detached top-level
   bool embed_mode{false};
   bool embed_geometry_valid{false};
-  RECT embed_last_applied{};      // last applied window rect (screen for tool)
-  int  embed_host_x{0}, embed_host_y{0}, embed_host_w{0}, embed_host_h{0};
-  int  embed_content_w{0}, embed_content_h{0};
+  RECT embed_last_applied{}; // last applied window rect (screen for tool)
+  int embed_host_x{0}, embed_host_y{0}, embed_host_w{0}, embed_host_h{0};
+  int embed_content_w{0}, embed_content_h{0};
   bool embed_resize_in_progress{false};
   // IPlugView::canResize, cached per created view (keyed on the view pointer
   // so view re-creation re-queries automatically). Drives the generic resize
   // contract: fixed-size views keep their getSize; resizable views go through
   // checkSizeConstraint.
   bool editor_resizable{false};
-  const void* editor_resizable_view{nullptr};
+  const void *editor_resizable_view{nullptr};
   // Main-owned shell (bridge): resizeView updates these; Rust polls and resizes
-  // the NativeEditorShell outer window — never SetWindowPos on editor_parent_hwnd.
+  // the NativeEditorShell outer window — never SetWindowPos on
+  // editor_parent_hwnd.
   std::atomic<bool> pending_main_shell_resize{false};
   int pending_main_shell_w{0};
   int pending_main_shell_h{0};
@@ -733,10 +777,12 @@ struct SphereDauxVst3Processor {
   // shell can tear the editor down. Consumed (and reset) via the take accessor.
   std::atomic<bool> embed_user_closed{false};
   // Bundled browser/WebView runtime — active only while an editor is open.
-  // One DLL-directory cookie per native runtime dir we added to the search path.
+  // One DLL-directory cookie per native runtime dir we added to the search
+  // path.
   std::vector<DLL_DIRECTORY_COOKIE> plugin_browser_dll_cookies;
-  HMODULE plugin_browser_loader = nullptr;  // optional verify-load (WebView2 only)
-  int plugin_browser_runtime_kind = 0;      // DauxEditorRuntimeKind
+  HMODULE plugin_browser_loader =
+      nullptr;                         // optional verify-load (WebView2 only)
+  int plugin_browser_runtime_kind = 0; // DauxEditorRuntimeKind
   // Guards window proc access; set to false before destroy so pending messages
   // received after GWLP_USERDATA is zeroed still find a valid flag.
   std::atomic<bool> processor_valid{true};
@@ -746,9 +792,10 @@ struct SphereDauxVst3Processor {
   // editor_mac.mm / editor_linux.cpp access these exclusively via the
   // sphere_daux_editor_bridge.h C API.
   Steinberg::IPtr<Steinberg::IPlugView> editor_view;
-  void* editor_native_window{nullptr};    // NSWindow* (mac) / GtkWidget* (linux)
-  void* editor_native_embed{nullptr};     // NSView* (mac only — the IPlugView parent)
-  void* editor_native_delegate{nullptr};  // DauxEditorWindowDelegate* (mac only)
+  void *editor_native_window{nullptr}; // NSWindow* (mac) / GtkWidget* (linux)
+  void *editor_native_embed{
+      nullptr}; // NSView* (mac only — the IPlugView parent)
+  void *editor_native_delegate{nullptr}; // DauxEditorWindowDelegate* (mac only)
   unsigned long long editor_handle{0};
   std::string editor_window_id;
   std::string editor_title;
@@ -760,46 +807,61 @@ struct SphereDauxVst3Processor {
 
   // ── Setup / shutdown ───────────────────────────────────────────────────────
 
-  static Steinberg::Vst::SpeakerArrangement arrangement_for_channels(int channels) {
+  static Steinberg::Vst::SpeakerArrangement
+  arrangement_for_channels(int channels) {
     using namespace Steinberg::Vst;
     switch (channels) {
-      case 0: return SpeakerArr::kEmpty;
-      case 1: return SpeakerArr::kMono;
-      case 2: return SpeakerArr::kStereo;
-      case 3: return SpeakerArr::k30Cine;
-      case 4: return SpeakerArr::k40Music;
-      case 5: return SpeakerArr::k50;
-      case 6: return SpeakerArr::k51;
-      case 7: return SpeakerArr::k70Music;
-      case 8: return SpeakerArr::k71Music;
-      default: return SpeakerArr::kStereo;
+    case 0:
+      return SpeakerArr::kEmpty;
+    case 1:
+      return SpeakerArr::kMono;
+    case 2:
+      return SpeakerArr::kStereo;
+    case 3:
+      return SpeakerArr::k30Cine;
+    case 4:
+      return SpeakerArr::k40Music;
+    case 5:
+      return SpeakerArr::k50;
+    case 6:
+      return SpeakerArr::k51;
+    case 7:
+      return SpeakerArr::k70Music;
+    case 8:
+      return SpeakerArr::k71Music;
+    default:
+      return SpeakerArr::kStereo;
     }
   }
 
   int output_bus_count_for_process() const {
     const int reported = std::min(audio_output_bus_count, kMaxBridgeBuses);
-    if (reported <= 0) return 0;
+    if (reported <= 0)
+      return 0;
     const int active = std::min(active_audio_output_bus_count, reported);
     return active > 0 ? active : reported;
   }
 
   int output_bus_channels_for_process(int bus) const {
-    if (bus < 0 || bus >= kMaxBridgeBuses) return 0;
+    if (bus < 0 || bus >= kMaxBridgeBuses)
+      return 0;
     int channels = audio_output_bus_channel_counts[bus];
-    if (channels <= 0 && bus == 0) channels = main_audio_output_channel_count;
+    if (channels <= 0 && bus == 0)
+      channels = main_audio_output_channel_count;
     return std::max(0, std::min(channels, kMaxBridgeChannels));
   }
 
-  static Vst3BusAudioStats compute_bus_stats(
-      const Steinberg::Vst::AudioBusBuffers& bus,
-      int frames) {
+  static Vst3BusAudioStats
+  compute_bus_stats(const Steinberg::Vst::AudioBusBuffers &bus, int frames) {
     Vst3BusAudioStats stats{};
     stats.ptr_valid = bus.numChannels > 0 && bus.channelBuffers32 != nullptr;
-    if (!stats.ptr_valid || frames <= 0) return stats;
-    const float* left = bus.channelBuffers32[0];
-    const float* right = bus.numChannels > 1 ? bus.channelBuffers32[1] : left;
+    if (!stats.ptr_valid || frames <= 0)
+      return stats;
+    const float *left = bus.channelBuffers32[0];
+    const float *right = bus.numChannels > 1 ? bus.channelBuffers32[1] : left;
     stats.ptr_valid = left != nullptr && right != nullptr;
-    if (!stats.ptr_valid) return stats;
+    if (!stats.ptr_valid)
+      return stats;
     double sum_l = 0.0;
     double sum_r = 0.0;
     for (int i = 0; i < frames; ++i) {
@@ -811,7 +873,8 @@ struct SphereDauxVst3Processor {
       stats.peak_r = std::max(stats.peak_r, abs_r);
       sum_l += l * l;
       sum_r += r * r;
-      if (stats.first_non_zero < 0 && (abs_l > 0.0000001 || abs_r > 0.0000001)) {
+      if (stats.first_non_zero < 0 &&
+          (abs_l > 0.0000001 || abs_r > 0.0000001)) {
         stats.first_non_zero = i;
       }
     }
@@ -822,36 +885,32 @@ struct SphereDauxVst3Processor {
   }
 
   void log_process_audio_out_once(
-      int frames,
-      int num_output_buses,
-      const Steinberg::Vst::AudioBusBuffers* output_buses,
-      const Vst3BusAudioStats* stats) {
-    if (process_audio_out_logged && !daux_vst3_bus_debug()) return;
+      int frames, int num_output_buses,
+      const Steinberg::Vst::AudioBusBuffers *output_buses,
+      const Vst3BusAudioStats *stats) {
+    if (process_audio_out_logged && !daux_vst3_bus_debug())
+      return;
     process_audio_out_logged = true;
     std::fprintf(stderr,
                  "[PROCESS AUDIO OUT]\n"
                  "block_size=%d\n"
                  "sample_rate=%.0f\n"
                  "num_output_buses_passed_to_process=%d\n",
-                 frames,
-                 process_context.sampleRate,
-                 num_output_buses);
+                 frames, process_context.sampleRate, num_output_buses);
     for (int bus = 0; bus < num_output_buses; ++bus) {
-      const auto& s = stats[bus];
-      const auto silence_flags = output_buses ? output_buses[bus].silenceFlags : 0;
+      const auto &s = stats[bus];
+      const auto silence_flags =
+          output_buses ? output_buses[bus].silenceFlags : 0;
       std::fprintf(stderr,
-                   "output_bus index=%d channel_count=%d ptr_valid=%d silence_flags=0x%llx "
+                   "output_bus index=%d channel_count=%d ptr_valid=%d "
+                   "silence_flags=0x%llx "
                    "peak_l=%.8f peak_r=%.8f rms_l=%.8f rms_r=%.8f "
-                   "first_non_zero_sample_index=%d routed_destination=downmix:fallback\n",
-                   bus,
-                   output_buses ? output_buses[bus].numChannels : 0,
+                   "first_non_zero_sample_index=%d "
+                   "routed_destination=downmix:fallback\n",
+                   bus, output_buses ? output_buses[bus].numChannels : 0,
                    s.ptr_valid ? 1 : 0,
-                   static_cast<unsigned long long>(silence_flags),
-                   s.peak_l,
-                   s.peak_r,
-                   s.rms_l,
-                   s.rms_r,
-                   s.first_non_zero);
+                   static_cast<unsigned long long>(silence_flags), s.peak_l,
+                   s.peak_r, s.rms_l, s.rms_r, s.first_non_zero);
     }
   }
 
@@ -859,33 +918,32 @@ struct SphereDauxVst3Processor {
     const double sr = sample_rate > 0.0 ? sample_rate : 44100.0;
 
     // Wire up I/O buffer descriptors
-    input_bus.numChannels       = 2;
-    input_bus.channelBuffers32  = input_channels;
-    output_bus.numChannels      = 2;
+    input_bus.numChannels = 2;
+    input_bus.channelBuffers32 = input_channels;
+    output_bus.numChannels = 2;
     output_bus.channelBuffers32 = output_channels;
 
     // ProcessData is reused every call — initialise once here
-    process_data.processMode        = Steinberg::Vst::kRealtime;
+    process_data.processMode = Steinberg::Vst::kRealtime;
     process_data.symbolicSampleSize = Steinberg::Vst::kSample32;
-    process_data.numSamples         = 1;
-    process_data.numInputs          = 0;
-    process_data.numOutputs         = 0;
-    process_data.inputs             = nullptr;
-    process_data.outputs            = nullptr;
-    process_data.inputParameterChanges  = nullptr;
+    process_data.numSamples = 1;
+    process_data.numInputs = 0;
+    process_data.numOutputs = 0;
+    process_data.inputs = nullptr;
+    process_data.outputs = nullptr;
+    process_data.inputParameterChanges = nullptr;
     process_data.outputParameterChanges = nullptr;
 
     // Initial transport defaults. The host (engine in-process, or the bridge
     // producer) overwrites tempo/time-sig/position/playing per block via
     // sphere_daux_vst3_set_process_context before every process() call — these
     // are only the values seen if a plugin processes before the first update.
-    process_context.sampleRate         = sr;
-    process_context.tempo              = 120.0;
-    process_context.timeSigNumerator   = 4;
+    process_context.sampleRate = sr;
+    process_context.tempo = 120.0;
+    process_context.timeSigNumerator = 4;
     process_context.timeSigDenominator = 4;
-    process_context.state =
-        Steinberg::Vst::ProcessContext::kTempoValid   |
-        Steinberg::Vst::ProcessContext::kTimeSigValid;
+    process_context.state = Steinberg::Vst::ProcessContext::kTempoValid |
+                            Steinberg::Vst::ProcessContext::kTimeSigValid;
     process_data.processContext = &process_context;
 
     const auto input_bus_count =
@@ -907,30 +965,27 @@ struct SphereDauxVst3Processor {
     active_audio_output_bus_count = 0;
     if (audio_input_bus_count > 0) {
       Steinberg::Vst::BusInfo input_info{};
-      if (component->getBusInfo(Steinberg::Vst::kAudio,
-                                Steinberg::Vst::kInput,
-                                0,
-                                input_info) == Steinberg::kResultOk &&
+      if (component->getBusInfo(Steinberg::Vst::kAudio, Steinberg::Vst::kInput,
+                                0, input_info) == Steinberg::kResultOk &&
           input_info.channelCount > 0) {
-        main_audio_input_channel_count = static_cast<int>(input_info.channelCount);
+        main_audio_input_channel_count =
+            static_cast<int>(input_info.channelCount);
       }
     }
     if (audio_output_bus_count > 0) {
       Steinberg::Vst::BusInfo output_info{};
-      if (component->getBusInfo(Steinberg::Vst::kAudio,
-                                Steinberg::Vst::kOutput,
-                                0,
-                                output_info) == Steinberg::kResultOk &&
+      if (component->getBusInfo(Steinberg::Vst::kAudio, Steinberg::Vst::kOutput,
+                                0, output_info) == Steinberg::kResultOk &&
           output_info.channelCount > 0) {
-        main_audio_output_channel_count = static_cast<int>(output_info.channelCount);
+        main_audio_output_channel_count =
+            static_cast<int>(output_info.channelCount);
       }
       const int buses = std::min(audio_output_bus_count, kMaxBridgeBuses);
       for (int bus = 0; bus < buses; ++bus) {
         Steinberg::Vst::BusInfo bus_info{};
         int channels = 0;
         if (component->getBusInfo(Steinberg::Vst::kAudio,
-                                  Steinberg::Vst::kOutput,
-                                  bus,
+                                  Steinberg::Vst::kOutput, bus,
                                   bus_info) == Steinberg::kResultOk &&
             bus_info.channelCount > 0) {
           channels = static_cast<int>(bus_info.channelCount);
@@ -940,57 +995,64 @@ struct SphereDauxVst3Processor {
               (bus_info.flags & Steinberg::Vst::BusInfo::kDefaultActive) != 0;
         }
         audio_output_bus_channel_counts[bus] = channels;
-        Steinberg::Vst::SpeakerArrangement arrangement = Steinberg::Vst::SpeakerArr::kEmpty;
-        if (processor->getBusArrangement(Steinberg::Vst::kOutput, bus, arrangement) ==
-                Steinberg::kResultOk &&
+        Steinberg::Vst::SpeakerArrangement arrangement =
+            Steinberg::Vst::SpeakerArr::kEmpty;
+        if (processor->getBusArrangement(Steinberg::Vst::kOutput, bus,
+                                         arrangement) == Steinberg::kResultOk &&
             arrangement != Steinberg::Vst::SpeakerArr::kEmpty) {
           audio_output_bus_arrangements[bus] = arrangement;
         } else {
-          audio_output_bus_arrangements[bus] = arrangement_for_channels(channels);
+          audio_output_bus_arrangements[bus] =
+              arrangement_for_channels(channels);
         }
-        bridge_audio_output_channel_count =
-            std::min(kMaxBridgeChannels, bridge_audio_output_channel_count + channels);
+        bridge_audio_output_channel_count = std::min(
+            kMaxBridgeChannels, bridge_audio_output_channel_count + channels);
       }
       if (bridge_audio_output_channel_count <= 0) {
         bridge_audio_output_channel_count = main_audio_output_channel_count;
       }
     }
-    std::fprintf(stderr,
-                 "[SphereVST3] busCount input=%d output=%d mainInputChannels=%d mainOutputChannels=%d bridgeOutputChannels=%d\n",
-                 (int)input_bus_count,
-                 (int)output_bus_count,
-                 main_audio_input_channel_count,
-                 main_audio_output_channel_count,
-                 bridge_audio_output_channel_count);
+    std::fprintf(
+        stderr,
+        "[SphereVST3] busCount input=%d output=%d mainInputChannels=%d "
+        "mainOutputChannels=%d bridgeOutputChannels=%d\n",
+        (int)input_bus_count, (int)output_bus_count,
+        main_audio_input_channel_count, main_audio_output_channel_count,
+        bridge_audio_output_channel_count);
 
     event_input_bus_count =
         component->getBusCount(Steinberg::Vst::kEvent, Steinberg::Vst::kInput);
-    std::fprintf(stderr, "[SphereVST3] eventInputBusCount=%d\n", event_input_bus_count);
+    std::fprintf(stderr, "[SphereVST3] eventInputBusCount=%d\n",
+                 event_input_bus_count);
     if (event_input_bus_count > 0) {
       const auto ev_res = component->activateBus(
           Steinberg::Vst::kEvent, Steinberg::Vst::kInput, 0, true);
       if (ev_res != Steinberg::kResultOk) {
-        std::fprintf(stderr,
-                     "[SphereVST3] activate event input bus FAILED (result=%d)\n",
-                     (int)ev_res);
+        std::fprintf(
+            stderr,
+            "[SphereVST3] activate event input bus FAILED (result=%d)\n",
+            (int)ev_res);
       }
     }
 
     // Set bus arrangements before bus activation. VST3 requires one arrangement
-    // per bus for both directions. Passing a single entry for a multi-bus plugin
-    // can leave the instance unconfigured and silent. Build the full per-bus
-    // list from each bus's actual channel count; if the plugin still rejects it
-    // we fall back to its default arrangement. Processing below provides buffers
-    // for every active bus regardless, so a rejection no longer means silence.
+    // per bus for both directions. Passing a single entry for a multi-bus
+    // plugin can leave the instance unconfigured and silent. Build the full
+    // per-bus list from each bus's actual channel count; if the plugin still
+    // rejects it we fall back to its default arrangement. Processing below
+    // provides buffers for every active bus regardless, so a rejection no
+    // longer means silence.
     const int arr_in_buses = std::min(audio_input_bus_count, kMaxBridgeBuses);
     const int arr_out_buses = std::min(audio_output_bus_count, kMaxBridgeBuses);
-    std::array<Steinberg::Vst::SpeakerArrangement, kMaxBridgeBuses> in_arrangements{};
-    std::array<Steinberg::Vst::SpeakerArrangement, kMaxBridgeBuses> out_arrangements{};
+    std::array<Steinberg::Vst::SpeakerArrangement, kMaxBridgeBuses>
+        in_arrangements{};
+    std::array<Steinberg::Vst::SpeakerArrangement, kMaxBridgeBuses>
+        out_arrangements{};
     for (int bus = 0; bus < arr_in_buses; ++bus) {
       int ch = (bus == 0) ? main_audio_input_channel_count : 2;
       Steinberg::Vst::BusInfo bi{};
-      if (component->getBusInfo(Steinberg::Vst::kAudio, Steinberg::Vst::kInput, bus, bi) ==
-              Steinberg::kResultOk &&
+      if (component->getBusInfo(Steinberg::Vst::kAudio, Steinberg::Vst::kInput,
+                                bus, bi) == Steinberg::kResultOk &&
           bi.channelCount > 0) {
         ch = static_cast<int>(bi.channelCount);
       }
@@ -998,7 +1060,8 @@ struct SphereDauxVst3Processor {
     }
     for (int bus = 0; bus < arr_out_buses; ++bus) {
       int ch = audio_output_bus_channel_counts[bus];
-      if (ch <= 0) ch = (bus == 0) ? main_audio_output_channel_count : 2;
+      if (ch <= 0)
+        ch = (bus == 0) ? main_audio_output_channel_count : 2;
       out_arrangements[bus] = arrangement_for_channels(ch);
       audio_output_bus_arrangements[bus] = out_arrangements[bus];
     }
@@ -1009,26 +1072,24 @@ struct SphereDauxVst3Processor {
     output_arrangement = arr_out_buses > 0 ? out_arrangements[0]
                                            : Steinberg::Vst::SpeakerArr::kEmpty;
     const auto arrangement_res = processor->setBusArrangements(
-        arr_in_buses > 0 ? in_arrangements.data() : nullptr,
-        arr_in_buses,
-        arr_out_buses > 0 ? out_arrangements.data() : nullptr,
-        arr_out_buses);
+        arr_in_buses > 0 ? in_arrangements.data() : nullptr, arr_in_buses,
+        arr_out_buses > 0 ? out_arrangements.data() : nullptr, arr_out_buses);
     if (arrangement_res != Steinberg::kResultOk) {
       std::ostringstream err;
-      err << g_last_error
-          << "; setBusArrangements returned " << (int)arrangement_res
-          << " for " << arr_in_buses << " in / " << arr_out_buses << " out buses"
+      err << g_last_error << "; setBusArrangements returned "
+          << (int)arrangement_res << " for " << arr_in_buses << " in / "
+          << arr_out_buses << " out buses"
           << "; continuing with plugin default arrangement";
       set_last_error(err.str());
       std::fprintf(stderr,
-                   "[SphereVST3] setBusArrangements result=%d failed inBuses=%d outBuses=%d\n",
+                   "[SphereVST3] setBusArrangements result=%d failed "
+                   "inBuses=%d outBuses=%d\n",
                    (int)arrangement_res, arr_in_buses, arr_out_buses);
     } else {
       std::fprintf(stderr,
-                   "[SphereVST3] setBusArrangements result=%d ok inBuses=%d outBuses=%d mainIn=%d mainOut=%d\n",
-                   (int)arrangement_res,
-                   arr_in_buses,
-                   arr_out_buses,
+                   "[SphereVST3] setBusArrangements result=%d ok inBuses=%d "
+                   "outBuses=%d mainIn=%d mainOut=%d\n",
+                   (int)arrangement_res, arr_in_buses, arr_out_buses,
                    main_audio_input_channel_count,
                    main_audio_output_channel_count);
     }
@@ -1039,22 +1100,29 @@ struct SphereDauxVst3Processor {
     // multi-out audio to exist.
     Steinberg::tresult in_res = Steinberg::kResultOk;
     if (audio_input_bus_count > 0) {
-      in_res = component->activateBus(
-          Steinberg::Vst::kAudio, Steinberg::Vst::kInput, 0, true);
+      in_res = component->activateBus(Steinberg::Vst::kAudio,
+                                      Steinberg::Vst::kInput, 0, true);
       if (in_res != Steinberg::kResultOk)
-        std::fprintf(stderr, "[DAUx VST3] activate input bus FAILED (result=%d)\n", (int)in_res);
+        std::fprintf(stderr,
+                     "[DAUx VST3] activate input bus FAILED (result=%d)\n",
+                     (int)in_res);
     } else {
-      std::fprintf(stderr, "[SphereVST3] activate input bus skipped reason=no_audio_inputs\n");
+      std::fprintf(
+          stderr,
+          "[SphereVST3] activate input bus skipped reason=no_audio_inputs\n");
     }
-    Steinberg::tresult out_res = audio_output_bus_count > 0 ? Steinberg::kResultOk
-                                                            : Steinberg::kResultFalse;
-    const int output_buses_to_activate = std::min(audio_output_bus_count, kMaxBridgeBuses);
+    Steinberg::tresult out_res = audio_output_bus_count > 0
+                                     ? Steinberg::kResultOk
+                                     : Steinberg::kResultFalse;
+    const int output_buses_to_activate =
+        std::min(audio_output_bus_count, kMaxBridgeBuses);
     for (int bus = 0; bus < output_buses_to_activate; ++bus) {
       const auto bus_res = component->activateBus(
           Steinberg::Vst::kAudio, Steinberg::Vst::kOutput, bus, true);
       audio_output_bus_activate_results[bus] = bus_res;
       audio_output_bus_active_after[bus] =
-          audio_output_bus_channel_counts[bus] > 0 && bus_res == Steinberg::kResultOk;
+          audio_output_bus_channel_counts[bus] > 0 &&
+          bus_res == Steinberg::kResultOk;
       if (audio_output_bus_active_after[bus]) {
         active_audio_output_bus_count = bus + 1;
       }
@@ -1062,16 +1130,18 @@ struct SphereDauxVst3Processor {
         out_res = bus_res;
         std::fprintf(stderr,
                      "[DAUx VST3] activate output bus %d FAILED (result=%d)\n",
-                     bus,
-                     (int)bus_res);
+                     bus, (int)bus_res);
       }
     }
 
-    std::fprintf(stderr, "[SphereVST3] activateBus inputResult=%d outputResult=%d outputBuses=%d\n",
+    std::fprintf(stderr,
+                 "[SphereVST3] activateBus inputResult=%d outputResult=%d "
+                 "outputBuses=%d\n",
                  (int)in_res, (int)out_res, output_buses_to_activate);
 
     if (active_audio_output_bus_count == 0 && audio_output_bus_count > 0) {
-      active_audio_output_bus_count = std::min(audio_output_bus_count, kMaxBridgeBuses);
+      active_audio_output_bus_count =
+          std::min(audio_output_bus_count, kMaxBridgeBuses);
     }
 
     std::fprintf(stderr,
@@ -1079,22 +1149,25 @@ struct SphereDauxVst3Processor {
                  "plugin_name=%s\n"
                  "num_audio_inputs=%d\n"
                  "num_audio_outputs=%d\n",
-                 plugin_path.c_str(),
-                 audio_input_bus_count,
+                 plugin_path.c_str(), audio_input_bus_count,
                  audio_output_bus_count);
     for (int bus = 0; bus < output_buses_to_activate; ++bus) {
-      std::fprintf(stderr,
-                   "output_bus index=%d name=\"%s\" media_type=audio bus_type=%s "
-                   "channel_count=%d speaker_arrangement=0x%llx active_before=%d "
-                   "activate_result=%d active_after=%d routed_to_track_or_downmix=downmix:fallback\n",
-                   bus,
-                   audio_output_bus_names[bus].empty() ? "(unnamed)" : audio_output_bus_names[bus].c_str(),
-                   vst3_bus_type_name(audio_output_bus_types[bus]),
-                   audio_output_bus_channel_counts[bus],
-                   static_cast<unsigned long long>(audio_output_bus_arrangements[bus]),
-                   audio_output_bus_active_before[bus] ? 1 : 0,
-                   static_cast<int>(audio_output_bus_activate_results[bus]),
-                   audio_output_bus_active_after[bus] ? 1 : 0);
+      std::fprintf(
+          stderr,
+          "output_bus index=%d name=\"%s\" media_type=audio bus_type=%s "
+          "channel_count=%d speaker_arrangement=0x%llx active_before=%d "
+          "activate_result=%d active_after=%d "
+          "routed_to_track_or_downmix=downmix:fallback\n",
+          bus,
+          audio_output_bus_names[bus].empty()
+              ? "(unnamed)"
+              : audio_output_bus_names[bus].c_str(),
+          vst3_bus_type_name(audio_output_bus_types[bus]),
+          audio_output_bus_channel_counts[bus],
+          static_cast<unsigned long long>(audio_output_bus_arrangements[bus]),
+          audio_output_bus_active_before[bus] ? 1 : 0,
+          static_cast<int>(audio_output_bus_activate_results[bus]),
+          audio_output_bus_active_after[bus] ? 1 : 0);
     }
 
     process_data.numInputs = audio_input_bus_count > 0 ? 1 : 0;
@@ -1104,49 +1177,59 @@ struct SphereDauxVst3Processor {
 
     // setupProcessing
     Steinberg::Vst::ProcessSetup ps{};
-    ps.processMode        = Steinberg::Vst::kRealtime;
+    ps.processMode = Steinberg::Vst::kRealtime;
     ps.symbolicSampleSize = Steinberg::Vst::kSample32;
     ps.maxSamplesPerBlock = 8192;
-    ps.sampleRate         = sr;
+    ps.sampleRate = sr;
     const auto setup_res = processor->setupProcessing(ps);
     if (setup_res != Steinberg::kResultOk) {
       std::ostringstream err;
       err << g_last_error << "; setupProcessing returned " << (int)setup_res
           << " sr=" << sr << " maxBlock=8192 realtime sample32";
       set_last_error(err.str());
-      std::fprintf(stderr, "[DAUx VST3] setupProcessing FAILED (result=%d)\n", (int)setup_res);
+      std::fprintf(stderr, "[DAUx VST3] setupProcessing FAILED (result=%d)\n",
+                   (int)setup_res);
       return false;
     }
-    std::fprintf(stderr, "[SphereVST3] setupProcessing sr=%.0f block=8192 result=%d ok realtime sample32\n",
+    std::fprintf(stderr,
+                 "[SphereVST3] setupProcessing sr=%.0f block=8192 result=%d ok "
+                 "realtime sample32\n",
                  sr, (int)setup_res);
 
     // setActive(true) — accept kResultOk and kNotImplemented (some plugins
     // simply don't need explicit activation; treating not-implemented as fatal
     // would block legitimate plugins).
     const auto active_res = component->setActive(true);
-    if (active_res != Steinberg::kResultOk && active_res != Steinberg::kNotImplemented) {
+    if (active_res != Steinberg::kResultOk &&
+        active_res != Steinberg::kNotImplemented) {
       std::ostringstream err;
       err << g_last_error << "; setActive(true) returned " << (int)active_res;
       set_last_error(err.str());
-      std::fprintf(stderr, "[DAUx VST3] setActive(true) FAILED (result=%d)\n", (int)active_res);
+      std::fprintf(stderr, "[DAUx VST3] setActive(true) FAILED (result=%d)\n",
+                   (int)active_res);
       return false;
     }
-    std::fprintf(stderr, "[SphereVST3] setActive result=%d ok\n", (int)active_res);
+    std::fprintf(stderr, "[SphereVST3] setActive result=%d ok\n",
+                 (int)active_res);
 
     // setProcessing(true) — accept kResultOk and kNotImplemented.
     // Per VST3 spec, setProcessing is an optional notification; plugins like
     // iZotope Ozone return kNotImplemented (0x80004001) and that's legitimate.
     const auto proc_res = processor->setProcessing(true);
-    if (proc_res != Steinberg::kResultOk && proc_res != Steinberg::kNotImplemented) {
+    if (proc_res != Steinberg::kResultOk &&
+        proc_res != Steinberg::kNotImplemented) {
       std::ostringstream err;
       err << g_last_error << "; setProcessing(true) returned " << (int)proc_res;
       set_last_error(err.str());
-      std::fprintf(stderr, "[DAUx VST3] setProcessing(true) FAILED (result=%d)\n", (int)proc_res);
+      std::fprintf(stderr,
+                   "[DAUx VST3] setProcessing(true) FAILED (result=%d)\n",
+                   (int)proc_res);
       return false;
     }
     processing = true;
-    std::fprintf(stderr, "[SphereVST3] setProcessing result=%d ok (notImplemented=%d)\n",
-                 (int)proc_res, proc_res == Steinberg::kNotImplemented ? 1 : 0);
+    std::fprintf(
+        stderr, "[SphereVST3] setProcessing result=%d ok (notImplemented=%d)\n",
+        (int)proc_res, proc_res == Steinberg::kNotImplemented ? 1 : 0);
 
     // Register IComponentHandler so plugin GUI edits are captured
     if (controller) {
@@ -1155,13 +1238,16 @@ struct SphereDauxVst3Processor {
       if (ch_res == Steinberg::kResultOk)
         std::fprintf(stderr, "[DAUx VST3] IComponentHandler registered\n");
       else
-        std::fprintf(stderr,
-                     "[DAUx VST3] setComponentHandler not accepted (result=%d) — "
-                     "GUI edits may not reach processor\n", (int)ch_res);
+        std::fprintf(
+            stderr,
+            "[DAUx VST3] setComponentHandler not accepted (result=%d) — "
+            "GUI edits may not reach processor\n",
+            (int)ch_res);
 
       // MIDI controller → parameter mapping (optional). Used to route CC /
       // pitch-bend / aftertouch input to parameter changes during process().
-      midi_mapping = Steinberg::FUnknownPtr<Steinberg::Vst::IMidiMapping>(controller);
+      midi_mapping =
+          Steinberg::FUnknownPtr<Steinberg::Vst::IMidiMapping>(controller);
       std::fprintf(stderr, "[DAUx VST3] IMidiMapping %s\n",
                    midi_mapping ? "available" : "not exposed");
     }
@@ -1177,7 +1263,8 @@ struct SphereDauxVst3Processor {
 #elif defined(__linux__)
     shutdown_editor_linux(this);
 #endif
-    if (processor && processing) processor->setProcessing(false);
+    if (processor && processing)
+      processor->setProcessing(false);
     processing = false;
     if (component_connection && controller_connection) {
       component_connection->disconnect(controller_connection);
@@ -1196,11 +1283,12 @@ struct SphereDauxVst3Processor {
     }
   }
 
-  // ── Thread-safe parameter enqueue (called from audio thread OR GUI thread) ──
+  // ── Thread-safe parameter enqueue (called from audio thread OR GUI thread)
+  // ──
 
   /// Drain pending parameters, route MIDI CC to parameter changes, and fill
   /// inputEvents with note on/off for this block.
-  void prepare_process_io(const SphereDauxVst3MidiEvent* midi_events,
+  void prepare_process_io(const SphereDauxVst3MidiEvent *midi_events,
                           int midi_event_count) {
     // Parameter changes come from two sources this block: GUI/host edits queued
     // in `pending_buf`, and CC events mapped via IMidiMapping below.
@@ -1209,7 +1297,7 @@ struct SphereDauxVst3Processor {
       std::lock_guard<std::mutex> lock(pending_mutex);
       for (int i = 0; i < pending_count; ++i) {
         Steinberg::int32 idx = 0;
-        auto* q = param_changes_obj.addParameterData(pending_buf[i].id, idx);
+        auto *q = param_changes_obj.addParameterData(pending_buf[i].id, idx);
         if (q) {
           Steinberg::int32 dummy = 0;
           q->addPoint(0, pending_buf[i].value, dummy);
@@ -1223,7 +1311,7 @@ struct SphereDauxVst3Processor {
     if (midi_events && midi_event_count > 0) {
       const int n = std::min(midi_event_count, SimpleEventList::kMaxEvents);
       for (int i = 0; i < n; ++i) {
-        const auto& m = midi_events[i];
+        const auto &m = midi_events[i];
         const auto ch = static_cast<Steinberg::int16>(m.channel & 0x0F);
         const auto offset = static_cast<Steinberg::int32>(m.sample_offset);
         if (m.kind == 2) {
@@ -1239,7 +1327,7 @@ struct SphereDauxVst3Processor {
           if (midi_mapping->getMidiControllerAssignment(0, ch, ctrl, pid) ==
               Steinberg::kResultOk) {
             Steinberg::int32 idx = 0;
-            auto* q = param_changes_obj.addParameterData(pid, idx);
+            auto *q = param_changes_obj.addParameterData(pid, idx);
             if (q) {
               Steinberg::int32 dummy = 0;
               q->addPoint(offset,
@@ -1265,22 +1353,20 @@ struct SphereDauxVst3Processor {
       if (daux_vst3_midi_debug()) {
         std::fprintf(stderr,
                      "[vst3-midi] input_events=%d event_bus=%d active=%s\n",
-                     input_events_obj.count,
-                     event_input_bus_count,
+                     input_events_obj.count, event_input_bus_count,
                      event_input_bus_count > 0 ? "true" : "false");
         for (int i = 0; i < input_events_obj.count; ++i) {
-          const auto& e = input_events_obj.events[i];
+          const auto &e = input_events_obj.events[i];
           if (e.type == Steinberg::Vst::Event::kNoteOnEvent) {
             std::fprintf(stderr,
-                         "[vst3-midi] add note_on pitch=%d velocity=%.2f sampleOffset=%d\n",
-                         (int)e.noteOn.pitch,
-                         e.noteOn.velocity,
+                         "[vst3-midi] add note_on pitch=%d velocity=%.2f "
+                         "sampleOffset=%d\n",
+                         (int)e.noteOn.pitch, e.noteOn.velocity,
                          (int)e.sampleOffset);
           } else if (e.type == Steinberg::Vst::Event::kNoteOffEvent) {
             std::fprintf(stderr,
                          "[vst3-midi] add note_off pitch=%d sampleOffset=%d\n",
-                         (int)e.noteOff.pitch,
-                         (int)e.sampleOffset);
+                         (int)e.noteOff.pitch, (int)e.sampleOffset);
           }
         }
       }
@@ -1294,7 +1380,8 @@ struct SphereDauxVst3Processor {
 
   /// Add or update a parameter change in the pending queue.
   /// Deduplicates by paramId — later value wins within one block.
-  void enqueue_param(Steinberg::Vst::ParamID id, Steinberg::Vst::ParamValue value) {
+  void enqueue_param(Steinberg::Vst::ParamID id,
+                     Steinberg::Vst::ParamValue value) {
     std::lock_guard<std::mutex> lock(pending_mutex);
     for (int i = 0; i < pending_count; ++i) {
       if (pending_buf[i].id == id) {
@@ -1308,28 +1395,31 @@ struct SphereDauxVst3Processor {
 
 #ifdef _WIN32
   void close_editor_window();
-  void close_editor_view_only(const char* reason);
+  void close_editor_view_only(const char *reason);
   // Detach the embedded IPlugView and destroy the host window, keeping the
   // component/controller (and thus the realtime processor) alive.
-  void close_embed_editor(const char* reason);
+  void close_embed_editor(const char *reason);
 #endif
 };
 
 #if defined(_WIN32)
 bool daux_vst3_editor_debug() {
-  static const bool enabled = std::getenv("FUTUREBOARD_VST3_EDITOR_DEBUG") != nullptr;
+  static const bool enabled =
+      std::getenv("FUTUREBOARD_VST3_EDITOR_DEBUG") != nullptr;
   return enabled;
 }
 
-inline bool daux_view_rect_equal(const Steinberg::ViewRect& a, const Steinberg::ViewRect& b) {
-  return a.left == b.left && a.top == b.top && a.right == b.right && a.bottom == b.bottom;
+inline bool daux_view_rect_equal(const Steinberg::ViewRect &a,
+                                 const Steinberg::ViewRect &b) {
+  return a.left == b.left && a.top == b.top && a.right == b.right &&
+         a.bottom == b.bottom;
 }
 
-inline int daux_view_rect_width(const Steinberg::ViewRect& r) {
+inline int daux_view_rect_width(const Steinberg::ViewRect &r) {
   return static_cast<int>(r.right - r.left);
 }
 
-inline int daux_view_rect_height(const Steinberg::ViewRect& r) {
+inline int daux_view_rect_height(const Steinberg::ViewRect &r) {
   return static_cast<int>(r.bottom - r.top);
 }
 
@@ -1342,45 +1432,50 @@ inline Steinberg::ViewRect daux_local_view_rect(int width, int height) {
   };
 }
 
-bool daux_embed_apply_content_size(SphereDauxVst3Processor* p,
-                                   int content_w,
-                                   int content_h,
-                                   const char* reason);
+bool daux_embed_apply_content_size(SphereDauxVst3Processor *p, int content_w,
+                                   int content_h, const char *reason);
 
-bool daux_adjust_window_rect_for_dpi(HWND hwnd, RECT* rect, DWORD style, DWORD ex_style) {
-  if (!hwnd || !rect) return false;
+bool daux_adjust_window_rect_for_dpi(HWND hwnd, RECT *rect, DWORD style,
+                                     DWORD ex_style) {
+  if (!hwnd || !rect)
+    return false;
   UINT dpi = GetDpiForWindow(hwnd);
-  if (dpi == 0) dpi = 96;
+  if (dpi == 0)
+    dpi = 96;
   return AdjustWindowRectExForDpi(rect, style, FALSE, ex_style, dpi) != 0;
 }
 
 UINT daux_hwnd_dpi(HWND hwnd) {
-  if (!hwnd || !IsWindow(hwnd)) return 96;
+  if (!hwnd || !IsWindow(hwnd))
+    return 96;
   const UINT dpi = GetDpiForWindow(hwnd);
   return dpi > 0 ? dpi : 96;
 }
 
-void daux_log_editor_dpi(HWND ref_hwnd, const char* label) {
+void daux_log_editor_dpi(HWND ref_hwnd, const char *label) {
   const UINT dpi = daux_hwnd_dpi(ref_hwnd);
   const double scale = static_cast<double>(dpi) / 96.0;
-  std::fprintf(stderr, "[PluginEditor] %s dpi=%u\n", label ? label : "dpi", dpi);
-  std::fprintf(stderr, "[PluginEditor] %s scale=%.3f\n", label ? label : "scale", scale);
+  std::fprintf(stderr, "[PluginEditor] %s dpi=%u\n", label ? label : "dpi",
+               dpi);
+  std::fprintf(stderr, "[PluginEditor] %s scale=%.3f\n",
+               label ? label : "scale", scale);
 }
 
 void daux_ensure_thread_dpi_awareness() {
   static std::once_flag once;
   std::call_once(once, [] {
-    using SetThreadDpiAwarenessContextFn = DPI_AWARENESS_CONTEXT(WINAPI*)(DPI_AWARENESS_CONTEXT);
-    using GetThreadDpiAwarenessContextFn = DPI_AWARENESS_CONTEXT(WINAPI*)();
+    using SetThreadDpiAwarenessContextFn =
+        DPI_AWARENESS_CONTEXT(WINAPI *)(DPI_AWARENESS_CONTEXT);
+    using GetThreadDpiAwarenessContextFn = DPI_AWARENESS_CONTEXT(WINAPI *)();
     HMODULE user32 = GetModuleHandleW(L"user32.dll");
-    auto* set_ctx = user32
-                        ? reinterpret_cast<SetThreadDpiAwarenessContextFn>(
-                              GetProcAddress(user32, "SetThreadDpiAwarenessContext"))
-                        : nullptr;
-    auto* get_ctx = user32
-                        ? reinterpret_cast<GetThreadDpiAwarenessContextFn>(
-                              GetProcAddress(user32, "GetThreadDpiAwarenessContext"))
-                        : nullptr;
+    auto *set_ctx =
+        user32 ? reinterpret_cast<SetThreadDpiAwarenessContextFn>(
+                     GetProcAddress(user32, "SetThreadDpiAwarenessContext"))
+               : nullptr;
+    auto *get_ctx =
+        user32 ? reinterpret_cast<GetThreadDpiAwarenessContextFn>(
+                     GetProcAddress(user32, "GetThreadDpiAwarenessContext"))
+               : nullptr;
     if (set_ctx) {
       set_ctx(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     } else {
@@ -1389,8 +1484,7 @@ void daux_ensure_thread_dpi_awareness() {
     if (get_ctx) {
       std::fprintf(stderr,
                    "[PluginEditor] dpi_awareness_context=0x%p tid=%lu\n",
-                   static_cast<void*>(get_ctx()),
-                   GetCurrentThreadId());
+                   static_cast<void *>(get_ctx()), GetCurrentThreadId());
     } else {
       std::fprintf(stderr,
                    "[PluginEditor] dpi_awareness_context=legacy tid=%lu\n",
@@ -1399,15 +1493,12 @@ void daux_ensure_thread_dpi_awareness() {
   });
 }
 
-bool daux_verify_child_client_rect(HWND child,
-                                   int expected_w,
-                                   int expected_h,
-                                   const char* phase) {
+bool daux_verify_child_client_rect(HWND child, int expected_w, int expected_h,
+                                   const char *phase) {
   if (!child || !IsWindow(child)) {
     std::fprintf(stderr,
                  "[PluginEditor] ERROR %s child_hwnd invalid hwnd=0x%p\n",
-                 phase ? phase : "verify",
-                 static_cast<void*>(child));
+                 phase ? phase : "verify", static_cast<void *>(child));
     return false;
   }
   RECT cr{};
@@ -1417,117 +1508,111 @@ bool daux_verify_child_client_rect(HWND child,
   if (cw <= 0 || ch <= 0 || cw != expected_w || ch != expected_h) {
     std::fprintf(stderr,
                  "[PluginEditor] ERROR %s child client=%dx%d expected=%dx%d\n",
-                 phase ? phase : "verify",
-                 cw,
-                 ch,
-                 expected_w,
-                 expected_h);
+                 phase ? phase : "verify", cw, ch, expected_w, expected_h);
     return false;
   }
-  std::fprintf(stderr,
-               "[PluginEditor] %s final child client=%dx%d\n",
-               phase ? phase : "verify",
-               cw,
-               ch);
+  std::fprintf(stderr, "[PluginEditor] %s final child client=%dx%d\n",
+               phase ? phase : "verify", cw, ch);
   return true;
 }
 
 bool daux_resize_child_client(HWND child, int content_w, int content_h) {
-  if (!child || !IsWindow(child) || content_w <= 0 || content_h <= 0) return false;
-  SetWindowPos(child,
-               nullptr,
-               0,
-               0,
-               content_w,
-               content_h,
+  if (!child || !IsWindow(child) || content_w <= 0 || content_h <= 0)
+    return false;
+  SetWindowPos(child, nullptr, 0, 0, content_w, content_h,
                SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_SHOWWINDOW);
-  return daux_verify_child_client_rect(child, content_w, content_h, "resize_child");
+  return daux_verify_child_client_rect(child, content_w, content_h,
+                                       "resize_child");
 }
 
-bool daux_editor_set_content_scale(SphereDauxVst3Processor* processor,
-                                   HWND dpi_ref,
-                                   const char* reason) {
-  if (!processor || !processor->editor_view) return false;
+bool daux_editor_set_content_scale(SphereDauxVst3Processor *processor,
+                                   HWND dpi_ref, const char *reason) {
+  if (!processor || !processor->editor_view)
+    return false;
   const UINT dpi = daux_hwnd_dpi(dpi_ref);
   const float scale = static_cast<float>(dpi) / 96.0f;
-  Steinberg::IPlugViewContentScaleSupport* scale_support = nullptr;
+  Steinberg::IPlugViewContentScaleSupport *scale_support = nullptr;
   const auto query_result = processor->editor_view->queryInterface(
       Steinberg::IPlugViewContentScaleSupport::iid,
-      reinterpret_cast<void**>(&scale_support));
-  if ((query_result != Steinberg::kResultTrue && query_result != Steinberg::kResultOk) ||
+      reinterpret_cast<void **>(&scale_support));
+  if ((query_result != Steinberg::kResultTrue &&
+       query_result != Steinberg::kResultOk) ||
       !scale_support) {
     if (daux_vst3_editor_debug()) {
       std::fprintf(stderr,
-                   "[vst3-editor] content_scale unsupported dpi=%u scale=%.3f reason=%s\n",
-                   dpi,
-                   scale,
-                   reason ? reason : "unknown");
+                   "[vst3-editor] content_scale unsupported dpi=%u scale=%.3f "
+                   "reason=%s\n",
+                   dpi, scale, reason ? reason : "unknown");
     }
     return false;
   }
   const auto scale_result = scale_support->setContentScaleFactor(scale);
   scale_support->release();
   if (daux_vst3_editor_debug()) {
-    std::fprintf(stderr,
-                 "[vst3-editor] content_scale result=0x%x dpi=%u scale=%.3f reason=%s\n",
-                 static_cast<unsigned>(scale_result),
-                 dpi,
-                 scale,
-                 reason ? reason : "unknown");
+    std::fprintf(
+        stderr,
+        "[vst3-editor] content_scale result=0x%x dpi=%u scale=%.3f reason=%s\n",
+        static_cast<unsigned>(scale_result), dpi, scale,
+        reason ? reason : "unknown");
   }
-  return scale_result == Steinberg::kResultTrue || scale_result == Steinberg::kResultOk;
+  return scale_result == Steinberg::kResultTrue ||
+         scale_result == Steinberg::kResultOk;
 }
 
 // IPlugFrame for VST3 editor hosting. Mirrors the SDK editorhost sample:
 // plugView->setFrame(this) BEFORE plugView->attached(...). WebView2/CEF editors
 // (UAD Native et al.) require a valid frame to bootstrap and call resizeView().
 class PluginEditorFrame final : public Steinberg::IPlugFrame {
- public:
-  explicit PluginEditorFrame(SphereDauxVst3Processor* owner) : owner_(owner) {}
+public:
+  explicit PluginEditorFrame(SphereDauxVst3Processor *owner) : owner_(owner) {}
 
-  Steinberg::tresult PLUGIN_API resizeView(Steinberg::IPlugView* view,
-                                           Steinberg::ViewRect* newSize) override {
+  Steinberg::tresult PLUGIN_API resizeView(
+      Steinberg::IPlugView *view, Steinberg::ViewRect *newSize) override {
     const bool debug = daux_vst3_editor_debug();
     if (debug) {
-      std::fprintf(stderr, "[vst3-editor] resizeView called view=0x%p\n", static_cast<void*>(view));
+      std::fprintf(stderr, "[vst3-editor] resizeView called view=0x%p\n",
+                   static_cast<void *>(view));
     }
     if (newSize == nullptr || view == nullptr || !owner_) {
-      if (debug) std::fprintf(stderr, "[vst3-editor] resizeView rejected (invalid args)\n");
+      if (debug)
+        std::fprintf(stderr,
+                     "[vst3-editor] resizeView rejected (invalid args)\n");
       return Steinberg::kInvalidArgument;
     }
     if (view != owner_->editor_view.get()) {
-      if (debug) std::fprintf(stderr, "[vst3-editor] resizeView rejected (view mismatch)\n");
+      if (debug)
+        std::fprintf(stderr,
+                     "[vst3-editor] resizeView rejected (view mismatch)\n");
       return Steinberg::kInvalidArgument;
     }
     if (resize_recursion_guard_) {
-      if (debug) std::fprintf(stderr, "[vst3-editor] resizeView rejected (recursion guard)\n");
+      if (debug)
+        std::fprintf(stderr,
+                     "[vst3-editor] resizeView rejected (recursion guard)\n");
       return Steinberg::kResultFalse;
     }
 
     Steinberg::ViewRect current{};
     if (view->getSize(&current) != Steinberg::kResultTrue) {
-      if (debug) std::fprintf(stderr, "[vst3-editor] resizeView rejected (getSize failed)\n");
+      if (debug)
+        std::fprintf(stderr,
+                     "[vst3-editor] resizeView rejected (getSize failed)\n");
       return Steinberg::kInternalError;
     }
     if (daux_view_rect_equal(current, *newSize)) {
       const int w = daux_view_rect_width(*newSize);
       const int h = daux_view_rect_height(*newSize);
-      const bool applied = (w > 0 && h > 0)
-                               ? daux_embed_apply_content_size(owner_, w, h, "resizeView.no-op")
-                               : false;
+      const bool applied =
+          (w > 0 && h > 0)
+              ? daux_embed_apply_content_size(owner_, w, h, "resizeView.no-op")
+              : false;
       if (debug) {
+        std::fprintf(
+            stderr,
+            "[vst3-frame] resizeView requested=(%d,%d,%d,%d) content=%dx%d\n",
+            newSize->left, newSize->top, newSize->right, newSize->bottom, w, h);
         std::fprintf(stderr,
-                     "[vst3-frame] resizeView requested=(%d,%d,%d,%d) content=%dx%d\n",
-                     newSize->left,
-                     newSize->top,
-                     newSize->right,
-                     newSize->bottom,
-                     w,
-                     h);
-        std::fprintf(stderr,
-                     "[vst3-frame] resizeView applied=%dx%d changed=%d\n",
-                     w,
-                     h,
+                     "[vst3-frame] resizeView applied=%dx%d changed=%d\n", w, h,
                      applied ? 1 : 0);
         std::fprintf(stderr, "[vst3-editor] resizeView accepted (no-op)\n");
       }
@@ -1537,14 +1622,10 @@ class PluginEditorFrame final : public Steinberg::IPlugFrame {
     const int w = daux_view_rect_width(*newSize);
     const int h = daux_view_rect_height(*newSize);
     if (debug) {
-      std::fprintf(stderr,
-                   "[vst3-frame] resizeView requested=(%d,%d,%d,%d) content=%dx%d\n",
-                   newSize->left,
-                   newSize->top,
-                   newSize->right,
-                   newSize->bottom,
-                   w,
-                   h);
+      std::fprintf(
+          stderr,
+          "[vst3-frame] resizeView requested=(%d,%d,%d,%d) content=%dx%d\n",
+          newSize->left, newSize->top, newSize->right, newSize->bottom, w, h);
     }
 
     resize_recursion_guard_ = true;
@@ -1556,7 +1637,9 @@ class PluginEditorFrame final : public Steinberg::IPlugFrame {
 
     Steinberg::ViewRect after{};
     if (view->getSize(&after) != Steinberg::kResultTrue) {
-      if (debug) std::fprintf(stderr, "[vst3-editor] resizeView rejected (getSize after resize failed)\n");
+      if (debug)
+        std::fprintf(stderr, "[vst3-editor] resizeView rejected (getSize after "
+                             "resize failed)\n");
       return Steinberg::kInternalError;
     }
     if (!daux_view_rect_equal(after, *newSize)) {
@@ -1565,29 +1648,23 @@ class PluginEditorFrame final : public Steinberg::IPlugFrame {
       if (debug) {
         std::fprintf(stderr,
                      "[vst3-editor] onSize result=0x%x rect=(%d,%d,%d,%d)\n",
-                     static_cast<unsigned>(on_size_res),
-                     local.left,
-                     local.top,
-                     local.right,
-                     local.bottom);
+                     static_cast<unsigned>(on_size_res), local.left, local.top,
+                     local.right, local.bottom);
       }
     }
     if (debug) {
-      std::fprintf(stderr,
-                   "[vst3-frame] resizeView applied=%dx%d changed=%d\n",
-                   w,
-                   h,
-                   applied ? 1 : 0);
-      std::fprintf(stderr,
-                   "[vst3-editor] resizeView accepted\n");
+      std::fprintf(stderr, "[vst3-frame] resizeView applied=%dx%d changed=%d\n",
+                   w, h, applied ? 1 : 0);
+      std::fprintf(stderr, "[vst3-editor] resizeView accepted\n");
     }
     return Steinberg::kResultOk;
   }
 
-  Steinberg::tresult PLUGIN_API queryInterface(const Steinberg::TUID iid, void** obj) override {
+  Steinberg::tresult PLUGIN_API queryInterface(const Steinberg::TUID iid,
+                                               void **obj) override {
     if (Steinberg::FUnknownPrivate::iidEqual(iid, Steinberg::IPlugFrame::iid) ||
         Steinberg::FUnknownPrivate::iidEqual(iid, Steinberg::FUnknown::iid)) {
-      *obj = static_cast<Steinberg::IPlugFrame*>(this);
+      *obj = static_cast<Steinberg::IPlugFrame *>(this);
       addRef();
       return Steinberg::kResultTrue;
     }
@@ -1598,47 +1675,50 @@ class PluginEditorFrame final : public Steinberg::IPlugFrame {
   Steinberg::uint32 PLUGIN_API addRef() override { return 1000; }
   Steinberg::uint32 PLUGIN_API release() override { return 1000; }
 
- private:
-  SphereDauxVst3Processor* owner_;
+private:
+  SphereDauxVst3Processor *owner_;
   bool resize_recursion_guard_{false};
 };
 
 // Create (if needed) and install the IPlugFrame on the view before attached().
-void daux_editor_install_frame(SphereDauxVst3Processor* processor) {
-  if (!processor || !processor->editor_view) return;
+void daux_editor_install_frame(SphereDauxVst3Processor *processor) {
+  if (!processor || !processor->editor_view)
+    return;
   if (!processor->editor_frame) {
     processor->editor_frame = new PluginEditorFrame(processor);
   }
   if (daux_vst3_editor_debug()) {
-    std::fprintf(stderr,
-                 "[vst3-editor] setFrame called view=0x%p frame=0x%p\n",
-                 static_cast<void*>(processor->editor_view.get()),
-                 static_cast<void*>(processor->editor_frame));
+    std::fprintf(stderr, "[vst3-editor] setFrame called view=0x%p frame=0x%p\n",
+                 static_cast<void *>(processor->editor_view.get()),
+                 static_cast<void *>(processor->editor_frame));
   }
   const auto res = processor->editor_view->setFrame(processor->editor_frame);
-  std::fprintf(stderr, "[vst3-editor] setFrame result=0x%x\n", static_cast<unsigned>(res));
+  std::fprintf(stderr, "[vst3-editor] setFrame result=0x%x\n",
+               static_cast<unsigned>(res));
 }
 
-void daux_editor_clear_frame(SphereDauxVst3Processor* processor) {
-  if (!processor) return;
+void daux_editor_clear_frame(SphereDauxVst3Processor *processor) {
+  if (!processor)
+    return;
   if (processor->editor_view) {
     if (daux_vst3_editor_debug()) {
       std::fprintf(stderr, "[vst3-editor] setFrame null view=0x%p\n",
-                   static_cast<void*>(processor->editor_view.get()));
+                   static_cast<void *>(processor->editor_view.get()));
     }
     processor->editor_view->setFrame(nullptr);
   }
   delete processor->editor_frame;
   processor->editor_frame = nullptr;
 }
-#endif  // _WIN32
+#endif // _WIN32
 
-// ── Bridge implementations for platform editor TUs ────────────────────────────
-// These give editor_mac.mm and editor_linux.cpp access to the TU-private
-// globals (g_last_error, g_next_editor_handle) and the IPlugView members
-// of SphereDauxVst3Processor without exposing the full struct definition.
+// ── Bridge implementations for platform editor TUs
+// ──────────────────────────── These give editor_mac.mm and editor_linux.cpp
+// access to the TU-private globals (g_last_error, g_next_editor_handle) and the
+// IPlugView members of SphereDauxVst3Processor without exposing the full struct
+// definition.
 
-extern "C" void sphere_daux_editor_set_error(const char* msg) {
+extern "C" void sphere_daux_editor_set_error(const char *msg) {
   set_last_error(msg ? msg : "");
 }
 
@@ -1648,17 +1728,15 @@ extern "C" unsigned long long sphere_daux_editor_next_handle(void) {
 
 #if defined(__APPLE__) || defined(__linux__)
 
-extern "C" int sphere_daux_editor_create_view(
-    SphereDauxVst3Processor* proc,
-    const char*              platform_type,
-    int*                     out_width,
-    int*                     out_height) {
-  if (!proc || !proc->controller) return 0;
+extern "C" int sphere_daux_editor_create_view(SphereDauxVst3Processor *proc,
+                                              const char *platform_type,
+                                              int *out_width, int *out_height) {
+  if (!proc || !proc->controller)
+    return 0;
   proc->editor_view = Steinberg::IPtr<Steinberg::IPlugView>::adopt(
       proc->controller->createView(Steinberg::Vst::ViewType::kEditor));
   if (!proc->editor_view) {
-    std::fprintf(stderr,
-                 "[SphereVST3] createView FAILED for platform='%s'\n",
+    std::fprintf(stderr, "[SphereVST3] createView FAILED for platform='%s'\n",
                  platform_type);
     return 0;
   }
@@ -1674,23 +1752,24 @@ extern "C" int sphere_daux_editor_create_view(
   if (proc->editor_view->getSize(&rect) == Steinberg::kResultTrue) {
     const int w = rect.right - rect.left;
     const int h = rect.bottom - rect.top;
-    if (w > 0 && out_width)  *out_width  = w;
-    if (h > 0 && out_height) *out_height = h;
+    if (w > 0 && out_width)
+      *out_width = w;
+    if (h > 0 && out_height)
+      *out_height = h;
   }
   return 1;
 }
 
-extern "C" int sphere_daux_editor_attach_view(
-    SphereDauxVst3Processor* proc,
-    void*                    native_handle,
-    const char*              platform_type) {
-  if (!proc || !proc->editor_view) return 0;
+extern "C" int sphere_daux_editor_attach_view(SphereDauxVst3Processor *proc,
+                                              void *native_handle,
+                                              const char *platform_type) {
+  if (!proc || !proc->editor_view)
+    return 0;
   const auto res = proc->editor_view->attached(native_handle, platform_type);
-  std::fprintf(stderr,
-               "[SphereVST3] IPlugView::attached('%s') result=%d\n",
+  std::fprintf(stderr, "[SphereVST3] IPlugView::attached('%s') result=%d\n",
                platform_type, (int)res);
   if (res != Steinberg::kResultTrue && res != Steinberg::kResultOk) {
-    proc->editor_view    = nullptr;
+    proc->editor_view = nullptr;
     proc->editor_attached = false;
     return 0;
   }
@@ -1698,112 +1777,124 @@ extern "C" int sphere_daux_editor_attach_view(
   return 1;
 }
 
-extern "C" void sphere_daux_editor_notify_resize(
-    SphereDauxVst3Processor* proc, int width, int height) {
-  if (!proc || !proc->editor_view) return;
-  Steinberg::ViewRect rect{0, 0,
-      static_cast<Steinberg::int32>(width),
-      static_cast<Steinberg::int32>(height)};
+extern "C" void sphere_daux_editor_notify_resize(SphereDauxVst3Processor *proc,
+                                                 int width, int height) {
+  if (!proc || !proc->editor_view)
+    return;
+  Steinberg::ViewRect rect{0, 0, static_cast<Steinberg::int32>(width),
+                           static_cast<Steinberg::int32>(height)};
   proc->editor_view->onSize(&rect);
 }
 
-extern "C" void sphere_daux_editor_detach_view(SphereDauxVst3Processor* proc) {
-  if (!proc) return;
+extern "C" void sphere_daux_editor_detach_view(SphereDauxVst3Processor *proc) {
+  if (!proc)
+    return;
   if (proc->editor_view && proc->editor_attached) {
     const auto res = proc->editor_view->removed();
     std::fprintf(stderr,
                  "[SphereVST3] IPlugView::removed() result=%d handle=%llu\n",
                  (int)res, proc->editor_handle);
   }
-  proc->editor_view     = nullptr;
+  proc->editor_view = nullptr;
   proc->editor_attached = false;
 }
 
 extern "C" void sphere_daux_editor_store_native(
-    SphereDauxVst3Processor* proc,
-    void*                    native_window,
-    void*                    native_embed,
-    void*                    native_delegate,
-    unsigned long long       handle,
-    const char*              window_id,
-    const char*              title,
-    int                      requested_width,
-    int                      requested_height) {
-  if (!proc) return;
-  proc->editor_native_window    = native_window;
-  proc->editor_native_embed     = native_embed;
-  proc->editor_native_delegate  = native_delegate;
-  proc->editor_handle           = handle;
-  proc->editor_window_id        = window_id ? window_id : "";
-  proc->editor_title            = title     ? title     : "";
-  proc->editor_requested_width  = requested_width;
+    SphereDauxVst3Processor *proc, void *native_window, void *native_embed,
+    void *native_delegate, unsigned long long handle, const char *window_id,
+    const char *title, int requested_width, int requested_height) {
+  if (!proc)
+    return;
+  proc->editor_native_window = native_window;
+  proc->editor_native_embed = native_embed;
+  proc->editor_native_delegate = native_delegate;
+  proc->editor_handle = handle;
+  proc->editor_window_id = window_id ? window_id : "";
+  proc->editor_title = title ? title : "";
+  proc->editor_requested_width = requested_width;
   proc->editor_requested_height = requested_height;
 }
 
-extern "C" void sphere_daux_editor_clear_native(SphereDauxVst3Processor* proc) {
-  if (!proc) return;
-  proc->editor_native_window    = nullptr;
-  proc->editor_native_embed     = nullptr;
-  proc->editor_native_delegate  = nullptr;
-  proc->editor_handle           = 0;
+extern "C" void sphere_daux_editor_clear_native(SphereDauxVst3Processor *proc) {
+  if (!proc)
+    return;
+  proc->editor_native_window = nullptr;
+  proc->editor_native_embed = nullptr;
+  proc->editor_native_delegate = nullptr;
+  proc->editor_handle = 0;
   proc->editor_window_id.clear();
   proc->editor_title.clear();
-  proc->editor_requested_width  = 0;
+  proc->editor_requested_width = 0;
   proc->editor_requested_height = 0;
 }
 
-extern "C" void* sphere_daux_editor_get_native_window(SphereDauxVst3Processor* p)
-  { return p ? p->editor_native_window   : nullptr; }
-extern "C" void* sphere_daux_editor_get_native_embed(SphereDauxVst3Processor* p)
-  { return p ? p->editor_native_embed    : nullptr; }
-extern "C" void* sphere_daux_editor_get_native_delegate(SphereDauxVst3Processor* p)
-  { return p ? p->editor_native_delegate : nullptr; }
-extern "C" unsigned long long sphere_daux_editor_get_handle(SphereDauxVst3Processor* p)
-  { return p ? p->editor_handle : 0; }
-extern "C" const char* sphere_daux_editor_get_window_id(SphereDauxVst3Processor* p)
-  { return p ? p->editor_window_id.c_str() : ""; }
-extern "C" const char* sphere_daux_editor_get_title(SphereDauxVst3Processor* p)
-  { return p ? p->editor_title.c_str() : ""; }
-extern "C" int sphere_daux_editor_get_requested_width(SphereDauxVst3Processor* p)
-  { return p ? p->editor_requested_width  : 0; }
-extern "C" int sphere_daux_editor_get_requested_height(SphereDauxVst3Processor* p)
-  { return p ? p->editor_requested_height : 0; }
+extern "C" void *
+sphere_daux_editor_get_native_window(SphereDauxVst3Processor *p) {
+  return p ? p->editor_native_window : nullptr;
+}
+extern "C" void *
+sphere_daux_editor_get_native_embed(SphereDauxVst3Processor *p) {
+  return p ? p->editor_native_embed : nullptr;
+}
+extern "C" void *
+sphere_daux_editor_get_native_delegate(SphereDauxVst3Processor *p) {
+  return p ? p->editor_native_delegate : nullptr;
+}
+extern "C" unsigned long long
+sphere_daux_editor_get_handle(SphereDauxVst3Processor *p) {
+  return p ? p->editor_handle : 0;
+}
+extern "C" const char *
+sphere_daux_editor_get_window_id(SphereDauxVst3Processor *p) {
+  return p ? p->editor_window_id.c_str() : "";
+}
+extern "C" const char *
+sphere_daux_editor_get_title(SphereDauxVst3Processor *p) {
+  return p ? p->editor_title.c_str() : "";
+}
+extern "C" int
+sphere_daux_editor_get_requested_width(SphereDauxVst3Processor *p) {
+  return p ? p->editor_requested_width : 0;
+}
+extern "C" int
+sphere_daux_editor_get_requested_height(SphereDauxVst3Processor *p) {
+  return p ? p->editor_requested_height : 0;
+}
 
 #endif // __APPLE__ || __linux__
 
 // ── ComponentHandlerImpl::performEdit (needs full SphereDauxVst3Processor) ───
 
 Steinberg::tresult PLUGIN_API ComponentHandlerImpl::performEdit(
-    Steinberg::Vst::ParamID id,
-    Steinberg::Vst::ParamValue value) {
-  if (owner) owner->enqueue_param(id, value);
+    Steinberg::Vst::ParamID id, Steinberg::Vst::ParamValue value) {
+  if (owner)
+    owner->enqueue_param(id, value);
   static std::atomic<int> logged{0};
   const int n = logged.fetch_add(1);
   if (n < 16 || n % 50 == 0) {
-    std::fprintf(stderr,
-                 "[SphereVST3] editor param -> processor param=%u value=%.6f count=%d\n",
-                 static_cast<unsigned int>(id),
-                 static_cast<double>(value),
-                 n + 1);
+    std::fprintf(
+        stderr,
+        "[SphereVST3] editor param -> processor param=%u value=%.6f count=%d\n",
+        static_cast<unsigned int>(id), static_cast<double>(value), n + 1);
   }
   return Steinberg::kResultOk;
 }
 
 #ifdef _WIN32
-void detach_editor_view(SphereDauxVst3Processor* processor) {
-  if (!processor) return;
+void detach_editor_view(SphereDauxVst3Processor *processor) {
+  if (!processor)
+    return;
   if (processor->editor_view && processor->editor_attached) {
     // Mirror editorhost teardown: clear frame, then removed().
     if (daux_vst3_editor_debug()) {
       std::fprintf(stderr, "[vst3-editor] setFrame null view=0x%p\n",
-                   static_cast<void*>(processor->editor_view.get()));
+                   static_cast<void *>(processor->editor_view.get()));
     }
     processor->editor_view->setFrame(nullptr);
     const auto removed_res = processor->editor_view->removed();
     std::fprintf(stderr,
                  "[SphereVST3] IPlugView::removed() result=0x%x handle=%llu\n",
-                 static_cast<unsigned>(removed_res),
-                 processor->editor_handle);
+                 static_cast<unsigned>(removed_res), processor->editor_handle);
     if (daux_vst3_editor_debug()) {
       std::fprintf(stderr, "[vst3-editor] removed result=0x%x\n",
                    static_cast<unsigned>(removed_res));
@@ -1815,8 +1906,9 @@ void detach_editor_view(SphereDauxVst3Processor* processor) {
   processor->editor_attached = false;
 }
 
-void destroy_fallback_controls(SphereDauxVst3Processor* processor) {
-  if (!processor) return;
+void destroy_fallback_controls(SphereDauxVst3Processor *processor) {
+  if (!processor)
+    return;
   HWND controls[] = {
       processor->editor_fallback_label_hwnd,
       processor->editor_fallback_reload_hwnd,
@@ -1824,7 +1916,8 @@ void destroy_fallback_controls(SphereDauxVst3Processor* processor) {
       processor->editor_fallback_close_hwnd,
   };
   for (HWND control : controls) {
-    if (control && IsWindow(control)) DestroyWindow(control);
+    if (control && IsWindow(control))
+      DestroyWindow(control);
   }
   processor->editor_fallback_label_hwnd = nullptr;
   processor->editor_fallback_reload_hwnd = nullptr;
@@ -1852,16 +1945,16 @@ bool daux_resize_log_allow() {
 // IPlugView::canResize, queried once per created view and cached (spec item 1).
 // kResultTrue means the editor supports host-driven resizing; everything else
 // is treated as fixed-size.
-bool daux_editor_view_resizable(SphereDauxVst3Processor* p) {
-  if (!p || !p->editor_view) return false;
+bool daux_editor_view_resizable(SphereDauxVst3Processor *p) {
+  if (!p || !p->editor_view)
+    return false;
   if (p->editor_resizable_view != p->editor_view.get()) {
     const auto res = p->editor_view->canResize();
     p->editor_resizable = (res == Steinberg::kResultTrue);
     p->editor_resizable_view = p->editor_view.get();
     std::fprintf(stderr,
                  "[PluginEditorResize] canResize result=0x%x resizable=%d\n",
-                 static_cast<unsigned>(res),
-                 p->editor_resizable ? 1 : 0);
+                 static_cast<unsigned>(res), p->editor_resizable ? 1 : 0);
   }
   return p->editor_resizable;
 }
@@ -1871,8 +1964,9 @@ bool daux_editor_view_resizable(SphereDauxVst3Processor* p) {
 // `IPlugView::checkSizeConstraint` and use the plugin-adjusted rect. `w`/`h`
 // are PLUGIN CONTENT dimensions (never include titlebar/non-client frame).
 // Returns true when the constraint changed the requested size.
-bool daux_constrain_content_size(SphereDauxVst3Processor* p, int* w, int* h) {
-  if (!p || !p->editor_view || !w || !h || *w <= 0 || *h <= 0) return false;
+bool daux_constrain_content_size(SphereDauxVst3Processor *p, int *w, int *h) {
+  if (!p || !p->editor_view || !w || !h || *w <= 0 || *h <= 0)
+    return false;
   const int want_w = *w;
   const int want_h = *h;
   if (!daux_editor_view_resizable(p)) {
@@ -1906,43 +2000,38 @@ bool daux_constrain_content_size(SphereDauxVst3Processor* p, int* w, int* h) {
   const bool changed = (*w != want_w || *h != want_h);
   if (daux_resize_log_allow()) {
     std::fprintf(stderr,
-                 "[PluginEditorResize] desired_plugin=%dx%d constrained_plugin=%dx%d resizable=%d\n",
-                 want_w,
-                 want_h,
-                 *w,
-                 *h,
-                 p->editor_resizable ? 1 : 0);
+                 "[PluginEditorResize] desired_plugin=%dx%d "
+                 "constrained_plugin=%dx%d resizable=%d\n",
+                 want_w, want_h, *w, *h, p->editor_resizable ? 1 : 0);
   }
   return changed;
 }
 
-void resize_editor_view(SphereDauxVst3Processor* processor) {
-  if (!processor || !processor->editor_view || !processor->editor_attach_hwnd) return;
+void resize_editor_view(SphereDauxVst3Processor *processor) {
+  if (!processor || !processor->editor_view || !processor->editor_attach_hwnd)
+    return;
   RECT rc{};
   GetClientRect(processor->editor_attach_hwnd, &rc);
   const int content_w = static_cast<int>(rc.right - rc.left);
   const int content_h = static_cast<int>(rc.bottom - rc.top);
   if (content_w <= 0 || content_h <= 0) {
-    std::fprintf(stderr,
-                 "[PluginEditor] ERROR onSize skipped zero client=%dx%d handle=%llu\n",
-                 content_w,
-                 content_h,
-                 processor->editor_handle);
+    std::fprintf(
+        stderr,
+        "[PluginEditor] ERROR onSize skipped zero client=%dx%d handle=%llu\n",
+        content_w, content_h, processor->editor_handle);
     return;
   }
   auto local = daux_local_view_rect(content_w, content_h);
   auto resize_res = processor->editor_view->onSize(&local);
-  if (!daux_verify_child_client_rect(
-          processor->editor_attach_hwnd, content_w, content_h, "onSize")) {
-    daux_resize_child_client(processor->editor_attach_hwnd, content_w, content_h);
+  if (!daux_verify_child_client_rect(processor->editor_attach_hwnd, content_w,
+                                     content_h, "onSize")) {
+    daux_resize_child_client(processor->editor_attach_hwnd, content_w,
+                             content_h);
     resize_res = processor->editor_view->onSize(&local);
     std::fprintf(stderr,
                  "[PluginEditor] onSize retry result=0x%x rect=%d,%d,%d,%d\n",
-                 static_cast<unsigned>(resize_res),
-                 local.left,
-                 local.top,
-                 local.right,
-                 local.bottom);
+                 static_cast<unsigned>(resize_res), local.left, local.top,
+                 local.right, local.bottom);
   }
   // Repaint the freshly sized child — never leave stale pixels at the edges
   // (spec item 3). FALSE: no background erase, the plugin owns its pixels.
@@ -1951,89 +2040,90 @@ void resize_editor_view(SphereDauxVst3Processor* processor) {
   const unsigned int count = resize_log_count.fetch_add(1);
   if (count < 12 || count % 50 == 0) {
     std::fprintf(stderr,
-                 "[SphereVST3] IPlugView::onSize() result=%d handle=%llu rect=%d,%d,%d,%d count=%u\n",
-                 (int)resize_res,
-                 processor->editor_handle,
-                 (int)local.left,
-                 (int)local.top,
-                 (int)local.right,
-                 (int)local.bottom,
+                 "[SphereVST3] IPlugView::onSize() result=%d handle=%llu "
+                 "rect=%d,%d,%d,%d count=%u\n",
+                 (int)resize_res, processor->editor_handle, (int)local.left,
+                 (int)local.top, (int)local.right, (int)local.bottom,
                  count + 1);
   }
   if (daux_resize_log_allow()) {
     RECT after{};
     GetClientRect(processor->editor_attach_hwnd, &after);
-    std::fprintf(stderr,
-                 "[PluginEditorResize] child_rect=(0,0,%ld,%ld) onSize result=0x%x\n",
-                 after.right - after.left,
-                 after.bottom - after.top,
-                 static_cast<unsigned>(resize_res));
+    std::fprintf(
+        stderr,
+        "[PluginEditorResize] child_rect=(0,0,%ld,%ld) onSize result=0x%x\n",
+        after.right - after.left, after.bottom - after.top,
+        static_cast<unsigned>(resize_res));
   }
 }
 
-bool daux_editor_window_live(void* user_data) {
-  auto* p = static_cast<SphereDauxVst3Processor*>(user_data);
+bool daux_editor_window_live(void *user_data) {
+  auto *p = static_cast<SphereDauxVst3Processor *>(user_data);
   return p && p->processor_valid.load(std::memory_order_acquire);
 }
 
-bool daux_editor_window_attached(void* user_data) {
-  auto* p = static_cast<SphereDauxVst3Processor*>(user_data);
+bool daux_editor_window_attached(void *user_data) {
+  auto *p = static_cast<SphereDauxVst3Processor *>(user_data);
   return p && p->editor_attached;
 }
 
-bool daux_editor_window_resize_in_progress(void* user_data) {
-  auto* p = static_cast<SphereDauxVst3Processor*>(user_data);
+bool daux_editor_window_resize_in_progress(void *user_data) {
+  auto *p = static_cast<SphereDauxVst3Processor *>(user_data);
   return p && p->embed_resize_in_progress;
 }
 
-void daux_editor_window_set_resize_in_progress(void* user_data, bool value) {
-  auto* p = static_cast<SphereDauxVst3Processor*>(user_data);
-  if (p) p->embed_resize_in_progress = value;
+void daux_editor_window_set_resize_in_progress(void *user_data, bool value) {
+  auto *p = static_cast<SphereDauxVst3Processor *>(user_data);
+  if (p)
+    p->embed_resize_in_progress = value;
 }
 
-bool daux_editor_window_can_resize(void* user_data) {
-  return daux_editor_view_resizable(static_cast<SphereDauxVst3Processor*>(user_data));
+bool daux_editor_window_can_resize(void *user_data) {
+  return daux_editor_view_resizable(
+      static_cast<SphereDauxVst3Processor *>(user_data));
 }
 
-bool daux_editor_window_constrain_size(void* user_data, int* width, int* height) {
-  return daux_constrain_content_size(static_cast<SphereDauxVst3Processor*>(user_data), width, height);
+bool daux_editor_window_constrain_size(void *user_data, int *width,
+                                       int *height) {
+  return daux_constrain_content_size(
+      static_cast<SphereDauxVst3Processor *>(user_data), width, height);
 }
 
-void daux_editor_window_content_resized(void* user_data, void* content_hwnd, int width, int height) {
-  auto* p = static_cast<SphereDauxVst3Processor*>(user_data);
-  if (!p) return;
+void daux_editor_window_content_resized(void *user_data, void *content_hwnd,
+                                        int width, int height) {
+  auto *p = static_cast<SphereDauxVst3Processor *>(user_data);
+  if (!p)
+    return;
   p->editor_attach_hwnd = reinterpret_cast<HWND>(content_hwnd);
   p->embed_content_w = width;
   p->embed_content_h = height;
   resize_editor_view(p);
 }
 
-void daux_editor_window_dpi_changed(void* user_data,
-                                    void* shell_hwnd,
-                                    void* content_hwnd,
-                                    int width,
-                                    int height) {
-  auto* p = static_cast<SphereDauxVst3Processor*>(user_data);
+void daux_editor_window_dpi_changed(void *user_data, void *shell_hwnd,
+                                    void *content_hwnd, int width, int height) {
+  auto *p = static_cast<SphereDauxVst3Processor *>(user_data);
   HWND shell = reinterpret_cast<HWND>(shell_hwnd);
   HWND content = reinterpret_cast<HWND>(content_hwnd);
-  if (!p || !p->editor_view || !content || !IsWindow(content)) return;
+  if (!p || !p->editor_view || !content || !IsWindow(content))
+    return;
   daux_editor_set_content_scale(p, shell, "WM_DPICHANGED");
   daux_resize_child_client(content, width, height);
   auto local = daux_local_view_rect(width, height);
   const auto on_size_res = p->editor_view->onSize(&local);
   std::fprintf(stderr,
                "[PluginEditor] WM_DPICHANGED onSize result=0x%x client=%dx%d\n",
-               static_cast<unsigned>(on_size_res),
-               width,
-               height);
+               static_cast<unsigned>(on_size_res), width, height);
 }
 
-void daux_editor_window_close_requested(void* user_data) {
-  auto* p = static_cast<SphereDauxVst3Processor*>(user_data);
-  if (p) p->embed_user_closed.store(true, std::memory_order_release);
+void daux_editor_window_close_requested(void *user_data) {
+  auto *p = static_cast<SphereDauxVst3Processor *>(user_data);
+  if (p)
+    p->embed_user_closed.store(true, std::memory_order_release);
 }
 
-DauxEditorWindowCallbacks daux_editor_window_callbacks(SphereDauxVst3Processor* p) {
+DauxEditorWindowCallbacks
+daux_editor_window_callbacks(SphereDauxVst3Processor *p) {
   DauxEditorWindowCallbacks callbacks{};
   callbacks.user_data = p;
   callbacks.is_live = daux_editor_window_live;
@@ -2048,30 +2138,39 @@ DauxEditorWindowCallbacks daux_editor_window_callbacks(SphereDauxVst3Processor* 
   return callbacks;
 }
 
-void layout_attach_or_fallback(SphereDauxVst3Processor* processor, HWND hwnd) {
-  if (!processor || !hwnd) return;
+void layout_attach_or_fallback(SphereDauxVst3Processor *processor, HWND hwnd) {
+  if (!processor || !hwnd)
+    return;
   RECT rc{};
   GetClientRect(hwnd, &rc);
   const int w = rc.right - rc.left;
   const int h = rc.bottom - rc.top;
-  if (processor->editor_attach_hwnd && IsWindow(processor->editor_attach_hwnd)) {
+  if (processor->editor_attach_hwnd &&
+      IsWindow(processor->editor_attach_hwnd)) {
     MoveWindow(processor->editor_attach_hwnd, 0, 0, w, h, TRUE);
     resize_editor_view(processor);
   }
-  if (processor->editor_fallback_label_hwnd && IsWindow(processor->editor_fallback_label_hwnd)) {
+  if (processor->editor_fallback_label_hwnd &&
+      IsWindow(processor->editor_fallback_label_hwnd)) {
     const int panel_w = 360;
     const int x = std::max(16, (w - panel_w) / 2);
     const int y = std::max(18, (h - 96) / 2);
     MoveWindow(processor->editor_fallback_label_hwnd, x, y, panel_w, 24, TRUE);
-    MoveWindow(processor->editor_fallback_reload_hwnd, x, y + 42, 104, 28, TRUE);
-    MoveWindow(processor->editor_fallback_generic_hwnd, x + 116, y + 42, 124, 28, TRUE);
-    MoveWindow(processor->editor_fallback_close_hwnd, x + 252, y + 42, 82, 28, TRUE);
+    MoveWindow(processor->editor_fallback_reload_hwnd, x, y + 42, 104, 28,
+               TRUE);
+    MoveWindow(processor->editor_fallback_generic_hwnd, x + 116, y + 42, 124,
+               28, TRUE);
+    MoveWindow(processor->editor_fallback_close_hwnd, x + 252, y + 42, 82, 28,
+               TRUE);
   }
 }
 
-void show_attach_failed_state(SphereDauxVst3Processor* processor, const char* reason) {
-  if (!processor || !processor->editor_hwnd) return;
-  if (processor->editor_attach_hwnd && IsWindow(processor->editor_attach_hwnd)) {
+void show_attach_failed_state(SphereDauxVst3Processor *processor,
+                              const char *reason) {
+  if (!processor || !processor->editor_hwnd)
+    return;
+  if (processor->editor_attach_hwnd &&
+      IsWindow(processor->editor_attach_hwnd)) {
     paint_dark_child(processor->editor_attach_hwnd);
     DestroyWindow(processor->editor_attach_hwnd);
   }
@@ -2082,125 +2181,127 @@ void show_attach_failed_state(SphereDauxVst3Processor* processor, const char* re
 
   processor->editor_fallback_label_hwnd = CreateWindowExW(
       0, L"STATIC", L"Editor failed to attach",
-      WS_CHILD | WS_VISIBLE | SS_CENTER,
-      0, 0, 1, 1, processor->editor_hwnd, nullptr, GetModuleHandleW(nullptr), nullptr);
+      WS_CHILD | WS_VISIBLE | SS_CENTER, 0, 0, 1, 1, processor->editor_hwnd,
+      nullptr, GetModuleHandleW(nullptr), nullptr);
   processor->editor_fallback_reload_hwnd = CreateWindowExW(
-      0, L"BUTTON", L"Reload Editor",
-      WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-      0, 0, 1, 1, processor->editor_hwnd,
+      0, L"BUTTON", L"Reload Editor", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 0,
+      0, 1, 1, processor->editor_hwnd,
       reinterpret_cast<HMENU>(static_cast<INT_PTR>(kDauxFallbackReloadId)),
       GetModuleHandleW(nullptr), nullptr);
   processor->editor_fallback_generic_hwnd = CreateWindowExW(
       0, L"BUTTON", L"Generic Params",
-      WS_CHILD | WS_VISIBLE | WS_DISABLED | BS_PUSHBUTTON,
-      0, 0, 1, 1, processor->editor_hwnd,
+      WS_CHILD | WS_VISIBLE | WS_DISABLED | BS_PUSHBUTTON, 0, 0, 1, 1,
+      processor->editor_hwnd,
       reinterpret_cast<HMENU>(static_cast<INT_PTR>(kDauxFallbackGenericId)),
       GetModuleHandleW(nullptr), nullptr);
   processor->editor_fallback_close_hwnd = CreateWindowExW(
-      0, L"BUTTON", L"Close",
-      WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-      0, 0, 1, 1, processor->editor_hwnd,
+      0, L"BUTTON", L"Close", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 0, 0, 1, 1,
+      processor->editor_hwnd,
       reinterpret_cast<HMENU>(static_cast<INT_PTR>(kDauxFallbackCloseId)),
       GetModuleHandleW(nullptr), nullptr);
   layout_attach_or_fallback(processor, processor->editor_hwnd);
-  std::fprintf(stderr,
-               "[SphereVST3] editor attach failed state shown handle=%llu reason=%s\n",
-               processor->editor_handle,
-               reason ? reason : "unknown");
+  std::fprintf(
+      stderr,
+      "[SphereVST3] editor attach failed state shown handle=%llu reason=%s\n",
+      processor->editor_handle, reason ? reason : "unknown");
 }
 
-extern "C" unsigned long long sphere_daux_vst3_open_editor(
-    SphereDauxVst3Processor* processor,
-    const char*              window_id,
-    const char*              title,
-    int                      width,
-    int                      height);
+extern "C" unsigned long long
+sphere_daux_vst3_open_editor(SphereDauxVst3Processor *processor,
+                             const char *window_id, const char *title,
+                             int width, int height);
 
-LRESULT CALLBACK daux_editor_window_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
-  auto* processor =
-      reinterpret_cast<SphereDauxVst3Processor*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+LRESULT CALLBACK daux_editor_window_proc(HWND hwnd, UINT msg, WPARAM wparam,
+                                         LPARAM lparam) {
+  auto *processor = reinterpret_cast<SphereDauxVst3Processor *>(
+      GetWindowLongPtrW(hwnd, GWLP_USERDATA));
   switch (msg) {
-    case WM_NCCREATE: {
-      auto* create = reinterpret_cast<CREATESTRUCTW*>(lparam);
-      processor = reinterpret_cast<SphereDauxVst3Processor*>(create->lpCreateParams);
-      SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(processor));
-      return TRUE;
-    }
-    case WM_SIZE:
-      if (processor) layout_attach_or_fallback(processor, hwnd);
-      return 0;
-    case WM_SETFOCUS:
-      if (processor && processor->editor_attach_hwnd) SetFocus(processor->editor_attach_hwnd);
-      return 0;
-    case WM_CTLCOLORSTATIC: {
-      SetTextColor(reinterpret_cast<HDC>(wparam), RGB(231, 237, 245));
-      SetBkColor(reinterpret_cast<HDC>(wparam), RGB(11, 15, 20));
-      static HBRUSH dark_brush = CreateSolidBrush(RGB(11, 15, 20));
-      return reinterpret_cast<LRESULT>(dark_brush);
-    }
-    case WM_ERASEBKGND: {
-      RECT rc{};
-      GetClientRect(hwnd, &rc);
-      HBRUSH brush = CreateSolidBrush(RGB(11, 15, 20));
-      FillRect(reinterpret_cast<HDC>(wparam), &rc, brush);
-      DeleteObject(brush);
-      return 1;
-    }
-    case WM_COMMAND:
-      if (processor) {
-        const int command_id = LOWORD(wparam);
-        if (command_id == kDauxFallbackCloseId || command_id == kDauxFallbackGenericId) {
-          processor->close_editor_window();
-          return 0;
-        }
-        if (command_id == kDauxFallbackReloadId) {
-          const std::string window_id = processor->editor_window_id;
-          const std::string title = processor->editor_title;
-          const int requested_width = processor->editor_requested_width;
-          const int requested_height = processor->editor_requested_height;
-          processor->close_editor_window();
-          sphere_daux_vst3_open_editor(
-              processor,
-              window_id.c_str(),
-              title.empty() ? "Plugin Editor" : title.c_str(),
-              requested_width,
-              requested_height);
-          return 0;
-        }
-      }
-      break;
-    case WM_CLOSE:
-      // User pressed the window's X button: destroy the editor shell/view only.
-      // Processor and controller stay alive; only insert removal may destroy them.
-      if (processor) {
+  case WM_NCCREATE: {
+    auto *create = reinterpret_cast<CREATESTRUCTW *>(lparam);
+    processor =
+        reinterpret_cast<SphereDauxVst3Processor *>(create->lpCreateParams);
+    SetWindowLongPtrW(hwnd, GWLP_USERDATA,
+                      reinterpret_cast<LONG_PTR>(processor));
+    return TRUE;
+  }
+  case WM_SIZE:
+    if (processor)
+      layout_attach_or_fallback(processor, hwnd);
+    return 0;
+  case WM_SETFOCUS:
+    if (processor && processor->editor_attach_hwnd)
+      SetFocus(processor->editor_attach_hwnd);
+    return 0;
+  case WM_CTLCOLORSTATIC: {
+    SetTextColor(reinterpret_cast<HDC>(wparam), RGB(231, 237, 245));
+    SetBkColor(reinterpret_cast<HDC>(wparam), RGB(11, 15, 20));
+    static HBRUSH dark_brush = CreateSolidBrush(RGB(11, 15, 20));
+    return reinterpret_cast<LRESULT>(dark_brush);
+  }
+  case WM_ERASEBKGND: {
+    RECT rc{};
+    GetClientRect(hwnd, &rc);
+    HBRUSH brush = CreateSolidBrush(RGB(11, 15, 20));
+    FillRect(reinterpret_cast<HDC>(wparam), &rc, brush);
+    DeleteObject(brush);
+    return 1;
+  }
+  case WM_COMMAND:
+    if (processor) {
+      const int command_id = LOWORD(wparam);
+      if (command_id == kDauxFallbackCloseId ||
+          command_id == kDauxFallbackGenericId) {
         processor->close_editor_window();
         return 0;
       }
-      break;
-    case WM_DAUX_DESTROY:
-      // Posted by close_editor_window() when called cross-thread; execute the
-      // DestroyWindow on this HWND's own thread.
-      DestroyWindow(hwnd);
-      return 0;
-    case WM_DESTROY:
-      // GWLP_USERDATA was already zeroed by close_editor_window() before this
-      // message was dispatched, so processor may be null here.  Do cleanup only
-      // if the pointer is still set (shouldn't normally happen but guard anyway).
-      if (processor) {
-        detach_editor_view(processor);
-        if (processor->editor_attach_hwnd && IsWindow(processor->editor_attach_hwnd)) {
-          DestroyWindow(processor->editor_attach_hwnd);
-        }
-        destroy_fallback_controls(processor);
-        processor->editor_attach_hwnd = nullptr;
-        processor->editor_hwnd = nullptr;
-        processor->editor_handle = 0;
-        processor->editor_window_id.clear();
-        processor->editor_title.clear();
+      if (command_id == kDauxFallbackReloadId) {
+        const std::string window_id = processor->editor_window_id;
+        const std::string title = processor->editor_title;
+        const int requested_width = processor->editor_requested_width;
+        const int requested_height = processor->editor_requested_height;
+        processor->close_editor_window();
+        sphere_daux_vst3_open_editor(processor, window_id.c_str(),
+                                     title.empty() ? "Plugin Editor"
+                                                   : title.c_str(),
+                                     requested_width, requested_height);
+        return 0;
       }
+    }
+    break;
+  case WM_CLOSE:
+    // User pressed the window's X button: destroy the editor shell/view only.
+    // Processor and controller stay alive; only insert removal may destroy
+    // them.
+    if (processor) {
+      processor->close_editor_window();
       return 0;
-    default:
-      break;
+    }
+    break;
+  case WM_DAUX_DESTROY:
+    // Posted by close_editor_window() when called cross-thread; execute the
+    // DestroyWindow on this HWND's own thread.
+    DestroyWindow(hwnd);
+    return 0;
+  case WM_DESTROY:
+    // GWLP_USERDATA was already zeroed by close_editor_window() before this
+    // message was dispatched, so processor may be null here.  Do cleanup only
+    // if the pointer is still set (shouldn't normally happen but guard anyway).
+    if (processor) {
+      detach_editor_view(processor);
+      if (processor->editor_attach_hwnd &&
+          IsWindow(processor->editor_attach_hwnd)) {
+        DestroyWindow(processor->editor_attach_hwnd);
+      }
+      destroy_fallback_controls(processor);
+      processor->editor_attach_hwnd = nullptr;
+      processor->editor_hwnd = nullptr;
+      processor->editor_handle = 0;
+      processor->editor_window_id.clear();
+      processor->editor_title.clear();
+    }
+    return 0;
+  default:
+    break;
   }
   return DefWindowProcW(hwnd, msg, wparam, lparam);
 }
@@ -2219,7 +2320,7 @@ void register_editor_parent_class() {
   });
 }
 
-void daux_plugin_browser_runtime_release(SphereDauxVst3Processor* processor);
+void daux_plugin_browser_runtime_release(SphereDauxVst3Processor *processor);
 
 void SphereDauxVst3Processor::close_editor_window() {
   HWND hwnd = editor_hwnd;
@@ -2276,7 +2377,7 @@ void SphereDauxVst3Processor::close_editor_window() {
   }
 }
 
-void SphereDauxVst3Processor::close_editor_view_only(const char* reason) {
+void SphereDauxVst3Processor::close_editor_view_only(const char *reason) {
   // Properly detach the IPlugView (calls removed()) and destroy ONLY the child
   // attach HWND.  The parent shell HWND remains alive so the same editor_handle
   // identity is preserved for the next reopen call.
@@ -2284,8 +2385,9 @@ void SphereDauxVst3Processor::close_editor_view_only(const char* reason) {
   // This is the correct hide/close path:
   //   detach view → destroy child HWND → hide parent HWND
   //
-  // On next open() we always create a fresh child HWND.  Reusing the stale child
-  // HWND after removed() was the root cause of the white-window regression.
+  // On next open() we always create a fresh child HWND.  Reusing the stale
+  // child HWND after removed() was the root cause of the white-window
+  // regression.
   detach_editor_view(this);
   if (editor_attach_hwnd && IsWindow(editor_attach_hwnd)) {
     DestroyWindow(editor_attach_hwnd);
@@ -2301,8 +2403,9 @@ void SphereDauxVst3Processor::close_editor_view_only(const char* reason) {
 // ── GPUI-embedded editor (reuses this processor's controller) ────────────────
 
 bool daux_embed_debug() {
-  static const bool enabled = std::getenv("FUTUREBOARD_PLUGIN_VIEW_DEBUG") != nullptr ||
-                              std::getenv("FUTUREBOARD_PLUGIN_DEBUG") != nullptr;
+  static const bool enabled =
+      std::getenv("FUTUREBOARD_PLUGIN_VIEW_DEBUG") != nullptr ||
+      std::getenv("FUTUREBOARD_PLUGIN_DEBUG") != nullptr;
   return enabled;
 }
 
@@ -2322,7 +2425,7 @@ void daux_embed_ensure_com_initialized() {
   const HRESULT hr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
   if (hr != s_last_hr) {
     s_last_hr = hr;
-    const char* tag = "ok";
+    const char *tag = "ok";
     if (hr == S_FALSE) {
       tag = "already initialized (STA)";
     } else if (hr == RPC_E_CHANGED_MODE) {
@@ -2330,24 +2433,22 @@ void daux_embed_ensure_com_initialized() {
     } else if (FAILED(hr)) {
       tag = "FAILED";
     }
-    std::fprintf(
-        stderr,
-        "[vst3-editor] COM init hr=0x%08lx (%s) tid=%lu\n",
-        static_cast<unsigned long>(hr),
-        tag,
-        GetCurrentThreadId());
+    std::fprintf(stderr, "[vst3-editor] COM init hr=0x%08lx (%s) tid=%lu\n",
+                 static_cast<unsigned long>(hr), tag, GetCurrentThreadId());
   }
 }
 
 // ── Generic browser/WebView runtime compatibility layer ──────────────────────
 // Many modern VST3 plug-ins render their editor with an embedded browser engine
-// and ship the runtime DLLs/resources *inside* the .vst3 bundle. The loader DLLs
-// resolve dependents from their own directory, so before createView/attached we
-// detect the bundled runtime and add ONLY its native dir(s) to the DLL search
-// path for the lifetime of the editor — never globally, never permanently.
+// and ship the runtime DLLs/resources *inside* the .vst3 bundle. The loader
+// DLLs resolve dependents from their own directory, so before
+// createView/attached we detect the bundled runtime and add ONLY its native
+// dir(s) to the DLL search path for the lifetime of the editor — never
+// globally, never permanently.
 //
-// Detection is keyed off marker files, not vendor names, so this is not UAD-only
-// and never touches plug-ins that ship no browser runtime (e.g. FabFilter).
+// Detection is keyed off marker files, not vendor names, so this is not
+// UAD-only and never touches plug-ins that ship no browser runtime (e.g.
+// FabFilter).
 
 // Mirror of the Rust `PluginEditorRuntimeKind`.
 enum class DauxEditorRuntimeKind {
@@ -2358,14 +2459,19 @@ enum class DauxEditorRuntimeKind {
   BrowserUnknown = 4,
 };
 
-const char* daux_editor_runtime_kind_name(DauxEditorRuntimeKind kind) {
+const char *daux_editor_runtime_kind_name(DauxEditorRuntimeKind kind) {
   switch (kind) {
-    case DauxEditorRuntimeKind::WebView2: return "WebView2";
-    case DauxEditorRuntimeKind::Cef: return "Cef";
-    case DauxEditorRuntimeKind::Chromium: return "Chromium";
-    case DauxEditorRuntimeKind::BrowserUnknown: return "BrowserUnknown";
-    case DauxEditorRuntimeKind::Native:
-    default: return "Native";
+  case DauxEditorRuntimeKind::WebView2:
+    return "WebView2";
+  case DauxEditorRuntimeKind::Cef:
+    return "Cef";
+  case DauxEditorRuntimeKind::Chromium:
+    return "Chromium";
+  case DauxEditorRuntimeKind::BrowserUnknown:
+    return "BrowserUnknown";
+  case DauxEditorRuntimeKind::Native:
+  default:
+    return "Native";
   }
 }
 
@@ -2384,48 +2490,60 @@ std::wstring daux_webview_runtime_arch_subdir() {
 #endif
 }
 
-bool daux_path_exists_w(const std::wstring& path) {
-  if (path.empty()) return false;
+bool daux_path_exists_w(const std::wstring &path) {
+  if (path.empty())
+    return false;
   const DWORD attrs = GetFileAttributesW(path.c_str());
-  return attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_DIRECTORY) == 0;
+  return attrs != INVALID_FILE_ATTRIBUTES &&
+         (attrs & FILE_ATTRIBUTE_DIRECTORY) == 0;
 }
 
-bool daux_dir_exists_w(const std::wstring& path) {
-  if (path.empty()) return false;
+bool daux_dir_exists_w(const std::wstring &path) {
+  if (path.empty())
+    return false;
   const DWORD attrs = GetFileAttributesW(path.c_str());
-  return attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_DIRECTORY) != 0;
+  return attrs != INVALID_FILE_ATTRIBUTES &&
+         (attrs & FILE_ATTRIBUTE_DIRECTORY) != 0;
 }
 
-std::wstring daux_join_path_w(std::wstring base, const wchar_t* suffix) {
-  if (base.empty()) return suffix ? suffix : L"";
+std::wstring daux_join_path_w(std::wstring base, const wchar_t *suffix) {
+  if (base.empty())
+    return suffix ? suffix : L"";
   while (!base.empty() && (base.back() == L'\\' || base.back() == L'/')) {
     base.pop_back();
   }
-  if (!suffix || !*suffix) return base;
+  if (!suffix || !*suffix)
+    return base;
   std::wstring out = std::move(base);
   out.push_back(L'\\');
   out += suffix;
   return out;
 }
 
-bool daux_file_in_dir(const std::wstring& dir, const wchar_t* file) {
+bool daux_file_in_dir(const std::wstring &dir, const wchar_t *file) {
   return daux_path_exists_w(daux_join_path_w(dir, file));
 }
 
-std::string daux_wide_to_utf8(const std::wstring& value) {
-  if (value.empty()) return {};
-  const int len =
-      WideCharToMultiByte(CP_UTF8, 0, value.c_str(), -1, nullptr, 0, nullptr, nullptr);
-  if (len <= 1) return {};
+std::string daux_wide_to_utf8(const std::wstring &value) {
+  if (value.empty())
+    return {};
+  const int len = WideCharToMultiByte(CP_UTF8, 0, value.c_str(), -1, nullptr, 0,
+                                      nullptr, nullptr);
+  if (len <= 1)
+    return {};
   std::string out(static_cast<std::size_t>(len - 1), '\0');
-  WideCharToMultiByte(CP_UTF8, 0, value.c_str(), -1, out.data(), len, nullptr, nullptr);
+  WideCharToMultiByte(CP_UTF8, 0, value.c_str(), -1, out.data(), len, nullptr,
+                      nullptr);
   return out;
 }
 
-void daux_push_dir_unique(std::vector<std::wstring>& dirs, const std::wstring& dir) {
-  if (dir.empty()) return;
-  for (const auto& existing : dirs) {
-    if (_wcsicmp(existing.c_str(), dir.c_str()) == 0) return;
+void daux_push_dir_unique(std::vector<std::wstring> &dirs,
+                          const std::wstring &dir) {
+  if (dir.empty())
+    return;
+  for (const auto &existing : dirs) {
+    if (_wcsicmp(existing.c_str(), dir.c_str()) == 0)
+      return;
   }
   dirs.push_back(dir);
 }
@@ -2433,21 +2551,24 @@ void daux_push_dir_unique(std::vector<std::wstring>& dirs, const std::wstring& d
 // Result of scanning a .vst3 bundle for a bundled browser/WebView runtime.
 struct DauxEditorRuntimeDetection {
   DauxEditorRuntimeKind kind = DauxEditorRuntimeKind::Native;
-  std::vector<std::wstring> dll_dirs;  // native dirs to add to the DLL search path
-  std::wstring webview2_loader;        // WebViewLoader.dll to verify-load (safe)
-  std::wstring marker;                 // diagnostic: first marker file found
+  std::vector<std::wstring>
+      dll_dirs;                 // native dirs to add to the DLL search path
+  std::wstring webview2_loader; // WebViewLoader.dll to verify-load (safe)
+  std::wstring marker;          // diagnostic: first marker file found
 };
 
 // Scan the bundle directory for known browser/WebView runtime marker files.
 // Bounded: probes a fixed list of candidate sub-directories, no recursion.
-DauxEditorRuntimeDetection daux_detect_editor_runtime(const std::string& plugin_path) {
+DauxEditorRuntimeDetection
+daux_detect_editor_runtime(const std::string &plugin_path) {
   DauxEditorRuntimeDetection out;
-  if (plugin_path.empty()) return out;
+  if (plugin_path.empty())
+    return out;
   const std::wstring root = widen_utf8(plugin_path.c_str());
   const std::wstring arch = daux_webview_runtime_arch_subdir();
 
-  static const wchar_t* kBaseRel[] = {
-      L"",  // bundle root
+  static const wchar_t *kBaseRel[] = {
+      L"", // bundle root
       L"Contents\\Resources",
       L"Contents\\x86_64-win",
       L"Contents\\Resources\\WebView2",
@@ -2463,30 +2584,37 @@ DauxEditorRuntimeDetection daux_detect_editor_runtime(const std::string& plugin_
   bool found_chromium = false;
   bool found_browser = false;
 
-  for (const wchar_t* rel : kBaseRel) {
+  for (const wchar_t *rel : kBaseRel) {
     const std::wstring base = (*rel) ? daux_join_path_w(root, rel) : root;
-    if (!daux_dir_exists_w(base)) continue;
+    if (!daux_dir_exists_w(base))
+      continue;
 
     // WebView2 fixed-version runtime: WebViewLoader.dll may sit directly in the
-    // base dir or under runtimes\win-{arch}\native (and the bare win-{arch}\native).
+    // base dir or under runtimes\win-{arch}\native (and the bare
+    // win-{arch}\native).
     const std::wstring runtimes_native = daux_join_path_w(
-        daux_join_path_w(daux_join_path_w(base, L"runtimes"), arch.c_str()), L"native");
+        daux_join_path_w(daux_join_path_w(base, L"runtimes"), arch.c_str()),
+        L"native");
     const std::wstring arch_native =
         daux_join_path_w(daux_join_path_w(base, arch.c_str()), L"native");
     const std::wstring wv2_candidates[] = {base, runtimes_native, arch_native};
-    for (const std::wstring& nd : wv2_candidates) {
-      if (nd.empty() || !daux_dir_exists_w(nd)) continue;
+    for (const std::wstring &nd : wv2_candidates) {
+      if (nd.empty() || !daux_dir_exists_w(nd))
+        continue;
       const std::wstring loader = daux_join_path_w(nd, L"WebViewLoader.dll");
       if (daux_path_exists_w(loader)) {
         found_webview2 = true;
         daux_push_dir_unique(out.dll_dirs, nd);
-        if (out.webview2_loader.empty()) out.webview2_loader = loader;
-        if (out.marker.empty()) out.marker = loader;
+        if (out.webview2_loader.empty())
+          out.webview2_loader = loader;
+        if (out.marker.empty())
+          out.marker = loader;
       }
       if (daux_file_in_dir(nd, L"Microsoft.Web.WebView2.Core.dll")) {
         found_webview2 = true;
         daux_push_dir_unique(out.dll_dirs, nd);
-        if (out.marker.empty()) out.marker = daux_join_path_w(nd, L"Microsoft.Web.WebView2.Core.dll");
+        if (out.marker.empty())
+          out.marker = daux_join_path_w(nd, L"Microsoft.Web.WebView2.Core.dll");
       }
     }
 
@@ -2504,27 +2632,38 @@ DauxEditorRuntimeDetection daux_detect_editor_runtime(const std::string& plugin_
     if (has_libcef) {
       found_cef = true;
       daux_push_dir_unique(out.dll_dirs, base);
-      if (out.marker.empty()) out.marker = daux_join_path_w(base, L"libcef.dll");
+      if (out.marker.empty())
+        out.marker = daux_join_path_w(base, L"libcef.dll");
     }
-    if (has_cef_pak) found_cef = true;
+    if (has_cef_pak)
+      found_cef = true;
     if (has_chrome_elf) {
       daux_push_dir_unique(out.dll_dirs, base);
-      if (!has_libcef && !has_cef_pak) found_chromium = true;
-      if (out.marker.empty()) out.marker = daux_join_path_w(base, L"chrome_elf.dll");
+      if (!has_libcef && !has_cef_pak)
+        found_chromium = true;
+      if (out.marker.empty())
+        out.marker = daux_join_path_w(base, L"chrome_elf.dll");
     }
-    if (has_icu || has_v8 || has_respak) found_browser = true;
+    if (has_icu || has_v8 || has_respak)
+      found_browser = true;
   }
 
-  if (found_webview2) out.kind = DauxEditorRuntimeKind::WebView2;
-  else if (found_cef) out.kind = DauxEditorRuntimeKind::Cef;
-  else if (found_chromium) out.kind = DauxEditorRuntimeKind::Chromium;
-  else if (found_browser) out.kind = DauxEditorRuntimeKind::BrowserUnknown;
-  else out.kind = DauxEditorRuntimeKind::Native;
+  if (found_webview2)
+    out.kind = DauxEditorRuntimeKind::WebView2;
+  else if (found_cef)
+    out.kind = DauxEditorRuntimeKind::Cef;
+  else if (found_chromium)
+    out.kind = DauxEditorRuntimeKind::Chromium;
+  else if (found_browser)
+    out.kind = DauxEditorRuntimeKind::BrowserUnknown;
+  else
+    out.kind = DauxEditorRuntimeKind::Native;
   return out;
 }
 
-bool daux_plugin_is_browser_based(const std::string& plugin_path) {
-  return daux_detect_editor_runtime(plugin_path).kind != DauxEditorRuntimeKind::Native;
+bool daux_plugin_is_browser_based(const std::string &plugin_path) {
+  return daux_detect_editor_runtime(plugin_path).kind !=
+         DauxEditorRuntimeKind::Native;
 }
 
 void daux_webview2_ensure_dll_search_policy() {
@@ -2537,26 +2676,31 @@ void daux_webview2_ensure_dll_search_policy() {
           "[plugin-webview-based] SetDefaultDllDirectories failed err=%lu\n",
           GetLastError());
     } else if (daux_plugin_webview_based_debug()) {
-      std::fprintf(stderr, "[plugin-webview-based] SetDefaultDllDirectories ok\n");
+      std::fprintf(stderr,
+                   "[plugin-webview-based] SetDefaultDllDirectories ok\n");
     }
   });
 }
 
 // Add every detected native runtime dir to the per-process DLL search path and
 // (for WebView2 only) verify-load the thin WebViewLoader.dll. CEF/Chromium
-// loaders are NOT force-loaded — that would spin up Chromium on the wrong thread;
-// the plug-in loads its own once the directory is discoverable.
-bool daux_plugin_browser_runtime_prepare(SphereDauxVst3Processor* processor) {
-  if (!processor) return false;
-  if (!processor->plugin_browser_dll_cookies.empty() || processor->plugin_browser_loader) {
-    return true;  // already prepared
+// loaders are NOT force-loaded — that would spin up Chromium on the wrong
+// thread; the plug-in loads its own once the directory is discoverable.
+bool daux_plugin_browser_runtime_prepare(SphereDauxVst3Processor *processor) {
+  if (!processor)
+    return false;
+  if (!processor->plugin_browser_dll_cookies.empty() ||
+      processor->plugin_browser_loader) {
+    return true; // already prepared
   }
 
-  const DauxEditorRuntimeDetection det = daux_detect_editor_runtime(processor->plugin_path);
+  const DauxEditorRuntimeDetection det =
+      daux_detect_editor_runtime(processor->plugin_path);
   processor->plugin_browser_runtime_kind = static_cast<int>(det.kind);
-  // Always log the detected editor runtime (Native vs WebView2 vs CEF/Chromium):
-  // it decides whether a hung `attached()` is a browser-subprocess issue or a
-  // native-GUI one, without needing a debug flag set.
+  // Always log the detected editor runtime (Native vs WebView2 vs
+  // CEF/Chromium): it decides whether a hung `attached()` is a
+  // browser-subprocess issue or a native-GUI one, without needing a debug flag
+  // set.
   std::fprintf(stderr, "[plugin-view] editor_runtime_kind=%s path=%s\n",
                daux_editor_runtime_kind_name(det.kind),
                processor->plugin_path.c_str());
@@ -2565,19 +2709,20 @@ bool daux_plugin_browser_runtime_prepare(SphereDauxVst3Processor* processor) {
   if (det.kind == DauxEditorRuntimeKind::Native) {
     if (debug) {
       std::fprintf(stderr,
-                   "[plugin-webview-based] runtime=Native (no bundled browser runtime) path=%s\n",
+                   "[plugin-webview-based] runtime=Native (no bundled browser "
+                   "runtime) path=%s\n",
                    processor->plugin_path.c_str());
     }
-    return true;  // normal native UI plug-in — nothing to do
+    return true; // normal native UI plug-in — nothing to do
   }
 
   if (debug) {
-    std::fprintf(stderr,
-                 "[plugin-webview-based] runtime=%s marker=%s dll_dirs=%zu path=%s\n",
-                 daux_editor_runtime_kind_name(det.kind),
-                 daux_wide_to_utf8(det.marker).c_str(),
-                 det.dll_dirs.size(),
-                 processor->plugin_path.c_str());
+    std::fprintf(
+        stderr,
+        "[plugin-webview-based] runtime=%s marker=%s dll_dirs=%zu path=%s\n",
+        daux_editor_runtime_kind_name(det.kind),
+        daux_wide_to_utf8(det.marker).c_str(), det.dll_dirs.size(),
+        processor->plugin_path.c_str());
   }
 
   if (det.dll_dirs.empty()) {
@@ -2585,7 +2730,8 @@ bool daux_plugin_browser_runtime_prepare(SphereDauxVst3Processor* processor) {
     // to add — nothing actionable, but not a failure. Editor open continues.
     if (debug) {
       std::fprintf(stderr,
-                   "[plugin-webview-based] runtime=%s detected via resources only; no DLL dir to add\n",
+                   "[plugin-webview-based] runtime=%s detected via resources "
+                   "only; no DLL dir to add\n",
                    daux_editor_runtime_kind_name(det.kind));
     }
     return true;
@@ -2594,13 +2740,17 @@ bool daux_plugin_browser_runtime_prepare(SphereDauxVst3Processor* processor) {
   daux_webview2_ensure_dll_search_policy();
 
   std::vector<DLL_DIRECTORY_COOKIE> cookies;
-  for (const std::wstring& dir : det.dll_dirs) {
+  for (const std::wstring &dir : det.dll_dirs) {
     DLL_DIRECTORY_COOKIE cookie = AddDllDirectory(dir.c_str());
     if (!cookie) {
       const DWORD err = GetLastError();
-      std::fprintf(stderr, "[plugin-webview-based] AddDllDirectory failed err=%lu\n", err);
-      for (DLL_DIRECTORY_COOKIE c : cookies) RemoveDllDirectory(c);
-      set_last_error("Failed to configure plugin browser runtime search path (AddDllDirectory err=" +
+      std::fprintf(stderr,
+                   "[plugin-webview-based] AddDllDirectory failed err=%lu\n",
+                   err);
+      for (DLL_DIRECTORY_COOKIE c : cookies)
+        RemoveDllDirectory(c);
+      set_last_error("Failed to configure plugin browser runtime search path "
+                     "(AddDllDirectory err=" +
                      std::to_string(err) + ")");
       return false;
     }
@@ -2616,15 +2766,21 @@ bool daux_plugin_browser_runtime_prepare(SphereDauxVst3Processor* processor) {
     loader = LoadLibraryW(det.webview2_loader.c_str());
     if (!loader) {
       const DWORD err = GetLastError();
-      std::fprintf(stderr, "[plugin-webview-based] LoadLibrary WebViewLoader.dll failed err=%lu\n", err);
-      for (DLL_DIRECTORY_COOKIE c : cookies) RemoveDllDirectory(c);
-      set_last_error(std::string("Failed to load plugin WebView2 runtime from ") +
-                     daux_wide_to_utf8(det.webview2_loader) +
-                     " (GetLastError=" + std::to_string(err) + ")");
+      std::fprintf(stderr,
+                   "[plugin-webview-based] LoadLibrary WebViewLoader.dll "
+                   "failed err=%lu\n",
+                   err);
+      for (DLL_DIRECTORY_COOKIE c : cookies)
+        RemoveDllDirectory(c);
+      set_last_error(
+          std::string("Failed to load plugin WebView2 runtime from ") +
+          daux_wide_to_utf8(det.webview2_loader) +
+          " (GetLastError=" + std::to_string(err) + ")");
       return false;
     }
     if (debug) {
-      std::fprintf(stderr, "[plugin-webview-based] LoadLibrary WebViewLoader.dll ok\n");
+      std::fprintf(stderr,
+                   "[plugin-webview-based] LoadLibrary WebViewLoader.dll ok\n");
     }
   }
 
@@ -2633,14 +2789,16 @@ bool daux_plugin_browser_runtime_prepare(SphereDauxVst3Processor* processor) {
   return true;
 }
 
-void daux_plugin_browser_runtime_release(SphereDauxVst3Processor* processor) {
-  if (!processor) return;
+void daux_plugin_browser_runtime_release(SphereDauxVst3Processor *processor) {
+  if (!processor)
+    return;
   if (processor->plugin_browser_loader) {
     FreeLibrary(processor->plugin_browser_loader);
     processor->plugin_browser_loader = nullptr;
   }
   for (DLL_DIRECTORY_COOKIE cookie : processor->plugin_browser_dll_cookies) {
-    if (cookie) RemoveDllDirectory(cookie);
+    if (cookie)
+      RemoveDllDirectory(cookie);
   }
   processor->plugin_browser_dll_cookies.clear();
 }
@@ -2648,35 +2806,43 @@ void daux_plugin_browser_runtime_release(SphereDauxVst3Processor* processor) {
 // Reposition/resize the host window to the requested region. Returns true only
 // when the applied rect actually changed, so idle frames do no SetWindowPos /
 // onSize / raise work (mirrors the SpherePluginHost anti-flicker fix).
-bool daux_embed_sync_geometry(SphereDauxVst3Processor* p, int x, int y, int w, int h,
-                              bool log_reposition) {
+bool daux_embed_sync_geometry(SphereDauxVst3Processor *p, int x, int y, int w,
+                              int h, bool log_reposition) {
   HWND top = p ? p->editor_embed_top_hwnd : nullptr;
-  if (!p || !top || !IsWindow(top)) return false;
+  if (!p || !top || !IsWindow(top))
+    return false;
   // Detached: a standalone OS window owns its own position/size (user-movable,
   // resizeView-driven). Never snap it to the GPUI parent region.
-  if (p->embed_host_kind == 2) return false;
-  p->embed_host_x = x; p->embed_host_y = y; p->embed_host_w = w; p->embed_host_h = h;
+  if (p->embed_host_kind == 2)
+    return false;
+  p->embed_host_x = x;
+  p->embed_host_y = y;
+  p->embed_host_w = w;
+  p->embed_host_h = h;
   if (p->embed_host_kind == 1 && p->editor_parent_hwnd) {
-    if (!IsWindow(p->editor_parent_hwnd)) return false;
-    const bool parent_visible =
-        IsWindowVisible(p->editor_parent_hwnd) && !IsIconic(p->editor_parent_hwnd);
+    if (!IsWindow(p->editor_parent_hwnd))
+      return false;
+    const bool parent_visible = IsWindowVisible(p->editor_parent_hwnd) &&
+                                !IsIconic(p->editor_parent_hwnd);
     ShowWindow(top, parent_visible ? SW_SHOWNA : SW_HIDE);
     RECT screen{};
     if (!daux_editor_content_screen_rect(p->editor_parent_hwnd, x, y, w, h,
-                                         &screen.left, &screen.top, &screen.right, &screen.bottom)) {
+                                         &screen.left, &screen.top,
+                                         &screen.right, &screen.bottom)) {
       return false;
     }
-    if (p->embed_geometry_valid && EqualRect(&screen, &p->embed_last_applied)) return false;
+    if (p->embed_geometry_valid && EqualRect(&screen, &p->embed_last_applied))
+      return false;
     p->embed_last_applied = screen;
     p->embed_geometry_valid = true;
-    SetWindowPos(top, p->editor_parent_hwnd,
-                 screen.left, screen.top,
+    SetWindowPos(top, p->editor_parent_hwnd, screen.left, screen.top,
                  screen.right - screen.left, screen.bottom - screen.top,
                  SWP_NOACTIVATE | SWP_SHOWWINDOW);
     daux_editor_apply_tool_styles(top, p->editor_parent_hwnd);
   } else {
     RECT want{x, y, x + w, y + h};
-    if (p->embed_geometry_valid && EqualRect(&want, &p->embed_last_applied)) return false;
+    if (p->embed_geometry_valid && EqualRect(&want, &p->embed_last_applied))
+      return false;
     p->embed_last_applied = want;
     p->embed_geometry_valid = true;
     SetWindowPos(top, HWND_TOP, x, y, w, h, SWP_SHOWWINDOW | SWP_NOACTIVATE);
@@ -2685,53 +2851,57 @@ bool daux_embed_sync_geometry(SphereDauxVst3Processor* p, int x, int y, int w, i
   if (p->editor_attach_hwnd && IsWindow(p->editor_attach_hwnd)) {
     RECT rc{};
     GetClientRect(top, &rc);
-    SetWindowPos(p->editor_attach_hwnd, nullptr, 0, 0, rc.right - rc.left, rc.bottom - rc.top,
+    SetWindowPos(p->editor_attach_hwnd, nullptr, 0, 0, rc.right - rc.left,
+                 rc.bottom - rc.top,
                  SWP_NOZORDER | SWP_NOACTIVATE | SWP_SHOWWINDOW);
   }
   daux_editor_raise_children(top);
   if (log_reposition && daux_embed_debug()) {
-    std::fprintf(stderr,
-                 "[plugin-view] daux reposition top=0x%p content=0x%p mode=%s\n",
-                 static_cast<void*>(top),
-                 static_cast<void*>(p->editor_attach_hwnd),
-                 daux_editor_host_kind_name(p->embed_host_kind));
+    std::fprintf(
+        stderr, "[plugin-view] daux reposition top=0x%p content=0x%p mode=%s\n",
+        static_cast<void *>(top), static_cast<void *>(p->editor_attach_hwnd),
+        daux_editor_host_kind_name(p->embed_host_kind));
   }
   return true;
 }
 
-bool daux_embed_apply_content_size(SphereDauxVst3Processor* p,
-                                   int content_w,
-                                   int content_h,
-                                   const char* reason) {
-  if (!p || content_w <= 0 || content_h <= 0) return false;
-  if (p->embed_resize_in_progress) return false;
+bool daux_embed_apply_content_size(SphereDauxVst3Processor *p, int content_w,
+                                   int content_h, const char *reason) {
+  if (!p || content_w <= 0 || content_h <= 0)
+    return false;
+  if (p->embed_resize_in_progress)
+    return false;
 
   const bool debug = daux_embed_debug() || daux_vst3_editor_debug();
 
-  // Detached: size the standalone top-level window so its CLIENT area equals the
-  // plug-in's preferred size (editorhost pattern). Position is left to the user.
+  // Detached: size the standalone top-level window so its CLIENT area equals
+  // the plug-in's preferred size (editorhost pattern). Position is left to the
+  // user.
   if (p->embed_host_kind == 2) {
     bool changed = false;
     HWND top = p->editor_embed_top_hwnd;
     if (top && IsWindow(top)) {
-      // Borderless (WM_NCCALCSIZE==0): the window outer == its client. Size it to
-      // the plug-in content plus the reserved custom titlebar; the content child
-      // sits below the titlebar.
+      // Borderless (WM_NCCALCSIZE==0): the window outer == its client. Size it
+      // to the plug-in content plus the reserved custom titlebar; the content
+      // child sits below the titlebar.
       const int th = daux_editor_titlebar_height(top);
       const int win_w = content_w;
       const int win_h = content_h + th;
       RECT cur{};
       GetWindowRect(top, &cur);
       if ((cur.right - cur.left) != win_w || (cur.bottom - cur.top) != win_h) {
-        changed = daux_editor_resize_content(&p->editor_window, content_w, content_h);
+        changed =
+            daux_editor_resize_content(&p->editor_window, content_w, content_h);
       }
     }
     p->embed_content_w = content_w;
     p->embed_content_h = content_h;
     if (debug) {
       std::fprintf(stderr,
-                   "[plugin-view] auto_size mode=detached plugin=%dx%d reason=%s changed=%d\n",
-                   content_w, content_h, reason ? reason : "unknown", changed ? 1 : 0);
+                   "[plugin-view] auto_size mode=detached plugin=%dx%d "
+                   "reason=%s changed=%d\n",
+                   content_w, content_h, reason ? reason : "unknown",
+                   changed ? 1 : 0);
     }
     return changed;
   }
@@ -2744,44 +2914,39 @@ bool daux_embed_apply_content_size(SphereDauxVst3Processor* p,
   p->embed_resize_in_progress = true;
 
   // Main-owned bridge shell: parent is the shell content HWND — resize via IPC.
-  if (p->embed_mode && p->editor_parent_hwnd && IsWindow(p->editor_parent_hwnd) &&
-      !p->editor_hwnd) {
+  if (p->embed_mode && p->editor_parent_hwnd &&
+      IsWindow(p->editor_parent_hwnd) && !p->editor_hwnd) {
     p->pending_main_shell_w = content_w;
     p->pending_main_shell_h = content_h;
     p->pending_main_shell_resize.store(true, std::memory_order_release);
-  } else if (p->embed_mode && p->editor_parent_hwnd && IsWindow(p->editor_parent_hwnd)) {
+  } else if (p->embed_mode && p->editor_parent_hwnd &&
+             IsWindow(p->editor_parent_hwnd)) {
     RECT client{};
     GetClientRect(p->editor_parent_hwnd, &client);
     const int current_w = client.right - client.left;
     const int current_h = client.bottom - client.top;
     if (current_w != shell_client_w || current_h != shell_client_h) {
-      SetWindowPos(p->editor_parent_hwnd,
-                   nullptr,
-                   0,
-                   0,
-                   shell_client_w,
-                   shell_client_h,
-                   SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+      SetWindowPos(p->editor_parent_hwnd, nullptr, 0, 0, shell_client_w,
+                   shell_client_h, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
       changed = true;
     }
   } else if (p->editor_hwnd && IsWindow(p->editor_hwnd)) {
     RECT wr{0, 0, content_w, content_h};
-    const DWORD style = static_cast<DWORD>(GetWindowLongPtrW(p->editor_hwnd, GWL_STYLE));
-    const DWORD ex_style = static_cast<DWORD>(GetWindowLongPtrW(p->editor_hwnd, GWL_EXSTYLE));
-    if (!daux_adjust_window_rect_for_dpi(p->editor_hwnd, &wr, style, ex_style)) {
+    const DWORD style =
+        static_cast<DWORD>(GetWindowLongPtrW(p->editor_hwnd, GWL_STYLE));
+    const DWORD ex_style =
+        static_cast<DWORD>(GetWindowLongPtrW(p->editor_hwnd, GWL_EXSTYLE));
+    if (!daux_adjust_window_rect_for_dpi(p->editor_hwnd, &wr, style,
+                                         ex_style)) {
       AdjustWindowRectEx(&wr, style, FALSE, ex_style);
     }
     const int shell_w = wr.right - wr.left;
     const int shell_h = wr.bottom - wr.top;
     RECT win{};
     GetWindowRect(p->editor_hwnd, &win);
-    if ((win.right - win.left) != shell_w || (win.bottom - win.top) != shell_h) {
-      SetWindowPos(p->editor_hwnd,
-                   nullptr,
-                   0,
-                   0,
-                   shell_w,
-                   shell_h,
+    if ((win.right - win.left) != shell_w ||
+        (win.bottom - win.top) != shell_h) {
+      SetWindowPos(p->editor_hwnd, nullptr, 0, 0, shell_w, shell_h,
                    SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
       changed = true;
     }
@@ -2798,71 +2963,72 @@ bool daux_embed_apply_content_size(SphereDauxVst3Processor* p,
   p->embed_resize_in_progress = false;
 
   if (p->pending_main_shell_resize.load(std::memory_order_acquire)) {
-    const UINT dpi =
-        (p->editor_parent_hwnd && IsWindow(p->editor_parent_hwnd))
-            ? GetDpiForWindow(p->editor_parent_hwnd)
-            : 96;
-    std::fprintf(
-        stderr,
-        "[PluginEditor] resizeView requested instance=%s size=%dx%d dpi=%u reason=%s\n",
-        p->embed_instance_label.empty() ? "<unknown>" : p->embed_instance_label.c_str(),
-        content_w,
-        content_h,
-        dpi,
-        reason ? reason : "unknown");
+    const UINT dpi = (p->editor_parent_hwnd && IsWindow(p->editor_parent_hwnd))
+                         ? GetDpiForWindow(p->editor_parent_hwnd)
+                         : 96;
     std::fprintf(stderr,
-                 "[PluginEditor] container resized client=%dx%d\n",
-                 content_w,
-                 content_h);
+                 "[PluginEditor] resizeView requested instance=%s size=%dx%d "
+                 "dpi=%u reason=%s\n",
+                 p->embed_instance_label.empty()
+                     ? "<unknown>"
+                     : p->embed_instance_label.c_str(),
+                 content_w, content_h, dpi, reason ? reason : "unknown");
+    std::fprintf(stderr, "[PluginEditor] container resized client=%dx%d\n",
+                 content_w, content_h);
   }
 
   if (debug) {
     std::fprintf(stderr,
-                 "[plugin-view] auto_size plugin=%dx%d shell=%dx%d content=(0,%d,%d,%d) reason=%s changed=%d\n",
-                 content_w,
-                 content_h,
-                 shell_client_w,
-                 shell_client_h,
-                 header_h,
-                 content_w,
-                 content_h,
-                 reason ? reason : "unknown",
+                 "[plugin-view] auto_size plugin=%dx%d shell=%dx%d "
+                 "content=(0,%d,%d,%d) reason=%s changed=%d\n",
+                 content_w, content_h, shell_client_w, shell_client_h, header_h,
+                 content_w, content_h, reason ? reason : "unknown",
                  changed ? 1 : 0);
   }
   return changed;
 }
 
-bool daux_embed_has_visible_ui(SphereDauxVst3Processor* p) {
-  if (!p || !p->editor_attach_hwnd || !IsWindow(p->editor_attach_hwnd)) return false;
-  if (!IsWindowVisible(p->editor_attach_hwnd)) return false;
+bool daux_embed_has_visible_ui(SphereDauxVst3Processor *p) {
+  if (!p || !p->editor_attach_hwnd || !IsWindow(p->editor_attach_hwnd))
+    return false;
+  if (!IsWindowVisible(p->editor_attach_hwnd))
+    return false;
   RECT cr{};
   GetClientRect(p->editor_attach_hwnd, &cr);
-  if (cr.right - cr.left < 4 || cr.bottom - cr.top < 4) return false;
-  struct Ctx { int visible = 0; } ctx{};
+  if (cr.right - cr.left < 4 || cr.bottom - cr.top < 4)
+    return false;
+  struct Ctx {
+    int visible = 0;
+  } ctx{};
   EnumChildWindows(
       p->editor_attach_hwnd,
       [](HWND hwnd, LPARAM lp) -> BOOL {
-        if (!IsWindowVisible(hwnd)) return TRUE;
+        if (!IsWindowVisible(hwnd))
+          return TRUE;
         RECT r{};
         GetWindowRect(hwnd, &r);
-        if (r.right > r.left && r.bottom > r.top) reinterpret_cast<Ctx*>(lp)->visible++;
+        if (r.right > r.left && r.bottom > r.top)
+          reinterpret_cast<Ctx *>(lp)->visible++;
         return TRUE;
       },
       reinterpret_cast<LPARAM>(&ctx));
-  if (ctx.visible > 0) return true;
+  if (ctx.visible > 0)
+    return true;
   if (p->editor_view) {
     Steinberg::ViewRect sz{};
     const auto gs = p->editor_view->getSize(&sz);
     if (gs == Steinberg::kResultTrue || gs == Steinberg::kResultOk) {
-      if (sz.right - sz.left > 16 && sz.bottom - sz.top > 16) return true;
+      if (sz.right - sz.left > 16 && sz.bottom - sz.top > 16)
+        return true;
     }
   }
   return false;
 }
 
-void SphereDauxVst3Processor::close_embed_editor(const char* reason) {
+void SphereDauxVst3Processor::close_embed_editor(const char *reason) {
   detach_editor_view(this); // IPlugView::removed(); keeps controller/processor
-  if (editor_window.shell_hwnd && editor_window.shell_hwnd == editor_embed_top_hwnd) {
+  if (editor_window.shell_hwnd &&
+      editor_window.shell_hwnd == editor_embed_top_hwnd) {
     daux_editor_destroy_window(&editor_window);
   } else if (editor_attach_hwnd && IsWindow(editor_attach_hwnd)) {
     DestroyWindow(editor_attach_hwnd);
@@ -2884,13 +3050,15 @@ void SphereDauxVst3Processor::close_embed_editor(const char* reason) {
   embed_resize_in_progress = false;
   editor_handle = 0;
   daux_plugin_browser_runtime_release(this);
-  std::fprintf(stderr,
-               "[SphereVST3] close_embed_editor reason=%s (processor kept alive)\n",
-               reason ? reason : "unknown");
+  std::fprintf(
+      stderr,
+      "[SphereVST3] close_embed_editor reason=%s (processor kept alive)\n",
+      reason ? reason : "unknown");
 }
 #endif
 
-// ── C API ─────────────────────────────────────────────────────────────────────
+// ── C API
+// ─────────────────────────────────────────────────────────────────────
 
 extern "C" int sphere_daux_vst3_bridge_probe(void) {
   std::fprintf(stderr, "[DAUx VST3] bridge probe ok\n");
@@ -2898,14 +3066,13 @@ extern "C" int sphere_daux_vst3_bridge_probe(void) {
   return 0xDA03;
 }
 
-extern "C" const char* sphere_daux_vst3_last_error(void) {
+extern "C" const char *sphere_daux_vst3_last_error(void) {
   return g_last_error.c_str();
 }
 
-extern "C" SphereDauxVst3Processor* sphere_daux_vst3_create(
-    const char* plugin_path,
-    const char* class_id,
-    double      sample_rate) {
+extern "C" SphereDauxVst3Processor *
+sphere_daux_vst3_create(const char *plugin_path, const char *class_id,
+                        double sample_rate) {
   set_last_error("");
   if (!plugin_path || !*plugin_path) {
     set_last_error("empty plugin_path");
@@ -2917,8 +3084,7 @@ extern "C" SphereDauxVst3Processor* sphere_daux_vst3_create(
 #if defined(_WIN32)
   std::fprintf(stderr,
                "[process] role=plugin_host mode=in_process pid=%lu tid=%lu\n",
-               GetCurrentProcessId(),
-               GetCurrentThreadId());
+               GetCurrentProcessId(), GetCurrentThreadId());
 #endif
   std::fflush(stderr);
 
@@ -2940,14 +3106,17 @@ extern "C" SphereDauxVst3Processor* sphere_daux_vst3_create(
   {
     std::ostringstream classes;
     int index = 0;
-    for (const auto& info : factory.classInfos()) {
-      if (index > 0) classes << " | ";
+    for (const auto &info : factory.classInfos()) {
+      if (index > 0)
+        classes << " | ";
       classes << "[" << index << "] name='" << info.name() << "' category='"
               << info.category() << "' uid=" << info.ID().toString();
       ++index;
     }
-    if (index == 0) set_last_error("factory has no classes");
-    else set_last_error("factory classes: " + classes.str());
+    if (index == 0)
+      set_last_error("factory has no classes");
+    else
+      set_last_error("factory classes: " + classes.str());
   }
 
   const std::string requested = class_id ? class_id : "";
@@ -2955,31 +3124,41 @@ extern "C" SphereDauxVst3Processor* sphere_daux_vst3_create(
   if (!looks_like_zero_class_id(requested))
     uid = VST3::UID::fromString(requested);
   if (!uid) {
-    std::fprintf(stderr,
-                 "[DAUx VST3] classId missing/zero/invalid; trying first Audio Module Class fallback\n");
+    std::fprintf(stderr, "[DAUx VST3] classId missing/zero/invalid; trying "
+                         "first Audio Module Class fallback\n");
     uid = first_audio_module_uid(factory);
   }
   if (!uid) {
     set_last_error(g_last_error + "; no Audio Module Class found");
-    std::fprintf(stderr, "[DAUx VST3] no Audio Module Class found in factory\n");
+    std::fprintf(stderr,
+                 "[DAUx VST3] no Audio Module Class found in factory\n");
     return nullptr;
   }
 
-  instance->component = factory.createInstance<Steinberg::Vst::IComponent>(*uid);
+  instance->component =
+      factory.createInstance<Steinberg::Vst::IComponent>(*uid);
   if (!instance->component) {
     std::fprintf(stderr,
-                 "[DAUx VST3] create IComponent FAILED for classId=%s; trying first Audio Module Class fallback\n",
+                 "[DAUx VST3] create IComponent FAILED for classId=%s; trying "
+                 "first Audio Module Class fallback\n",
                  requested.c_str());
     uid = first_audio_module_uid(factory);
-    if (uid) instance->component = factory.createInstance<Steinberg::Vst::IComponent>(*uid);
+    if (uid)
+      instance->component =
+          factory.createInstance<Steinberg::Vst::IComponent>(*uid);
     if (!instance->component) {
-      set_last_error(g_last_error + "; create IComponent failed for requested classId='" + requested + "' and fallback");
-      std::fprintf(stderr, "[DAUx VST3] create IComponent FAILED after fallback\n");
+      set_last_error(g_last_error +
+                     "; create IComponent failed for requested classId='" +
+                     requested + "' and fallback");
+      std::fprintf(stderr,
+                   "[DAUx VST3] create IComponent FAILED after fallback\n");
       return nullptr;
     }
   }
-  std::fprintf(stderr, "[DAUx VST3] component created classId=%s\n", uid->toString().c_str());
-  if (auto pb = Steinberg::FUnknownPtr<Steinberg::IPluginBase>(instance->component)) {
+  std::fprintf(stderr, "[DAUx VST3] component created classId=%s\n",
+               uid->toString().c_str());
+  if (auto pb =
+          Steinberg::FUnknownPtr<Steinberg::IPluginBase>(instance->component)) {
     if (pb->initialize(&instance->host_context) != Steinberg::kResultOk) {
       set_last_error(g_last_error + "; component initialize failed");
       std::fprintf(stderr, "[DAUx VST3] component initialize FAILED\n");
@@ -2988,40 +3167,52 @@ extern "C" SphereDauxVst3Processor* sphere_daux_vst3_create(
     std::fprintf(stderr, "[SphereVST3] component initialized result=0 ok\n");
   } else {
     set_last_error(g_last_error + "; component does not implement IPluginBase");
-    std::fprintf(stderr, "[DAUx VST3] component does not implement IPluginBase\n");
+    std::fprintf(stderr,
+                 "[DAUx VST3] component does not implement IPluginBase\n");
     return nullptr;
   }
 
   if (instance->component->queryInterface(
           Steinberg::Vst::IAudioProcessor::iid,
-          reinterpret_cast<void**>(&instance->processor)) != Steinberg::kResultTrue ||
+          reinterpret_cast<void **>(&instance->processor)) !=
+          Steinberg::kResultTrue ||
       !instance->processor) {
-    set_last_error(g_last_error + "; component does not implement IAudioProcessor");
-    std::fprintf(stderr, "[DAUx VST3] component does not implement IAudioProcessor\n");
+    set_last_error(g_last_error +
+                   "; component does not implement IAudioProcessor");
+    std::fprintf(stderr,
+                 "[DAUx VST3] component does not implement IAudioProcessor\n");
     return nullptr;
   }
   std::fprintf(stderr, "[SphereVST3] processor found\n");
 
-  // Obtain IEditController (either from the component itself or a separate class)
-  Steinberg::Vst::IEditController* raw_ctrl = nullptr;
+  // Obtain IEditController (either from the component itself or a separate
+  // class)
+  Steinberg::Vst::IEditController *raw_ctrl = nullptr;
   if (instance->component->queryInterface(
           Steinberg::Vst::IEditController::iid,
-          reinterpret_cast<void**>(&raw_ctrl)) == Steinberg::kResultTrue) {
-    instance->controller = Steinberg::IPtr<Steinberg::Vst::IEditController>::adopt(raw_ctrl);
+          reinterpret_cast<void **>(&raw_ctrl)) == Steinberg::kResultTrue) {
+    instance->controller =
+        Steinberg::IPtr<Steinberg::Vst::IEditController>::adopt(raw_ctrl);
     instance->controller_is_component = true;
-    std::fprintf(stderr, "[SphereVST3] controller initialized result=0 ok component-owned\n");
+    std::fprintf(
+        stderr,
+        "[SphereVST3] controller initialized result=0 ok component-owned\n");
   } else {
     Steinberg::TUID ctrl_cid{};
-    if (instance->component->getControllerClassId(ctrl_cid) == Steinberg::kResultTrue) {
+    if (instance->component->getControllerClassId(ctrl_cid) ==
+        Steinberg::kResultTrue) {
       instance->controller =
-          factory.createInstance<Steinberg::Vst::IEditController>(VST3::UID(ctrl_cid));
+          factory.createInstance<Steinberg::Vst::IEditController>(
+              VST3::UID(ctrl_cid));
       if (instance->controller) {
-        if (auto pb = Steinberg::FUnknownPtr<Steinberg::IPluginBase>(instance->controller)) {
+        if (auto pb = Steinberg::FUnknownPtr<Steinberg::IPluginBase>(
+                instance->controller)) {
           if (pb->initialize(&instance->host_context) != Steinberg::kResultOk) {
             std::fprintf(stderr, "[DAUx VST3] controller initialize FAILED\n");
             instance->controller = nullptr;
           } else {
-            std::fprintf(stderr, "[SphereVST3] controller initialized result=0 ok\n");
+            std::fprintf(stderr,
+                         "[SphereVST3] controller initialized result=0 ok\n");
           }
         }
       }
@@ -3031,9 +3222,11 @@ extern "C" SphereDauxVst3Processor* sphere_daux_vst3_create(
   // Connect component ↔ controller
   if (instance->controller) {
     instance->component_connection =
-        Steinberg::FUnknownPtr<Steinberg::Vst::IConnectionPoint>(instance->component);
+        Steinberg::FUnknownPtr<Steinberg::Vst::IConnectionPoint>(
+            instance->component);
     instance->controller_connection =
-        Steinberg::FUnknownPtr<Steinberg::Vst::IConnectionPoint>(instance->controller);
+        Steinberg::FUnknownPtr<Steinberg::Vst::IConnectionPoint>(
+            instance->controller);
     if (instance->component_connection && instance->controller_connection) {
       instance->component_connection->connect(instance->controller_connection);
       instance->controller_connection->connect(instance->component_connection);
@@ -3051,15 +3244,15 @@ extern "C" SphereDauxVst3Processor* sphere_daux_vst3_create(
 
   set_last_error("");
   std::fprintf(stderr, "[DAUx VST3] processor ready: %s handle=0x%p\n",
-               plugin_path, static_cast<void*>(instance.get()));
+               plugin_path, static_cast<void *>(instance.get()));
   return instance.release();
 }
 
-extern "C" void sphere_daux_vst3_destroy(SphereDauxVst3Processor* processor) {
-  if (!processor) return;
-  std::fprintf(stderr,
-               "[SphereVST3] destroying processor handle=0x%p\n",
-               static_cast<void*>(processor));
+extern "C" void sphere_daux_vst3_destroy(SphereDauxVst3Processor *processor) {
+  if (!processor)
+    return;
+  std::fprintf(stderr, "[SphereVST3] destroying processor handle=0x%p\n",
+               static_cast<void *>(processor));
 #if defined(_WIN32)
   // Mark invalid BEFORE zeroing GWLP_USERDATA so the window proc can check
   // this flag even if it races between the zero and a pending message.
@@ -3076,17 +3269,18 @@ extern "C" void sphere_daux_vst3_destroy(SphereDauxVst3Processor* processor) {
   delete processor;
 }
 
-extern "C" int sphere_daux_vst3_process_stereo_sample(
-    SphereDauxVst3Processor* processor,
-    float in_l, float in_r,
-    float* out_l, float* out_r) {
-  if (!processor || !processor->processor || !out_l || !out_r) return 0;
+extern "C" int
+sphere_daux_vst3_process_stereo_sample(SphereDauxVst3Processor *processor,
+                                       float in_l, float in_r, float *out_l,
+                                       float *out_r) {
+  if (!processor || !processor->processor || !out_l || !out_r)
+    return 0;
 
   processor->prepare_process_io(nullptr, 0);
 
   // Fill input, clear output
-  processor->input_l  = in_l;
-  processor->input_r  = in_r;
+  processor->input_l = in_l;
+  processor->input_r = in_r;
   processor->output_l = 0.f;
   processor->output_r = 0.f;
   processor->input_bus.numChannels = 2;
@@ -3095,37 +3289,39 @@ extern "C" int sphere_daux_vst3_process_stereo_sample(
   processor->output_bus.channelBuffers32 = processor->output_channels;
   processor->output_bus.silenceFlags = 0;
   processor->process_data.numSamples = 1;
-  processor->process_data.numInputs = processor->audio_input_bus_count > 0 ? 1 : 0;
+  processor->process_data.numInputs =
+      processor->audio_input_bus_count > 0 ? 1 : 0;
   processor->process_data.inputs =
       processor->audio_input_bus_count > 0 ? &processor->input_bus : nullptr;
-  processor->process_data.numOutputs = processor->audio_output_bus_count > 0 ? 1 : 0;
+  processor->process_data.numOutputs =
+      processor->audio_output_bus_count > 0 ? 1 : 0;
   processor->process_data.outputs =
       processor->audio_output_bus_count > 0 ? &processor->output_bus : nullptr;
 
   const auto result = processor->processor->process(processor->process_data);
 
-  processor->last_input_peak = std::max(
-      std::abs(static_cast<double>(in_l)),
-      std::abs(static_cast<double>(in_r)));
-  processor->last_output_peak = std::max(
-      std::abs(static_cast<double>(processor->output_l)),
-      std::abs(static_cast<double>(processor->output_r)));
-  processor->last_difference_peak = std::max(
-      std::abs(static_cast<double>(processor->output_l - in_l)),
-      std::abs(static_cast<double>(processor->output_r - in_r)));
+  processor->last_input_peak = std::max(std::abs(static_cast<double>(in_l)),
+                                        std::abs(static_cast<double>(in_r)));
+  processor->last_output_peak =
+      std::max(std::abs(static_cast<double>(processor->output_l)),
+               std::abs(static_cast<double>(processor->output_r)));
+  processor->last_difference_peak =
+      std::max(std::abs(static_cast<double>(processor->output_l - in_l)),
+               std::abs(static_cast<double>(processor->output_r - in_r)));
 
   // First-process debug log (fires once, outside the hot path thereafter)
   if (!processor->first_process_done) {
     processor->first_process_done = true;
     std::fprintf(stderr,
-                 "[SphereVST3] first process %s inputPeakL=%.6f outputPeakL=%.6f diffPeak=%.6f\n",
+                 "[SphereVST3] first process %s inputPeakL=%.6f "
+                 "outputPeakL=%.6f diffPeak=%.6f\n",
                  result == Steinberg::kResultOk ? "ok" : "failed",
-                 processor->last_input_peak,
-                 processor->last_output_peak,
+                 processor->last_input_peak, processor->last_output_peak,
                  processor->last_difference_peak);
   }
 
-  if (result != Steinberg::kResultOk) return 0;
+  if (result != Steinberg::kResultOk)
+    return 0;
 
   processor->process_count += 1;
 
@@ -3134,53 +3330,50 @@ extern "C" int sphere_daux_vst3_process_stereo_sample(
   return 1;
 }
 
-extern "C" int sphere_daux_vst3_process_stereo_block(
-    SphereDauxVst3Processor* processor,
-    const float* in_l,
-    const float* in_r,
-    float* out_l,
-    float* out_r,
-    int frames) {
+extern "C" int
+sphere_daux_vst3_process_stereo_block(SphereDauxVst3Processor *processor,
+                                      const float *in_l, const float *in_r,
+                                      float *out_l, float *out_r, int frames) {
   return sphere_daux_vst3_process_stereo_block_with_midi(
       processor, in_l, in_r, out_l, out_r, frames, nullptr, 0);
 }
 
 extern "C" int sphere_daux_vst3_process_stereo_block_with_midi(
-    SphereDauxVst3Processor* processor,
-    const float* in_l,
-    const float* in_r,
-    float* out_l,
-    float* out_r,
-    int frames,
-    const SphereDauxVst3MidiEvent* events,
-    int event_count) {
-  if (!processor || !processor->processor || !in_l || !in_r || !out_l || !out_r || frames <= 0) {
+    SphereDauxVst3Processor *processor, const float *in_l, const float *in_r,
+    float *out_l, float *out_r, int frames,
+    const SphereDauxVst3MidiEvent *events, int event_count) {
+  if (!processor || !processor->processor || !in_l || !in_r || !out_l ||
+      !out_r || frames <= 0) {
     return 0;
   }
 
   processor->prepare_process_io(events, event_count);
 
-  float* input_channels[2] = {
-      const_cast<float*>(in_l),
-      const_cast<float*>(in_r),
+  float *input_channels[2] = {
+      const_cast<float *>(in_l),
+      const_cast<float *>(in_r),
   };
   processor->input_bus.numChannels = 2;
   processor->input_bus.channelBuffers32 = input_channels;
   processor->process_data.numSamples = frames;
-  processor->process_data.numInputs = processor->audio_input_bus_count > 0 ? 1 : 0;
+  processor->process_data.numInputs =
+      processor->audio_input_bus_count > 0 ? 1 : 0;
   processor->process_data.inputs =
       processor->audio_input_bus_count > 0 ? &processor->input_bus : nullptr;
 
-  static thread_local std::array<std::array<float, SphereDauxVst3Processor::kMaxProcessFrames>,
-                                 SphereDauxVst3Processor::kMaxBridgeChannels>
+  static thread_local std::array<
+      std::array<float, SphereDauxVst3Processor::kMaxProcessFrames>,
+      SphereDauxVst3Processor::kMaxBridgeChannels>
       planes{};
   static thread_local std::array<Steinberg::Vst::AudioBusBuffers,
                                  SphereDauxVst3Processor::kMaxBridgeBuses>
       output_buses{};
-  static thread_local std::array<std::array<float*, SphereDauxVst3Processor::kMaxBridgeChannels>,
-                                 SphereDauxVst3Processor::kMaxBridgeBuses>
+  static thread_local std::array<
+      std::array<float *, SphereDauxVst3Processor::kMaxBridgeChannels>,
+      SphereDauxVst3Processor::kMaxBridgeBuses>
       output_channel_ptrs{};
-  static thread_local std::array<float, SphereDauxVst3Processor::kMaxProcessFrames>
+  static thread_local std::array<float,
+                                 SphereDauxVst3Processor::kMaxProcessFrames>
       discard_plane{};
   const int n = std::min(frames, SphereDauxVst3Processor::kMaxProcessFrames);
   int flat_channel = 0;
@@ -3190,7 +3383,7 @@ extern "C" int sphere_daux_vst3_process_stereo_block_with_midi(
     output_buses[bus].numChannels = bus_channels;
     output_buses[bus].silenceFlags = 0;
     for (int ch = 0; ch < bus_channels; ++ch) {
-      float* plane = flat_channel < SphereDauxVst3Processor::kMaxBridgeChannels
+      float *plane = flat_channel < SphereDauxVst3Processor::kMaxBridgeChannels
                          ? planes[flat_channel].data()
                          : discard_plane.data();
       std::fill(plane, plane + n, 0.0f);
@@ -3204,16 +3397,14 @@ extern "C" int sphere_daux_vst3_process_stereo_block_with_midi(
   }
   processor->process_data.numSamples = n;
   processor->process_data.numOutputs = buses_used;
-  processor->process_data.outputs = buses_used > 0 ? output_buses.data() : nullptr;
+  processor->process_data.outputs =
+      buses_used > 0 ? output_buses.data() : nullptr;
 
   const auto result = processor->processor->process(processor->process_data);
 
   if (daux_vst3_midi_debug() && event_count > 0) {
-    std::fprintf(stderr,
-                 "[vst3-process] frames=%d midi_events=%d result=%d\n",
-                 frames,
-                 event_count,
-                 (int)result);
+    std::fprintf(stderr, "[vst3-process] frames=%d midi_events=%d result=%d\n",
+                 frames, event_count, (int)result);
   }
 
   double input_peak_l = 0.0;
@@ -3221,21 +3412,26 @@ extern "C" int sphere_daux_vst3_process_stereo_block_with_midi(
   double output_peak_l = 0.0;
   double output_peak_r = 0.0;
   double diff_peak = 0.0;
-  std::array<Vst3BusAudioStats, SphereDauxVst3Processor::kMaxBridgeBuses> bus_stats{};
+  std::array<Vst3BusAudioStats, SphereDauxVst3Processor::kMaxBridgeBuses>
+      bus_stats{};
   for (int bus = 0; bus < buses_used; ++bus) {
-    bus_stats[bus] = SphereDauxVst3Processor::compute_bus_stats(output_buses[bus], n);
+    bus_stats[bus] =
+        SphereDauxVst3Processor::compute_bus_stats(output_buses[bus], n);
   }
   for (int i = 0; i < frames; ++i) {
     if (i < n) {
       out_l[i] = 0.0f;
       out_r[i] = 0.0f;
     }
-    input_peak_l = std::max(input_peak_l, std::abs(static_cast<double>(in_l[i])));
-    input_peak_r = std::max(input_peak_r, std::abs(static_cast<double>(in_r[i])));
+    input_peak_l =
+        std::max(input_peak_l, std::abs(static_cast<double>(in_l[i])));
+    input_peak_r =
+        std::max(input_peak_r, std::abs(static_cast<double>(in_r[i])));
   }
   for (int bus = 0; bus < buses_used; ++bus) {
     const int bus_channels = output_buses[bus].numChannels;
-    if (bus_channels <= 0 || output_buses[bus].channelBuffers32 == nullptr) continue;
+    if (bus_channels <= 0 || output_buses[bus].channelBuffers32 == nullptr)
+      continue;
     for (int i = 0; i < n; ++i) {
       if (bus_channels == 1 && output_buses[bus].channelBuffers32[0]) {
         const float sample = output_buses[bus].channelBuffers32[0][i];
@@ -3243,8 +3439,9 @@ extern "C" int sphere_daux_vst3_process_stereo_block_with_midi(
         out_r[i] += sample;
       } else {
         for (int ch = 0; ch < bus_channels; ++ch) {
-          const float* src = output_buses[bus].channelBuffers32[ch];
-          if (!src) continue;
+          const float *src = output_buses[bus].channelBuffers32[ch];
+          if (!src)
+            continue;
           if ((ch & 1) == 0) {
             out_l[i] += src[i];
           } else {
@@ -3255,30 +3452,35 @@ extern "C" int sphere_daux_vst3_process_stereo_block_with_midi(
     }
   }
   for (int i = 0; i < n; ++i) {
-    output_peak_l = std::max(output_peak_l, std::abs(static_cast<double>(out_l[i])));
-    output_peak_r = std::max(output_peak_r, std::abs(static_cast<double>(out_r[i])));
-    diff_peak = std::max(diff_peak, std::abs(static_cast<double>(out_l[i] - in_l[i])));
-    diff_peak = std::max(diff_peak, std::abs(static_cast<double>(out_r[i] - in_r[i])));
+    output_peak_l =
+        std::max(output_peak_l, std::abs(static_cast<double>(out_l[i])));
+    output_peak_r =
+        std::max(output_peak_r, std::abs(static_cast<double>(out_r[i])));
+    diff_peak =
+        std::max(diff_peak, std::abs(static_cast<double>(out_l[i] - in_l[i])));
+    diff_peak =
+        std::max(diff_peak, std::abs(static_cast<double>(out_r[i] - in_r[i])));
   }
   processor->last_input_peak = std::max(input_peak_l, input_peak_r);
   processor->last_output_peak = std::max(output_peak_l, output_peak_r);
   processor->last_difference_peak = diff_peak;
-  processor->log_process_audio_out_once(n, buses_used, output_buses.data(), bus_stats.data());
+  processor->log_process_audio_out_once(n, buses_used, output_buses.data(),
+                                        bus_stats.data());
 
   if (!processor->first_process_done) {
     processor->first_process_done = true;
     std::fprintf(stderr,
-                 "[SphereVST3] first process %s frames=%d inputPeakL=%.6f outputPeakL=%.6f diffPeak=%.6f\n",
-                 result == Steinberg::kResultOk ? "ok" : "failed",
-                 frames,
-                 input_peak_l,
-                 output_peak_l,
-                 processor->last_difference_peak);
+                 "[SphereVST3] first process %s frames=%d inputPeakL=%.6f "
+                 "outputPeakL=%.6f diffPeak=%.6f\n",
+                 result == Steinberg::kResultOk ? "ok" : "failed", frames,
+                 input_peak_l, output_peak_l, processor->last_difference_peak);
   }
 
   processor->process_data.numSamples = 1;
-  processor->process_data.numInputs = processor->audio_input_bus_count > 0 ? 1 : 0;
-  processor->process_data.numOutputs = processor->output_bus_count_for_process();
+  processor->process_data.numInputs =
+      processor->audio_input_bus_count > 0 ? 1 : 0;
+  processor->process_data.numOutputs =
+      processor->output_bus_count_for_process();
   processor->process_data.inputEvents = nullptr;
   processor->input_bus.channelBuffers32 = processor->input_channels;
   processor->output_bus.channelBuffers32 = processor->output_channels;
@@ -3286,56 +3488,54 @@ extern "C" int sphere_daux_vst3_process_stereo_block_with_midi(
       processor->audio_input_bus_count > 0 ? &processor->input_bus : nullptr;
   processor->process_data.outputs = nullptr;
 
-  if (result != Steinberg::kResultOk) return 0;
+  if (result != Steinberg::kResultOk)
+    return 0;
   processor->process_count += 1;
   return 1;
 }
 
 extern "C" int sphere_daux_vst3_process_main_output_block_with_midi(
-    SphereDauxVst3Processor* processor,
-    const float* in_l,
-    const float* in_r,
-    float* out_interleaved,
-    int frames,
-    int output_channels,
-    const SphereDauxVst3MidiEvent* events,
-    int event_count) {
-  if (!processor || !processor->processor || !in_l || !in_r || !out_interleaved ||
-      frames <= 0 || output_channels <= 0) {
+    SphereDauxVst3Processor *processor, const float *in_l, const float *in_r,
+    float *out_interleaved, int frames, int output_channels,
+    const SphereDauxVst3MidiEvent *events, int event_count) {
+  if (!processor || !processor->processor || !in_l || !in_r ||
+      !out_interleaved || frames <= 0 || output_channels <= 0) {
     return 0;
   }
 
-  const int channels = std::max(
-      1,
-      std::min({output_channels,
-                processor->bridge_audio_output_channel_count > 0
-                    ? processor->bridge_audio_output_channel_count
-                    : 2,
-                SphereDauxVst3Processor::kMaxBridgeChannels}));
+  const int channels =
+      std::max(1, std::min({output_channels,
+                            processor->bridge_audio_output_channel_count > 0
+                                ? processor->bridge_audio_output_channel_count
+                                : 2,
+                            SphereDauxVst3Processor::kMaxBridgeChannels}));
 
   processor->prepare_process_io(events, event_count);
 
-  float* input_channels[2] = {
-      const_cast<float*>(in_l),
-      const_cast<float*>(in_r),
+  float *input_channels[2] = {
+      const_cast<float *>(in_l),
+      const_cast<float *>(in_r),
   };
   processor->input_bus.numChannels = 2;
   processor->input_bus.channelBuffers32 = input_channels;
   processor->process_data.numSamples = frames;
-  processor->process_data.numInputs = processor->audio_input_bus_count > 0 ? 1 : 0;
+  processor->process_data.numInputs =
+      processor->audio_input_bus_count > 0 ? 1 : 0;
   processor->process_data.inputs =
       processor->audio_input_bus_count > 0 ? &processor->input_bus : nullptr;
 
   // VST3 wants per-channel contiguous buffers. The bridge wire format is
   // interleaved, so process into fixed stack channel planes, then interleave.
-  static thread_local std::array<std::array<float, SphereDauxVst3Processor::kMaxProcessFrames>,
-                                 SphereDauxVst3Processor::kMaxBridgeChannels>
+  static thread_local std::array<
+      std::array<float, SphereDauxVst3Processor::kMaxProcessFrames>,
+      SphereDauxVst3Processor::kMaxBridgeChannels>
       planes{};
   static thread_local std::array<Steinberg::Vst::AudioBusBuffers,
                                  SphereDauxVst3Processor::kMaxBridgeBuses>
       output_buses{};
-  static thread_local std::array<std::array<float*, SphereDauxVst3Processor::kMaxBridgeChannels>,
-                                 SphereDauxVst3Processor::kMaxBridgeBuses>
+  static thread_local std::array<
+      std::array<float *, SphereDauxVst3Processor::kMaxBridgeChannels>,
+      SphereDauxVst3Processor::kMaxBridgeBuses>
       output_channel_ptrs{};
   // Channels past the read window still need valid buffers: a spec-conformant
   // instrument may render silence on every bus when `numOutputs` is short of
@@ -3343,9 +3543,11 @@ extern "C" int sphere_daux_vst3_process_main_output_block_with_midi(
   // planes for the first `kMaxBridgeChannels` flat channels we downmix, and a
   // shared throwaway plane (write-only, discarded) for the rest. Set
   // `numOutputs` to the full active-bus count.
-  static thread_local std::array<float, SphereDauxVst3Processor::kMaxProcessFrames> discard_plane{};
+  static thread_local std::array<float,
+                                 SphereDauxVst3Processor::kMaxProcessFrames>
+      discard_plane{};
   const int n = std::min(frames, SphereDauxVst3Processor::kMaxProcessFrames);
-  int read_channels = 0;  // channels captured in `planes` (what we downmix)
+  int read_channels = 0; // channels captured in `planes` (what we downmix)
   const int output_buses_available = processor->output_bus_count_for_process();
   for (int bus = 0; bus < output_buses_available; ++bus) {
     const int bus_channels = processor->output_bus_channels_for_process(bus);
@@ -3354,7 +3556,8 @@ extern "C" int sphere_daux_vst3_process_main_output_block_with_midi(
     for (int ch = 0; ch < bus_channels; ++ch) {
       if (read_channels < SphereDauxVst3Processor::kMaxBridgeChannels) {
         output_channel_ptrs[bus][ch] = planes[read_channels].data();
-        std::fill(planes[read_channels].begin(), planes[read_channels].begin() + n, 0.0f);
+        std::fill(planes[read_channels].begin(),
+                  planes[read_channels].begin() + n, 0.0f);
         ++read_channels;
       } else {
         output_channel_ptrs[bus][ch] = discard_plane.data();
@@ -3368,7 +3571,8 @@ extern "C" int sphere_daux_vst3_process_main_output_block_with_midi(
   const int produced_channels = std::max(1, read_channels);
   processor->process_data.numSamples = n;
   processor->process_data.numOutputs = buses_used > 0 ? buses_used : 0;
-  processor->process_data.outputs = buses_used > 0 ? output_buses.data() : nullptr;
+  processor->process_data.outputs =
+      buses_used > 0 ? output_buses.data() : nullptr;
 
   const auto result = processor->processor->process(processor->process_data);
 
@@ -3376,41 +3580,52 @@ extern "C" int sphere_daux_vst3_process_main_output_block_with_midi(
   double input_peak_r = 0.0;
   double output_peak = 0.0;
   double diff_peak = 0.0;
-  std::array<Vst3BusAudioStats, SphereDauxVst3Processor::kMaxBridgeBuses> bus_stats{};
+  std::array<Vst3BusAudioStats, SphereDauxVst3Processor::kMaxBridgeBuses>
+      bus_stats{};
   for (int bus = 0; bus < buses_used; ++bus) {
-    bus_stats[bus] = SphereDauxVst3Processor::compute_bus_stats(output_buses[bus], n);
+    bus_stats[bus] =
+        SphereDauxVst3Processor::compute_bus_stats(output_buses[bus], n);
   }
   for (int i = 0; i < n; ++i) {
-    input_peak_l = std::max(input_peak_l, std::abs(static_cast<double>(in_l[i])));
-    input_peak_r = std::max(input_peak_r, std::abs(static_cast<double>(in_r[i])));
+    input_peak_l =
+        std::max(input_peak_l, std::abs(static_cast<double>(in_l[i])));
+    input_peak_r =
+        std::max(input_peak_r, std::abs(static_cast<double>(in_r[i])));
     for (int ch = 0; ch < std::min(produced_channels, channels); ++ch) {
       const float sample = planes[ch][i];
       out_interleaved[i * channels + ch] = sample;
-      output_peak = std::max(output_peak, std::abs(static_cast<double>(sample)));
-      if (ch == 0) diff_peak = std::max(diff_peak, std::abs(static_cast<double>(sample - in_l[i])));
-      if (ch == 1) diff_peak = std::max(diff_peak, std::abs(static_cast<double>(sample - in_r[i])));
+      output_peak =
+          std::max(output_peak, std::abs(static_cast<double>(sample)));
+      if (ch == 0)
+        diff_peak = std::max(diff_peak,
+                             std::abs(static_cast<double>(sample - in_l[i])));
+      if (ch == 1)
+        diff_peak = std::max(diff_peak,
+                             std::abs(static_cast<double>(sample - in_r[i])));
     }
   }
 
   processor->last_input_peak = std::max(input_peak_l, input_peak_r);
   processor->last_output_peak = output_peak;
   processor->last_difference_peak = diff_peak;
-  processor->log_process_audio_out_once(n, buses_used, output_buses.data(), bus_stats.data());
+  processor->log_process_audio_out_once(n, buses_used, output_buses.data(),
+                                        bus_stats.data());
 
   if (!processor->first_process_done) {
     processor->first_process_done = true;
     std::fprintf(stderr,
-                 "[SphereVST3] first process %s frames=%d channels=%d outputPeak=%.6f diffPeak=%.6f\n",
-                 result == Steinberg::kResultOk ? "ok" : "failed",
-                 n,
-                 produced_channels,
-                 processor->last_output_peak,
+                 "[SphereVST3] first process %s frames=%d channels=%d "
+                 "outputPeak=%.6f diffPeak=%.6f\n",
+                 result == Steinberg::kResultOk ? "ok" : "failed", n,
+                 produced_channels, processor->last_output_peak,
                  processor->last_difference_peak);
   }
 
   processor->process_data.numSamples = 1;
-  processor->process_data.numInputs = processor->audio_input_bus_count > 0 ? 1 : 0;
-  processor->process_data.numOutputs = processor->output_bus_count_for_process();
+  processor->process_data.numInputs =
+      processor->audio_input_bus_count > 0 ? 1 : 0;
+  processor->process_data.numOutputs =
+      processor->output_bus_count_for_process();
   processor->process_data.inputEvents = nullptr;
   processor->input_bus.channelBuffers32 = processor->input_channels;
   processor->output_bus.numChannels = 2;
@@ -3419,38 +3634,44 @@ extern "C" int sphere_daux_vst3_process_main_output_block_with_midi(
       processor->audio_input_bus_count > 0 ? &processor->input_bus : nullptr;
   processor->process_data.outputs = nullptr;
 
-  if (result != Steinberg::kResultOk) return 0;
+  if (result != Steinberg::kResultOk)
+    return 0;
   processor->process_count += 1;
   return produced_channels;
 }
 
-extern "C" int sphere_daux_vst3_event_input_bus_count(
-    SphereDauxVst3Processor* processor) {
-  if (!processor) return 0;
+extern "C" int
+sphere_daux_vst3_event_input_bus_count(SphereDauxVst3Processor *processor) {
+  if (!processor)
+    return 0;
   return processor->event_input_bus_count;
 }
 
-extern "C" int sphere_daux_vst3_audio_input_bus_count(
-    SphereDauxVst3Processor* processor) {
-  if (!processor) return 0;
+extern "C" int
+sphere_daux_vst3_audio_input_bus_count(SphereDauxVst3Processor *processor) {
+  if (!processor)
+    return 0;
   return processor->audio_input_bus_count;
 }
 
-extern "C" int sphere_daux_vst3_audio_output_bus_count(
-    SphereDauxVst3Processor* processor) {
-  if (!processor) return 0;
+extern "C" int
+sphere_daux_vst3_audio_output_bus_count(SphereDauxVst3Processor *processor) {
+  if (!processor)
+    return 0;
   return processor->audio_output_bus_count;
 }
 
 extern "C" int sphere_daux_vst3_main_audio_input_channel_count(
-    SphereDauxVst3Processor* processor) {
-  if (!processor) return 0;
+    SphereDauxVst3Processor *processor) {
+  if (!processor)
+    return 0;
   return processor->main_audio_input_channel_count;
 }
 
 extern "C" int sphere_daux_vst3_main_audio_output_channel_count(
-    SphereDauxVst3Processor* processor) {
-  if (!processor) return 0;
+    SphereDauxVst3Processor *processor) {
+  if (!processor)
+    return 0;
   return processor->bridge_audio_output_channel_count;
 }
 
@@ -3461,9 +3682,11 @@ extern "C" int sphere_daux_vst3_main_audio_output_channel_count(
 /// (one mixer strip per bus) instead of assuming every channel pair is a stereo
 /// bus — a mono bus must become its own stereo strip, never paired with the
 /// next bus.
-extern "C" int sphere_daux_vst3_output_bus_channel_counts(
-    SphereDauxVst3Processor* processor, int* out_counts, int max_count) {
-  if (!processor || !out_counts || max_count <= 0) return 0;
+extern "C" int
+sphere_daux_vst3_output_bus_channel_counts(SphereDauxVst3Processor *processor,
+                                           int *out_counts, int max_count) {
+  if (!processor || !out_counts || max_count <= 0)
+    return 0;
   const int buses = processor->output_bus_count_for_process();
   const int n = std::min(buses, max_count);
   for (int i = 0; i < n; ++i) {
@@ -3474,14 +3697,13 @@ extern "C" int sphere_daux_vst3_output_bus_channel_counts(
 
 /// Enqueue a normalized parameter change for delivery on the next process call.
 /// Safe to call from any thread (audio thread or UI thread).
-extern "C" void sphere_daux_vst3_set_param(
-    SphereDauxVst3Processor* processor,
-    unsigned int             param_id,
-    double                   value) {
-  if (!processor) return;
-  processor->enqueue_param(
-      static_cast<Steinberg::Vst::ParamID>(param_id),
-      static_cast<Steinberg::Vst::ParamValue>(value));
+extern "C" void sphere_daux_vst3_set_param(SphereDauxVst3Processor *processor,
+                                           unsigned int param_id,
+                                           double value) {
+  if (!processor)
+    return;
+  processor->enqueue_param(static_cast<Steinberg::Vst::ParamID>(param_id),
+                           static_cast<Steinberg::Vst::ParamValue>(value));
 }
 
 /// Update the transport ProcessContext delivered to the plugin on the next
@@ -3495,46 +3717,45 @@ extern "C" void sphere_daux_vst3_set_param(
 /// 0/1. `ppq` is the project quarter-note position; `bar_ppq` the quarter-note
 /// position of the current bar start.
 extern "C" void sphere_daux_vst3_set_process_context(
-    SphereDauxVst3Processor* processor,
-    double                   tempo,
-    int                      time_sig_num,
-    int                      time_sig_den,
-    long long                project_time_samples,
-    double                   ppq,
-    double                   bar_ppq,
-    int                      playing,
-    int                      recording) {
-  if (!processor) return;
-  auto& ctx = processor->process_context;
-  ctx.tempo              = tempo > 0.0 ? tempo : 120.0;
-  ctx.timeSigNumerator   = time_sig_num > 0 ? time_sig_num : 4;
+    SphereDauxVst3Processor *processor, double tempo, int time_sig_num,
+    int time_sig_den, long long project_time_samples, double ppq,
+    double bar_ppq, int playing, int recording) {
+  if (!processor)
+    return;
+  auto &ctx = processor->process_context;
+  ctx.tempo = tempo > 0.0 ? tempo : 120.0;
+  ctx.timeSigNumerator = time_sig_num > 0 ? time_sig_num : 4;
   ctx.timeSigDenominator = time_sig_den > 0 ? time_sig_den : 4;
-  ctx.projectTimeSamples = static_cast<Steinberg::Vst::TSamples>(project_time_samples);
-  ctx.continousTimeSamples = static_cast<Steinberg::Vst::TSamples>(project_time_samples);
-  ctx.projectTimeMusic   = static_cast<Steinberg::Vst::TQuarterNotes>(ppq);
-  ctx.barPositionMusic   = static_cast<Steinberg::Vst::TQuarterNotes>(bar_ppq);
+  ctx.projectTimeSamples =
+      static_cast<Steinberg::Vst::TSamples>(project_time_samples);
+  ctx.continousTimeSamples =
+      static_cast<Steinberg::Vst::TSamples>(project_time_samples);
+  ctx.projectTimeMusic = static_cast<Steinberg::Vst::TQuarterNotes>(ppq);
+  ctx.barPositionMusic = static_cast<Steinberg::Vst::TQuarterNotes>(bar_ppq);
   Steinberg::uint32 state =
-      Steinberg::Vst::ProcessContext::kTempoValid            |
-      Steinberg::Vst::ProcessContext::kTimeSigValid          |
+      Steinberg::Vst::ProcessContext::kTempoValid |
+      Steinberg::Vst::ProcessContext::kTimeSigValid |
       Steinberg::Vst::ProcessContext::kProjectTimeMusicValid |
-      Steinberg::Vst::ProcessContext::kBarPositionValid      |
+      Steinberg::Vst::ProcessContext::kBarPositionValid |
       Steinberg::Vst::ProcessContext::kContTimeValid;
-  if (playing)   state |= Steinberg::Vst::ProcessContext::kPlaying;
-  if (recording) state |= Steinberg::Vst::ProcessContext::kRecording;
+  if (playing)
+    state |= Steinberg::Vst::ProcessContext::kPlaying;
+  if (recording)
+    state |= Steinberg::Vst::ProcessContext::kRecording;
   ctx.state = state;
 }
 
-extern "C" unsigned long long sphere_daux_vst3_open_editor(
-    SphereDauxVst3Processor* processor,
-    const char*              window_id,
-    const char*              title,
-    int                      width,
-    int                      height) {
+extern "C" unsigned long long
+sphere_daux_vst3_open_editor(SphereDauxVst3Processor *processor,
+                             const char *window_id, const char *title,
+                             int width, int height) {
   if (!processor || !processor->controller) {
     std::fprintf(stderr,
-                 "[SphereVST3] editor open failed processor=%p controller=%p exists=%d\n",
-                 static_cast<void*>(processor),
-                 processor ? static_cast<void*>(processor->controller.get()) : nullptr,
+                 "[SphereVST3] editor open failed processor=%p controller=%p "
+                 "exists=%d\n",
+                 static_cast<void *>(processor),
+                 processor ? static_cast<void *>(processor->controller.get())
+                           : nullptr,
                  processor && processor->controller ? 1 : 0);
     return 0;
   }
@@ -3554,71 +3775,71 @@ extern "C" unsigned long long sphere_daux_vst3_open_editor(
     ShowWindow(processor->editor_hwnd, SW_SHOWNORMAL);
     UpdateWindow(processor->editor_hwnd);
     SetForegroundWindow(processor->editor_hwnd);
-    if (processor->editor_attach_hwnd) SetFocus(processor->editor_attach_hwnd);
+    if (processor->editor_attach_hwnd)
+      SetFocus(processor->editor_attach_hwnd);
     std::fprintf(stderr,
-                 "[SphereVST3] editor already open; focused existing shell handle=%llu windowId=%s\n",
-                 processor->editor_handle,
-                 processor->editor_window_id.c_str());
+                 "[SphereVST3] editor already open; focused existing shell "
+                 "handle=%llu windowId=%s\n",
+                 processor->editor_handle, processor->editor_window_id.c_str());
     return processor->editor_handle;
 
-    // Parent shell still alive (was hidden after user-close or programmatic-close).
-    // Always create a FRESH child HWND + fresh IPlugView — never reuse the stale
-    // child HWND.  After IPlugView::removed() the child HWND has no vendor content;
-    // re-attaching to it yields a white/blank window (the root cause).
-    std::fprintf(stderr,
-                 "[SphereVST3] editor reopen: creating fresh child HWND + IPlugView "
-                 "handle=%llu windowId=%s\n",
-                 processor->editor_handle,
-                 processor->editor_window_id.c_str());
+    // Parent shell still alive (was hidden after user-close or
+    // programmatic-close). Always create a FRESH child HWND + fresh IPlugView —
+    // never reuse the stale child HWND.  After IPlugView::removed() the child
+    // HWND has no vendor content; re-attaching to it yields a white/blank
+    // window (the root cause).
+    std::fprintf(
+        stderr,
+        "[SphereVST3] editor reopen: creating fresh child HWND + IPlugView "
+        "handle=%llu windowId=%s\n",
+        processor->editor_handle, processor->editor_window_id.c_str());
 
     // Measure the current client area of the parent shell to match size.
     RECT rc{};
     GetClientRect(processor->editor_hwnd, &rc);
-    const int w = (rc.right - rc.left > 0) ? (rc.right - rc.left) : (width > 0 ? width : 820);
-    const int h = (rc.bottom - rc.top > 0) ? (rc.bottom - rc.top) : (height > 0 ? height : 560);
+    const int w = (rc.right - rc.left > 0) ? (rc.right - rc.left)
+                                           : (width > 0 ? width : 820);
+    const int h = (rc.bottom - rc.top > 0) ? (rc.bottom - rc.top)
+                                           : (height > 0 ? height : 560);
 
     // Create fresh child attach HWND.
     HWND child = CreateWindowExW(
-        0,
-        kDauxEditorContentClass,
-        L"",
-        WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | WS_CLIPCHILDREN,
-        0, 0, w, h,
-        processor->editor_hwnd,
-        nullptr,
-        GetModuleHandleW(nullptr),
-        nullptr);
+        0, kDauxEditorContentClass, L"",
+        WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | WS_CLIPCHILDREN, 0, 0, w, h,
+        processor->editor_hwnd, nullptr, GetModuleHandleW(nullptr), nullptr);
     if (!child) {
       std::fprintf(stderr,
-                   "[SphereVST3] editor reopen: CreateWindowExW child FAILED handle=%llu\n",
+                   "[SphereVST3] editor reopen: CreateWindowExW child FAILED "
+                   "handle=%llu\n",
                    processor->editor_handle);
       return 0;
     }
-    std::fprintf(stderr,
-                 "[SphereVST3] editor reopen: fresh child HWND=0x%p handle=%llu\n",
-                 static_cast<void*>(child), processor->editor_handle);
+    std::fprintf(
+        stderr,
+        "[SphereVST3] editor reopen: fresh child HWND=0x%p handle=%llu\n",
+        static_cast<void *>(child), processor->editor_handle);
     processor->editor_attach_hwnd = child;
 
     // Create fresh IPlugView.
     processor->editor_view = Steinberg::IPtr<Steinberg::IPlugView>::adopt(
         processor->controller->createView(Steinberg::Vst::ViewType::kEditor));
-    std::fprintf(stderr,
-                 "[SphereVST3] editor reopen: createView %s handle=%llu\n",
-                 processor->editor_view ? "ok" : "FAILED",
-                 processor->editor_handle);
+    std::fprintf(
+        stderr, "[SphereVST3] editor reopen: createView %s handle=%llu\n",
+        processor->editor_view ? "ok" : "FAILED", processor->editor_handle);
     if (!processor->editor_view) {
       DestroyWindow(child);
       processor->editor_attach_hwnd = nullptr;
       return 0;
     }
-    if (processor->editor_view->isPlatformTypeSupported(Steinberg::kPlatformTypeHWND) !=
-        Steinberg::kResultTrue) {
+    if (processor->editor_view->isPlatformTypeSupported(
+            Steinberg::kPlatformTypeHWND) != Steinberg::kResultTrue) {
       processor->editor_view = nullptr;
       DestroyWindow(child);
       processor->editor_attach_hwnd = nullptr;
-      std::fprintf(stderr,
-                   "[SphereVST3] editor reopen: HWND not supported handle=%llu\n",
-                   processor->editor_handle);
+      std::fprintf(
+          stderr,
+          "[SphereVST3] editor reopen: HWND not supported handle=%llu\n",
+          processor->editor_handle);
       return 0;
     }
 
@@ -3627,11 +3848,13 @@ extern "C" unsigned long long sphere_daux_vst3_open_editor(
 
     // Attach to fresh child HWND.
     const auto attach_res = processor->editor_view->attached(
-        reinterpret_cast<void*>(child), Steinberg::kPlatformTypeHWND);
+        reinterpret_cast<void *>(child), Steinberg::kPlatformTypeHWND);
     std::fprintf(stderr,
-                 "[SphereVST3] editor reopen: IPlugView::attached() result=%d handle=%llu\n",
+                 "[SphereVST3] editor reopen: IPlugView::attached() result=%d "
+                 "handle=%llu\n",
                  (int)attach_res, processor->editor_handle);
-    if (attach_res != Steinberg::kResultTrue && attach_res != Steinberg::kResultOk) {
+    if (attach_res != Steinberg::kResultTrue &&
+        attach_res != Steinberg::kResultOk) {
       daux_editor_clear_frame(processor);
       processor->editor_view = nullptr;
       DestroyWindow(child);
@@ -3658,8 +3881,8 @@ extern "C" unsigned long long sphere_daux_vst3_open_editor(
                  "[SphereVST3] editor reopen: complete handle=%llu "
                  "mainHWND=0x%p attachHWND=0x%p\n",
                  processor->editor_handle,
-                 static_cast<void*>(processor->editor_hwnd),
-                 static_cast<void*>(child));
+                 static_cast<void *>(processor->editor_hwnd),
+                 static_cast<void *>(child));
     return processor->editor_handle;
   }
 
@@ -3673,14 +3896,14 @@ extern "C" unsigned long long sphere_daux_vst3_open_editor(
   processor->editor_requested_height = height;
   const std::string plugin_instance_id = processor->editor_window_id;
   const auto identity_colon = plugin_instance_id.find_last_of(':');
-  const char* identity =
-      identity_colon == std::string::npos ? plugin_instance_id.c_str()
-                                          : plugin_instance_id.c_str() + identity_colon + 1;
+  const char *identity = identity_colon == std::string::npos
+                             ? plugin_instance_id.c_str()
+                             : plugin_instance_id.c_str() + identity_colon + 1;
   std::fprintf(stderr,
-               "[SphereVST3] editor open request pluginInstanceId=%s windowId=%s controller=%p exists=%d\n",
-               identity,
-               processor->editor_window_id.c_str(),
-               static_cast<void*>(processor->controller.get()),
+               "[SphereVST3] editor open request pluginInstanceId=%s "
+               "windowId=%s controller=%p exists=%d\n",
+               identity, processor->editor_window_id.c_str(),
+               static_cast<void *>(processor->controller.get()),
                processor->controller ? 1 : 0);
 
   if (!daux_plugin_browser_runtime_prepare(processor)) {
@@ -3691,21 +3914,22 @@ extern "C" unsigned long long sphere_daux_vst3_open_editor(
       processor->controller->createView(Steinberg::Vst::ViewType::kEditor));
   std::fprintf(stderr, "[PluginEditor] create view ok\n");
   std::fprintf(stderr,
-               "[SphereVST3] IPlugView createView pluginInstanceId=%s ptr=%p exists=%d\n",
-               identity,
-               static_cast<void*>(processor->editor_view.get()),
+               "[SphereVST3] IPlugView createView pluginInstanceId=%s ptr=%p "
+               "exists=%d\n",
+               identity, static_cast<void *>(processor->editor_view.get()),
                processor->editor_view ? 1 : 0);
   if (!processor->editor_view) {
     daux_plugin_browser_runtime_release(processor);
     if (daux_plugin_is_browser_based(processor->plugin_path)) {
-      set_last_error("Browser/WebView-based plugin editor createView failed (controller returned null view)");
+      set_last_error("Browser/WebView-based plugin editor createView failed "
+                     "(controller returned null view)");
     } else {
       set_last_error("controller did not create editor view");
     }
     return 0;
   }
-  if (processor->editor_view->isPlatformTypeSupported(Steinberg::kPlatformTypeHWND) !=
-      Steinberg::kResultTrue) {
+  if (processor->editor_view->isPlatformTypeSupported(
+          Steinberg::kPlatformTypeHWND) != Steinberg::kResultTrue) {
     processor->editor_view = nullptr;
     set_last_error("editor view does not support HWND");
     return 0;
@@ -3716,52 +3940,37 @@ extern "C" unsigned long long sphere_daux_vst3_open_editor(
   int editor_height = height > 0 ? height : 560;
   const auto get_size_result = processor->editor_view->getSize(&preferred);
   std::fprintf(stderr,
-               "[SphereVST3] IPlugView::getSize() result=%d rect=%d,%d,%d,%d pluginInstanceId=%s\n",
-               (int)get_size_result,
-               (int)preferred.left,
-               (int)preferred.top,
-               (int)preferred.right,
-               (int)preferred.bottom,
-               identity);
+               "[SphereVST3] IPlugView::getSize() result=%d rect=%d,%d,%d,%d "
+               "pluginInstanceId=%s\n",
+               (int)get_size_result, (int)preferred.left, (int)preferred.top,
+               (int)preferred.right, (int)preferred.bottom, identity);
   if (get_size_result == Steinberg::kResultTrue) {
     const int preferred_width = preferred.right - preferred.left;
     const int preferred_height = preferred.bottom - preferred.top;
-    if (preferred_width > 0) editor_width = preferred_width;
-    if (preferred_height > 0) editor_height = preferred_height;
+    if (preferred_width > 0)
+      editor_width = preferred_width;
+    if (preferred_height > 0)
+      editor_height = preferred_height;
   }
-  std::fprintf(stderr,
-               "[PluginEditor] getSize rect=%d,%d,%d,%d\n",
-               (int)preferred.left,
-               (int)preferred.top,
-               (int)preferred.right,
+  std::fprintf(stderr, "[PluginEditor] getSize rect=%d,%d,%d,%d\n",
+               (int)preferred.left, (int)preferred.top, (int)preferred.right,
                (int)preferred.bottom);
-  std::fprintf(stderr,
-               "[PluginEditor] view_get_size=%dx%d client_size=%dx%d\n",
-               editor_width,
-               editor_height,
-               editor_width,
-               editor_height);
+  std::fprintf(stderr, "[PluginEditor] view_get_size=%dx%d client_size=%dx%d\n",
+               editor_width, editor_height, editor_width, editor_height);
 
   RECT rect{0, 0, editor_width, editor_height};
   const DWORD outer_style = WS_OVERLAPPEDWINDOW;
   const DWORD outer_ex_style = WS_EX_TOPMOST;
-  if (!AdjustWindowRectExForDpi(&rect, outer_style, FALSE, outer_ex_style, 96)) {
+  if (!AdjustWindowRectExForDpi(&rect, outer_style, FALSE, outer_ex_style,
+                                96)) {
     AdjustWindowRectEx(&rect, outer_style, FALSE, outer_ex_style);
   }
   const auto wide_title = widen_utf8(title && *title ? title : "Plugin Editor");
-  HWND hwnd = CreateWindowExW(
-      WS_EX_TOPMOST,
-      kDauxEditorWindowClass,
-      wide_title.c_str(),
-      WS_OVERLAPPEDWINDOW,
-      CW_USEDEFAULT,
-      CW_USEDEFAULT,
-      rect.right - rect.left,
-      rect.bottom - rect.top,
-      nullptr,
-      nullptr,
-      GetModuleHandleW(nullptr),
-      processor);
+  HWND hwnd =
+      CreateWindowExW(WS_EX_TOPMOST, kDauxEditorWindowClass, wide_title.c_str(),
+                      WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT,
+                      rect.right - rect.left, rect.bottom - rect.top, nullptr,
+                      nullptr, GetModuleHandleW(nullptr), processor);
   if (!hwnd) {
     processor->editor_view = nullptr;
     set_last_error("CreateWindowExW failed for DAUx VST3 editor");
@@ -3771,40 +3980,23 @@ extern "C" unsigned long long sphere_daux_vst3_open_editor(
   const UINT dpi = daux_hwnd_dpi(hwnd);
   daux_log_editor_dpi(hwnd, "created top");
   RECT outer_rect{0, 0, editor_width, editor_height};
-  if (!AdjustWindowRectExForDpi(&outer_rect, outer_style, FALSE, outer_ex_style, dpi)) {
+  if (!AdjustWindowRectExForDpi(&outer_rect, outer_style, FALSE, outer_ex_style,
+                                dpi)) {
     AdjustWindowRectEx(&outer_rect, outer_style, FALSE, outer_ex_style);
   }
   const int outer_w = outer_rect.right - outer_rect.left;
   const int outer_h = outer_rect.bottom - outer_rect.top;
-  std::fprintf(stderr,
-               "[PluginEditor] created top hwnd=0x%p dpi=%u\n",
-               static_cast<void*>(hwnd),
-               dpi);
-  std::fprintf(stderr,
-               "[PluginEditor] outer_size=%dx%d\n",
-               outer_w,
-               outer_h);
-  SetWindowPos(hwnd,
-               HWND_TOPMOST,
-               0,
-               0,
-               outer_w,
-               outer_h,
+  std::fprintf(stderr, "[PluginEditor] created top hwnd=0x%p dpi=%u\n",
+               static_cast<void *>(hwnd), dpi);
+  std::fprintf(stderr, "[PluginEditor] outer_size=%dx%d\n", outer_w, outer_h);
+  SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, outer_w, outer_h,
                SWP_NOMOVE | SWP_NOACTIVATE);
 
-  HWND child = CreateWindowExW(
-      0,
-      kDauxEditorContentClass,
-      L"",
-      WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | WS_CLIPCHILDREN,
-      0,
-      0,
-      editor_width,
-      editor_height,
-      hwnd,
-      nullptr,
-      GetModuleHandleW(nullptr),
-      nullptr);
+  HWND child =
+      CreateWindowExW(0, kDauxEditorContentClass, L"",
+                      WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | WS_CLIPCHILDREN,
+                      0, 0, editor_width, editor_height, hwnd, nullptr,
+                      GetModuleHandleW(nullptr), nullptr);
   if (!child) {
     DestroyWindow(hwnd);
     processor->editor_view = nullptr;
@@ -3815,34 +4007,29 @@ extern "C" unsigned long long sphere_daux_vst3_open_editor(
   processor->editor_hwnd = hwnd;
   processor->editor_attach_hwnd = child;
   processor->editor_handle = g_next_editor_handle.fetch_add(1);
+  std::fprintf(stderr, "[PluginEditor] created child hwnd=0x%p client=%dx%d\n",
+               static_cast<void *>(child), editor_width, editor_height);
   std::fprintf(stderr,
-               "[PluginEditor] created child hwnd=0x%p client=%dx%d\n",
-               static_cast<void*>(child),
-               editor_width,
-               editor_height);
-  std::fprintf(stderr,
-               "[SphereVST3] editor HWNDs pluginInstanceId=%s handle=%llu mainHWND=0x%p childHWND=0x%p\n",
-               identity,
-               processor->editor_handle,
-               static_cast<void*>(hwnd),
-               static_cast<void*>(child));
+               "[SphereVST3] editor HWNDs pluginInstanceId=%s handle=%llu "
+               "mainHWND=0x%p childHWND=0x%p\n",
+               identity, processor->editor_handle, static_cast<void *>(hwnd),
+               static_cast<void *>(child));
 
   // Set the frame BEFORE attached() — required by WebView/CEF editors.
   daux_editor_install_frame(processor);
   std::fprintf(stderr, "[PluginEditor] setFrame ok\n");
 
-  const auto attach_result =
-      processor->editor_view->attached(reinterpret_cast<void*>(child), Steinberg::kPlatformTypeHWND);
-  std::fprintf(stderr,
-               "[PluginEditor] attached result=0x%x\n",
+  const auto attach_result = processor->editor_view->attached(
+      reinterpret_cast<void *>(child), Steinberg::kPlatformTypeHWND);
+  std::fprintf(stderr, "[PluginEditor] attached result=0x%x\n",
                static_cast<unsigned>(attach_result));
   std::fprintf(stderr,
-               "[SphereVST3] IPlugView::attached(child HWND) result=%d handle=%llu childHWND=0x%p pluginInstanceId=%s\n",
-               (int)attach_result,
-               processor->editor_handle,
-               static_cast<void*>(child),
-               identity);
-  if (attach_result != Steinberg::kResultTrue && attach_result != Steinberg::kResultOk) {
+               "[SphereVST3] IPlugView::attached(child HWND) result=%d "
+               "handle=%llu childHWND=0x%p pluginInstanceId=%s\n",
+               (int)attach_result, processor->editor_handle,
+               static_cast<void *>(child), identity);
+  if (attach_result != Steinberg::kResultTrue &&
+      attach_result != Steinberg::kResultOk) {
     set_last_error("IPlugView::attached(HWND) failed for DAUx VST3 editor");
     show_attach_failed_state(processor, "attached-failed");
     ShowWindow(hwnd, SW_SHOWNORMAL);
@@ -3855,38 +4042,40 @@ extern "C" unsigned long long sphere_daux_vst3_open_editor(
   {
     auto local = daux_local_view_rect(editor_width, editor_height);
     const auto on_size_res = processor->editor_view->onSize(&local);
-    std::fprintf(stderr,
-                 "[PluginEditor] onSize result=0x%x\n",
+    std::fprintf(stderr, "[PluginEditor] onSize result=0x%x\n",
                  static_cast<unsigned>(on_size_res));
-    daux_verify_child_client_rect(child, editor_width, editor_height, "after attach");
+    daux_verify_child_client_rect(child, editor_width, editor_height,
+                                  "after attach");
   }
   ShowWindow(hwnd, SW_SHOWNORMAL);
   UpdateWindow(hwnd);
   SetForegroundWindow(hwnd);
   std::fprintf(stderr, "[PluginEditor] visible=true\n");
   std::fprintf(stderr,
-               "[SphereVST3] editor opened same-instance handle=%llu windowId=%s mainHWND=0x%p attachHWND=0x%p\n",
-               processor->editor_handle,
-               processor->editor_window_id.c_str(),
-               static_cast<void*>(hwnd),
-               static_cast<void*>(child));
+               "[SphereVST3] editor opened same-instance handle=%llu "
+               "windowId=%s mainHWND=0x%p attachHWND=0x%p\n",
+               processor->editor_handle, processor->editor_window_id.c_str(),
+               static_cast<void *>(hwnd), static_cast<void *>(child));
   return processor->editor_handle;
 #endif
 }
 
-extern "C" void sphere_daux_vst3_close_editor(SphereDauxVst3Processor* processor) {
-  if (!processor) return;
+extern "C" void
+sphere_daux_vst3_close_editor(SphereDauxVst3Processor *processor) {
+  if (!processor)
+    return;
 #if defined(_WIN32)
   // Detach IPlugView and destroy the native editor shell.
-  // Processor and controller are kept alive — only insert removal may destroy them.
+  // Processor and controller are kept alive — only insert removal may destroy
+  // them.
   if (processor->editor_hwnd && IsWindow(processor->editor_hwnd)) {
     const unsigned long long handle = processor->editor_handle;
     const std::string window_id = processor->editor_window_id;
     processor->close_editor_window();
-    std::fprintf(stderr,
-                 "[SphereVST3] editor closed (programmatic) handle=%llu windowId=%s\n",
-                 handle,
-                 window_id.c_str());
+    std::fprintf(
+        stderr,
+        "[SphereVST3] editor closed (programmatic) handle=%llu windowId=%s\n",
+        handle, window_id.c_str());
   }
 #elif defined(__APPLE__)
   close_editor_mac(processor);
@@ -3895,13 +4084,16 @@ extern "C" void sphere_daux_vst3_close_editor(SphereDauxVst3Processor* processor
 #endif
 }
 
-extern "C" int sphere_daux_vst3_focus_editor(SphereDauxVst3Processor* processor) {
-  if (!processor) return 0;
+extern "C" int
+sphere_daux_vst3_focus_editor(SphereDauxVst3Processor *processor) {
+  if (!processor)
+    return 0;
 #if defined(_WIN32)
   if (processor->editor_hwnd && IsWindow(processor->editor_hwnd)) {
     ShowWindow(processor->editor_hwnd, SW_SHOWNORMAL);
     SetForegroundWindow(processor->editor_hwnd);
-    if (processor->editor_attach_hwnd) SetFocus(processor->editor_attach_hwnd);
+    if (processor->editor_attach_hwnd)
+      SetFocus(processor->editor_attach_hwnd);
     return 1;
   }
 #elif defined(__APPLE__)
@@ -3918,10 +4110,10 @@ extern "C" int sphere_daux_vst3_focus_editor(SphereDauxVst3Processor* processor)
 // new component/controller — GUI parameter edits flow through the same
 // ComponentHandlerImpl that feeds the realtime processor.
 
-extern "C" unsigned long long sphere_daux_vst3_embed_editor(
-    SphereDauxVst3Processor* processor,
-    unsigned long long       parent_hwnd,
-    int x, int y, int width, int height) {
+extern "C" unsigned long long
+sphere_daux_vst3_embed_editor(SphereDauxVst3Processor *processor,
+                              unsigned long long parent_hwnd, int x, int y,
+                              int width, int height) {
 #ifdef _WIN32
   // Phase 4: ensure COM (STA) is live on the editor thread before any
   // IPlugView call. Some VST3 editors — notably UAD Native / Chromium-backed
@@ -3932,46 +4124,56 @@ extern "C" unsigned long long sphere_daux_vst3_embed_editor(
   daux_ensure_thread_dpi_awareness();
 
   if (!processor || !processor->controller) {
-    std::fprintf(stderr, "[vst3-editor] attach failed error=processor/controller missing\n");
+    std::fprintf(
+        stderr,
+        "[vst3-editor] attach failed error=processor/controller missing\n");
     set_last_error("embed editor: processor/controller missing");
     return 0;
   }
-  HWND parent = reinterpret_cast<HWND>(static_cast<std::uintptr_t>(parent_hwnd));
+  HWND parent =
+      reinterpret_cast<HWND>(static_cast<std::uintptr_t>(parent_hwnd));
   if (!parent || !IsWindow(parent) || width <= 0 || height <= 0) {
-    std::fprintf(
-        stderr,
-        "[vst3-editor] attach failed error=invalid parent HWND or region parent=0x%p w=%d h=%d\n",
-        static_cast<void*>(parent), width, height);
+    std::fprintf(stderr,
+                 "[vst3-editor] attach failed error=invalid parent HWND or "
+                 "region parent=0x%p w=%d h=%d\n",
+                 static_cast<void *>(parent), width, height);
     set_last_error("embed editor: invalid parent HWND or region");
     return 0;
   }
   std::fprintf(stderr, "[plugin-view] sdk_reference=editorhost\n");
   std::fprintf(stderr,
                "[process] role=editor_host mode=in_process pid=%lu tid=%lu\n",
-               GetCurrentProcessId(),
+               GetCurrentProcessId(), GetCurrentThreadId());
+  std::fprintf(stderr, "[plugin-view] ui_thread_id=%lu\n",
                GetCurrentThreadId());
-  std::fprintf(stderr, "[plugin-view] ui_thread_id=%lu\n", GetCurrentThreadId());
   std::fprintf(stderr, "[plugin-view] platform_type=HWND\n");
-  std::fprintf(
-      stderr,
-      "[vst3-editor] attach begin parent=0x%p platform=HWND region=(%d,%d,%d,%d) tid=%lu\n",
-      static_cast<void*>(parent), x, y, width, height, GetCurrentThreadId());
-  std::fprintf(stderr, "[VST3Editor] owner_hwnd=0x%p\n", static_cast<void*>(parent));
+  std::fprintf(stderr,
+               "[vst3-editor] attach begin parent=0x%p platform=HWND "
+               "region=(%d,%d,%d,%d) tid=%lu\n",
+               static_cast<void *>(parent), x, y, width, height,
+               GetCurrentThreadId());
+  std::fprintf(stderr, "[VST3Editor] owner_hwnd=0x%p\n",
+               static_cast<void *>(parent));
 
   // Reuse: if this instance already has an embedded editor attached, just
   // re-sync geometry and return the existing handle — never re-create.
   if (processor->embed_mode && processor->editor_attached &&
-      processor->editor_embed_top_hwnd && IsWindow(processor->editor_embed_top_hwnd) &&
-      processor->editor_attach_hwnd && IsWindow(processor->editor_attach_hwnd)) {
+      processor->editor_embed_top_hwnd &&
+      IsWindow(processor->editor_embed_top_hwnd) &&
+      processor->editor_attach_hwnd &&
+      IsWindow(processor->editor_attach_hwnd)) {
     processor->editor_parent_hwnd = parent;
     if (processor->embed_host_kind == 2) {
       daux_editor_apply_owner(&processor->editor_window, parent);
       daux_editor_show_and_focus(&processor->editor_window);
     }
-    processor->embed_geometry_valid = false; // force re-apply against new parent
-    daux_embed_sync_geometry(processor, x, y, width, height, daux_embed_debug());
+    processor->embed_geometry_valid =
+        false; // force re-apply against new parent
+    daux_embed_sync_geometry(processor, x, y, width, height,
+                             daux_embed_debug());
     std::fprintf(stderr,
-                 "[SphereVST3] embed editor reuse handle=%llu (existing instance/view)\n",
+                 "[SphereVST3] embed editor reuse handle=%llu (existing "
+                 "instance/view)\n",
                  processor->editor_handle);
     return processor->editor_handle;
   }
@@ -3996,8 +4198,9 @@ extern "C" unsigned long long sphere_daux_vst3_embed_editor(
   // Falls back to "Unknown Plugin". Kept in a local so the wide buffers outlive
   // daux_editor_create_window.
   const std::wstring editor_title_w =
-      processor->editor_title.empty() ? std::wstring(L"Unknown Plugin")
-                                      : widen_utf8(processor->editor_title.c_str());
+      processor->editor_title.empty()
+          ? std::wstring(L"Unknown Plugin")
+          : widen_utf8(processor->editor_title.c_str());
   DauxEditorWindowConfig window_config{};
   window_config.owner_hwnd = parent;
   window_config.title = editor_title_w.c_str();
@@ -4007,7 +4210,8 @@ extern "C" unsigned long long sphere_daux_vst3_embed_editor(
   window_config.y = y;
   window_config.content_width = editor_w;
   window_config.content_height = editor_h;
-  window_config.pin_default = daux_editor_env_truthy("FUTUREBOARD_EDITOR_PIN_DEFAULT");
+  window_config.pin_default =
+      daux_editor_env_truthy("FUTUREBOARD_EDITOR_PIN_DEFAULT");
   window_config.callbacks = daux_editor_window_callbacks(processor);
   // Reclaim any stale shell left over from a previous failed open (we keep the
   // shell on failure to show an error, so a re-open must reclaim it before
@@ -4018,15 +4222,24 @@ extern "C" unsigned long long sphere_daux_vst3_embed_editor(
   // rather than issue an invalid cross-thread DestroyWindow.
   if (daux_editor_is_window_valid(&processor->editor_window)) {
     HWND stale = reinterpret_cast<HWND>(processor->editor_window.shell_hwnd);
-    if (stale && GetWindowThreadProcessId(stale, nullptr) == GetCurrentThreadId()) {
+    if (stale &&
+        GetWindowThreadProcessId(stale, nullptr) == GetCurrentThreadId()) {
       daux_editor_destroy_window(&processor->editor_window);
     }
   }
   processor->editor_window = DauxEditorWindow{};
+  std::fprintf(stderr,
+               "[editor-open] 10 shell_create_begin mode=%s size=%dx%d tid=%lu\n",
+               daux_editor_selected_mode_label(kind), editor_w, editor_h,
+               GetCurrentThreadId());
   if (!daux_editor_create_window(&window_config, &processor->editor_window)) {
+    std::fprintf(stderr,
+                 "[editor-open] FAILED stage=shell_create reason=create_window_returned_false\n");
     set_last_error("embed editor: native editor window creation failed");
     return 0;
   }
+  std::fprintf(stderr, "[PluginEditorLifecycle] shell created mode=%s\n",
+               daux_editor_selected_mode_label(kind));
   HWND top = reinterpret_cast<HWND>(processor->editor_window.shell_hwnd);
   HWND content = reinterpret_cast<HWND>(processor->editor_window.content_hwnd);
   if (!top || !content) {
@@ -4038,32 +4251,41 @@ extern "C" unsigned long long sphere_daux_vst3_embed_editor(
   const int content_y_off = processor->editor_window.titlebar_height;
   const HWND content_parent = GetParent(content);
   const bool content_is_child = content_parent == top;
-  std::fprintf(stderr, "[plugin-view] selected_host_mode=%s\n", daux_editor_selected_mode_label(kind));
-  std::fprintf(stderr, "[plugin-view] top_hwnd=0x%p\n", static_cast<void*>(top));
-  std::fprintf(stderr, "[plugin-view] content_hwnd=0x%p\n", static_cast<void*>(content));
-  std::fprintf(stderr, "[plugin-view] content_is_child=%s\n", content_is_child ? "true" : "false");
-  std::fprintf(stderr, "[plugin-view] content_parent=0x%p\n", static_cast<void*>(content_parent));
+  std::fprintf(stderr, "[plugin-view] selected_host_mode=%s\n",
+               daux_editor_selected_mode_label(kind));
+  std::fprintf(stderr, "[plugin-view] top_hwnd=0x%p\n",
+               static_cast<void *>(top));
+  std::fprintf(stderr, "[plugin-view] content_hwnd=0x%p\n",
+               static_cast<void *>(content));
+  std::fprintf(stderr, "[plugin-view] content_is_child=%s\n",
+               content_is_child ? "true" : "false");
+  std::fprintf(stderr, "[plugin-view] content_parent=0x%p\n",
+               static_cast<void *>(content_parent));
   std::fprintf(stderr, "[NativeEditorShell] dpi=%u\n", daux_hwnd_dpi(top));
   std::fprintf(stderr, "[NativeEditorShell] titlebar_h=%d\n", content_y_off);
   if (content == top || !content_is_child) {
     std::fprintf(stderr,
-                 "[plugin-view] ERROR invalid HWND hierarchy top=0x%p content=0x%p parent=0x%p\n",
-                 static_cast<void*>(top),
-                 static_cast<void*>(content),
-                 static_cast<void*>(content_parent));
+                 "[plugin-view] ERROR invalid HWND hierarchy top=0x%p "
+                 "content=0x%p parent=0x%p\n",
+                 static_cast<void *>(top), static_cast<void *>(content),
+                 static_cast<void *>(content_parent));
     daux_editor_destroy_window(&processor->editor_window);
-    set_last_error("embed editor: content HWND must be a child and must differ from top HWND");
+    set_last_error("embed editor: content HWND must be a child and must differ "
+                   "from top HWND");
     return 0;
   }
+  std::fprintf(stderr, "[PluginEditor] created top hwnd=0x%p dpi=%u\n",
+               static_cast<void *>(top), daux_hwnd_dpi(top));
   std::fprintf(stderr,
-               "[PluginEditor] created top hwnd=0x%p dpi=%u\n",
-               static_cast<void*>(top),
-               daux_hwnd_dpi(top));
+               "[editor-open] 11 shell_create_ok shell_hwnd=0x%p content_hwnd=0x%p "
+               "titlebar_h=%d\n",
+               static_cast<void *>(top), static_cast<void *>(content),
+               content_y_off);
   daux_log_hwnd_state("created", top, content);
 
   // Publish the host HWNDs now so the loading shell is addressable and the
-  // Phase B/D failure paths can show an error in it. The IPlugFrame is installed
-  // in Phase C (it needs the view).
+  // Phase B/D failure paths can show an error in it. The IPlugFrame is
+  // installed in Phase C (it needs the view).
   processor->editor_embed_top_hwnd = top;
   processor->editor_attach_hwnd = content;
   processor->editor_parent_hwnd = parent;
@@ -4090,115 +4312,117 @@ extern "C" unsigned long long sphere_daux_vst3_embed_editor(
     // behind the DAW (initial bring-to-top on show is permitted).
     daux_editor_show_and_focus(&processor->editor_window);
   }
-  std::fprintf(stderr, "[vst3-editor] loading_shell_shown top=0x%p content=0x%p name=%s\n",
-               static_cast<void*>(top), static_cast<void*>(content),
-               processor->editor_title.empty() ? "Unknown Plugin" : processor->editor_title.c_str());
+  std::fprintf(
+      stderr,
+      "[vst3-editor] loading_shell_shown top=0x%p content=0x%p name=%s\n",
+      static_cast<void *>(top), static_cast<void *>(content),
+      processor->editor_title.empty() ? "Unknown Plugin"
+                                      : processor->editor_title.c_str());
 
   // ── Phase B: createView (may block / fail). The loading shell is already on
   // screen; on failure it stays and shows an error instead of vanishing.
+  std::fprintf(stderr, "[PluginEditorLifecycle] editor view requested\n");
+  std::fprintf(stderr,
+               "[editor-open] 08 create_view_begin controller=0x%p tid=%lu\n",
+               static_cast<void *>(processor->controller.get()),
+               GetCurrentThreadId());
   if (!processor->editor_view) {
     if (!daux_plugin_browser_runtime_prepare(processor)) {
-      set_last_error("embed editor: plugin browser/web runtime failed to start");
-      daux_editor_set_load_state(&processor->editor_window, true, L"Editor runtime failed to start");
+      set_last_error(
+          "embed editor: plugin browser/web runtime failed to start");
+      daux_editor_set_load_state(&processor->editor_window, true,
+                                 L"Editor runtime failed to start");
       return 0;
     }
     processor->editor_view = Steinberg::IPtr<Steinberg::IPlugView>::adopt(
         processor->controller->createView(Steinberg::Vst::ViewType::kEditor));
   } else {
-    std::fprintf(stderr, "[vst3-editor] createView reuse prepared view ptr=0x%p\n",
-                 static_cast<void*>(processor->editor_view.get()));
+    std::fprintf(stderr,
+                 "[vst3-editor] createView reuse prepared view ptr=0x%p\n",
+                 static_cast<void *>(processor->editor_view.get()));
   }
   std::fprintf(stderr, "[PluginEditor] create view ok\n");
-  std::fprintf(
-      stderr,
-      "[vst3-editor] createView result=%s ptr=0x%p\n",
-      processor->editor_view ? "ok" : "null",
-      static_cast<void*>(processor->editor_view.get()));
+  std::fprintf(stderr, "[vst3-editor] createView result=%s ptr=0x%p\n",
+               processor->editor_view ? "ok" : "null",
+               static_cast<void *>(processor->editor_view.get()));
+  std::fprintf(stderr, "[editor-open] 09 create_view_%s view=0x%p\n",
+               processor->editor_view ? "ok" : "null",
+               static_cast<void *>(processor->editor_view.get()));
   if (!processor->editor_view) {
+    std::fprintf(stderr,
+                 "[editor-open] FAILED stage=create_view reason=createView_returned_null\n");
     daux_plugin_browser_runtime_release(processor);
     if (daux_plugin_is_browser_based(processor->plugin_path)) {
-      set_last_error("Browser/WebView-based plugin editor createView failed (controller returned null view)");
+      set_last_error("Browser/WebView-based plugin editor createView failed "
+                     "(controller returned null view)");
     } else {
       set_last_error("embed editor: controller did not create view");
     }
-    daux_editor_set_load_state(&processor->editor_window, true, L"Editor view could not be created");
+    daux_editor_set_load_state(&processor->editor_window, true,
+                               L"Editor view could not be created");
     return 0;
   }
-  if (processor->editor_view->isPlatformTypeSupported(Steinberg::kPlatformTypeHWND) !=
-      Steinberg::kResultTrue) {
+  if (processor->editor_view->isPlatformTypeSupported(
+          Steinberg::kPlatformTypeHWND) != Steinberg::kResultTrue) {
     processor->editor_view = nullptr;
     daux_plugin_browser_runtime_release(processor);
-    std::fprintf(stderr, "[vst3-editor] attach failed error=view does not support HWND\n");
+    std::fprintf(
+        stderr,
+        "[vst3-editor] attach failed error=view does not support HWND\n");
     set_last_error("embed editor: view does not support HWND");
-    daux_editor_set_load_state(&processor->editor_window, true, L"Editor is not supported on this platform");
+    daux_editor_set_load_state(&processor->editor_window, true,
+                               L"Editor is not supported on this platform");
     return 0;
   }
 
-  // ── Phase C: getSize → preferred content size, resize the open shell to match,
-  // then install the IPlugFrame before attached().
+  // ── Phase C: getSize → preferred content size, resize the open shell to
+  // match, then install the IPlugFrame before attached().
   daux_editor_set_content_scale(processor, parent, "before_getSize");
 
   Steinberg::ViewRect preferred{};
   const auto get_size_result = processor->editor_view->getSize(&preferred);
   int preferred_w = 0;
   int preferred_h = 0;
-  if (get_size_result == Steinberg::kResultTrue || get_size_result == Steinberg::kResultOk) {
+  if (get_size_result == Steinberg::kResultTrue ||
+      get_size_result == Steinberg::kResultOk) {
     preferred_w = daux_view_rect_width(preferred);
     preferred_h = daux_view_rect_height(preferred);
   }
   // IPlugView::getSize is the content/client size source of truth; otherwise we
   // keep the provisional host-region size used to open the shell.
-  if (preferred_w > 0) editor_w = preferred_w;
-  if (preferred_h > 0) editor_h = preferred_h;
+  if (preferred_w > 0)
+    editor_w = preferred_w;
+  if (preferred_h > 0)
+    editor_h = preferred_h;
   const UINT dpi = daux_hwnd_dpi(parent);
   daux_log_editor_dpi(parent, "embed");
-  std::fprintf(stderr,
-               "[PluginEditor] getSize rect=%d,%d,%d,%d\n",
-               preferred.left,
-               preferred.top,
-               preferred.right,
+  std::fprintf(stderr, "[PluginEditor] getSize rect=%d,%d,%d,%d\n",
+               preferred.left, preferred.top, preferred.right,
                preferred.bottom);
+  std::fprintf(stderr, "[PluginEditor] view_get_size=%dx%d client_size=%dx%d\n",
+               editor_w, editor_h, editor_w, editor_h);
   std::fprintf(stderr,
-               "[PluginEditor] view_get_size=%dx%d client_size=%dx%d\n",
-               editor_w,
-               editor_h,
-               editor_w,
-               editor_h);
-  std::fprintf(stderr,
-               "[PluginEditor] view_size=%dx%d client_rect=%dx%d dpi=%u host_region=%dx%d\n",
-               preferred_w,
-               preferred_h,
-               editor_w,
-               editor_h,
-               dpi,
-               width,
+               "[PluginEditor] view_size=%dx%d client_rect=%dx%d dpi=%u "
+               "host_region=%dx%d\n",
+               preferred_w, preferred_h, editor_w, editor_h, dpi, width,
                height);
-  std::fprintf(
-      stderr,
-      "[vst3-editor] getSize result=0x%x width=%d height=%d rect=(%d,%d,%d,%d)\n",
-      static_cast<unsigned>(get_size_result),
-      editor_w,
-      editor_h,
-      preferred.left,
-      preferred.top,
-      preferred.right,
-      preferred.bottom);
   std::fprintf(stderr,
-               "[NativeEditorShell] content_rect=(0,%d,%d,%d)\n",
-               content_y_off,
-               editor_w,
-               editor_h);
-  std::fprintf(stderr,
-               "[PluginEditor] created child hwnd=0x%p client=%dx%d\n",
-               static_cast<void*>(content),
-               editor_w,
-               editor_h);
+               "[vst3-editor] getSize result=0x%x width=%d height=%d "
+               "rect=(%d,%d,%d,%d)\n",
+               static_cast<unsigned>(get_size_result), editor_w, editor_h,
+               preferred.left, preferred.top, preferred.right,
+               preferred.bottom);
+  std::fprintf(stderr, "[NativeEditorShell] content_rect=(0,%d,%d,%d)\n",
+               content_y_off, editor_w, editor_h);
+  std::fprintf(stderr, "[PluginEditor] created child hwnd=0x%p client=%dx%d\n",
+               static_cast<void *>(content), editor_w, editor_h);
 
   // Resize the already-open shell (top + content) to the plug-in's preferred
   // size now that getSize() is known: daux_embed_apply_content_size sizes the
   // top window (kind-aware), daux_resize_child_client sizes the content child
   // in place (SWP_NOMOVE preserves its titlebar offset).
-  daux_embed_apply_content_size(processor, editor_w, editor_h, "createView.getSize");
+  daux_embed_apply_content_size(processor, editor_w, editor_h,
+                                "createView.getSize");
   daux_resize_child_client(content, editor_w, editor_h);
   daux_editor_install_frame(processor);
   std::fprintf(stderr, "[PluginEditor] setFrame ok\n");
@@ -4210,14 +4434,16 @@ extern "C" unsigned long long sphere_daux_vst3_embed_editor(
   InvalidateRect(content, nullptr, FALSE);
   UpdateWindow(content);
   UpdateWindow(top);
-  std::fprintf(stderr, "[vst3-editor] shown_before_attach top=0x%p content=0x%p\n",
-               static_cast<void*>(top), static_cast<void*>(content));
+  std::fprintf(stderr,
+               "[vst3-editor] shown_before_attach top=0x%p content=0x%p\n",
+               static_cast<void *>(top), static_cast<void *>(content));
 
   // ── Phase D: settle the freshly-shown window (initial paint/size/activation)
   // before the plug-in attaches into it. Slow-UI editors (Qt/QML, VSTGUI,
   // Chromium/WebView) expect a live, pumping, realized window at attach time;
   // attaching into a shown-but-unpumped window can stall the attach or leave it
-  // blank. Bounded — returns as soon as the queue goes quiet, never past the cap.
+  // blank. Bounded — returns as soon as the queue goes quiet, never past the
+  // cap.
   daux_editor_settle_pump_thread(250);
 
   const ULONGLONG attach_start_ms = GetTickCount64();
@@ -4231,46 +4457,55 @@ extern "C" unsigned long long sphere_daux_vst3_embed_editor(
   std::thread([attach_watchdog, attach_start_ms, content, top] {
     for (int i = 0; i < 4; ++i) {
       std::this_thread::sleep_for(std::chrono::seconds(5));
-      if (attach_watchdog->load(std::memory_order_acquire)) return;
+      if (attach_watchdog->load(std::memory_order_acquire))
+        return;
       int child_count = 0;
       EnumChildWindows(
           content,
           [](HWND, LPARAM lp) -> BOOL {
-            (*reinterpret_cast<int*>(lp))++;
+            (*reinterpret_cast<int *>(lp))++;
             return TRUE;
           },
           reinterpret_cast<LPARAM>(&child_count));
       std::fprintf(
           stderr,
-          "[vst3-editor] attached still_blocked elapsed_ms=%llu content=0x%p top_visible=%d content_children=%d watchdog_tid=%lu\n",
+          "[vst3-editor] attached still_blocked elapsed_ms=%llu content=0x%p "
+          "top_visible=%d content_children=%d watchdog_tid=%lu\n",
           static_cast<unsigned long long>(GetTickCount64() - attach_start_ms),
-          static_cast<void*>(content),
-          IsWindowVisible(top) ? 1 : 0,
-          child_count,
-          GetCurrentThreadId());
+          static_cast<void *>(content), IsWindowVisible(top) ? 1 : 0,
+          child_count, GetCurrentThreadId());
     }
   }).detach();
+  std::fprintf(
+      stderr,
+      "[vst3-editor] attached begin parent=0x%p attach_tid=%lu start_ms=%llu\n",
+      static_cast<void *>(content), GetCurrentThreadId(),
+      static_cast<unsigned long long>(attach_start_ms));
   std::fprintf(stderr,
-               "[vst3-editor] attached begin parent=0x%p attach_tid=%lu start_ms=%llu\n",
-               static_cast<void*>(content),
-               GetCurrentThreadId(),
-               static_cast<unsigned long long>(attach_start_ms));
-  const auto attach_res =
-      processor->editor_view->attached(reinterpret_cast<void*>(content), Steinberg::kPlatformTypeHWND);
+               "[editor-open] 12 attach_begin parent_hwnd=0x%p attach_tid=%lu\n",
+               static_cast<void *>(content), GetCurrentThreadId());
+  const auto attach_res = processor->editor_view->attached(
+      reinterpret_cast<void *>(content), Steinberg::kPlatformTypeHWND);
   attach_returned->store(true, std::memory_order_release);
   const ULONGLONG attach_end_ms = GetTickCount64();
-  std::fprintf(stderr,
-               "[PluginEditor] attached result=0x%x\n",
+  std::fprintf(stderr, "[PluginEditor] attached result=0x%x\n",
                static_cast<unsigned>(attach_res));
   std::fprintf(
       stderr,
-      "[vst3-editor] attached result=0x%x content=0x%p attach_tid=%lu end_ms=%llu elapsed_ms=%llu\n",
-      static_cast<unsigned>(attach_res),
-      static_cast<void*>(content),
-      GetCurrentThreadId(),
-      static_cast<unsigned long long>(attach_end_ms),
+      "[vst3-editor] attached result=0x%x content=0x%p attach_tid=%lu "
+      "end_ms=%llu elapsed_ms=%llu\n",
+      static_cast<unsigned>(attach_res), static_cast<void *>(content),
+      GetCurrentThreadId(), static_cast<unsigned long long>(attach_end_ms),
       static_cast<unsigned long long>(attach_end_ms - attach_start_ms));
-  if (attach_res != Steinberg::kResultTrue && attach_res != Steinberg::kResultOk) {
+  if (attach_res != Steinberg::kResultTrue &&
+      attach_res != Steinberg::kResultOk) {
+    std::fprintf(stderr,
+                 "[editor-open] 13 attach_fail result=0x%x content=0x%p\n",
+                 static_cast<unsigned>(attach_res), static_cast<void *>(content));
+    std::fprintf(stderr,
+                 "[editor-open] FAILED stage=attach reason=attached_returned_error "
+                 "result=0x%x\n",
+                 static_cast<unsigned>(attach_res));
     daux_editor_clear_frame(processor);
     processor->editor_view = nullptr;
     processor->editor_attached = false;
@@ -4287,17 +4522,23 @@ extern "C" unsigned long long sphere_daux_vst3_embed_editor(
     if (daux_plugin_is_browser_based(processor->plugin_path)) {
       char msg[160];
       std::snprintf(msg, sizeof(msg),
-                    "Browser/WebView-based plugin editor createView failed (IPlugView::attached returned 0x%x)",
+                    "Browser/WebView-based plugin editor createView failed "
+                    "(IPlugView::attached returned 0x%x)",
                     static_cast<unsigned>(attach_res));
       set_last_error(msg);
     } else {
       set_last_error("embed editor: IPlugView::attached(HWND) failed");
     }
-    daux_editor_set_load_state(&processor->editor_window, true, L"Editor failed to attach");
+    daux_editor_set_load_state(&processor->editor_window, true,
+                               L"Editor failed to attach");
     return 0;
   }
 
   processor->editor_attached = true;
+  std::fprintf(stderr, "[PluginEditorLifecycle] editor attached\n");
+  std::fprintf(stderr,
+               "[editor-open] 13 attach_ok result=0x%x content=0x%p\n",
+               static_cast<unsigned>(attach_res), static_cast<void *>(content));
   processor->editor_embed_top_hwnd = top;
   processor->editor_attach_hwnd = content;
   processor->editor_parent_hwnd = parent;
@@ -4316,66 +4557,68 @@ extern "C" unsigned long long sphere_daux_vst3_embed_editor(
   daux_embed_apply_content_size(processor, editor_w, editor_h, "attached");
   {
     Steinberg::ViewRect after_attach_size{};
-    const auto after_get_size_result = processor->editor_view->getSize(&after_attach_size);
+    const auto after_get_size_result =
+        processor->editor_view->getSize(&after_attach_size);
     const int after_w = daux_view_rect_width(after_attach_size);
     const int after_h = daux_view_rect_height(after_attach_size);
     const int size_w = after_w > 0 ? after_w : editor_w;
     const int size_h = after_h > 0 ? after_h : editor_h;
     daux_resize_child_client(content, size_w, size_h);
-    std::fprintf(
-        stderr,
-        "[vst3-editor] getSize after_attach result=0x%x width=%d height=%d rect=(%d,%d,%d,%d)\n",
-        static_cast<unsigned>(after_get_size_result),
-        size_w,
-        size_h,
-        after_attach_size.left,
-        after_attach_size.top,
-        after_attach_size.right,
-        after_attach_size.bottom);
+    std::fprintf(stderr,
+                 "[vst3-editor] getSize after_attach result=0x%x width=%d "
+                 "height=%d rect=(%d,%d,%d,%d)\n",
+                 static_cast<unsigned>(after_get_size_result), size_w, size_h,
+                 after_attach_size.left, after_attach_size.top,
+                 after_attach_size.right, after_attach_size.bottom);
     editor_w = size_w;
     editor_h = size_h;
   }
   {
     auto local = daux_local_view_rect(editor_w, editor_h);
+    std::fprintf(stderr, "[PluginEditorLifecycle] initial resize size=%dx%d\n",
+                 editor_w, editor_h);
     const auto on_size_res = processor->editor_view->onSize(&local);
-    std::fprintf(stderr,
-                 "[PluginEditor] onSize result=0x%x\n",
+    std::fprintf(stderr, "[PluginEditor] onSize result=0x%x\n",
                  static_cast<unsigned>(on_size_res));
-    std::fprintf(
-        stderr,
-        "[vst3-editor] onSize result=0x%x rect=(%d,%d,%d,%d)\n",
-        static_cast<unsigned>(on_size_res),
-        local.left,
-        local.top,
-        local.right,
-        local.bottom);
-    if (!daux_verify_child_client_rect(content, editor_w, editor_h, "after attach")) {
+    std::fprintf(stderr,
+                 "[editor-open] 14 resize width=%d height=%d onSize_result=0x%x\n",
+                 editor_w, editor_h, static_cast<unsigned>(on_size_res));
+    std::fprintf(stderr,
+                 "[vst3-editor] onSize result=0x%x rect=(%d,%d,%d,%d)\n",
+                 static_cast<unsigned>(on_size_res), local.left, local.top,
+                 local.right, local.bottom);
+    if (!daux_verify_child_client_rect(content, editor_w, editor_h,
+                                       "after attach")) {
       daux_resize_child_client(content, editor_w, editor_h);
       processor->editor_view->onSize(&local);
     }
   }
   daux_log_hwnd_state("after_attach_onSize", top, content);
-  if (kind == 1) daux_editor_apply_tool_styles(top, parent);
+  if (kind == 1)
+    daux_editor_apply_tool_styles(top, parent);
 
   ShowWindow(top, kind == 2 ? SW_SHOWNORMAL : SW_SHOWNA);
   ShowWindow(content, SW_SHOW);
   UpdateWindow(top);
   UpdateWindow(content);
   std::fprintf(stderr, "[PluginEditor] visible=true\n");
+  std::fprintf(stderr,
+               "[editor-open] 15 show_update_redraw top=0x%p content=0x%p "
+               "top_visible=%d content_visible=%d\n",
+               static_cast<void *>(top), static_cast<void *>(content),
+               IsWindowVisible(top) ? 1 : 0, IsWindowVisible(content) ? 1 : 0);
   {
     RECT crc{};
     GetWindowRect(content, &crc);
-    std::fprintf(stderr,
-                 "[PluginEditorHWND] wrapper=0x%p child=0x%p child_enabled=%d "
-                 "child_visible=%d child_style=0x%Ix child_ex_style=0x%Ix\n",
-                 static_cast<void*>(top),
-                 static_cast<void*>(content),
-                 IsWindowEnabled(content) ? 1 : 0,
-                 IsWindowVisible(content) ? 1 : 0,
-                 static_cast<std::uintptr_t>(GetWindowLongPtrW(content, GWL_STYLE)),
-                 static_cast<std::uintptr_t>(GetWindowLongPtrW(content, GWL_EXSTYLE)));
-    std::fprintf(stderr,
-                 "[PluginEditorHWND] child_rect=(%ld,%ld,%ld,%ld)\n",
+    std::fprintf(
+        stderr,
+        "[PluginEditorHWND] wrapper=0x%p child=0x%p child_enabled=%d "
+        "child_visible=%d child_style=0x%Ix child_ex_style=0x%Ix\n",
+        static_cast<void *>(top), static_cast<void *>(content),
+        IsWindowEnabled(content) ? 1 : 0, IsWindowVisible(content) ? 1 : 0,
+        static_cast<std::uintptr_t>(GetWindowLongPtrW(content, GWL_STYLE)),
+        static_cast<std::uintptr_t>(GetWindowLongPtrW(content, GWL_EXSTYLE)));
+    std::fprintf(stderr, "[PluginEditorHWND] child_rect=(%ld,%ld,%ld,%ld)\n",
                  crc.left, crc.top, crc.right, crc.bottom);
   }
 
@@ -4396,25 +4639,21 @@ extern "C" unsigned long long sphere_daux_vst3_embed_editor(
           DWORD tid = 0;
           GetWindowThreadProcessId(hwnd, &tid);
           const LONG_PTR style = GetWindowLongPtr(hwnd, GWL_STYLE);
-          std::fprintf(
-              stderr,
-              "[vst3-editor]   child hwnd=0x%p class='%s' visible=%d rect=(%ld,%ld %ldx%ld) "
-              "style=0x%08lx tid=%lu\n",
-              static_cast<void*>(hwnd),
-              cls,
-              IsWindowVisible(hwnd) ? 1 : 0,
-              r.left, r.top, r.right - r.left, r.bottom - r.top,
-              static_cast<unsigned long>(style),
-              tid);
-          (*reinterpret_cast<int*>(lp))++;
+          std::fprintf(stderr,
+                       "[vst3-editor]   child hwnd=0x%p class='%s' visible=%d "
+                       "rect=(%ld,%ld %ldx%ld) "
+                       "style=0x%08lx tid=%lu\n",
+                       static_cast<void *>(hwnd), cls,
+                       IsWindowVisible(hwnd) ? 1 : 0, r.left, r.top,
+                       r.right - r.left, r.bottom - r.top,
+                       static_cast<unsigned long>(style), tid);
+          (*reinterpret_cast<int *>(lp))++;
           return TRUE;
         },
         reinterpret_cast<LPARAM>(&child_count));
-    std::fprintf(
-        stderr,
-        "[vst3-editor] EnumChildWindows count=%d content=0x%p\n",
-        child_count,
-        static_cast<void*>(content));
+    std::fprintf(stderr,
+                 "[vst3-editor] EnumChildWindows count=%d content=0x%p\n",
+                 child_count, static_cast<void *>(content));
   }
 
   // Phase 5: post-attach paint hygiene — repaint the host + any plug-in
@@ -4427,7 +4666,8 @@ extern "C" unsigned long long sphere_daux_vst3_embed_editor(
   EnumChildWindows(
       content,
       [](HWND hwnd, LPARAM) -> BOOL {
-        if (!IsWindow(hwnd)) return TRUE;
+        if (!IsWindow(hwnd))
+          return TRUE;
         InvalidateRect(hwnd, nullptr, TRUE);
         UpdateWindow(hwnd);
         return TRUE;
@@ -4436,7 +4676,8 @@ extern "C" unsigned long long sphere_daux_vst3_embed_editor(
 
   if (!IsWindowVisible(content) || !daux_embed_has_visible_ui(processor)) {
     std::fprintf(stderr,
-                 "[SphereVST3] embed editor attached but no visible UI yet handle=%llu mode=%s "
+                 "[SphereVST3] embed editor attached but no visible UI yet "
+                 "handle=%llu mode=%s "
                  "(deferring to delayed-ready poller)\n",
                  processor->editor_handle, daux_editor_host_kind_name(kind));
     // Leave it attached — Rust will poll embed_has_visible_ui at 100/500/1000/
@@ -4444,25 +4685,38 @@ extern "C" unsigned long long sphere_daux_vst3_embed_editor(
   }
 
   std::fprintf(stderr,
-               "[SphereVST3] embed editor ok handle=%llu mode=%s parent=0x%p content=0x%p "
+               "[SphereVST3] embed editor ok handle=%llu mode=%s parent=0x%p "
+               "content=0x%p "
                "region=(%d,%d,%d,%d) (reused runtime instance)\n",
-               processor->editor_handle,
-               daux_editor_host_kind_name(kind),
-               static_cast<void*>(parent),
-               static_cast<void*>(content),
-               x, y, width, height);
+               processor->editor_handle, daux_editor_host_kind_name(kind),
+               static_cast<void *>(parent), static_cast<void *>(content), x, y,
+               width, height);
+  std::fprintf(stderr,
+               "[editor-open] 16 editor_ready handle=%llu mode=%s shell_hwnd=0x%p "
+               "content_hwnd=0x%p size=%dx%d\n",
+               processor->editor_handle, daux_editor_host_kind_name(kind),
+               static_cast<void *>(top), static_cast<void *>(content), editor_w,
+               editor_h);
   return processor->editor_handle;
 #else
-  (void)processor; (void)parent_hwnd; (void)x; (void)y; (void)width; (void)height;
+  (void)processor;
+  (void)parent_hwnd;
+  (void)x;
+  (void)y;
+  (void)width;
+  (void)height;
   return 0;
 #endif
 }
 
-extern "C" void sphere_daux_vst3_embed_set_bounds(
-    SphereDauxVst3Processor* processor, int x, int y, int width, int height) {
+extern "C" void
+sphere_daux_vst3_embed_set_bounds(SphereDauxVst3Processor *processor, int x,
+                                  int y, int width, int height) {
 #ifdef _WIN32
-  if (!processor || !processor->embed_mode) return;
-  if (width <= 0 || height <= 0) return;
+  if (!processor || !processor->embed_mode)
+    return;
+  if (width <= 0 || height <= 0)
+    return;
   if (daux_resize_log_allow()) {
     std::fprintf(stderr,
                  "[PluginEditorResize] wrapper_client=%dx%d origin=(%d,%d)\n",
@@ -4486,23 +4740,25 @@ extern "C" void sphere_daux_vst3_embed_set_bounds(
   processor->embed_content_w = content_w;
   processor->embed_content_h = content_h;
   processor->embed_geometry_valid = false;
-  if (daux_embed_sync_geometry(processor, x, y, content_w, content_h, daux_embed_debug())) {
+  if (daux_embed_sync_geometry(processor, x, y, content_w, content_h,
+                               daux_embed_debug())) {
     daux_editor_set_content_scale(processor,
                                   processor->editor_parent_hwnd
                                       ? processor->editor_parent_hwnd
                                       : processor->editor_attach_hwnd,
                                   "set_bounds");
     resize_editor_view(processor);
-    std::fprintf(stderr,
-                 "[plugin-host] host_hwnd resize %dx%d\n",
-                 content_w, content_h);
+    std::fprintf(stderr, "[plugin-host] host_hwnd resize %dx%d\n", content_w,
+                 content_h);
     // Repaint everything the resize exposed — no stale edge pixels.
-    if (processor->editor_embed_top_hwnd && IsWindow(processor->editor_embed_top_hwnd)) {
+    if (processor->editor_embed_top_hwnd &&
+        IsWindow(processor->editor_embed_top_hwnd)) {
       InvalidateRect(processor->editor_embed_top_hwnd, nullptr, FALSE);
     }
     // Input contract after resize (spec item 10): a geometry change must not
     // steal focus from the plugin subtree.
-    if (focus_before && IsWindow(focus_before) && processor->editor_attach_hwnd &&
+    if (focus_before && IsWindow(focus_before) &&
+        processor->editor_attach_hwnd &&
         (focus_before == processor->editor_attach_hwnd ||
          IsChild(processor->editor_attach_hwnd, focus_before)) &&
         GetFocus() != focus_before) {
@@ -4518,26 +4774,34 @@ extern "C" void sphere_daux_vst3_embed_set_bounds(
     processor->pending_main_shell_h = content_h;
     processor->pending_main_shell_resize.store(true, std::memory_order_release);
     std::fprintf(stderr,
-                 "[PluginEditorResize] wrapper_snapback requested=%dx%d constrained=%dx%d\n",
+                 "[PluginEditorResize] wrapper_snapback requested=%dx%d "
+                 "constrained=%dx%d\n",
                  width, height, content_w, content_h);
   }
 #else
-  (void)processor; (void)x; (void)y; (void)width; (void)height;
+  (void)processor;
+  (void)x;
+  (void)y;
+  (void)width;
+  (void)height;
 #endif
 }
 
-extern "C" void sphere_daux_vst3_embed_refresh(SphereDauxVst3Processor* processor) {
+extern "C" void
+sphere_daux_vst3_embed_refresh(SphereDauxVst3Processor *processor) {
 #ifdef _WIN32
-  if (!processor || !processor->embed_mode || !processor->editor_attach_hwnd) return;
-  if (!IsWindow(processor->editor_attach_hwnd)) return;
+  if (!processor || !processor->embed_mode || !processor->editor_attach_hwnd)
+    return;
+  if (!IsWindow(processor->editor_attach_hwnd))
+    return;
   // Detached: standalone window manages its own geometry — nothing to re-sync.
-  if (processor->embed_host_kind == 2) return;
+  if (processor->embed_host_kind == 2)
+    return;
   // Idle frames: re-sync geometry only (tracks parent moves). onSize/pump only
   // run when the applied rect actually changed — no per-frame flicker/spam.
-  if (daux_embed_sync_geometry(processor,
-                               processor->embed_host_x, processor->embed_host_y,
-                               processor->embed_host_w, processor->embed_host_h,
-                               false)) {
+  if (daux_embed_sync_geometry(processor, processor->embed_host_x,
+                               processor->embed_host_y, processor->embed_host_w,
+                               processor->embed_host_h, false)) {
     daux_editor_set_content_scale(processor,
                                   processor->editor_parent_hwnd
                                       ? processor->editor_parent_hwnd
@@ -4550,9 +4814,11 @@ extern "C" void sphere_daux_vst3_embed_refresh(SphereDauxVst3Processor* processo
 #endif
 }
 
-extern "C" void sphere_daux_vst3_embed_detach(SphereDauxVst3Processor* processor) {
+extern "C" void
+sphere_daux_vst3_embed_detach(SphereDauxVst3Processor *processor) {
 #ifdef _WIN32
-  if (!processor || !processor->embed_mode) return;
+  if (!processor || !processor->embed_mode)
+    return;
   processor->close_embed_editor("embed_detach");
 #else
   (void)processor;
@@ -4564,14 +4830,18 @@ extern "C" void sphere_daux_vst3_embed_detach(SphereDauxVst3Processor* processor
 // child). `sphere_daux_vst3_embed_editor` returns an opaque monotonic handle,
 // NOT an HWND — callers that need to pump/focus/audit the editor subtree must
 // use this.
-extern "C" unsigned long long sphere_daux_vst3_embed_attach_hwnd(
-    SphereDauxVst3Processor* processor) {
+extern "C" unsigned long long
+sphere_daux_vst3_embed_attach_hwnd(SphereDauxVst3Processor *processor) {
 #ifdef _WIN32
-  if (!processor) return 0;
-  if (processor->editor_embed_top_hwnd && IsWindow(processor->editor_embed_top_hwnd)) {
-    return reinterpret_cast<unsigned long long>(processor->editor_embed_top_hwnd);
+  if (!processor)
+    return 0;
+  if (processor->editor_embed_top_hwnd &&
+      IsWindow(processor->editor_embed_top_hwnd)) {
+    return reinterpret_cast<unsigned long long>(
+        processor->editor_embed_top_hwnd);
   }
-  if (processor->editor_attach_hwnd && IsWindow(processor->editor_attach_hwnd)) {
+  if (processor->editor_attach_hwnd &&
+      IsWindow(processor->editor_attach_hwnd)) {
     return reinterpret_cast<unsigned long long>(processor->editor_attach_hwnd);
   }
   return 0;
@@ -4581,17 +4851,21 @@ extern "C" unsigned long long sphere_daux_vst3_embed_attach_hwnd(
 #endif
 }
 
-extern "C" int sphere_daux_vst3_embed_is_valid(SphereDauxVst3Processor* processor) {
+extern "C" int
+sphere_daux_vst3_embed_is_valid(SphereDauxVst3Processor *processor) {
 #ifdef _WIN32
   return (processor && processor->embed_mode && processor->editor_attach_hwnd &&
-          IsWindow(processor->editor_attach_hwnd)) ? 1 : 0;
+          IsWindow(processor->editor_attach_hwnd))
+             ? 1
+             : 0;
 #else
   (void)processor;
   return 0;
 #endif
 }
 
-extern "C" int sphere_daux_vst3_embed_has_visible_ui(SphereDauxVst3Processor* processor) {
+extern "C" int
+sphere_daux_vst3_embed_has_visible_ui(SphereDauxVst3Processor *processor) {
 #ifdef _WIN32
   return daux_embed_has_visible_ui(processor) ? 1 : 0;
 #else
@@ -4600,9 +4874,11 @@ extern "C" int sphere_daux_vst3_embed_has_visible_ui(SphereDauxVst3Processor* pr
 #endif
 }
 
-extern "C" int sphere_daux_vst3_embed_host_kind(SphereDauxVst3Processor* processor) {
+extern "C" int
+sphere_daux_vst3_embed_host_kind(SphereDauxVst3Processor *processor) {
 #ifdef _WIN32
-  if (!processor || !processor->embed_mode) return -1;
+  if (!processor || !processor->embed_mode)
+    return -1;
   return processor->embed_host_kind; // 0 child, 1 tool, 2 detached
 #else
   (void)processor;
@@ -4612,20 +4888,44 @@ extern "C" int sphere_daux_vst3_embed_host_kind(SphereDauxVst3Processor* process
 
 // Detached mode only: returns 1 (and resets) if the user closed the standalone
 // editor window (WM_CLOSE). The Rust shell polls this to tear the editor down.
-extern "C" int sphere_daux_vst3_embed_take_user_close(SphereDauxVst3Processor* processor) {
+extern "C" int
+sphere_daux_vst3_embed_take_user_close(SphereDauxVst3Processor *processor) {
 #ifdef _WIN32
-  if (!processor) return 0;
-  return processor->embed_user_closed.exchange(false, std::memory_order_acq_rel) ? 1 : 0;
+  if (!processor)
+    return 0;
+  return processor->embed_user_closed.exchange(false, std::memory_order_acq_rel)
+             ? 1
+             : 0;
 #else
   (void)processor;
   return 0;
 #endif
 }
 
-extern "C" void sphere_daux_vst3_embed_set_instance_label(
-    SphereDauxVst3Processor* processor, const char* instance_id) {
+extern "C" void
+sphere_daux_vst3_embed_set_waiting_stage(SphereDauxVst3Processor *processor,
+                                         const char *stage) {
 #ifdef _WIN32
-  if (!processor) return;
+  if (!processor)
+    return;
+  const std::wstring stage_w =
+      widen_utf8(stage && *stage ? stage : "attach_view");
+  daux_editor_set_load_state(&processor->editor_window, false, stage_w.c_str());
+  std::fprintf(stderr,
+               "[PluginEditorLifecycle] editor ready timeout stage=%s\n",
+               stage && *stage ? stage : "attach_view");
+#else
+  (void)processor;
+  (void)stage;
+#endif
+}
+
+extern "C" void
+sphere_daux_vst3_embed_set_instance_label(SphereDauxVst3Processor *processor,
+                                          const char *instance_id) {
+#ifdef _WIN32
+  if (!processor)
+    return;
   processor->embed_instance_label = instance_id ? instance_id : "";
 #else
   (void)processor;
@@ -4636,10 +4936,12 @@ extern "C" void sphere_daux_vst3_embed_set_instance_label(
 // Human-readable editor title / plug-in name (UTF-8). Used for the shell
 // titlebar and the content "Loading Plugin <name>" overlay. Set before
 // embed_editor so the loading shell shows the real name immediately.
-extern "C" void sphere_daux_vst3_set_editor_title(
-    SphereDauxVst3Processor* processor, const char* title) {
+extern "C" void
+sphere_daux_vst3_set_editor_title(SphereDauxVst3Processor *processor,
+                                  const char *title) {
 #ifdef _WIN32
-  if (!processor) return;
+  if (!processor)
+    return;
   processor->editor_title = title ? title : "";
 #else
   (void)processor;
@@ -4647,19 +4949,23 @@ extern "C" void sphere_daux_vst3_set_editor_title(
 #endif
 }
 
-extern "C" int sphere_daux_vst3_prepare_editor_view(
-    SphereDauxVst3Processor* processor, int* out_width, int* out_height) {
+extern "C" int
+sphere_daux_vst3_prepare_editor_view(SphereDauxVst3Processor *processor,
+                                     int *out_width, int *out_height) {
 #ifdef _WIN32
   daux_embed_ensure_com_initialized();
   daux_ensure_thread_dpi_awareness();
-  if (!processor || !processor->controller) return 0;
+  if (!processor || !processor->controller)
+    return 0;
   if (!processor->editor_view) {
-    if (!daux_plugin_browser_runtime_prepare(processor)) return 0;
+    if (!daux_plugin_browser_runtime_prepare(processor))
+      return 0;
     processor->editor_view = Steinberg::IPtr<Steinberg::IPlugView>::adopt(
         processor->controller->createView(Steinberg::Vst::ViewType::kEditor));
-    if (!processor->editor_view) return 0;
-    if (processor->editor_view->isPlatformTypeSupported(Steinberg::kPlatformTypeHWND) !=
-        Steinberg::kResultTrue) {
+    if (!processor->editor_view)
+      return 0;
+    if (processor->editor_view->isPlatformTypeSupported(
+            Steinberg::kPlatformTypeHWND) != Steinberg::kResultTrue) {
       processor->editor_view = nullptr;
       daux_plugin_browser_runtime_release(processor);
       return 0;
@@ -4670,17 +4976,20 @@ extern "C" int sphere_daux_vst3_prepare_editor_view(
   const auto gs = processor->editor_view->getSize(&sz);
   const int w = daux_view_rect_width(sz);
   const int h = daux_view_rect_height(sz);
-  if (gs != Steinberg::kResultTrue && gs != Steinberg::kResultOk) return 0;
-  if (w <= 0 || h <= 0) return 0;
-  if (out_width) *out_width = w;
-  if (out_height) *out_height = h;
+  if (gs != Steinberg::kResultTrue && gs != Steinberg::kResultOk)
+    return 0;
+  if (w <= 0 || h <= 0)
+    return 0;
+  if (out_width)
+    *out_width = w;
+  if (out_height)
+    *out_height = h;
   std::fprintf(stderr,
                "[PluginEditor] prepare getSize instance=%s view_size=%dx%d\n",
                processor->embed_instance_label.empty()
                    ? "<unknown>"
                    : processor->embed_instance_label.c_str(),
-               w,
-               h);
+               w, h);
   return 1;
 #else
   (void)processor;
@@ -4690,14 +4999,19 @@ extern "C" int sphere_daux_vst3_prepare_editor_view(
 #endif
 }
 
-extern "C" int sphere_daux_vst3_take_pending_shell_resize(
-    SphereDauxVst3Processor* processor, int* out_width, int* out_height) {
+extern "C" int
+sphere_daux_vst3_take_pending_shell_resize(SphereDauxVst3Processor *processor,
+                                           int *out_width, int *out_height) {
 #ifdef _WIN32
-  if (!processor) return 0;
-  if (!processor->pending_main_shell_resize.load(std::memory_order_acquire)) return 0;
+  if (!processor)
+    return 0;
+  if (!processor->pending_main_shell_resize.load(std::memory_order_acquire))
+    return 0;
   processor->pending_main_shell_resize.store(false, std::memory_order_release);
-  if (out_width) *out_width = processor->pending_main_shell_w;
-  if (out_height) *out_height = processor->pending_main_shell_h;
+  if (out_width)
+    *out_width = processor->pending_main_shell_w;
+  if (out_height)
+    *out_height = processor->pending_main_shell_h;
   return 1;
 #else
   (void)processor;
@@ -4710,9 +5024,11 @@ extern "C" int sphere_daux_vst3_take_pending_shell_resize(
 // IPlugView::canResize for the current editor view: 1 resizable, 0 fixed-size,
 // -1 unknown (no view). The main app uses this to lock the wrapper window for
 // fixed-size editors (spec item 1/8).
-extern "C" int sphere_daux_vst3_editor_resizable(SphereDauxVst3Processor* processor) {
+extern "C" int
+sphere_daux_vst3_editor_resizable(SphereDauxVst3Processor *processor) {
 #ifdef _WIN32
-  if (!processor || !processor->editor_view) return -1;
+  if (!processor || !processor->editor_view)
+    return -1;
   return daux_editor_view_resizable(processor) ? 1 : 0;
 #else
   (void)processor;
@@ -4720,13 +5036,18 @@ extern "C" int sphere_daux_vst3_editor_resizable(SphereDauxVst3Processor* proces
 #endif
 }
 
-extern "C" int sphere_daux_vst3_embed_content_size(
-    SphereDauxVst3Processor* processor, int* out_width, int* out_height) {
+extern "C" int
+sphere_daux_vst3_embed_content_size(SphereDauxVst3Processor *processor,
+                                    int *out_width, int *out_height) {
 #ifdef _WIN32
-  if (!processor || !processor->embed_mode) return 0;
-  if (processor->embed_content_w <= 0 || processor->embed_content_h <= 0) return 0;
-  if (out_width) *out_width = processor->embed_content_w;
-  if (out_height) *out_height = processor->embed_content_h;
+  if (!processor || !processor->embed_mode)
+    return 0;
+  if (processor->embed_content_w <= 0 || processor->embed_content_h <= 0)
+    return 0;
+  if (out_width)
+    *out_width = processor->embed_content_w;
+  if (out_height)
+    *out_height = processor->embed_content_h;
   return 1;
 #else
   (void)processor;
@@ -4736,33 +5057,41 @@ extern "C" int sphere_daux_vst3_embed_content_size(
 #endif
 }
 
-extern "C" unsigned long long sphere_daux_vst3_process_count(
-    SphereDauxVst3Processor* processor) {
+extern "C" unsigned long long
+sphere_daux_vst3_process_count(SphereDauxVst3Processor *processor) {
   return processor ? processor->process_count : 0;
 }
 
-extern "C" double sphere_daux_vst3_last_input_peak(SphereDauxVst3Processor* processor) {
+extern "C" double
+sphere_daux_vst3_last_input_peak(SphereDauxVst3Processor *processor) {
   return processor ? processor->last_input_peak : 0.0;
 }
 
-extern "C" double sphere_daux_vst3_last_output_peak(SphereDauxVst3Processor* processor) {
+extern "C" double
+sphere_daux_vst3_last_output_peak(SphereDauxVst3Processor *processor) {
   return processor ? processor->last_output_peak : 0.0;
 }
 
-extern "C" double sphere_daux_vst3_last_difference_peak(SphereDauxVst3Processor* processor) {
+extern "C" double
+sphere_daux_vst3_last_difference_peak(SphereDauxVst3Processor *processor) {
   return processor ? processor->last_difference_peak : 0.0;
 }
 
-extern "C" int sphere_daux_vst3_is_valid(SphereDauxVst3Processor* processor) {
+extern "C" int sphere_daux_vst3_is_valid(SphereDauxVst3Processor *processor) {
 #if defined(_WIN32) || defined(__APPLE__) || defined(__linux__)
-  return (processor && processor->processor_valid.load(std::memory_order_acquire)) ? 1 : 0;
+  return (processor &&
+          processor->processor_valid.load(std::memory_order_acquire))
+             ? 1
+             : 0;
 #else
   return processor ? 1 : 0;
 #endif
 }
 
-extern "C" int sphere_daux_vst3_get_latency_samples(SphereDauxVst3Processor* processor) {
-  if (!processor || !processor->processor) return 0;
+extern "C" int
+sphere_daux_vst3_get_latency_samples(SphereDauxVst3Processor *processor) {
+  if (!processor || !processor->processor)
+    return 0;
   const auto latency = processor->processor->getLatencySamples();
   return static_cast<int>(latency);
 }
@@ -4781,38 +5110,44 @@ namespace {
 
 // Copy a captured MemoryStream into a malloc buffer. An empty stream is a
 // valid (zero-length) state, not an error.
-bool daux_copy_stream(const Steinberg::MemoryStream& stream,
-                      unsigned char** out_data,
-                      int* out_len) {
+bool daux_copy_stream(const Steinberg::MemoryStream &stream,
+                      unsigned char **out_data, int *out_len) {
   const auto size = stream.getSize();
   if (size <= 0) {
     *out_data = nullptr;
     *out_len = 0;
     return true;
   }
-  auto* buf = static_cast<unsigned char*>(std::malloc(static_cast<size_t>(size)));
-  if (!buf) return false;
+  auto *buf =
+      static_cast<unsigned char *>(std::malloc(static_cast<size_t>(size)));
+  if (!buf)
+    return false;
   std::memcpy(buf, stream.getData(), static_cast<size_t>(size));
   *out_data = buf;
   *out_len = static_cast<int>(size);
   return true;
 }
 
-}  // namespace
+} // namespace
 
 // Capture the plugin's current state. Returns 1 on success (zero-length blobs
 // are valid — some plugins have no state), 0 on failure. A plugin returning
 // kNotImplemented from getState is treated as "no state", not failure.
-extern "C" int sphere_daux_vst3_get_state(
-    SphereDauxVst3Processor* processor,
-    unsigned char** out_component, int* out_component_len,
-    unsigned char** out_controller, int* out_controller_len) {
-  if (out_component) *out_component = nullptr;
-  if (out_component_len) *out_component_len = 0;
-  if (out_controller) *out_controller = nullptr;
-  if (out_controller_len) *out_controller_len = 0;
-  if (!processor || !processor->component || !out_component || !out_component_len ||
-      !out_controller || !out_controller_len) {
+extern "C" int sphere_daux_vst3_get_state(SphereDauxVst3Processor *processor,
+                                          unsigned char **out_component,
+                                          int *out_component_len,
+                                          unsigned char **out_controller,
+                                          int *out_controller_len) {
+  if (out_component)
+    *out_component = nullptr;
+  if (out_component_len)
+    *out_component_len = 0;
+  if (out_controller)
+    *out_controller = nullptr;
+  if (out_controller_len)
+    *out_controller_len = 0;
+  if (!processor || !processor->component || !out_component ||
+      !out_component_len || !out_controller || !out_controller_len) {
     return 0;
   }
 
@@ -4832,15 +5167,18 @@ extern "C" int sphere_daux_vst3_get_state(
     }
   }
 
-  if (!daux_copy_stream(component_stream, out_component, out_component_len)) return 0;
-  if (!daux_copy_stream(controller_stream, out_controller, out_controller_len)) {
+  if (!daux_copy_stream(component_stream, out_component, out_component_len))
+    return 0;
+  if (!daux_copy_stream(controller_stream, out_controller,
+                        out_controller_len)) {
     std::free(*out_component);
     *out_component = nullptr;
     *out_component_len = 0;
     return 0;
   }
   std::fprintf(stderr,
-               "[SphereVST3] get_state ok component_bytes=%d controller_bytes=%d comp_result=0x%x\n",
+               "[SphereVST3] get_state ok component_bytes=%d "
+               "controller_bytes=%d comp_result=0x%x\n",
                *out_component_len, *out_controller_len,
                static_cast<unsigned>(comp_res));
   return 1;
@@ -4850,87 +5188,105 @@ extern "C" int sphere_daux_vst3_get_state(
 // workflow: IComponent::setState, then IEditController::setComponentState
 // (same component blob, fresh cursor), then IEditController::setState with
 // the controller blob. Returns 1 when the component state was applied.
-extern "C" int sphere_daux_vst3_set_state(
-    SphereDauxVst3Processor* processor,
-    const unsigned char* component_data, int component_len,
-    const unsigned char* controller_data, int controller_len) {
-  if (!processor || !processor->component) return 0;
+extern "C" int sphere_daux_vst3_set_state(SphereDauxVst3Processor *processor,
+                                          const unsigned char *component_data,
+                                          int component_len,
+                                          const unsigned char *controller_data,
+                                          int controller_len) {
+  if (!processor || !processor->component)
+    return 0;
 
   int ok = 1;
   if (component_data && component_len > 0) {
     // Non-owning stream over the caller's buffer; cursor starts at 0.
     Steinberg::MemoryStream comp_stream(
-        const_cast<unsigned char*>(component_data), component_len);
+        const_cast<unsigned char *>(component_data), component_len);
     const auto res = processor->component->setState(&comp_stream);
     if (res != Steinberg::kResultOk) {
-      std::fprintf(stderr,
-                   "[SphereVST3] set_state component setState result=0x%x bytes=%d\n",
-                   static_cast<unsigned>(res), component_len);
+      std::fprintf(
+          stderr,
+          "[SphereVST3] set_state component setState result=0x%x bytes=%d\n",
+          static_cast<unsigned>(res), component_len);
       ok = (res == Steinberg::kNotImplemented) ? 1 : 0;
     }
     if (processor->controller && !processor->controller_is_component) {
       Steinberg::MemoryStream sync_stream(
-          const_cast<unsigned char*>(component_data), component_len);
-      const auto sync_res = processor->controller->setComponentState(&sync_stream);
+          const_cast<unsigned char *>(component_data), component_len);
+      const auto sync_res =
+          processor->controller->setComponentState(&sync_stream);
       if (sync_res != Steinberg::kResultOk) {
-        std::fprintf(stderr,
-                     "[SphereVST3] set_state controller setComponentState result=0x%x\n",
-                     static_cast<unsigned>(sync_res));
+        std::fprintf(
+            stderr,
+            "[SphereVST3] set_state controller setComponentState result=0x%x\n",
+            static_cast<unsigned>(sync_res));
       }
     }
   }
   if (controller_data && controller_len > 0 && processor->controller &&
       !processor->controller_is_component) {
     Steinberg::MemoryStream ctrl_stream(
-        const_cast<unsigned char*>(controller_data), controller_len);
+        const_cast<unsigned char *>(controller_data), controller_len);
     const auto res = processor->controller->setState(&ctrl_stream);
     if (res != Steinberg::kResultOk) {
-      std::fprintf(stderr,
-                   "[SphereVST3] set_state controller setState result=0x%x bytes=%d\n",
-                   static_cast<unsigned>(res), controller_len);
+      std::fprintf(
+          stderr,
+          "[SphereVST3] set_state controller setState result=0x%x bytes=%d\n",
+          static_cast<unsigned>(res), controller_len);
     }
   }
   std::fprintf(stderr,
-               "[SphereVST3] set_state applied component_bytes=%d controller_bytes=%d ok=%d\n",
+               "[SphereVST3] set_state applied component_bytes=%d "
+               "controller_bytes=%d ok=%d\n",
                component_len, controller_len, ok);
   return ok;
 }
 
-extern "C" void sphere_daux_vst3_state_free(unsigned char* data) {
+extern "C" void sphere_daux_vst3_state_free(unsigned char *data) {
   std::free(data);
 }
 
 namespace {
 
-std::string daux_json_escape(const std::string& value) {
+std::string daux_json_escape(const std::string &value) {
   std::string out;
   out.reserve(value.size() + 8);
   out.push_back('"');
   for (const char ch : value) {
     switch (ch) {
-      case '"': out += "\\\""; break;
-      case '\\': out += "\\\\"; break;
-      case '\n': out += "\\n"; break;
-      case '\r': out += "\\r"; break;
-      case '\t': out += "\\t"; break;
-      default:
-        if (static_cast<unsigned char>(ch) < 0x20) {
-          char buf[7];
-          std::snprintf(buf, sizeof(buf), "\\u%04x", static_cast<unsigned char>(ch));
-          out += buf;
-        } else {
-          out.push_back(ch);
-        }
-        break;
+    case '"':
+      out += "\\\"";
+      break;
+    case '\\':
+      out += "\\\\";
+      break;
+    case '\n':
+      out += "\\n";
+      break;
+    case '\r':
+      out += "\\r";
+      break;
+    case '\t':
+      out += "\\t";
+      break;
+    default:
+      if (static_cast<unsigned char>(ch) < 0x20) {
+        char buf[7];
+        std::snprintf(buf, sizeof(buf), "\\u%04x",
+                      static_cast<unsigned char>(ch));
+        out += buf;
+      } else {
+        out.push_back(ch);
+      }
+      break;
     }
   }
   out.push_back('"');
   return out;
 }
 
-std::string daux_append_parameter_json(
-    Steinberg::Vst::IEditController* controller,
-    const Steinberg::Vst::ParameterInfo& info) {
+std::string
+daux_append_parameter_json(Steinberg::Vst::IEditController *controller,
+                           const Steinberg::Vst::ParameterInfo &info) {
   const std::string title = vst3_tchar_to_utf8(info.title);
   const std::string short_title = vst3_tchar_to_utf8(info.shortTitle);
   const std::string unit = vst3_tchar_to_utf8(info.units);
@@ -4947,7 +5303,8 @@ std::string daux_append_parameter_json(
   json += "\"title\":" + daux_json_escape(title) + ",";
   json += "\"short_title\":" + daux_json_escape(short_title) + ",";
   json += "\"unit\":" + daux_json_escape(unit) + ",";
-  json += std::string("\"automatable\":") + (automatable ? "true" : "false") + ",";
+  json +=
+      std::string("\"automatable\":") + (automatable ? "true" : "false") + ",";
   json += std::string("\"hidden\":") + (hidden ? "true" : "false") + ",";
   json += std::string("\"read_only\":") + (read_only ? "true" : "false") + ",";
   json += "\"value_normalized\":" + std::to_string(value_normalized);
@@ -4955,14 +5312,14 @@ std::string daux_append_parameter_json(
   return json;
 }
 
-}  // namespace
+} // namespace
 
-extern "C" char* sphere_daux_vst3_list_parameters_json(
-    SphereDauxVst3Processor* processor) {
+extern "C" char *
+sphere_daux_vst3_list_parameters_json(SphereDauxVst3Processor *processor) {
   if (!processor || !processor->controller) {
     return nullptr;
   }
-  Steinberg::Vst::IEditController* controller = processor->controller;
+  Steinberg::Vst::IEditController *controller = processor->controller;
   const Steinberg::int32 count = controller->getParameterCount();
   std::string json = "[";
   bool first = true;
@@ -4978,7 +5335,7 @@ extern "C" char* sphere_daux_vst3_list_parameters_json(
     json += daux_append_parameter_json(controller, info);
   }
   json += "]";
-  char* out = static_cast<char*>(std::malloc(json.size() + 1));
+  char *out = static_cast<char *>(std::malloc(json.size() + 1));
   if (!out) {
     return nullptr;
   }
@@ -4986,6 +5343,6 @@ extern "C" char* sphere_daux_vst3_list_parameters_json(
   return out;
 }
 
-extern "C" void sphere_daux_vst3_parameters_json_free(char* data) {
+extern "C" void sphere_daux_vst3_parameters_json_free(char *data) {
   std::free(data);
 }

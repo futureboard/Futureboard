@@ -478,16 +478,6 @@ impl StudioLayout {
             return self.handle_plugin_picker_text_input(event, window, cx);
         };
 
-        let visible_len = compute_filter_result(
-            &index,
-            &self.plugin_picker.query,
-            &self.plugin_picker.filters,
-            &self.plugin_picker_prefs,
-            std::env::var_os("FUTUREBOARD_PLUGIN_PICKER_DEBUG").is_some(),
-        )
-        .indices
-        .len();
-
         match key {
             "enter" => {
                 if let Some(id) =
@@ -499,71 +489,42 @@ impl StudioLayout {
                         self.open_insert_editor(&track_id, insert_index, &insert_id, window, cx);
                     }
                 }
-                return true;
+                true
             }
-            "up" | "arrowup" => {
-                move_highlight(&mut self.plugin_picker, -1, visible_len);
-                sync_selection_from_highlight(
-                    &mut self.plugin_picker,
+            // Navigation keys are the only ones that need the visible row count,
+            // so the filter pass is computed lazily here — typing a character
+            // (the `_` arm) never pays for it.
+            "up" | "arrowup" | "down" | "arrowdown" | "home" | "end" | "pageup" | "pagedown" => {
+                let visible_len = compute_filter_result(
                     &index,
+                    &self.plugin_picker.query,
+                    &self.plugin_picker.filters,
                     &self.plugin_picker_prefs,
-                );
-                cx.notify();
-                return true;
-            }
-            "down" | "arrowdown" => {
-                move_highlight(&mut self.plugin_picker, 1, visible_len);
-                sync_selection_from_highlight(
-                    &mut self.plugin_picker,
-                    &index,
-                    &self.plugin_picker_prefs,
-                );
-                cx.notify();
-                return true;
-            }
-            "home" => {
-                self.plugin_picker.highlighted_index = 0;
-                sync_selection_from_highlight(
-                    &mut self.plugin_picker,
-                    &index,
-                    &self.plugin_picker_prefs,
-                );
-                cx.notify();
-                return true;
-            }
-            "end" => {
-                if visible_len > 0 {
-                    self.plugin_picker.highlighted_index = visible_len - 1;
-                    sync_selection_from_highlight(
-                        &mut self.plugin_picker,
-                        &index,
-                        &self.plugin_picker_prefs,
-                    );
+                    std::env::var_os("FUTUREBOARD_PLUGIN_PICKER_DEBUG").is_some(),
+                )
+                .indices
+                .len();
+                let page = page_size_for_height(self.plugin_picker_prefs.window_height) as isize;
+                match key {
+                    "up" | "arrowup" => move_highlight(&mut self.plugin_picker, -1, visible_len),
+                    "down" | "arrowdown" => move_highlight(&mut self.plugin_picker, 1, visible_len),
+                    "home" => self.plugin_picker.highlighted_index = 0,
+                    "end" => {
+                        if visible_len > 0 {
+                            self.plugin_picker.highlighted_index = visible_len - 1;
+                        }
+                    }
+                    "pageup" => move_highlight(&mut self.plugin_picker, -page, visible_len),
+                    "pagedown" => move_highlight(&mut self.plugin_picker, page, visible_len),
+                    _ => unreachable!(),
                 }
-                cx.notify();
-                return true;
-            }
-            "pageup" => {
-                let page = page_size_for_height(self.plugin_picker_prefs.window_height);
-                move_highlight(&mut self.plugin_picker, -(page as isize), visible_len);
                 sync_selection_from_highlight(
                     &mut self.plugin_picker,
                     &index,
                     &self.plugin_picker_prefs,
                 );
                 cx.notify();
-                return true;
-            }
-            "pagedown" => {
-                let page = page_size_for_height(self.plugin_picker_prefs.window_height);
-                move_highlight(&mut self.plugin_picker, page as isize, visible_len);
-                sync_selection_from_highlight(
-                    &mut self.plugin_picker,
-                    &index,
-                    &self.plugin_picker_prefs,
-                );
-                cx.notify();
-                return true;
+                true
             }
             _ => self.handle_plugin_picker_text_input(event, window, cx),
         }
@@ -585,10 +546,9 @@ impl StudioLayout {
             let action = self
                 .plugin_picker_search_input
                 .handle_key_with_clipboard(event, Some(cx));
+            // `sync_text_input_target` already updates the query AND refreshes the
+            // default highlight for this field — no second filter pass here.
             self.sync_text_input_target(TextMenuTarget::PluginPickerSearch);
-            if let Some(index) = self.plugin_search_index.as_ref() {
-                ensure_default_highlight(&mut self.plugin_picker, index, &self.plugin_picker_prefs);
-            }
             return !matches!(action, TextInputAction::Pass);
         }
         false

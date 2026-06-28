@@ -217,6 +217,18 @@ pub struct EngineStats {
     pub device_lost: bool,
     /// Lifecycle state: "Closed" | "Ready" | "Running" | "DeviceLost".
     pub device_state: String,
+    /// Active Dropout Protection mode ("Off" | "Light" | "Medium" | "High").
+    pub dropout_protection_mode: String,
+    /// Blocks flagged as dropout-risk since the stream opened.
+    pub dropout_count: u64,
+    /// Reason of the most recent dropout-risk block.
+    pub dropout_last_reason: String,
+    /// Most recent output-callback duration, microseconds.
+    pub callback_last_us: u32,
+    /// Worst output-callback duration since stream open, microseconds.
+    pub callback_max_us: u32,
+    /// Per-block wall-clock budget, microseconds.
+    pub callback_deadline_us: u32,
 }
 
 /// Native Rust-facing handle to the engine.
@@ -625,6 +637,7 @@ impl AudioEngine {
         let st = self.inner.get_status();
         let daux = self.inner.get_daux_status();
         let transport = self.inner.transport_snapshot();
+        let dropout = self.inner.dropout_diagnostics();
         EngineStats {
             running: st.running,
             stream_open: st.stream_open,
@@ -645,6 +658,12 @@ impl AudioEngine {
             estimated_latency_ms: daux.estimated_latency_ms,
             device_lost: daux.device_lost,
             device_state: daux.device_state,
+            dropout_protection_mode: dropout.protection_mode.as_str().to_string(),
+            dropout_count: dropout.dropout_count,
+            dropout_last_reason: dropout.last_reason.as_str().to_string(),
+            callback_last_us: dropout.callback_last_us,
+            callback_max_us: dropout.callback_max_us,
+            callback_deadline_us: dropout.callback_deadline_us,
         }
     }
 
@@ -789,6 +808,21 @@ impl AudioEngine {
 
     pub fn latency_graph_version(&self) -> u64 {
         self.inner.latency_graph_version()
+    }
+
+    /// Active Dropout Protection mode.
+    pub fn dropout_protection_mode(&self) -> crate::engine::DropoutProtectionMode {
+        self.inner.dropout_protection_mode()
+    }
+
+    /// Set the Dropout Protection mode (Settings → Playback).
+    pub fn set_dropout_protection_mode(&self, mode: crate::engine::DropoutProtectionMode) {
+        self.inner.set_dropout_protection_mode(mode);
+    }
+
+    /// Realtime dropout-protection diagnostics snapshot (atomic reads).
+    pub fn dropout_diagnostics(&self) -> crate::engine::DropoutDiagnostics {
+        self.inner.dropout_diagnostics()
     }
 
     /// Multi-LOD peak summary for any audio format supported by the

@@ -328,6 +328,8 @@ mod tests {
             pdc_delay_r: Vec::new(),
             pdc_write_pos: 0,
             plugin_latency_samples: plugin_latency,
+            smoothed_gain_l: 1.0,
+            smoothed_gain_r: 1.0,
         }
     }
 

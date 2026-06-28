@@ -755,12 +755,20 @@ pub fn fill_output_f32(
     let started = std::time::Instant::now();
     let frames = fill_output_f32_inner(data, channels, runtime, shared, local);
     let elapsed_us = started.elapsed().as_micros().min(u32::MAX as u128) as u32;
-    shared.last_callback_us.store(elapsed_us, Ordering::Relaxed);
-    if elapsed_us > shared.max_callback_us.load(Ordering::Relaxed) {
-        shared.max_callback_us.store(elapsed_us, Ordering::Relaxed);
-    }
+    // Publish last/max/deadline + classify dropout-risk against the active
+    // protection mode (shared with the legacy callback so both paths agree).
+    let block_frames = if channels > 0 {
+        data.len() / channels
+    } else {
+        0
+    };
+    crate::engine::record_output_callback_timing(
+        shared,
+        elapsed_us,
+        block_frames,
+        shared.sample_rate.load(Ordering::Relaxed),
+    );
     if elapsed_us >= 2_000 {
-        shared.slow_callback_count.fetch_add(1, Ordering::Relaxed);
         if elapsed_us >= 5_000 {
             let cb = shared.output_cb_count.load(Ordering::Relaxed);
             let last = SLOW_CALLBACK_LAST_LOG.load(Ordering::Relaxed);
@@ -1419,12 +1427,18 @@ mod tests {
 
         for sample in 0..512 {
             let click = local.metronome_sample(sample, sample, 48_000, true, 512, 512);
-            assert_eq!(click, 0.0, "click leaked before compensated sample {sample}");
+            assert_eq!(
+                click, 0.0,
+                "click leaked before compensated sample {sample}"
+            );
             assert_eq!(local.metronome_click_remaining, 0);
         }
 
         let first = local.metronome_sample(512, 512, 48_000, true, 512, 512);
-        assert_eq!(first, 0.0, "first click oscillator sample starts at phase zero");
+        assert_eq!(
+            first, 0.0,
+            "first click oscillator sample starts at phase zero"
+        );
         assert!(
             local.metronome_click_remaining > 0,
             "click should arm exactly at raw click sample plus compensation delay"
@@ -1437,7 +1451,10 @@ mod tests {
         local.set_metronome_enabled(true, 0, 48_000);
 
         let first = local.metronome_sample(0, 0, 48_000, true, 0, 0);
-        assert_eq!(first, 0.0, "first click oscillator sample starts at phase zero");
+        assert_eq!(
+            first, 0.0,
+            "first click oscillator sample starts at phase zero"
+        );
         assert!(
             local.metronome_click_remaining > 0,
             "uncompensated metronome should arm at the raw beat sample"

@@ -1930,6 +1930,89 @@ fn build_settings_content(
                         ),
                 ))
                 .child(settings_section_hint(i18n.tr("settings.latency.pdc-hint")))
+                .child({
+                    use crate::settings::DropoutProtectionMode as Dp;
+                    let mode = schema.playback.dropout_protection;
+                    let ou = callbacks.on_update_setting.clone();
+                    settings_daw_row(
+                        "Dropout Protection",
+                        div()
+                            .flex()
+                            .flex_row()
+                            .gap(px(4.0))
+                            .child({
+                                let ou = ou.clone();
+                                fb_segmented_button(
+                                    "dropout-off",
+                                    "Off",
+                                    mode == Dp::Off,
+                                    move |_, w, cx| {
+                                        ou(
+                                            Arc::new(|s: &mut crate::settings::SettingsSchema| {
+                                                s.playback.dropout_protection = Dp::Off;
+                                            }),
+                                            w,
+                                            cx,
+                                        );
+                                    },
+                                )
+                            })
+                            .child({
+                                let ou = ou.clone();
+                                fb_segmented_button(
+                                    "dropout-light",
+                                    "Light",
+                                    mode == Dp::Light,
+                                    move |_, w, cx| {
+                                        ou(
+                                            Arc::new(|s: &mut crate::settings::SettingsSchema| {
+                                                s.playback.dropout_protection = Dp::Light;
+                                            }),
+                                            w,
+                                            cx,
+                                        );
+                                    },
+                                )
+                            })
+                            .child({
+                                let ou = ou.clone();
+                                fb_segmented_button(
+                                    "dropout-medium",
+                                    "Medium",
+                                    mode == Dp::Medium,
+                                    move |_, w, cx| {
+                                        ou(
+                                            Arc::new(|s: &mut crate::settings::SettingsSchema| {
+                                                s.playback.dropout_protection = Dp::Medium;
+                                            }),
+                                            w,
+                                            cx,
+                                        );
+                                    },
+                                )
+                            })
+                            .child({
+                                let ou = ou.clone();
+                                fb_segmented_button(
+                                    "dropout-high",
+                                    "High",
+                                    mode == Dp::High,
+                                    move |_, w, cx| {
+                                        ou(
+                                            Arc::new(|s: &mut crate::settings::SettingsSchema| {
+                                                s.playback.dropout_protection = Dp::High;
+                                            }),
+                                            w,
+                                            cx,
+                                        );
+                                    },
+                                )
+                            }),
+                    )
+                })
+                .child(settings_section_hint(
+                    "Keeps internal headroom against UI / plugin jitter at the same device buffer. Medium is recommended; Off is lowest latency.",
+                ))
                 .into_any_element(),
         );
 

@@ -128,6 +128,9 @@ fn main() {
     hlog!("[PluginHostEditor] start pid={pid} thread_id={thread_id} selftest={selftest}");
     if let Some(parent_pid) = parent_pid {
         eprintln!("[plugin-host] parent_pid={parent_pid}");
+        eprintln!(
+            "[PluginHostProcess] pid={pid} parent_pid={parent_pid} expected_parent=FutureboardStudio"
+        );
     }
 
     // Confirm the main app stripped its renderer-only environment before
@@ -243,6 +246,7 @@ type PendingPrepareRegistry = HashMap<String, PendingEditorPrepare>;
 struct DelayedGpuRedraw {
     instance_id: String,
     deadline: Instant,
+    second_resize: Option<(u32, u32)>,
 }
 
 // Browser/WebView-backed editors can take well over 10s to finish their first
@@ -265,6 +269,8 @@ struct PendingEditorAttach {
     display_title: String,
     started_at: Instant,
     stage: &'static str,
+    timeout_logged: bool,
+    processor: DirectAudio::vst3_processor::Vst3RuntimeProcessor,
 }
 
 struct EditorAttachResult {
@@ -841,19 +847,20 @@ fn run_ipc_loop(mut out: io::Stdout, shutdown: Arc<AtomicBool>) {
         //    short bounded try-locks and skip the tick when the lock is busy.
         let user_closed_editors: Vec<String> = timed_section!("editor_refresh", {
             let mut user_closed: Vec<String> = Vec::new();
-            let refresh_targets: Option<Vec<(String, DirectAudio::vst3_processor::Vst3RuntimeProcessor)>> =
-                preview
-                    .try_lock_for(Duration::from_millis(2))
-                    .map(|engine| {
-                        registry
-                            .keys()
-                            .filter_map(|id| {
-                                engine
-                                    .clone_processor_for(id)
-                                    .map(|processor| (id.clone(), processor))
-                            })
-                            .collect()
-                    });
+            let refresh_targets: Option<
+                Vec<(String, DirectAudio::vst3_processor::Vst3RuntimeProcessor)>,
+            > = preview
+                .try_lock_for(Duration::from_millis(2))
+                .map(|engine| {
+                    registry
+                        .keys()
+                        .filter_map(|id| {
+                            engine
+                                .clone_processor_for(id)
+                                .map(|processor| (id.clone(), processor))
+                        })
+                        .collect()
+                });
             if let Some(refresh_targets) = refresh_targets {
                 for (instance_id, processor) in refresh_targets {
                     // Host-owned (detached) window: the user can close it via its
@@ -929,6 +936,14 @@ fn run_ipc_loop(mut out: io::Stdout, shutdown: Arc<AtomicBool>) {
                         return true;
                     };
                     processor.embed_refresh();
+                    if let Some((width, height)) = entry.second_resize {
+                        eprintln!(
+                            "[PluginEditorLifecycle] second resize instance={} size={}x{}",
+                            entry.instance_id, width, height
+                        );
+                        processor.embed_set_bounds(0, 0, width as i32, height as i32);
+                        processor.embed_refresh();
+                    }
                     if !platform::editor_safe_mode() {
                         if let Some(host_hwnd) = registry
                             .get(&entry.instance_id)
@@ -1230,8 +1245,19 @@ fn dispatch(
             let display_title = plugin_display_name
                 .clone()
                 .unwrap_or_else(|| plugin_instance_id.clone());
+            let requested_owner = owner_hwnd.unwrap_or(parent_hwnd);
+            let editor_mode = editor_mode_name();
+            let resolved_owner =
+                resolve_editor_owner_hwnd(requested_owner, parent_hwnd, &editor_mode);
             eprintln!(
-                "[OpenEditor/IPC] track_id={} track_index={} track_name={} slot_id={} instance_id={} class_id={} plugin_uid={} plugin={} owner_hwnd=0x{:x}",
+                "[editor-open] 05 ipc_received insert_id={} plugin={} thread_id={} requested_owner_hwnd=0x{:x} parent_hwnd=0x{parent_hwnd:x} resolved_owner_hwnd=0x{resolved_owner:x}",
+                plugin_instance_id,
+                display_title,
+                platform::current_thread_id(),
+                requested_owner,
+            );
+            eprintln!(
+                "[OpenEditor/IPC] track_id={} track_index={} track_name={} slot_id={} instance_id={} class_id={} plugin_uid={} plugin={} requested_owner_hwnd=0x{:x} parent_hwnd=0x{parent_hwnd:x} resolved_owner_hwnd=0x{resolved_owner:x}",
                 track_id.as_deref().unwrap_or("<unknown>"),
                 track_index
                     .map(|i| i.to_string())
@@ -1242,11 +1268,15 @@ fn dispatch(
                 class_id,
                 plugin_uid.as_deref().unwrap_or("<unknown>"),
                 display_title,
-                owner_hwnd.unwrap_or(parent_hwnd),
+                requested_owner,
             );
+            platform::log_window_identity_chain("studio_main_hwnd", main_hwnd());
+            platform::log_window_identity_chain("open_requested_owner", requested_owner);
+            platform::log_window_identity_chain("open_parent_hwnd", parent_hwnd);
+            platform::log_window_identity_chain("open_resolved_owner", resolved_owner);
             schedule_unified_editor_attach(
                 &plugin_instance_id,
-                owner_hwnd.unwrap_or(parent_hwnd),
+                resolved_owner,
                 &display_title,
                 width,
                 height,
@@ -1599,7 +1629,9 @@ fn dispatch(
             );
         }
         HostCommand::GetPluginParameters { plugin_instance_id } => {
-            let params = preview.lock().list_parameters_for_instance(&plugin_instance_id);
+            let params = preview
+                .lock()
+                .list_parameters_for_instance(&plugin_instance_id);
             let ok = params.is_some();
             let parameters: Vec<ipc::HostPluginParameter> = params
                 .unwrap_or_default()
@@ -1935,6 +1967,65 @@ fn plugin_lifecycle_on_main_thread() -> bool {
     std::env::var_os("FUTUREBOARD_PLUGIN_HOST_WORKER_THREADS").is_none()
 }
 
+fn editor_mode_name() -> String {
+    std::env::var("FUTUREBOARD_PLUGIN_EDITOR_MODE").unwrap_or_else(|_| "legacy".to_string())
+}
+
+fn editor_mode_prefers_async_attach(mode: &str) -> bool {
+    let mode = mode.trim().to_ascii_lowercase();
+    !matches!(
+        mode.as_str(),
+        "" | "default" | "legacy" | "child" | "ws_child" | "embedded_child"
+    )
+}
+
+fn resolve_editor_owner_hwnd(requested_owner: u64, parent_hwnd: u64, editor_mode: &str) -> u64 {
+    if !editor_mode_prefers_async_attach(editor_mode) {
+        return parent_hwnd;
+    }
+
+    // Detached/owned top-level modes: the owner is a read-only DPI/position/owner
+    // reference for the host's OWN window — never a `SetParent` target. Studio sends
+    // its live main-window HWND with EVERY open request (`requested_owner`/
+    // `parent_hwnd`), so that is the current, correct handle. Prefer it as long as
+    // it is a real window owned by the Studio (parent) process.
+    //
+    // Do NOT require the host's `main_hwnd()` copy: it is captured once at `Hello`
+    // (spawn) time via the spawn config, frequently BEFORE the GPUI window exists,
+    // so it is an unreliable 0. Requiring it regressed editor opening — every open
+    // resolved owner=0 → `schedule_unified_editor_attach` rejected `parent_hwnd` as
+    // "not a valid window" before attach ever ran.
+    let parent_pid = parse_parent_pid();
+    for candidate in [requested_owner, parent_hwnd, main_hwnd()] {
+        if candidate == 0 || !platform::is_window(candidate) {
+            continue;
+        }
+        // When the parent pid is known, only accept a window the parent owns — this
+        // keeps the "don't parent/own under an arbitrary foreign HWND" guarantee
+        // without depending on the stale stored handle.
+        if let (Some(ppid), cpid) = (parent_pid, platform::window_process_id(candidate)) {
+            if cpid != Some(ppid) {
+                eprintln!(
+                    "[PluginEditorOwner] skipping owner hwnd=0x{candidate:x} pid={cpid:?} expected_parent_pid={ppid}"
+                );
+                continue;
+            }
+        }
+        if candidate != requested_owner {
+            eprintln!(
+                "[PluginEditorOwner] using owner hwnd=0x{candidate:x} (requested=0x{requested_owner:x})"
+            );
+        }
+        return candidate;
+    }
+
+    eprintln!(
+        "[PluginEditorOwner] no Studio-owned owner HWND available (requested=0x{requested_owner:x} parent=0x{parent_hwnd:x} stored=0x{:x}); proceeding without owner",
+        main_hwnd()
+    );
+    0
+}
+
 fn schedule_unified_editor_attach(
     plugin_instance_id: &str,
     parent_hwnd: u64,
@@ -1954,11 +2045,18 @@ fn schedule_unified_editor_attach(
     // FUTUREBOARD_PLUGIN_EDITOR_MODE (default "detached" = host-owned top-level
     // owned popup). In detached mode `parent_hwnd` is the Studio main HWND used
     // as the Win32 owner, not a child parent and never SetParent.
-    let editor_mode =
-        std::env::var("FUTUREBOARD_PLUGIN_EDITOR_MODE").unwrap_or_else(|_| "detached".to_string());
+    let editor_mode = editor_mode_name();
     eprintln!("[plugin-host] editor_mode={editor_mode} owner_hwnd=0x{parent_hwnd:x}");
     eprintln!("[VST3Editor] owner_hwnd=0x{parent_hwnd:x}");
     eprintln!("[PluginHost] open_editor requested instance_id={plugin_instance_id}");
+    eprintln!(
+        "[editor-open] host request plugin={} insert={} thread_id={} hwnd=0x{parent_hwnd:x} size={}x{}",
+        display_title,
+        plugin_instance_id,
+        platform::current_thread_id(),
+        width.max(1),
+        height.max(1)
+    );
     eprintln!("[plugin-host] OpenEditor uses existing instance={plugin_instance_id}");
     eprintln!(
         "[EDITOR OPEN START]\nplugin_instance_id={plugin_instance_id}\nparent_hwnd=0x{parent_hwnd:x}\nrequested_size={}x{}\ndpi={dpi}",
@@ -1982,7 +2080,9 @@ fn schedule_unified_editor_attach(
                 "[VST3Editor] refusing to focus mismatched editor requested={plugin_instance_id} existing={}",
                 existing.plugin_instance_id
             );
-        } else {
+            return;
+        }
+        if platform::is_window(existing.host_hwnd) {
             eprintln!(
                 "[PluginHost] focusing existing editor requested_instance_id={plugin_instance_id} existing_editor_instance_id={}",
                 existing.plugin_instance_id
@@ -1993,8 +2093,20 @@ fn schedule_unified_editor_attach(
             );
             let focused = platform::focus_editor_window(existing.host_hwnd);
             eprintln!("[NativeEditorShell] focus_existing result={focused}");
+            eprintln!(
+                "[editor-open] existing valid plugin={} insert={} hwnd=0x{:x} result={}",
+                existing.display_title,
+                plugin_instance_id,
+                existing.host_hwnd,
+                if focused { "focused" } else { "focus_failed" }
+            );
+            return;
         }
-        return;
+        eprintln!(
+            "[editor-open] existing invalid plugin={} insert={} hwnd=0x{:x} result=recreate",
+            existing.display_title, plugin_instance_id, existing.host_hwnd
+        );
+        registry.remove(plugin_instance_id);
     }
     if pending_editor_attaches.contains_key(plugin_instance_id) {
         eprintln!("[plugin-host] editor attach already pending instance={plugin_instance_id}");
@@ -2002,6 +2114,8 @@ fn schedule_unified_editor_attach(
     }
     if !loaded.contains_key(plugin_instance_id) {
         eprintln!("[PluginHost] instance lookup result=not_found instance_id={plugin_instance_id}");
+        eprintln!("[editor-open] 06 instance_lookup fail insert_id={plugin_instance_id} reason=not_in_loaded_registry");
+        eprintln!("[editor-open] FAILED stage=instance_lookup reason=runtime_instance_not_loaded insert_id={plugin_instance_id}");
         emit_attach_failed(
             out,
             plugin_instance_id,
@@ -2011,6 +2125,8 @@ fn schedule_unified_editor_attach(
     }
     if !preview.lock().has_instance(plugin_instance_id) {
         eprintln!("[PluginHost] instance lookup result=not_found instance_id={plugin_instance_id}");
+        eprintln!("[editor-open] 06 instance_lookup fail insert_id={plugin_instance_id} reason=not_in_preview_engine");
+        eprintln!("[editor-open] FAILED stage=instance_lookup reason=plugin_not_loaded insert_id={plugin_instance_id}");
         emit_attach_failed(
             out,
             plugin_instance_id,
@@ -2019,11 +2135,17 @@ fn schedule_unified_editor_attach(
         return;
     }
     eprintln!("[PluginHost] instance lookup result=found instance_id={plugin_instance_id}");
+    eprintln!("[editor-open] 06 instance_lookup ok insert_id={plugin_instance_id} plugin={display_title}");
     if !platform::is_window(parent_hwnd) {
+        eprintln!("[editor-open] shell/parent invalid plugin={display_title} insert={plugin_instance_id} hwnd=0x{parent_hwnd:x} result=failed");
         emit_attach_failed(out, plugin_instance_id, "parent_hwnd is not a valid window");
         return;
     }
     if width < MIN_EDITOR_ATTACH_SIZE || height < MIN_EDITOR_ATTACH_SIZE {
+        eprintln!(
+            "[editor-open] shell size invalid plugin={display_title} insert={plugin_instance_id} hwnd=0x{parent_hwnd:x} size={}x{} result=failed",
+            width, height
+        );
         emit_attach_failed(
             out,
             plugin_instance_id,
@@ -2034,6 +2156,10 @@ fn schedule_unified_editor_attach(
     eprintln!(
         "[EDITOR HWND]\nplugin_instance_id={plugin_instance_id}\nparent_hwnd=0x{parent_hwnd:x}\nvalid=true"
     );
+    eprintln!(
+        "[editor-open] shell ready plugin={display_title} insert={plugin_instance_id} hwnd=0x{parent_hwnd:x} size={}x{} result=ok",
+        width, height
+    );
     let w = width.max(1) as i32;
     let h = height.max(1) as i32;
     eprintln!(
@@ -2041,6 +2167,8 @@ fn schedule_unified_editor_attach(
     );
     let processor = preview.lock().clone_processor_for(plugin_instance_id);
     let Some(processor) = processor else {
+        eprintln!("[editor-open] 07 controller_lookup fail insert_id={plugin_instance_id} reason=no_runtime_processor");
+        eprintln!("[editor-open] FAILED stage=controller_lookup reason=processor_unavailable insert_id={plugin_instance_id}");
         emit_attach_failed(
             out,
             plugin_instance_id,
@@ -2048,15 +2176,28 @@ fn schedule_unified_editor_attach(
         );
         return;
     };
+    eprintln!(
+        "[editor-open] 07 controller_lookup ok insert_id={plugin_instance_id} plugin={display_title}"
+    );
     let request_id = NEXT_EDITOR_ATTACH_REQUEST_ID.fetch_add(1, Ordering::Relaxed);
 
-    // Default path: attach on THIS thread — the host's main STA UI thread, the
-    // SAME thread that created the controller (see plugin_lifecycle_on_main_thread).
-    // Native editors `SendMessage()` from `attached()` to a window the plug-in
-    // created at controller time; keeping both on this one living, pumped thread
-    // makes that send a direct same-thread call instead of a send to a dead
-    // worker (the live AD2 hang). The whole open stays crash-isolated (separate
-    // process); the main app is never coupled to it.
+    // The editor view MUST be created + `attached()` on the SAME thread that
+    // created the controller. When `plugin_lifecycle_on_main_thread()` is true
+    // (the default) LoadPlugin builds the controller inline on this persistent,
+    // COM-STA, message-pumped main IPC thread; native VST3 editors routinely
+    // `SendMessage()` from `attached()` to a hidden window the plug-in created at
+    // controller-construction time, so attaching on any OTHER thread makes that
+    // synchronous send target a window whose owning thread isn't servicing it →
+    // `attached()` deadlocks and no editor ever appears. The worker-thread path
+    // below is therefore only valid in the legacy split mode where the controller
+    // ALSO lives on a worker (`FUTUREBOARD_PLUGIN_HOST_WORKER_THREADS=1`).
+    //
+    // Regression guard (2026-06-28): gating this on `editor_mode_prefers_async_attach`
+    // routed the DEFAULT `detached` mode to the worker path, which hung in
+    // `attached()` for every plug-in (load still worked, so the symptom was
+    // "plugins load + audio works but no editor opens"). Do NOT re-add an
+    // editor-mode condition here — the attach thread must track the LOAD thread,
+    // not the window-ownership mode.
     if plugin_lifecycle_on_main_thread() {
         let thread_id = platform::current_thread_id();
         eprintln!(
@@ -2070,6 +2211,7 @@ fn schedule_unified_editor_attach(
         processor.set_editor_title(display_title);
         eprintln!("[VST3Editor] createView instance_id={plugin_instance_id}");
         eprintln!("[plugin-editor] createView from existing controller (reuse loaded runtime)");
+        eprintln!("[editor-open] createView(editor) begin plugin={display_title} insert={plugin_instance_id} thread_id={thread_id}");
         eprintln!(
             "[VST3 ATTACH VIEW]\nplugin_instance_id={plugin_instance_id}\nparent_hwnd=0x{parent_hwnd:x}\nsize={w}x{h}\nresult=begin"
         );
@@ -2077,6 +2219,13 @@ fn schedule_unified_editor_attach(
         let handle = processor.embed_editor(parent_hwnd, 0, 0, w, h);
         let elapsed = started.elapsed();
         let attach_hwnd = processor.embed_attach_hwnd();
+        eprintln!(
+            "[editor-open] attach {} plugin={} insert={} parent=0x{parent_hwnd:x} hwnd=0x{attach_hwnd:x} size={w}x{h} thread_id={thread_id} duration_ms={}",
+            if handle.is_some() { "ok" } else { "failed" },
+            display_title,
+            plugin_instance_id,
+            elapsed.as_millis()
+        );
         let (preferred_width, preferred_height) = processor
             .embed_content_size()
             .map(|(cw, ch)| (cw.max(1) as u32, ch.max(1) as u32))
@@ -2126,6 +2275,8 @@ fn schedule_unified_editor_attach(
             display_title: display_title.to_string(),
             started_at: Instant::now(),
             stage: "attach_view",
+            timeout_logged: false,
+            processor: processor.clone(),
         },
     );
     eprintln!(
@@ -2274,6 +2425,13 @@ fn finalize_editor_attach(
     out: &mut io::Stdout,
 ) {
     if let Some(error) = result.error {
+        eprintln!(
+            "[editor-open] failed plugin={} insert={} stage=attach_view result={} thread_id={}",
+            result.display_title,
+            result.plugin_instance_id,
+            error,
+            platform::current_thread_id()
+        );
         emit_attach_failed(out, &result.plugin_instance_id, &error);
         eprintln!(
             "[EDITOR FAILURE SAFE EXIT]\nplugin_instance_id={}\nfailure_stage=attach_view\nplugin_audio_kept_alive = true\neditor_state = failed\napp_frozen = false",
@@ -2320,6 +2478,26 @@ fn finalize_editor_attach(
         result.plugin_instance_id, result.display_title
     );
     preview.lock().set_continuous_mode(true);
+    eprintln!(
+        "[PluginEditorLifecycle] initial resize instance={} size={}x{}",
+        result.plugin_instance_id, result.preferred_width, result.preferred_height
+    );
+    result.processor.embed_set_bounds(
+        0,
+        0,
+        result.preferred_width as i32,
+        result.preferred_height as i32,
+    );
+    result.processor.embed_refresh();
+    eprintln!(
+        "[editor-open] resize {}x{} ok plugin={} insert={} hwnd=0x{:x} thread_id={}",
+        result.preferred_width,
+        result.preferred_height,
+        result.display_title,
+        result.plugin_instance_id,
+        attach_hwnd,
+        platform::current_thread_id()
+    );
     if platform::editor_safe_mode() {
         eprintln!("[PluginEditorSafe] attach: skipped focus walk and attach-time pump");
     } else {
@@ -2339,6 +2517,13 @@ fn finalize_editor_attach(
     eprintln!(
         "[PluginEditor] open complete engine_state=Running transport_playing=unknown instance={}",
         result.plugin_instance_id
+    );
+    eprintln!(
+        "[editor-open] ready plugin={} insert={} hwnd=0x{:x} result=ok thread_id={}",
+        result.display_title,
+        result.plugin_instance_id,
+        attach_hwnd,
+        platform::current_thread_id()
     );
     SpherePluginHost::plugin_host_preview::PluginHostPreviewEngine::verify_unified_runtime(
         &result.plugin_instance_id,
@@ -2364,6 +2549,7 @@ fn finalize_editor_attach(
     delayed_redraws.push(DelayedGpuRedraw {
         instance_id: result.plugin_instance_id.clone(),
         deadline: Instant::now() + Duration::from_millis(100),
+        second_resize: Some((result.preferred_width, result.preferred_height)),
     });
     let _ = ipc::write_frame(
         out,
@@ -2397,8 +2583,18 @@ fn expire_editor_attach_requests(
         .cloned()
         .collect();
     for pending in timed_out {
-        pending_editor_attaches.remove(&pending.plugin_instance_id);
         let elapsed_ms = now.duration_since(pending.started_at).as_millis();
+        let Some(pending_live) = pending_editor_attaches.get_mut(&pending.plugin_instance_id)
+        else {
+            continue;
+        };
+        if pending_live.timeout_logged {
+            continue;
+        }
+        pending_live.timeout_logged = true;
+        pending_live
+            .processor
+            .embed_set_waiting_stage(pending.stage);
         eprintln!(
             "[EDITOR HANG DETECTED]\nplugin_instance_id={}\nplugin_name=(unknown)\nstage={}\nelapsed_ms={elapsed_ms}\nui_thread_blocked=false\nipc_thread_blocked=false\naudio_thread_blocked=false\nlast_successful_step=resolve_instance\nlast_vst3_result=(pending)\nhost_process_alive=true",
             pending.plugin_instance_id,
@@ -2422,16 +2618,12 @@ fn expire_editor_attach_requests(
         );
         let audio_alive = preview.lock().has_instance(&pending.plugin_instance_id);
         eprintln!(
-            "[EDITOR FAILURE SAFE EXIT]\nplugin_instance_id={}\nfailure_stage={}\nplugin_audio_kept_alive = {}\neditor_state = failed\napp_frozen = false",
+            "[EDITOR WAITING SAFE STATE]\nplugin_instance_id={}\nfailure_stage={}\nplugin_audio_kept_alive = {}\neditor_state = waiting\napp_frozen = false\nloading_shell_alive = true",
             pending.plugin_instance_id,
             pending.stage,
             audio_alive
         );
-        emit_attach_failed(
-            out,
-            &pending.plugin_instance_id,
-            "EditorState=AttachTimedOut: editor open timed out while attaching VST3 view",
-        );
+        let _ = out;
     }
 }
 
@@ -2537,14 +2729,15 @@ mod platform {
     use windows::Win32::UI::WindowsAndMessaging::{
         BringWindowToTop, ChildWindowFromPointEx, CreateWindowExW, DestroyWindow, DispatchMessageW,
         EnumChildWindows, EnumThreadWindows, GetAncestor, GetClassNameW, GetParent, GetWindow,
-        GetWindowLongPtrW, GetWindowRect, GetWindowThreadProcessId, IsChild, IsDialogMessageW,
-        IsWindow, IsWindowVisible, MsgWaitForMultipleObjectsEx, PeekMessageW, PostThreadMessageW,
-        SetForegroundWindow, SetWindowPos, ShowWindow, TranslateMessage, WindowFromPoint, CWP_ALL,
-        CW_USEDEFAULT, GA_PARENT, GA_ROOT, GWLP_HWNDPARENT, GWL_EXSTYLE, GWL_STYLE, GW_CHILD,
-        GW_OWNER, HWND_TOP, MSG, MWMO_INPUTAVAILABLE, PM_REMOVE, QS_ALLINPUT, SWP_NOMOVE,
-        SWP_NOSIZE, SWP_SHOWWINDOW, SW_SHOWNORMAL, WINDOW_EX_STYLE, WM_KEYDOWN, WM_LBUTTONDOWN,
-        WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MOUSEMOVE, WM_NULL, WM_RBUTTONDOWN, WM_RBUTTONUP,
-        WM_TIMER, WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_OVERLAPPEDWINDOW, WS_VISIBLE,
+        GetWindowLongPtrW, GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, IsChild,
+        IsDialogMessageW, IsWindow, IsWindowVisible, MsgWaitForMultipleObjectsEx, PeekMessageW,
+        PostThreadMessageW, SetForegroundWindow, SetWindowPos, ShowWindow, TranslateMessage,
+        WindowFromPoint, CWP_ALL, CW_USEDEFAULT, GA_PARENT, GA_ROOT, GWLP_HWNDPARENT, GWL_EXSTYLE,
+        GWL_STYLE, GW_CHILD, GW_OWNER, HWND_TOP, MSG, MWMO_INPUTAVAILABLE, PM_REMOVE, QS_ALLINPUT,
+        SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW, SW_SHOWNORMAL, WINDOW_EX_STYLE, WM_KEYDOWN,
+        WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MOUSEMOVE, WM_NULL, WM_RBUTTONDOWN,
+        WM_RBUTTONUP, WM_TIMER, WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_OVERLAPPEDWINDOW,
+        WS_VISIBLE,
     };
 
     /// End-to-end plugin debug switch (`FUTUREBOARD_PLUGIN_DEBUG=1`), shared
@@ -2620,8 +2813,21 @@ mod platform {
         if hwnd.0.is_null() {
             return String::new();
         }
-        let mut buf = [0u16; 64];
+        let mut buf = [0u16; 128];
         let len = unsafe { GetClassNameW(hwnd, &mut buf) };
+        if len > 0 {
+            String::from_utf16_lossy(&buf[..len as usize])
+        } else {
+            String::new()
+        }
+    }
+
+    fn window_title(hwnd: HWND) -> String {
+        if hwnd.0.is_null() {
+            return String::new();
+        }
+        let mut buf = [0u16; 256];
+        let len = unsafe { GetWindowTextW(hwnd, &mut buf) };
         if len > 0 {
             String::from_utf16_lossy(&buf[..len as usize])
         } else {
@@ -2719,6 +2925,61 @@ mod platform {
             return false;
         }
         unsafe { IsWindow(Some(hwnd_from(handle))).as_bool() }
+    }
+
+    pub fn window_process_id(handle: u64) -> Option<u32> {
+        if handle == 0 {
+            return None;
+        }
+        unsafe {
+            let hwnd = hwnd_from(handle);
+            if !IsWindow(Some(hwnd)).as_bool() {
+                return None;
+            }
+            let mut pid = 0u32;
+            let _ = GetWindowThreadProcessId(hwnd, Some(&mut pid));
+            if pid == 0 {
+                None
+            } else {
+                Some(pid)
+            }
+        }
+    }
+
+    pub fn log_window_identity_chain(label: &str, handle: u64) {
+        if handle == 0 {
+            eprintln!("[PluginEditorHWNDChain] {label} hwnd=0x0 valid=false");
+            return;
+        }
+        unsafe {
+            let mut hwnd = hwnd_from(handle);
+            for depth in 0..8 {
+                if hwnd.0.is_null() || !IsWindow(Some(hwnd)).as_bool() {
+                    eprintln!(
+                        "[PluginEditorHWNDChain] {label} depth={depth} hwnd=0x{:x} valid=false",
+                        hwnd.0 as u64
+                    );
+                    break;
+                }
+                let parent = GetParent(hwnd).unwrap_or_default();
+                let owner = GetWindow(hwnd, GW_OWNER).unwrap_or_default();
+                let mut pid = 0u32;
+                let tid = GetWindowThreadProcessId(hwnd, Some(&mut pid));
+                eprintln!(
+                    "[PluginEditorHWNDChain] {label} depth={depth} hwnd=0x{:x} pid={pid} tid={tid} parent=0x{:x} owner=0x{:x} class='{}' title='{}'",
+                    hwnd.0 as u64,
+                    parent.0 as u64,
+                    owner.0 as u64,
+                    class_name(hwnd),
+                    window_title(hwnd)
+                );
+                let next = if !owner.0.is_null() { owner } else { parent };
+                if next.0.is_null() || next == hwnd {
+                    break;
+                }
+                hwnd = next;
+            }
+        }
     }
 
     pub fn focus_editor_window(handle: u64) -> bool {
@@ -3328,6 +3589,10 @@ mod platform {
     pub fn is_window(handle: u64) -> bool {
         handle != 0
     }
+    pub fn window_process_id(_handle: u64) -> Option<u32> {
+        None
+    }
+    pub fn log_window_identity_chain(_label: &str, _handle: u64) {}
     pub fn focus_editor_window(_handle: u64) -> bool {
         false
     }

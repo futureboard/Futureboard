@@ -1000,6 +1000,9 @@ impl StudioLayout {
         match open_result {
             Ok(()) => {
                 let host_pid = runtime.lock().ok().and_then(|r| r.host_pid());
+                eprintln!(
+                    "[editor-open] 04 sending_ipc_open_editor host_id={host_pid:?} insert_id={instance_id} host_owned={host_owned} size={content_w}x{content_h}"
+                );
                 self.timeline.update(cx, |timeline, _cx| {
                     timeline.state.set_insert_runtime(
                         track_id,
@@ -1051,6 +1054,15 @@ impl StudioLayout {
                 );
                 eprintln!(
                     "[plugin-editor-window] open bridge editor FAILED instance={instance_id} err={e}"
+                );
+                eprintln!(
+                    "[editor-open] FAILED stage=ipc_send instance={instance_id} reason={e}"
+                );
+                // Never fail silently: surface the IPC failure on the editor shell
+                // so the user sees the failing stage instead of a dead window.
+                shell.set_status(
+                    &format!("Plugin editor open failed\nStage: ipc_send\n{e}"),
+                    true,
                 );
             }
         }
@@ -1425,6 +1437,10 @@ impl StudioLayout {
         use crate::components::timeline::timeline_state::{InsertLoadStatus, InsertPluginFormat};
         let debug = std::env::var_os("FUTUREBOARD_PLUGIN_VIEW_DEBUG").is_some();
 
+        eprintln!(
+            "[editor-open] 01 open_button_clicked track={track_id} slot={insert_index} instance={plugin_instance_id}"
+        );
+
         let resolved = {
             let timeline = self.timeline.read(cx);
             let track_info = timeline
@@ -1481,6 +1497,9 @@ impl StudioLayout {
                 "[PluginEditor] open requested track={track_id} slot={insert_index} instance=<none>"
             );
             eprintln!("[PluginEditor] no runtime instance; cannot open");
+            eprintln!(
+                "[editor-open] FAILED stage=resolve_slot reason=slot_not_found track={track_id} slot={insert_index}"
+            );
             return;
         };
 
@@ -1495,13 +1514,26 @@ impl StudioLayout {
             "[PluginEditor] open requested track={track_id} slot={insert_index} instance={resolved_plugin_instance_id}"
         );
         eprintln!(
+            "[editor-open] 02 selected_track_resolved track_id={track_id} track_index={} track_name={}",
+            track_index
+                .map(|i| i.to_string())
+                .unwrap_or_else(|| "<unknown>".to_string()),
+            track_name.as_deref().unwrap_or("<unknown>"),
+        );
+        eprintln!(
             "[PluginEditor] insert runtime_state={runtime_state:?} load_status={load_status:?}"
         );
 
         if !insert_found {
             eprintln!("[PluginEditor] no runtime instance; cannot open (insert id mismatch)");
+            eprintln!(
+                "[editor-open] FAILED stage=resolve_slot reason=insert_id_mismatch track={track_id} slot={insert_index} requested={plugin_instance_id} resolved={resolved_plugin_instance_id}"
+            );
             return;
         }
+        eprintln!(
+            "[editor-open] 03 selected_insert_resolved insert_id={resolved_plugin_instance_id} plugin_name={display_name} format={plugin_format:?} runtime_state={runtime_state:?}"
+        );
         if SpherePluginHost::plugin_host_client::vst3_editor_backend_disabled() {
             eprintln!(
                 "[VST3Editor] backend=disabled action=skip_open instance={resolved_plugin_instance_id}"
@@ -2120,7 +2152,8 @@ impl StudioLayout {
                             .map(|e| e.to_registry_plugin())
                             .collect();
                         this.plugin_catalog.available = Some(plugins.clone());
-                        this.plugin_search_index = Some(PluginSearchIndex::from_plugins(plugins));
+                        this.plugin_search_index =
+                            Some(std::sync::Arc::new(PluginSearchIndex::from_plugins(plugins)));
                         this.plugin_picker_au_error = load_au_cache_state().last_error;
                         this.plugin_catalog.cache_present = true;
                         this.plugin_catalog.status = PluginCatalogStatus::Ready;

@@ -5,9 +5,9 @@ use crate::components::timeline::timeline_state::{
 };
 use crate::theme::Colors;
 use gpui::{
-    canvas, div, fill, point, px, size, AnyView, App, AppContext, Bounds, Context,
-    InteractiveElement, IntoElement, ParentElement, Pixels, Render, StatefulInteractiveElement,
-    Styled, Window,
+    canvas, div, fill, point, px, size, AnyView, App, AppContext, Background, Bounds, Context,
+    InteractiveElement, IntoElement, ParentElement, PathBuilder, PathStyle, Pixels, Point, Render,
+    StatefulInteractiveElement, StrokeOptions, Styled, Window,
 };
 
 /// Tiny tooltip surface for sub-lane control buttons. Matches the global lane
@@ -489,6 +489,50 @@ fn lane_button(
     btn.child(label)
 }
 
+/// Logical stroke widths for the automation envelope. Kept comfortably above
+/// 1px so HiDPI scaling can never thin the line into subpixel shimmer —
+/// `paint_path` applies the device scale exactly once, so these stay visually
+/// stable at 125% / 150% / 175% / 200%.
+const AUTOMATION_LINE_WIDTH: f32 = 1.6;
+const AUTOMATION_LINE_WIDTH_HOVER: f32 = 2.2;
+const AUTOMATION_LINE_WIDTH_ACTIVE: f32 = 2.6;
+
+/// Paint a polyline as a single anti-aliased stroked path.
+///
+/// `pts` are lane-local (x/y in lane pixels) and `origin` is the canvas'
+/// window-space top-left, so the path lands in the right place. Coordinates stay
+/// in floating point on purpose: GPUI tessellates + anti-aliases the stroke and
+/// `paint_path` applies the DPI scale once, so diagonals and curves come out
+/// smooth at any zoom / HiDPI scale instead of the old pixel-stepped quads. The
+/// whole curve is one continuous path (not per-segment quads), so there are no
+/// gaps or unpainted pixels at segment boundaries.
+fn paint_automation_stroke(
+    window: &mut Window,
+    origin: Point<Pixels>,
+    pts: &[(f32, f32)],
+    width: f32,
+    color: impl Into<Background>,
+) {
+    if pts.len() < 2 {
+        return;
+    }
+    // Tight miter limit: a continuous single-path stroke that bevels (rather than
+    // spiking) at sharp peaks. No `lyon::LineJoin` import is needed — the default
+    // join already produces gap-free joins; the limit just tames sharp corners.
+    let options = StrokeOptions::default()
+        .with_line_width(width)
+        .with_miter_limit(2.0);
+    let mut builder = PathBuilder::stroke(px(width)).with_style(PathStyle::Stroke(options));
+    let (x0, y0) = pts[0];
+    builder.move_to(origin + point(px(x0), px(y0)));
+    for &(x, y) in &pts[1..] {
+        builder.line_to(origin + point(px(x), px(y)));
+    }
+    if let Ok(path) = builder.build() {
+        window.paint_path(path, color);
+    }
+}
+
 /// Draw the automation line + points for one lane inside its sub-lane area.
 /// Pure render of state. The curve is sampled per visible column so Hold steps
 /// and Linear ramps are both correct.
@@ -503,7 +547,14 @@ fn lane_envelope(
     let points = lane.points.clone();
 
     let lane_w = state.viewport.viewport_width.max(1.0);
-    let sample_step = 0.5_f32;
+    // Screen-space adaptive sampling: ~one sample per logical pixel of visible
+    // width. That keeps the polyline continuous and smooth at any zoom (a wider
+    // visible segment / higher zoom yields more samples), while a hard cap stops
+    // an ultra-wide window from blowing up the per-frame stroke tessellation. A
+    // 1px screen step is below what a thin AA stroke can resolve, so curves read
+    // as smooth without oversampling tiny offscreen detail.
+    const MAX_SAMPLES: usize = 4096;
+    let sample_step = (lane_w / MAX_SAMPLES as f32).max(1.0);
     let sample_count = (lane_w / sample_step).ceil().max(1.0) as usize;
 
     // Hovered / actively-dragged segment → column range to emphasize. Uses the
@@ -568,24 +619,36 @@ fn lane_envelope(
                 size(px(lane_w), px(1.0)),
             );
             window.paint_quad(fill(bl, baseline_color));
-            for sample in 0..sample_count {
-                let (x0, y0) = samples[sample];
-                let (x1, y1) = samples[sample + 1];
-                let y = (y0 + y1) * 0.5;
-                let (col_color, col_w): (_, f32) = match highlight {
-                    Some((c0, c1, active)) if sample >= c0 && sample < c1 => {
-                        (highlight_color, if active { 3.4 } else { 2.4 })
-                    }
-                    _ => (line_color, 1.7),
-                };
-                let seg_w = (x1 - x0).max(sample_step) + 0.9;
-                let seg_h = col_w.max((y0 - y1).abs() + col_w);
-                let top = y - seg_h * 0.5;
-                let r = Bounds::new(
-                    bounds.origin + point(px(x0 - 0.25), px(top)),
-                    size(px(seg_w), px(seg_h)),
-                );
-                window.paint_quad(fill(r, col_color));
+
+            // Base envelope: ONE continuous anti-aliased stroke for the whole
+            // visible curve. Replaces the old per-column hard quads, so diagonals
+            // and curved segments are smooth instead of stair-stepped.
+            paint_automation_stroke(
+                window,
+                bounds.origin,
+                &samples,
+                AUTOMATION_LINE_WIDTH,
+                line_color,
+            );
+
+            // Hovered / actively-dragged segment: the SAME sampled path, redrawn
+            // thicker and at full alpha over the base. The emphasis is a clean
+            // weight change with no second jagged 1px line and no doubled pixels.
+            if let Some((c0, c1, active)) = highlight {
+                if c1 > c0 && c1 <= sample_count {
+                    let width = if active {
+                        AUTOMATION_LINE_WIDTH_ACTIVE
+                    } else {
+                        AUTOMATION_LINE_WIDTH_HOVER
+                    };
+                    paint_automation_stroke(
+                        window,
+                        bounds.origin,
+                        &samples[c0..=c1],
+                        width,
+                        highlight_color,
+                    );
+                }
             }
         },
     )

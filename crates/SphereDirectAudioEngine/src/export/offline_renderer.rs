@@ -60,6 +60,9 @@ pub fn render_offline(
     )
     .map_err(|e| ExportError::Build(e.to_string()))?;
     runtime.sample_rate = request.sample_rate;
+    // Deterministic bounce: apply the exact constant per-block fader gain, never
+    // the realtime anti-zipper ramp (which is for live fader drags).
+    runtime.fader_smoothing = false;
     // Restore each in-process VST3 insert's saved state before any process() call
     // so instruments/effects render with the user's current tweaks. Runs once on
     // this worker thread, never the audio callback.
@@ -456,8 +459,9 @@ mod tests {
             let mut snapshot = silence_snapshot(48_000);
             snapshot.pdc_enabled = pdc;
             let mut cache = HashMap::new();
-            let runtime = RuntimeProject::build(&snapshot, 48_000, &mut cache, None, snapshot.pdc_enabled)
-                .expect("build");
+            let runtime =
+                RuntimeProject::build(&snapshot, 48_000, &mut cache, None, snapshot.pdc_enabled)
+                    .expect("build");
             assert_eq!(
                 runtime.pdc_enabled, pdc,
                 "runtime graph must adopt the snapshot's PDC state"

@@ -354,20 +354,52 @@ pub(crate) fn effective_track_muted(track: &RuntimeTrack, beat: f64) -> bool {
 /// destination — routing is done separately by [`route_main_output`]. No
 /// allocation.
 #[inline]
-fn apply_fader(track: &mut RuntimeTrack, frames: usize, beat: f64) {
+fn apply_fader(track: &mut RuntimeTrack, frames: usize, beat: f64, smooth: bool) {
     let automation = track.automation_values_at_beat(beat);
     let volume = automation.volume.unwrap_or(track.volume);
     let pan = automation.pan.unwrap_or(track.pan);
     let (pan_l, pan_r) = pan_gains(pan);
+    let target_l = volume * pan_l;
+    let target_r = volume * pan_r;
+    if !smooth {
+        // Offline export / tests: exact constant per-block gain (unchanged
+        // behavior, deterministic bounce). Keep the smoother aligned with the
+        // applied gain so a later realtime block starts without a jump.
+        for frame_idx in 0..frames {
+            let (l, r) = apply_preview_mode(
+                track.block_l[frame_idx] * target_l,
+                track.block_r[frame_idx] * target_r,
+                track.preview_mode,
+            );
+            track.block_l[frame_idx] = l;
+            track.block_r[frame_idx] = r;
+        }
+        track.smoothed_gain_l = target_l;
+        track.smoothed_gain_r = target_r;
+        return;
+    }
+    // Realtime: ramp from the previously applied gain to the new target across
+    // the block (≈ one block ≈ 10 ms @ 48 k / 512). Each block ends on the
+    // target, so successive blocks are continuous — no step at block boundaries,
+    // no zipper noise when the fader/pan is dragged. Allocation-free.
+    let start_l = track.smoothed_gain_l;
+    let start_r = track.smoothed_gain_r;
+    let inv = 1.0 / frames as f32;
+    let inc_l = (target_l - start_l) * inv;
+    let inc_r = (target_r - start_r) * inv;
     for frame_idx in 0..frames {
+        let g_l = start_l + inc_l * frame_idx as f32;
+        let g_r = start_r + inc_r * frame_idx as f32;
         let (l, r) = apply_preview_mode(
-            track.block_l[frame_idx] * volume * pan_l,
-            track.block_r[frame_idx] * volume * pan_r,
+            track.block_l[frame_idx] * g_l,
+            track.block_r[frame_idx] * g_r,
             track.preview_mode,
         );
         track.block_l[frame_idx] = l;
         track.block_r[frame_idx] = r;
     }
+    track.smoothed_gain_l = target_l;
+    track.smoothed_gain_r = target_r;
 }
 
 #[inline]
@@ -446,7 +478,8 @@ fn process_track_block(
     scatter_vsti_output_children(runtime, track_index, frames, output, channels);
     // Pre-fader sends tap the post-insert signal currently in block_*.
     accumulate_sends(runtime, track_index, frames, true);
-    apply_fader(&mut runtime.tracks[track_index], frames, beat);
+    let smooth = runtime.fader_smoothing;
+    apply_fader(&mut runtime.tracks[track_index], frames, beat, smooth);
     let pdc_delay = runtime
         .latency_graph
         .track_pdc_delay
@@ -1045,11 +1078,26 @@ pub fn render_project_block_interleaved(
     }
 
     // Final master volume + soft-knee limiter (graceful brick-wall instead of
-    // a harsh hard clip when the bus is hot).
-    for i in 0..frames {
-        let out = &mut output[i * channels..i * channels + channels];
-        out[0] = crate::dsp::gain::soft_limit(out[0] * master_volume);
-        out[1] = crate::dsp::gain::soft_limit(out[1] * master_volume);
+    // a harsh hard clip when the bus is hot). In realtime the master gain ramps
+    // across the block so dragging the master fader does not zipper; offline
+    // export applies the exact constant gain.
+    if runtime.fader_smoothing {
+        let start = runtime.smoothed_master_gain;
+        let inc = (master_volume - start) / frames as f32;
+        for i in 0..frames {
+            let g = start + inc * i as f32;
+            let out = &mut output[i * channels..i * channels + channels];
+            out[0] = crate::dsp::gain::soft_limit(out[0] * g);
+            out[1] = crate::dsp::gain::soft_limit(out[1] * g);
+        }
+        runtime.smoothed_master_gain = master_volume;
+    } else {
+        runtime.smoothed_master_gain = master_volume;
+        for i in 0..frames {
+            let out = &mut output[i * channels..i * channels + channels];
+            out[0] = crate::dsp::gain::soft_limit(out[0] * master_volume);
+            out[1] = crate::dsp::gain::soft_limit(out[1] * master_volume);
+        }
     }
     {
         static MASTER_INPUT_LOG_SEQ: std::sync::atomic::AtomicU64 =

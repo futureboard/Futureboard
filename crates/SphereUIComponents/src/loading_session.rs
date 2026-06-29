@@ -2,6 +2,7 @@
 //! is mounted so no session-bound UI can observe a half-loaded project.
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -12,13 +13,20 @@ use gpui::{
 };
 
 use crate::app_state::{AppMode, AppSessionGate};
-use crate::components::progress_dialog::{progress_bar, ProgressBarValue};
+use crate::components::progress_dialog::{progress_bar_animated, ProgressBarValue};
 use crate::components::timeline::timeline_state::TimelineState;
 use crate::components::title_bar::{external_window_titlebar_compact, TITLEBAR_HEIGHT};
 use crate::layout::ProjectOpenOptions;
+use crate::layout::StudioLayout;
 use crate::project::io::{load_project, validate_project_file};
 use crate::project::{FutureboardProject, ProjectSession};
-pub use crate::session_shutdown::{SessionShutdownReason, SessionShutdownSnapshot};
+pub use crate::session_shutdown::{
+    SessionLifecycleStep, SessionShutdownReason, SessionShutdownSnapshot,
+};
+use crate::session_shutdown::{
+    flush_autosave_blocking, run_session_shutdown, SessionShutdownError, POST_SHUTDOWN_UI_STEPS,
+    UI_SHUTDOWN_STEPS,
+};
 use crate::theme::{self, Colors};
 
 const LOAD_WINDOW_WIDTH: f32 = 430.0;
@@ -27,6 +35,7 @@ const BODY_PAD_X: f32 = 16.0;
 const BODY_PAD_Y: f32 = 14.0;
 const BODY_GAP: f32 = 10.0;
 const STAGE_TICK: Duration = Duration::from_millis(20);
+const UI_STEP_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Default)]
 pub(crate) struct LoadingSessionGate {
@@ -34,6 +43,54 @@ pub(crate) struct LoadingSessionGate {
 }
 
 impl Global for LoadingSessionGate {}
+
+#[derive(Debug, Default)]
+pub(crate) struct ProjectLifecycleGate {
+    busy: AtomicBool,
+}
+
+impl Global for ProjectLifecycleGate {}
+
+static PROJECT_LIFECYCLE_BUSY: AtomicBool = AtomicBool::new(false);
+
+pub fn is_project_lifecycle_busy() -> bool {
+    PROJECT_LIFECYCLE_BUSY.load(Ordering::Relaxed)
+}
+
+fn set_project_lifecycle_busy(busy: bool) {
+    PROJECT_LIFECYCLE_BUSY.store(busy, Ordering::Relaxed);
+    eprintln!("[ProjectLifecycle] busy={busy}");
+}
+
+/// Where a project lifecycle transaction is headed after the loading dialog finishes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProjectLifecycleTarget {
+    Studio,
+    Welcome,
+}
+
+impl ProjectLifecycleTarget {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Studio => "studio",
+            Self::Welcome => "welcome",
+        }
+    }
+}
+
+/// Dismiss the loading session dialog and mark the lifecycle transaction complete.
+/// Safe when `target_project` is `None` (close-to-welcome).
+pub fn complete_project_lifecycle<C: BorrowAppContext + AppContext>(
+    cx: &mut C,
+    target: ProjectLifecycleTarget,
+) {
+    eprintln!(
+        "[ProjectLifecycle] ProjectLifecycleCompleted target={} target_project=None",
+        target.label()
+    );
+    set_project_lifecycle_busy(false);
+    close_loading_session_window_for(cx);
+}
 
 macro_rules! session_log {
     ($($arg:tt)*) => {
@@ -111,11 +168,234 @@ impl LoadStage {
     }
 }
 
+async fn run_studio_ui_step_with_timeout(
+    studio: &WindowHandle<StudioLayout>,
+    cx: &mut gpui::AsyncApp,
+    ui: gpui::Entity<LoadingSessionWindow>,
+    step: SessionLifecycleStep,
+    clear_session_state: bool,
+) -> Result<(), SessionShutdownError> {
+    touch_loading_progress(
+        cx,
+        &ui,
+        step.label(),
+        ProgressBarValue::value(step.progress_base()),
+    )
+    .await;
+    let deadline = std::time::Instant::now() + step.timeout().min(UI_STEP_TIMEOUT);
+    let slot = Arc::new(std::sync::Mutex::new(None::<Result<(), String>>));
+    let slot_wait = slot.clone();
+    let update_result = studio.update(cx, |layout, _window, cx| {
+        let result = layout.run_session_lifecycle_ui_step(step, clear_session_state, cx);
+        if let Ok(mut guard) = slot_wait.lock() {
+            *guard = Some(result);
+        }
+    });
+    if update_result.is_err() {
+        return Err(SessionShutdownError {
+            step,
+            message: "studio window update failed".to_string(),
+        });
+    }
+    while slot.lock().ok().and_then(|guard| guard.clone()).is_none() {
+        if std::time::Instant::now() >= deadline {
+            return Err(SessionShutdownError {
+                step,
+                message: format!(
+                    "{} timed out after {:?}",
+                    step.label(),
+                    step.timeout().min(UI_STEP_TIMEOUT)
+                ),
+            });
+        }
+        cx.background_executor()
+            .timer(Duration::from_millis(25))
+            .await;
+    }
+    slot.lock()
+        .ok()
+        .and_then(|mut guard| guard.take())
+        .unwrap_or_else(|| {
+            Err(format!(
+                "{} did not report a result",
+                step.label()
+            ))
+        })
+        .map_err(|message| SessionShutdownError { step, message })
+}
+
+async fn capture_shutdown_snapshot_from_studio(
+    studio: &WindowHandle<StudioLayout>,
+    cx: &mut gpui::AsyncApp,
+    reason: SessionShutdownReason,
+) -> Result<SessionShutdownSnapshot, SessionShutdownError> {
+    let step = SessionLifecycleStep::UnloadPlugins;
+    let deadline = std::time::Instant::now() + UI_STEP_TIMEOUT;
+    let slot = Arc::new(std::sync::Mutex::new(None::<SessionShutdownSnapshot>));
+    let slot_wait = slot.clone();
+    let update_result = studio.update(cx, |layout, _window, cx| {
+        let snapshot = layout.capture_session_shutdown_snapshot_for_loading(reason, cx);
+        if let Ok(mut guard) = slot_wait.lock() {
+            *guard = Some(snapshot);
+        }
+    });
+    if update_result.is_err() {
+        return Err(SessionShutdownError {
+            step,
+            message: "failed to capture shutdown snapshot".to_string(),
+        });
+    }
+    while slot.lock().ok().and_then(|guard| guard.clone()).is_none() {
+        if std::time::Instant::now() >= deadline {
+            return Err(SessionShutdownError {
+                step,
+                message: "capturing shutdown snapshot timed out".to_string(),
+            });
+        }
+        cx.background_executor()
+            .timer(Duration::from_millis(25))
+            .await;
+    }
+    slot.lock()
+        .ok()
+        .and_then(|mut guard| guard.take())
+        .ok_or_else(|| SessionShutdownError {
+            step,
+            message: "shutdown snapshot missing after capture".to_string(),
+        })
+}
+
+async fn touch_loading_progress(
+    cx: &mut gpui::AsyncApp,
+    ui: &gpui::Entity<LoadingSessionWindow>,
+    detail: &str,
+    bar: ProgressBarValue,
+) {
+    let ui = ui.clone();
+    let detail = detail.to_string();
+    let _ = ui.update(cx, |window, cx| window.set_progress(detail, bar, cx));
+}
+
+async fn run_async_session_shutdown(
+    cx: &mut gpui::AsyncApp,
+    ui: gpui::Entity<LoadingSessionWindow>,
+    studio: Option<WindowHandle<StudioLayout>>,
+    reason: SessionShutdownReason,
+    clear_session_state: bool,
+    prepared_snapshot: Option<SessionShutdownSnapshot>,
+) -> Result<(), SessionShutdownError> {
+    if let Some(studio) = studio.as_ref() {
+        for step in UI_SHUTDOWN_STEPS {
+            if *step == SessionLifecycleStep::FlushAutosave {
+                continue;
+            }
+            run_studio_ui_step_with_timeout(studio, cx, ui.clone(), *step, clear_session_state).await?;
+        }
+    }
+
+    let mut snapshot = if let Some(snapshot) = prepared_snapshot {
+        snapshot
+    } else if let Some(studio) = studio.as_ref() {
+        capture_shutdown_snapshot_from_studio(studio, cx, reason).await?
+    } else {
+        return Err(SessionShutdownError {
+            step: SessionLifecycleStep::StopTransport,
+            message: "no studio surface available for session shutdown".to_string(),
+        });
+    };
+
+    if let (Some(path), Some(project)) = (
+        snapshot.flush_autosave_path.clone(),
+        snapshot.flush_autosave_project.take(),
+    ) {
+        touch_loading_progress(
+            cx,
+            &ui,
+            SessionLifecycleStep::FlushAutosave.label(),
+            ProgressBarValue::value(SessionLifecycleStep::FlushAutosave.progress_base()),
+        )
+        .await;
+        let flush_result = cx
+            .background_executor()
+            .spawn(async move {
+                flush_autosave_blocking(path, project, SessionLifecycleStep::FlushAutosave.timeout())
+            })
+            .await;
+        if let Err(message) = flush_result {
+            return Err(SessionShutdownError {
+                step: SessionLifecycleStep::FlushAutosave,
+                message,
+            });
+        }
+    }
+
+    touch_loading_progress(
+        cx,
+        &ui,
+        SessionLifecycleStep::UnloadPlugins.label(),
+        ProgressBarValue::Indeterminate,
+    )
+    .await;
+    let progress_slot = Arc::new(std::sync::Mutex::new((
+        SessionLifecycleStep::UnloadPlugins.label().to_string(),
+        ProgressBarValue::Indeterminate,
+    )));
+    let progress_for_shutdown = progress_slot.clone();
+    let shutdown_done = Arc::new(AtomicBool::new(false));
+    let shutdown_done_flag = shutdown_done.clone();
+    let shutdown_future = cx.background_executor().spawn(async move {
+        let result = run_session_shutdown(snapshot, move |report| {
+            if let Ok(mut slot) = progress_for_shutdown.lock() {
+                *slot = (report.stage.clone(), report.bar);
+            }
+        });
+        shutdown_done_flag.store(true, Ordering::Release);
+        result
+    });
+    while !shutdown_done.load(Ordering::Acquire) {
+        if let Ok(guard) = progress_slot.lock() {
+            let (detail, bar) = guard.clone();
+            touch_loading_progress(cx, &ui, &detail, bar).await;
+        }
+        cx.background_executor()
+            .timer(Duration::from_millis(50))
+            .await;
+    }
+    let shutdown_result = shutdown_future.await;
+
+    shutdown_result?;
+
+    if let Some(studio) = studio.as_ref() {
+        for step in POST_SHUTDOWN_UI_STEPS {
+            run_studio_ui_step_with_timeout(studio, cx, ui.clone(), *step, clear_session_state)
+                .await?;
+        }
+    }
+
+    if clear_session_state {
+        if let Some(studio) = studio.as_ref() {
+            run_studio_ui_step_with_timeout(
+                studio,
+                cx,
+                ui,
+                SessionLifecycleStep::ClearSessionState,
+                true,
+            )
+            .await?;
+        }
+    }
+
+    Ok(())
+}
+
 struct SessionLoadTransaction {
     path: Option<PathBuf>,
     open_options: ProjectOpenOptions,
     rollback: Option<SessionRollbackSnapshot>,
     shutdown: Option<SessionShutdownSnapshot>,
+    shutdown_reason: Option<SessionShutdownReason>,
+    studio: Option<WindowHandle<StudioLayout>>,
+    clear_session_state: bool,
     on_shutdown_complete: Option<SessionShutdownCompleteCb>,
     stage: LoadStage,
     project: Option<FutureboardProject>,
@@ -129,6 +409,9 @@ pub struct LoadingSessionWindow {
     progress: ProgressBarValue,
     footer: SharedString,
     focus_handle: FocusHandle,
+    indeterminate_phase: f32,
+    animation_active: bool,
+    has_error: bool,
     transaction: Option<SessionLoadTransaction>,
 }
 
@@ -146,8 +429,42 @@ impl LoadingSessionWindow {
             progress: initial_progress,
             footer: "This can take a moment for large sessions.".into(),
             focus_handle: cx.focus_handle(),
+            indeterminate_phase: 0.0,
+            animation_active: false,
+            has_error: false,
             transaction: Some(transaction),
         }
+    }
+
+    fn start_progress_animation(&mut self, cx: &mut Context<Self>) {
+        if self.animation_active {
+            return;
+        }
+        self.animation_active = true;
+        cx.spawn(async move |entity, cx| {
+            loop {
+                cx.background_executor().timer(STAGE_TICK).await;
+                let still_active = entity
+                    .update(cx, |window, cx| {
+                        if !window.animation_active {
+                            return false;
+                        }
+                        window.indeterminate_phase =
+                            (window.indeterminate_phase + 0.035).rem_euclid(1.0);
+                        cx.notify();
+                        true
+                    })
+                    .unwrap_or(false);
+                if !still_active {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
+    fn stop_progress_animation(&mut self) {
+        self.animation_active = false;
     }
 
     fn new_for_load(
@@ -209,18 +526,18 @@ impl LoadingSessionWindow {
                 let Some(mut transaction) = self.transaction.take() else {
                     return;
                 };
-                let Some(snapshot) = transaction.shutdown.take() else {
-                    transaction.stage = transaction
-                        .path
-                        .as_ref()
-                        .map(|_| LoadStage::Validate)
-                        .unwrap_or(LoadStage::Validate);
+                let snapshot = transaction.shutdown.take();
+                let on_shutdown_complete = transaction.on_shutdown_complete.clone();
+                let has_load = transaction.path.is_some();
+                let needs_shutdown = transaction.studio.is_some()
+                    || snapshot.is_some()
+                    || transaction.shutdown_reason.is_some();
+                if !needs_shutdown {
+                    transaction.stage = LoadStage::Validate;
                     self.transaction = Some(transaction);
                     self.schedule_tick(cx);
                     return;
-                };
-                let on_shutdown_complete = transaction.on_shutdown_complete.clone();
-                let has_load = transaction.path.is_some();
+                }
                 self.transaction = Some(transaction);
                 self.begin_session_shutdown(snapshot, has_load, on_shutdown_complete, cx);
             }
@@ -353,6 +670,8 @@ impl LoadingSessionWindow {
         detail: Option<String>,
         cx: &mut Context<Self>,
     ) {
+        self.stop_progress_animation();
+        set_project_lifecycle_busy(false);
         let Some(transaction) = self.transaction.take() else {
             return;
         };
@@ -373,90 +692,112 @@ impl LoadingSessionWindow {
     }
 
     fn show_terminal_error(&mut self, message: impl Into<SharedString>, cx: &mut Context<Self>) {
-        self.heading = "Open Failed".into();
+        self.stop_progress_animation();
+        self.has_error = true;
+        self.heading = "Operation Failed".into();
         self.detail = message.into();
-        self.progress = ProgressBarValue::Indeterminate;
-        self.footer = "The project could not be opened.".into();
+        self.progress = ProgressBarValue::Value(0.0);
+        self.footer = "The session could not be closed or switched.".into();
+        self.transaction = None;
         cx.notify();
+    }
+
+    fn finish_shutdown_failure(
+        &mut self,
+        error: SessionShutdownError,
+        cx: &mut Context<Self>,
+    ) {
+        session_log!(
+            "shutdown failed step={} error={}",
+            error.step.label(),
+            error.message
+        );
+        self.show_terminal_error(
+            format!("{} failed.\n\n{}", error.step.label(), error.message),
+            cx,
+        );
+        set_project_lifecycle_busy(false);
     }
 
     fn begin_session_shutdown(
         &mut self,
-        snapshot: SessionShutdownSnapshot,
+        snapshot: Option<SessionShutdownSnapshot>,
         continue_to_load: bool,
         on_shutdown_complete: Option<SessionShutdownCompleteCb>,
         cx: &mut Context<Self>,
     ) {
+        let Some(mut transaction) = self.transaction.take() else {
+            return;
+        };
+        let studio = transaction.studio.clone();
+        let shutdown_reason = transaction
+            .shutdown_reason
+            .or_else(|| snapshot.as_ref().map(|value| value.reason))
+            .unwrap_or(SessionShutdownReason::ProjectClose);
+        let clear_session_state = transaction.clear_session_state;
+        let snapshot_for_async = snapshot.clone();
+        transaction.shutdown = snapshot;
+        transaction.on_shutdown_complete = on_shutdown_complete;
+        self.transaction = Some(transaction);
+        self.start_progress_animation(cx);
+        set_project_lifecycle_busy(true);
+
         eprintln!("[SessionLoad] progress sink attached (shutdown)");
         eprintln!("[LoadingSessionUI] presentation=dialog");
         self.set_detail("Closing current session", cx);
 
-        let progress_state = Arc::new(std::sync::Mutex::new((
-            "Closing current session".to_string(),
-            ProgressBarValue::value(0.05),
-        )));
-        let progress_for_shutdown = progress_state.clone();
-        let progress_for_ui = progress_state.clone();
-        let shutdown_done = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let shutdown_done_ui = shutdown_done.clone();
-        let shutdown_done_job = shutdown_done.clone();
         let this = cx.entity().clone();
-
         cx.spawn(async move |_view, cx| {
-            let progress_ui = this.clone();
-            let progress_task = cx.spawn(async move |cx| {
-                while !shutdown_done_ui.load(std::sync::atomic::Ordering::Relaxed) {
-                    cx.background_executor()
-                        .timer(Duration::from_millis(50))
-                        .await;
-                    let (detail, bar) =
-                        progress_for_ui
-                            .lock()
-                            .map(|g| g.clone())
-                            .unwrap_or_else(|_| {
-                                (
-                                    "Closing current session".to_string(),
-                                    ProgressBarValue::Indeterminate,
-                                )
-                            });
-                    let _ = progress_ui.update(cx, |window, cx| {
-                        window.set_progress(detail, bar, cx);
-                    });
-                }
-            });
-
-            let shutdown_result = cx
-                .background_executor()
-                .spawn(async move {
-                    crate::session_shutdown::run_session_shutdown(snapshot, |progress| {
-                        if let Ok(mut slot) = progress_for_shutdown.lock() {
-                            *slot = (progress.stage.clone(), progress.bar);
-                        }
-                    })
-                })
-                .await;
-
-            shutdown_done_job.store(true, std::sync::atomic::Ordering::Relaxed);
-            let _ = progress_task;
-            cx.background_executor()
-                .timer(Duration::from_millis(60))
-                .await;
+            let shutdown_result = run_async_session_shutdown(
+                cx,
+                this.clone(),
+                studio,
+                shutdown_reason,
+                clear_session_state,
+                snapshot_for_async,
+            )
+            .await;
 
             let _ = this.update(cx, |window, cx| {
-                let _report = shutdown_result;
-                eprintln!("[SessionSwitch] shutdown complete, loading next session");
-                if continue_to_load {
-                    if let Some(load) = window.transaction.as_mut() {
-                        load.stage = LoadStage::Validate;
+                set_project_lifecycle_busy(false);
+                match shutdown_result {
+                    Ok(()) => {
+                        if continue_to_load {
+                            eprintln!(
+                                "[ProjectLifecycle] shutdown complete continue_to_load=true"
+                            );
+                            if let Some(load) = window.transaction.as_mut() {
+                                load.stage = LoadStage::Validate;
+                            }
+                            window.set_detail("Reading project", cx);
+                            window.progress = ProgressBarValue::value(0.1);
+                            cx.notify();
+                            window.schedule_tick(cx);
+                        } else if let Some(on_complete) = window
+                            .transaction
+                            .as_ref()
+                            .and_then(|load| load.on_shutdown_complete.clone())
+                        {
+                            eprintln!(
+                                "[ProjectLifecycle] shutdown complete continue_to_load=false — invoking completion callback"
+                            );
+                            window.stop_progress_animation();
+                            window.transaction = None;
+                            cx.defer(move |cx| {
+                                on_complete(cx);
+                            });
+                        } else {
+                            eprintln!(
+                                "[ProjectLifecycle] shutdown complete continue_to_load=false target_project=None"
+                            );
+                            window.stop_progress_animation();
+                            window.transaction = None;
+                            cx.defer(move |cx| {
+                                complete_project_lifecycle(cx, ProjectLifecycleTarget::Welcome);
+                            });
+                        }
                     }
-                    window.set_detail("Reading project", cx);
-                    window.progress = ProgressBarValue::value(0.1);
-                    cx.notify();
-                    window.schedule_tick(cx);
-                } else if let Some(on_complete) = on_shutdown_complete {
-                    cx.defer(move |cx| {
-                        on_complete(cx);
-                    });
+                    Err(error) => window.finish_shutdown_failure(error, cx),
                 }
             });
         })
@@ -474,67 +815,32 @@ impl LoadingSessionWindow {
         eprintln!("[LoadingSessionUI] presentation=dialog");
         self.set_detail("Preparing session", cx);
         self.progress = ProgressBarValue::value(0.25);
+        self.start_progress_animation(cx);
+        set_project_lifecycle_busy(true);
 
         let path = package.path.clone();
         let open_options = package.open_options.clone();
         let project = package.project.clone();
-        let progress_state = Arc::new(std::sync::Mutex::new((
-            "Preparing session".to_string(),
-            ProgressBarValue::value(0.15),
-        )));
-        let progress_for_install = progress_state.clone();
-        let progress_for_ui = progress_state.clone();
-        let install_done = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let install_done_ui = install_done.clone();
-        let install_done_job = install_done.clone();
         let this = cx.entity().clone();
 
         cx.spawn(async move |_view, cx| {
-            let progress_ui = this.clone();
-            let progress_task = cx.spawn(async move |cx| {
-                while !install_done_ui.load(std::sync::atomic::Ordering::Relaxed) {
-                    cx.background_executor()
-                        .timer(Duration::from_millis(50))
-                        .await;
-                    let (detail, bar) =
-                        progress_for_ui
-                            .lock()
-                            .map(|g| g.clone())
-                            .unwrap_or_else(|_| {
-                                (
-                                    "Preparing session".to_string(),
-                                    ProgressBarValue::Indeterminate,
-                                )
-                            });
-                    let _ = progress_ui.update(cx, |window, cx| {
-                        window.set_progress(detail, bar, cx);
-                    });
-                }
-            });
-
             let install_result = cx
                 .background_executor()
                 .spawn(async move {
                     crate::pre_studio_install::run_pre_studio_session_install(
                         package,
                         |detail, bar| {
-                            if let Ok(mut slot) = progress_for_install.lock() {
-                                *slot = (detail.to_string(), bar);
-                            }
+                            eprintln!(
+                                "[SessionLoad] install progress: {detail} {:?}",
+                                bar.fraction()
+                            );
                         },
                     )
                 })
                 .await;
 
-            install_done_job.store(true, std::sync::atomic::Ordering::Relaxed);
-            let _ = progress_task;
-            // Let the progress poller exit before the terminal update so we never
-            // lease LoadingSessionWindow from two tasks at once.
-            cx.background_executor()
-                .timer(Duration::from_millis(60))
-                .await;
-
             let _ = this.update(cx, |window, cx| {
+                set_project_lifecycle_busy(false);
                 match install_result {
                     Ok((handoff, report)) => {
                         let ready = LoadedSessionPackage {
@@ -544,12 +850,11 @@ impl LoadingSessionWindow {
                             install_handoff: Some(handoff),
                             restore_warnings: report.warnings,
                         };
+                        window.stop_progress_animation();
                         window.progress = ProgressBarValue::value(1.0);
                         window.detail = "Opening studio".into();
                         cx.notify();
                         eprintln!("[SessionLoad] ready");
-                        // Defer so opening Studio / closing this window never runs
-                        // re-entrantly inside our own entity update.
                         cx.defer(move |cx| {
                             on_success(ready, cx);
                         });
@@ -564,6 +869,7 @@ impl LoadingSessionWindow {
                             open_options,
                             rollback: None,
                         };
+                        window.stop_progress_animation();
                         cx.defer(move |cx| {
                             on_failure(ctx, cx);
                         });
@@ -606,6 +912,7 @@ pub fn is_loading_session_window_open(cx: &App) -> bool {
 pub(crate) fn close_loading_session_window_for<C: BorrowAppContext + AppContext>(cx: &mut C) {
     eprintln!("[WindowLifecycle] close loading session window requested");
     session_log!("closing loading window");
+    set_project_lifecycle_busy(false);
     crate::window_lifecycle::log_remove_window("LoadingSessionWindow", "session_load_complete");
     cx.update_global::<LoadingSessionGate, _>(|gate, cx| {
         if let Some(handle) = gate.window.take() {
@@ -698,7 +1005,7 @@ impl Render for LoadingSessionWindow {
                             .text_color(Colors::text_muted())
                             .child(detail),
                     )
-                    .child(progress_bar(progress))
+                    .child(progress_bar_animated(progress, self.indeterminate_phase))
                     .child(
                         div()
                             .text_size(px(10.0))
@@ -805,6 +1112,9 @@ pub fn begin_pre_studio_workspace_prepare(
         open_options: ProjectOpenOptions::default(),
         rollback: None,
         shutdown: None,
+        shutdown_reason: None,
+        studio: None,
+        clear_session_state: false,
         on_shutdown_complete: None,
         stage: LoadStage::SessionInstall,
         project: Some(project),
@@ -820,6 +1130,7 @@ pub fn begin_pre_studio_workspace_prepare(
                 window.heading = heading;
                 window.set_detail("Preparing session", cx);
                 window.progress = ProgressBarValue::value(0.25);
+                window.start_progress_animation(cx);
                 window.schedule_tick(cx);
             });
         }
@@ -852,11 +1163,15 @@ pub fn begin_project_session_load(
     on_failure: LoadFailedCb,
     cx: &mut App,
 ) {
+    let shutdown_reason = shutdown.as_ref().map(|snapshot| snapshot.reason);
     begin_project_session_load_inner(
         path,
         open_options,
         rollback,
         shutdown,
+        None,
+        shutdown_reason,
+        false,
         owner_bounds,
         None,
         on_success,
@@ -866,9 +1181,11 @@ pub fn begin_project_session_load(
 }
 
 /// Close the current session with visible progress, then invoke `on_complete`.
-pub fn begin_session_shutdown(
-    snapshot: SessionShutdownSnapshot,
+pub fn begin_studio_session_shutdown(
+    reason: SessionShutdownReason,
+    studio: WindowHandle<StudioLayout>,
     owner_bounds: Option<Bounds<Pixels>>,
+    clear_session_state: bool,
     on_complete: SessionShutdownCompleteCb,
     cx: &mut App,
 ) {
@@ -878,7 +1195,10 @@ pub fn begin_session_shutdown(
         path: None,
         open_options: ProjectOpenOptions::default(),
         rollback: None,
-        shutdown: Some(snapshot.clone()),
+        shutdown: None,
+        shutdown_reason: Some(reason),
+        studio: Some(studio),
+        clear_session_state,
         on_shutdown_complete: Some(on_complete.clone()),
         stage: LoadStage::SessionShutdown,
         project: None,
@@ -889,15 +1209,43 @@ pub fn begin_session_shutdown(
         Ok(handle) => {
             store_loading_session_window(cx, handle.clone());
             let _ = handle.update(cx, |window, _win, cx| {
+                window.start_progress_animation(cx);
                 window.schedule_tick(cx);
             });
         }
         Err(err) => {
             session_log!("loading window unavailable for shutdown: {err}");
-            crate::session_shutdown::run_session_shutdown(snapshot, |_| {});
             on_complete(cx);
         }
     }
+}
+
+/// In-studio project switch — show the loading dialog immediately, then shut
+/// down the live session asynchronously before decoding the target project.
+pub fn begin_studio_project_session_load(
+    path: PathBuf,
+    open_options: ProjectOpenOptions,
+    rollback: SessionRollbackSnapshot,
+    studio: WindowHandle<StudioLayout>,
+    owner_bounds: Option<Bounds<Pixels>>,
+    on_success: LoadSuccessCb,
+    on_failure: LoadFailedCb,
+    cx: &mut App,
+) {
+    begin_project_session_load_inner(
+        path,
+        open_options,
+        Some(rollback),
+        None,
+        Some(studio),
+        Some(SessionShutdownReason::ProjectSwitch),
+        false,
+        owner_bounds,
+        None,
+        on_success,
+        on_failure,
+        cx,
+    );
 }
 
 fn begin_project_session_load_inner(
@@ -905,6 +1253,9 @@ fn begin_project_session_load_inner(
     open_options: ProjectOpenOptions,
     rollback: Option<SessionRollbackSnapshot>,
     shutdown: Option<SessionShutdownSnapshot>,
+    studio: Option<WindowHandle<StudioLayout>>,
+    shutdown_reason: Option<SessionShutdownReason>,
+    clear_session_state: bool,
     owner_bounds: Option<Bounds<Pixels>>,
     on_shutdown_complete: Option<SessionShutdownCompleteCb>,
     on_success: LoadSuccessCb,
@@ -913,7 +1264,7 @@ fn begin_project_session_load_inner(
 ) {
     set_app_mode(cx, AppMode::LoadingSession);
     session_log!("begin pre-studio load: {}", path.display());
-    if shutdown.is_some() {
+    if studio.is_some() || shutdown.is_some() {
         eprintln!("[AppMode] Studio -> LoadingSession (project switch)");
     } else {
         eprintln!("[AppMode] Welcome -> LoadingSession");
@@ -926,7 +1277,7 @@ fn begin_project_session_load_inner(
 
     let rollback_for_headless = rollback.clone();
     let shutdown_for_headless = shutdown.clone();
-    let initial_stage = if shutdown.is_some() {
+    let initial_stage = if studio.is_some() || shutdown.is_some() {
         LoadStage::SessionShutdown
     } else {
         LoadStage::Validate
@@ -936,6 +1287,9 @@ fn begin_project_session_load_inner(
         open_options,
         rollback,
         shutdown,
+        shutdown_reason,
+        studio,
+        clear_session_state,
         on_shutdown_complete,
         stage: initial_stage,
         project: None,
@@ -947,13 +1301,14 @@ fn begin_project_session_load_inner(
         Ok(handle) => {
             store_loading_session_window(cx, handle.clone());
             let _ = handle.update(cx, |window, _win, cx| {
+                window.start_progress_animation(cx);
                 window.schedule_tick(cx);
             });
         }
         Err(err) => {
             session_log!("loading window unavailable: {err}");
             if let Some(snapshot) = shutdown_for_headless {
-                crate::session_shutdown::run_session_shutdown(snapshot, |_| {});
+                let _ = crate::session_shutdown::run_session_shutdown(snapshot, |_| {});
             }
             run_headless_load(
                 path,

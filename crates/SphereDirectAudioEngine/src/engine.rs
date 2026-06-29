@@ -880,6 +880,7 @@ impl EngineInner {
 
         let sample_rate = selected_config.config.sample_rate.0;
         let buffer_size = reported_buffer_size(&selected_config.config);
+        eprintln!("[audio-engine] active_sample_rate={sample_rate} block_size={buffer_size}");
 
         // Store the stream and sender.
         *self.stream.lock() = Some(stream);
@@ -2190,6 +2191,19 @@ impl EngineInner {
         // Clear any previous error / device-lost flag on success.
         self.status.lock().last_daux_error = None;
         self.shared.device_lost.store(false, Ordering::Relaxed);
+
+        // Surface any divergence between the requested rate and the rate the
+        // device actually opened at. Shared/Auto: allowed (logged + shown in
+        // Settings). Exclusive: an implicit fallback happened — make it a
+        // visible warning so the user isn't silently off-pitch.
+        let active_sr = self.shared.sample_rate.load(Ordering::Relaxed);
+        let requested_sr = daux_cfg.sample_rate.unwrap_or(0);
+        if let Some(exclusive_warning) =
+            log_sample_rate_decision(requested_sr, active_sr, &daux_cfg.backend)
+        {
+            self.status.lock().last_daux_error = Some(exclusive_warning);
+        }
+
         *self.active_stream.lock() = Some(stream);
         Ok(())
     }
@@ -2717,6 +2731,7 @@ impl EngineInner {
             backend_name,
             output_device: st.output_device,
             sample_rate: st.sample_rate,
+            requested_sample_rate: daux_cfg.sample_rate.unwrap_or(0),
             buffer_size: st.buffer_size,
             estimated_latency_ms,
             glitch_count,
@@ -2778,6 +2793,7 @@ impl EngineInner {
         st.buffer_size = bs;
         st.output_device = Some(device_name);
         st.last_error = None;
+        eprintln!("[audio-engine] active_sample_rate={sr} block_size={bs}");
         eprintln!("[DAUx] Stream committed: backend={backend_name} sr={sr} buf={bs}");
     }
 
@@ -2878,6 +2894,56 @@ fn reported_buffer_size(config: &cpal::StreamConfig) -> u32 {
     match config.buffer_size {
         BufferSize::Fixed(frames) => frames,
         BufferSize::Default => 0,
+    }
+}
+
+/// Compact, log-friendly mode token for the audio-device sample-rate decision.
+fn sample_rate_mode_label(backend: &BackendKind) -> &'static str {
+    match backend {
+        BackendKind::Auto => "AUTO",
+        BackendKind::WasapiShared => "WASAPI_SHARED",
+        BackendKind::WasapiExclusive => "WASAPI_EXCLUSIVE",
+        BackendKind::WdmKs => "WDM_KS",
+        BackendKind::CoreAudio => "COREAUDIO",
+        BackendKind::Alsa => "ALSA",
+        BackendKind::MmeFallback => "MME",
+    }
+}
+
+/// Returns `Some((requested, active))` when a *specific* rate was requested
+/// (`requested > 0`) and the opened stream runs at a different rate. `None`
+/// otherwise (no specific request, or the rates agree). Control-thread only —
+/// the realtime callback must never call this.
+pub(crate) fn sample_rate_mismatch(requested: u32, active: u32) -> Option<(u32, u32)> {
+    if requested > 0 && active > 0 && requested != active {
+        Some((requested, active))
+    } else {
+        None
+    }
+}
+
+/// Emit the visible sample-rate decision after a stream opens (control thread).
+/// Shared/Auto/WDM-KS mismatch is *allowed* (Windows resamples) but must be
+/// visible. Exclusive-mode mismatch means an implicit fallback happened and is
+/// surfaced as a warning string the caller can store in `last_daux_error`.
+fn log_sample_rate_decision(requested: u32, active: u32, backend: &BackendKind) -> Option<String> {
+    let Some((req, act)) = sample_rate_mismatch(requested, active) else {
+        return None;
+    };
+    let mode = sample_rate_mode_label(backend);
+    eprintln!("[audio-device] requested_sample_rate={req} active_sample_rate={act} mode={mode}");
+    eprintln!("[audio-device] sample rate mismatch: using active device rate for timing");
+    if matches!(backend, BackendKind::WasapiExclusive) {
+        // Exclusive mode could not honor the exact rate and fell back to the
+        // native device rate — a real degradation the user should see.
+        let msg = format!(
+            "Exclusive mode could not open at {req} Hz; the device is running at {act} Hz. \
+             Timing uses the active device rate."
+        );
+        eprintln!("[audio-device] WARNING: {msg}");
+        Some(msg)
+    } else {
+        None
     }
 }
 
@@ -3720,6 +3786,74 @@ mod clip_fade_tests {
 }
 
 #[cfg(test)]
+mod sample_rate_mismatch_tests {
+    use super::{log_sample_rate_decision, sample_rate_mismatch, sample_rate_mode_label};
+    use crate::backend::BackendKind;
+
+    #[test]
+    fn shared_mode_requested_48k_active_96k_is_a_mismatch() {
+        // The exact reported scenario: Preferences requested 48000, but the
+        // device opened at 96000 (WASAPI shared / device default).
+        assert_eq!(sample_rate_mismatch(48_000, 96_000), Some((48_000, 96_000)));
+    }
+
+    #[test]
+    fn matching_rates_report_no_mismatch() {
+        assert_eq!(sample_rate_mismatch(48_000, 48_000), None);
+        assert_eq!(sample_rate_mismatch(96_000, 96_000), None);
+    }
+
+    #[test]
+    fn zero_requested_means_device_default_no_mismatch() {
+        // requested == 0 ("use device default") is never a mismatch, whatever
+        // the device opened at.
+        assert_eq!(sample_rate_mismatch(0, 96_000), None);
+        assert_eq!(sample_rate_mismatch(48_000, 0), None);
+    }
+
+    #[test]
+    fn shared_mismatch_is_visible_but_not_an_error() {
+        // Shared/Auto mismatch is allowed (Windows resamples) — logged, but no
+        // error string is returned for the UI's error channel.
+        assert_eq!(
+            log_sample_rate_decision(48_000, 96_000, &BackendKind::WasapiShared),
+            None
+        );
+        assert_eq!(
+            log_sample_rate_decision(48_000, 96_000, &BackendKind::Auto),
+            None
+        );
+    }
+
+    #[test]
+    fn exclusive_mismatch_returns_a_visible_warning() {
+        // Exclusive mode could not honor the rate and fell back — surfaced as a
+        // warning string the caller stores in last_daux_error.
+        let warning = log_sample_rate_decision(48_000, 96_000, &BackendKind::WasapiExclusive)
+            .expect("exclusive fallback must surface a warning");
+        assert!(warning.contains("48000"));
+        assert!(warning.contains("96000"));
+    }
+
+    #[test]
+    fn exclusive_without_mismatch_has_no_warning() {
+        assert_eq!(
+            log_sample_rate_decision(96_000, 96_000, &BackendKind::WasapiExclusive),
+            None
+        );
+    }
+
+    #[test]
+    fn mode_labels_are_stable() {
+        assert_eq!(sample_rate_mode_label(&BackendKind::WasapiShared), "WASAPI_SHARED");
+        assert_eq!(
+            sample_rate_mode_label(&BackendKind::WasapiExclusive),
+            "WASAPI_EXCLUSIVE"
+        );
+    }
+}
+
+#[cfg(test)]
 mod clip_stretch_dsp_tests {
     use super::{clip_source_pos_seconds, sample_clip_processor_stereo, signalsmith_input_span};
     use crate::audio_file::AudioFileBuffer;
@@ -4484,6 +4618,8 @@ mod routing_tests {
                 id: "clip-1".to_string(),
                 track_id: "audio".to_string(),
                 track_index: None,
+                start_beat: 0.0,
+                duration_beats: 8.0,
                 start_sample: 0,
                 duration_samples: 8,
                 offset_seconds: 0.0,
@@ -4568,6 +4704,8 @@ mod routing_tests {
                     id: "c".to_string(),
                     track_id: "audio".to_string(),
                     track_index: None,
+                    start_beat: 0.0,
+                    duration_beats: 8.0,
                     start_sample: 0,
                     duration_samples: 8,
                     offset_seconds: 0.0,

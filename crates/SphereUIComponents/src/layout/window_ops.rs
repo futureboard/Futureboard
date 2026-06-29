@@ -17,7 +17,6 @@ use crate::components::timeline::timeline_state::{
     TrackOutputRouting, TrackType,
 };
 use crate::components::{external_mixer_debug, open_mixer_window};
-use crate::session_shutdown::SessionShutdownSnapshot;
 use crate::window_position::resolve_owner_bounds_with_preferred;
 use SpherePluginHost::{PluginFormat as RegistryPluginFormat, PluginKind};
 
@@ -115,9 +114,9 @@ pub(crate) struct StudioWindowHooks {
     pub on_request_session_shutdown: Option<
         Arc<
             dyn Fn(
-                    SessionShutdownSnapshot,
+                    crate::session_shutdown::SessionShutdownReason,
                     Option<Bounds<gpui::Pixels>>,
-                    Option<gpui::WindowHandle<StudioLayout>>,
+                    gpui::WindowHandle<StudioLayout>,
                     &mut gpui::App,
                 ) + 'static,
         >,
@@ -524,23 +523,30 @@ impl StudioLayout {
         ];
 
         let on_update: OnSettingUpdate = Arc::new(move |updater, cx| {
-            let updater = updater.clone();
             let _ = owner.update(cx, |this, cx| {
-                let _ = this.settings.update(cx, |settings, cx| {
-                    settings.update_setting(move |s| updater(s), cx);
-                });
-                this.sync_settings_to_systems(cx);
-                cx.notify();
+                // A sample-rate change while the engine is live is intercepted
+                // here (confirmation dialog) instead of silently restarting the
+                // audio engine — see `handle_setting_update`.
+                this.handle_setting_update(updater, cx);
             });
         });
 
         let engine_for_latency = self.audio_bridge.engine.clone();
+        let deferred_rate = self.audio_bridge.sample_rate_deferred_target.clone();
         let latency_provider: crate::components::settings_dialog::AudioLatencySnapshotProvider =
             Arc::new(move || {
-                engine_for_latency
+                let mut snapshot = engine_for_latency
                     .as_ref()
                     .map(crate::settings::SettingsAudioLatencySnapshot::from_engine)
-                    .unwrap_or_else(crate::settings::SettingsAudioLatencySnapshot::unavailable)
+                    .unwrap_or_else(crate::settings::SettingsAudioLatencySnapshot::unavailable);
+                // A deferred ("Later") rate is pending only until the active device
+                // rate actually matches it — then it resolves automatically.
+                let target = deferred_rate.load(std::sync::atomic::Ordering::Relaxed);
+                if target != 0 && target != snapshot.active_sample_rate {
+                    snapshot.restart_pending = true;
+                    snapshot.deferred_sample_rate = target;
+                }
+                snapshot
             });
         let input_test_start: Option<crate::components::settings_dialog::InputTestStartFn> =
             self.audio_bridge.engine.clone().map(|engine| {

@@ -52,6 +52,10 @@ impl StudioLayout {
         owner_bounds: Option<Bounds<Pixels>>,
         cx: &mut Context<Self>,
     ) {
+        if crate::loading_session::is_project_lifecycle_busy() {
+            eprintln!("[ProjectSwitch] ignored — project lifecycle already in progress");
+            return;
+        }
         self.close_project_switcher_and_overlays(cx);
 
         if self.is_current_project_path(&request.target_path) {

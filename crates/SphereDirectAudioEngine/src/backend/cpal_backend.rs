@@ -204,7 +204,7 @@ where
     let sr = output_sample_rate as f64;
     let ch = config.channels as usize;
     let mut runtime = initial_runtime;
-    runtime.sample_rate = output_sample_rate;
+    runtime.retarget_sample_rate(output_sample_rate);
     let mut local = LocalAudioState::new(sr);
     #[cfg(target_os = "windows")]
     let mut mmcss_set = false;

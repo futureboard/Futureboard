@@ -380,6 +380,11 @@ fn progress_dialog_body(
 }
 
 pub fn progress_bar(value: ProgressBarValue) -> impl IntoElement {
+    progress_bar_animated(value, 0.0)
+}
+
+/// Determinate bars ignore `phase`. Indeterminate bars sweep using `phase` in `0.0..1.0`.
+pub fn progress_bar_animated(value: ProgressBarValue, phase: f32) -> impl IntoElement {
     let rail = div()
         .h(px(BAR_H))
         .w_full()
@@ -395,11 +400,14 @@ pub fn progress_bar(value: ProgressBarValue) -> impl IntoElement {
                 .w(gpui::relative(value.clamp(0.0, 1.0).max(0.015)))
                 .bg(Colors::accent_primary()),
         ),
-        ProgressBarValue::Indeterminate => rail
-            .child(
+        ProgressBarValue::Indeterminate => {
+            let phase = phase.fract().abs();
+            let primary_left = 0.08 + phase * 0.58;
+            let secondary_left = (primary_left + 0.38).fract() * 0.72 + 0.08;
+            rail.child(
                 div()
                     .absolute()
-                    .left(gpui::relative(0.12))
+                    .left(gpui::relative(primary_left.clamp(0.0, 0.92)))
                     .top_0()
                     .bottom_0()
                     .w(gpui::relative(0.34))
@@ -409,13 +417,14 @@ pub fn progress_bar(value: ProgressBarValue) -> impl IntoElement {
             .child(
                 div()
                     .absolute()
-                    .left(gpui::relative(0.56))
+                    .left(gpui::relative(secondary_left.clamp(0.0, 0.92)))
                     .top_0()
                     .bottom_0()
                     .w(gpui::relative(0.22))
                     .rounded(px(BAR_RADIUS))
                     .bg(Colors::with_alpha(Colors::accent_primary(), 0.45)),
-            ),
+            )
+        }
     }
 }
 

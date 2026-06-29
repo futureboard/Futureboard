@@ -181,7 +181,11 @@ impl SettingsWindow {
                     || next.device_state != window.latency.device_state
                     || next.backend_name != window.latency.backend_name
                     || next.last_error != window.latency.last_error
-                    || next.buffer_ms != window.latency.buffer_ms;
+                    || next.buffer_ms != window.latency.buffer_ms
+                    || next.active_sample_rate != window.latency.active_sample_rate
+                    || next.requested_sample_rate != window.latency.requested_sample_rate
+                    || next.restart_pending != window.latency.restart_pending
+                    || next.deferred_sample_rate != window.latency.deferred_sample_rate;
                 window.latency = next;
                 if changed {
                     cx.notify();

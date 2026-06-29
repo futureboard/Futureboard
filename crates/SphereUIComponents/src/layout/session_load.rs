@@ -20,7 +20,7 @@ use crate::loading_session::{
 };
 use crate::project::io::{load_project, validate_project_file};
 use crate::project::{apply_to_timeline, now_secs};
-use crate::session_shutdown::{PluginUnloadTarget, SessionShutdownReason, SessionShutdownSnapshot};
+use crate::session_shutdown::{PluginUnloadTarget, SessionLifecycleStep, SessionShutdownReason, SessionShutdownSnapshot};
 
 use super::project_ops::ProjectOpenOptions;
 use super::{RecordingUiState, StudioLayout};
@@ -427,25 +427,120 @@ impl StudioLayout {
         cx.notify();
     }
 
-    /// Prepare rollback + shutdown snapshot for an in-studio project switch.
-    /// Does not close or unhook the root studio window.
+    /// Prepare rollback for an in-studio project switch. Session shutdown runs
+    /// asynchronously once the loading dialog is visible.
     pub fn prepare_for_in_studio_project_switch_transaction(
         &mut self,
         cx: &mut Context<Self>,
     ) -> (
         SessionRollbackSnapshot,
-        SessionShutdownSnapshot,
         Option<gpui::Bounds<gpui::Pixels>>,
     ) {
         session_log!("prepare for in-studio project switch transaction");
         eprintln!("[ProjectSwitch] close project switcher popover");
-        let transient_count = self.prepare_for_in_studio_project_switch(cx);
-        eprintln!("[SessionShutdown] closing transient windows count={transient_count}");
+        self.menu_bar.open_menu_id = None;
+        self.menu_bar.submenu_path.clear();
+        self.project_switcher.is_open = false;
+        self.command_palette.close();
+        self.overlay.text_context_menu = None;
+        self.overlay.open_popover = None;
         let rollback = self.capture_session_rollback_snapshot(cx);
-        let shutdown =
-            self.capture_session_shutdown_snapshot(SessionShutdownReason::ProjectSwitch, cx);
         let owner_bounds = self.studio_window_bounds(cx);
-        (rollback, shutdown, owner_bounds)
+        (rollback, owner_bounds)
+    }
+
+    /// Run one UI-thread session lifecycle step for the loading dialog.
+    pub fn run_session_lifecycle_ui_step(
+        &mut self,
+        step: SessionLifecycleStep,
+        clear_session_state: bool,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        eprintln!("[ProjectLifecycle] ui step begin: {}", step.label());
+        let result = match step {
+            SessionLifecycleStep::StopTransport => {
+                self.prepare_immediate_session_shutdown(cx);
+                Ok(())
+            }
+            SessionLifecycleStep::FlushAutosave => Ok(()),
+            SessionLifecycleStep::StopAudioEngine => {
+                if let Some(mut engine) = self.audio_bridge.engine.take() {
+                    let _ = engine.stop();
+                }
+                self.audio_bridge.running = false;
+                self.audio_bridge.stats = None;
+                Ok(())
+            }
+            SessionLifecycleStep::StopWorkers => {
+                self.cancel_session_background_workers(cx);
+                Ok(())
+            }
+            SessionLifecycleStep::CloseFileWatchers => {
+                eprintln!("[ProjectLifecycle] file watchers not configured");
+                Ok(())
+            }
+            SessionLifecycleStep::ReleaseProjectResources => {
+                self.teardown_all_plugin_instances(cx, "session_shutdown");
+                Ok(())
+            }
+            SessionLifecycleStep::ClearSessionState => {
+                if clear_session_state {
+                    self.reset_project(cx);
+                }
+                Ok(())
+            }
+            SessionLifecycleStep::UnloadPlugins | SessionLifecycleStep::TerminatePluginHosts => {
+                Ok(())
+            }
+        };
+        match &result {
+            Ok(()) => eprintln!("[ProjectLifecycle] ui step complete: {}", step.label()),
+            Err(error) => {
+                eprintln!(
+                    "[ProjectLifecycle] ui step failed: {} error={error}",
+                    step.label()
+                );
+            }
+        }
+        result
+    }
+
+    pub fn capture_session_shutdown_snapshot_for_loading(
+        &mut self,
+        reason: SessionShutdownReason,
+        cx: &mut Context<Self>,
+    ) -> SessionShutdownSnapshot {
+        let (flush_autosave_path, flush_autosave_project) =
+            self.session_autosave_flush_payload(cx);
+        let mut snapshot = self.capture_session_shutdown_snapshot(reason, cx);
+        snapshot.flush_autosave_path = flush_autosave_path;
+        snapshot.flush_autosave_project = flush_autosave_project;
+        snapshot
+    }
+
+    fn cancel_session_background_workers(&mut self, cx: &mut Context<Self>) {
+        let ids: Vec<String> = self
+            .background_tasks
+            .tasks
+            .iter()
+            .filter(|(_, task)| {
+                task.cancellable
+                    && matches!(
+                        task.status,
+                        crate::components::background_tasks::BackgroundTaskStatus::Queued
+                            | crate::components::background_tasks::BackgroundTaskStatus::Running
+                            | crate::components::background_tasks::BackgroundTaskStatus::Paused
+                    )
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in &ids {
+            eprintln!("[ProjectLifecycle] cancel background worker id={id}");
+            self.background_tasks.cancel(id);
+        }
+        if !ids.is_empty() {
+            cx.notify();
+        }
     }
 
     /// Tear down the live studio surface before a welcome-path project reload
@@ -547,6 +642,8 @@ impl StudioLayout {
             plugin_targets,
             bridge_runtime: self.plugin_editors.bridge_runtime.take(),
             instrument_track_ids,
+            flush_autosave_path: None,
+            flush_autosave_project: None,
         }
     }
 

@@ -56,6 +56,7 @@ mod plugin_restore;
 mod project_ops;
 mod project_switch;
 mod recording_ops;
+mod sample_rate_ops;
 mod session_load;
 mod stretch_tempo_ops;
 mod studio_render;
@@ -1089,9 +1090,9 @@ impl StudioLayout {
         &mut self,
         callback: Arc<
             dyn Fn(
-                    crate::session_shutdown::SessionShutdownSnapshot,
+                    crate::session_shutdown::SessionShutdownReason,
                     Option<gpui::Bounds<gpui::Pixels>>,
-                    Option<gpui::WindowHandle<Self>>,
+                    gpui::WindowHandle<Self>,
                     &mut gpui::App,
                 ) + 'static,
         >,
@@ -2032,8 +2033,20 @@ impl StudioLayout {
                 backend,
                 &schema.hardware.audio.device_out,
             );
+            // A *live* engine must never silently swap its timing rate from a
+            // generic settings sync — sample-rate changes go exclusively through
+            // the explicit "Re-open Project" flow (`restart_audio_for_sample_rate`).
+            // So while the stream is open we pin the current active rate here and
+            // let other device-shaping changes (backend / device / buffer size)
+            // reopen without touching timing. When the stream is closed there is
+            // no live timing to disrupt, so the schema rate may apply directly.
+            let sample_rate = if engine.stats().stream_open {
+                engine.config().sample_rate
+            } else {
+                schema.general.project_defaults.sample_rate
+            };
             let desired_config = DirectAudio::EngineConfig {
-                sample_rate: schema.general.project_defaults.sample_rate,
+                sample_rate,
                 buffer_size: schema.general.project_defaults.buffer_size,
                 channels: 2,
                 backend,

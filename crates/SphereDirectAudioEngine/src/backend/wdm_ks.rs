@@ -673,7 +673,7 @@ unsafe fn run_rt_stream(
 
     // Realtime runtime + scratch (period-sized; the fill loop chunks by period).
     let mut runtime = initial_runtime;
-    runtime.sample_rate = sample_rate;
+    runtime.retarget_sample_rate(sample_rate);
     let mut local = LocalAudioState::new(sample_rate as f64);
     let mut scratch = vec![0.0f32; stream.period_frames as usize * channels.max(1)];
 
@@ -1151,9 +1151,12 @@ fn build_format_candidates(
         }
     }
 
-    // Broadly-accepted fallbacks (in case the pin reported no usable ranges or
-    // its preferred format is rejected by KsCreatePin / RtAudio).
-    for sr in [requested_sr.unwrap_or(48000), 48000, 44100] {
+    // Fallbacks if the pin reported no usable ranges or its preferred format is
+    // rejected by KsCreatePin / RtAudio. Do not bake in a 48 kHz runtime
+    // assumption; prefer the caller's requested rate, otherwise use the generic
+    // selector over the device-declared range.
+    let fallback_sr = pick_sample_rate(requested_sr, 0, 0);
+    for sr in [requested_sr.unwrap_or(fallback_sr), fallback_sr, 44_100] {
         for fmt in [SampleFmt::I16, SampleFmt::F32, SampleFmt::I32] {
             push(
                 FormatCandidate {
@@ -1179,12 +1182,12 @@ fn pick_sample_rate(requested: Option<u32>, min: u32, max: u32) -> u32 {
     if let Some(req) = requested.filter(|&r| r >= min && r <= max) {
         return req;
     }
-    for pref in [48_000, 44_100] {
-        if pref >= min && pref <= max {
-            return pref;
-        }
-    }
-    max.min(48_000).max(min)
+    let preferred = if (44_100..=96_000).contains(&max) {
+        max
+    } else {
+        max.min(96_000).max(min)
+    };
+    preferred.clamp(min, max)
 }
 
 fn pick_pcm_fmt(min_bits: u32, max_bits: u32) -> SampleFmt {
@@ -1377,16 +1380,13 @@ pub fn list_output_devices() -> Vec<WdmKsDeviceInfo> {
                 .unwrap_or(0);
             let default_sample_rate = pin
                 .audio_ranges
-                .iter()
-                .find_map(|range| {
-                    (range.minimum_sample_frequency <= 48_000
-                        && range.maximum_sample_frequency >= 48_000)
-                        .then_some(48_000)
-                })
-                .or_else(|| {
-                    pin.audio_ranges
-                        .first()
-                        .map(|range| range.maximum_sample_frequency)
+                .first()
+                .map(|range| {
+                    pick_sample_rate(
+                        None,
+                        range.minimum_sample_frequency,
+                        range.maximum_sample_frequency,
+                    )
                 })
                 .unwrap_or(0);
             Some(WdmKsDeviceInfo {

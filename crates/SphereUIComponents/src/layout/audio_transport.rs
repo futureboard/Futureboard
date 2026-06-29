@@ -1,7 +1,7 @@
 use gpui::{App, Context, Window};
 use sphere_midi_service::{MidiInputEvent, MidiInputRouteStatus, MidiInputSource, MidiInputTarget};
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -196,6 +196,16 @@ pub(crate) struct AudioBridgeState {
     pub dropout_notice_until: Option<Instant>,
     /// Reason of the most recent dropout, for the status notice.
     pub last_dropout_reason: String,
+    /// Preferred sample rate the user deferred via the "Later" button (Hz), or 0
+    /// when nothing is pending. Shared with the Settings latency provider so the
+    /// Preferences "restart pending" warning reflects live state. Treated as
+    /// resolved once the active device rate matches it.
+    pub sample_rate_deferred_target: Arc<AtomicU32>,
+    /// While set in the future, the status bar shows a coalesced sample-rate
+    /// notice (e.g. an active-vs-requested mismatch after re-opening).
+    pub sample_rate_notice_until: Option<Instant>,
+    /// Text of the most recent sample-rate notice.
+    pub sample_rate_notice_text: String,
 }
 
 impl Default for AudioBridgeState {
@@ -234,6 +244,9 @@ impl Default for AudioBridgeState {
             last_dropout_count: 0,
             dropout_notice_until: None,
             last_dropout_reason: String::new(),
+            sample_rate_deferred_target: Arc::new(AtomicU32::new(0)),
+            sample_rate_notice_until: None,
+            sample_rate_notice_text: String::new(),
         }
     }
 }

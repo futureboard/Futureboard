@@ -324,6 +324,37 @@ mod tests {
     }
 
     #[test]
+    fn bpm_math_roundtrips_across_supported_sample_rates() {
+        let bpm = 128.0;
+        let map = TempoMap::static_tempo(bpm);
+        for sr in [44_100.0, 48_000.0, 88_200.0, 96_000.0, 192_000.0] {
+            assert!((map.tempo_at_beat(0.0) - bpm).abs() < 1e-9);
+            let samples_per_beat = sr * 60.0 / bpm;
+            assert_eq!(
+                map.samples_at_beat(1.0, sr),
+                samples_per_beat.round() as u64
+            );
+            let half_sample_ppq = bpm / (sr * 60.0) * 0.5;
+            assert!(
+                (map.beat_at_samples(samples_per_beat.round() as u64, sr) - 1.0).abs()
+                    <= half_sample_ppq + 1e-12,
+                "sr={sr}"
+            );
+
+            let ppq = 17.25;
+            let sample = map.samples_at_beat(ppq, sr);
+            let roundtrip = map.beat_at_samples(sample, sr);
+            assert!(
+                (roundtrip - ppq).abs() <= half_sample_ppq + 1e-12,
+                "sr={sr} sample={sample} roundtrip={roundtrip}"
+            );
+        }
+
+        assert_eq!(map.samples_at_beat(1.0, 48_000.0), 22_500);
+        assert_eq!(map.samples_at_beat(1.0, 96_000.0), 45_000);
+    }
+
+    #[test]
     fn metronome_click_samples_follow_tempo_map() {
         let snap = map_120_160().snapshot();
         let sr = 48_000.0;

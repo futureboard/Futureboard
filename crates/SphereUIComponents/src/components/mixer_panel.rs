@@ -315,13 +315,13 @@ pub fn mixer_sub_header(track_count: usize) -> impl IntoElement {
         .h(px(30.0))
         .px(px(10.0))
         .border_b(px(1.0))
-        .border_color(Colors::divider())
+        .border_color(Colors::border_default())
         .child(
             svg()
                 .path(assets::ICON_SLIDERS_HORIZONTAL_PATH)
                 .w(px(14.0))
                 .h(px(14.0))
-                .text_color(Colors::text_faint()),
+                .text_color(Colors::text_muted()),
         )
         .child(
             div()
@@ -337,11 +337,11 @@ pub fn mixer_sub_header(track_count: usize) -> impl IntoElement {
                 .px(px(5.0))
                 .py(px(1.0))
                 .rounded_md()
-                .bg(Colors::slot_bg())
+                .bg(Colors::button_bg())
                 .border(px(1.0))
-                .border_color(Colors::slot_border())
+                .border_color(Colors::border_default())
                 .text_size(px(9.0))
-                .text_color(Colors::text_faint())
+                .text_color(Colors::text_secondary())
                 .child(format!("{} ch", track_count)),
         )
 }
@@ -350,7 +350,7 @@ pub fn mixer_sub_header(track_count: usize) -> impl IntoElement {
 
 fn section_header(
     label: &'static str,
-    accent: gpui::Rgba,
+    _accent: gpui::Rgba,
     plus: Option<HeaderPlus>,
 ) -> impl IntoElement {
     let icon_path = match label {
@@ -358,7 +358,8 @@ fn section_header(
         "SENDS" => Some(assets::ICON_ROUTE_PATH),
         _ => None,
     };
-    let soft_accent = Colors::with_alpha(accent, 0.55); // Approved: dynamic accent decoration alpha
+    let section_accent = Colors::accent_primary();
+    let soft_accent = Colors::with_alpha(section_accent, 0.55); // Approved: dynamic accent decoration alpha
 
     // The trailing "+" — interactive when `plus` is Some, otherwise an inert
     // decorative glyph. Interactive variant carries its own id + occlude so the
@@ -424,13 +425,13 @@ fn section_header(
                         .path(path)
                         .w(px(9.0))
                         .h(px(9.0))
-                        .text_color(Colors::text_muted())
+                        .text_color(Colors::text_secondary())
                 }))
                 .child(
                     div()
                         .text_size(px(7.5))
                         .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .text_color(Colors::text_muted())
+                        .text_color(Colors::text_secondary())
                         .child(label),
                 ),
         )
@@ -447,8 +448,7 @@ fn empty_slot() -> impl IntoElement {
         .py(px(2.0))
         .rounded_sm()
         .text_size(px(8.0))
-        .text_color(Colors::text_faint())
-        .opacity(0.62)
+        .text_color(Colors::text_muted())
         .child("empty")
 }
 
@@ -480,11 +480,11 @@ fn msri_button(
         btn = btn.bg(active_bg).text_color(active_fg);
     } else {
         btn = btn
-            .bg(Colors::slot_bg())
+            .bg(Colors::button_bg())
             .border(px(1.0))
-            .border_color(Colors::slot_border())
-            .text_color(Colors::text_muted())
-            .hover(|s| s.bg(Colors::slot_bg_hover()));
+            .border_color(Colors::button_border())
+            .text_color(Colors::button_text_muted())
+            .hover(|s| s.bg(Colors::button_bg_hover()));
     }
     btn
 }
@@ -584,7 +584,7 @@ fn strip_header(
         .h(px(SEC_HEADER_H))
         .px(px(5.0))
         .border_b(px(1.0))
-        .border_color(Colors::divider())
+        .border_color(Colors::border_default())
         .child(div().w(px(2.0)).h(px(20.0)).rounded_full().bg(track.color))
         .child(
             div()
@@ -612,14 +612,14 @@ fn strip_header(
                             div()
                                 .text_size(px(7.5))
                                 .font_weight(gpui::FontWeight::MEDIUM)
-                                .text_color(Colors::text_faint())
+                                .text_color(Colors::text_secondary())
                                 .child(type_label),
                         )
                         .child(
                             div()
                                 .text_size(px(7.5))
                                 .font_weight(gpui::FontWeight::MEDIUM)
-                                .text_color(Colors::text_faint())
+                                .text_color(Colors::text_secondary())
                                 .child(format!("CH{:02}", index + 1)),
                         ),
                 ),
@@ -640,11 +640,11 @@ fn strip_header(
                     .h(px(20.0))
                     .rounded_sm()
                     .border(px(1.0))
-                    .border_color(Colors::slot_border())
+                    .border_color(Colors::border_default())
                     .bg(if count > 0 {
                         Colors::accent_muted()
                     } else {
-                        Colors::slot_bg()
+                        Colors::button_bg()
                     })
                     .cursor(gpui::CursorStyle::PointingHand)
                     .hover(|s| s.bg(Colors::surface_control_hover()))
@@ -788,14 +788,14 @@ fn insert_chip(
 
     let (bg, text) = match &slot.load_status {
         InsertLoadStatus::Ready if !bypassed => (Colors::accent_muted(), Colors::text_primary()),
-        InsertLoadStatus::Ready => (Colors::surface_input(), Colors::text_muted()),
-        InsertLoadStatus::Loading => (Colors::surface_input(), Colors::text_muted()),
+        InsertLoadStatus::Ready => (Colors::button_bg(), Colors::text_muted()),
+        InsertLoadStatus::Loading => (Colors::button_bg(), Colors::text_muted()),
         InsertLoadStatus::Missing(_) | InsertLoadStatus::Failed(_) => (
             Colors::with_alpha(Colors::status_error(), 0.16),
             Colors::status_error(),
         ),
-        InsertLoadStatus::Disabled => (Colors::surface_input(), Colors::text_faint()),
-        InsertLoadStatus::Empty => (Colors::surface_input(), Colors::slot_empty_text()),
+        InsertLoadStatus::Disabled => (Colors::button_bg(), Colors::text_muted()),
+        InsertLoadStatus::Empty => (Colors::button_bg(), Colors::slot_empty_text()),
     };
 
     let id_owned = slot_id.clone();
@@ -926,7 +926,7 @@ fn insert_chip(
                     remove_pair.1
                 )))
                 .text_size(px(10.0))
-                .text_color(Colors::text_faint())
+                .text_color(Colors::text_muted())
                 .px(px(2.0))
                 .cursor(gpui::CursorStyle::PointingHand)
                 .child("×")
@@ -997,15 +997,15 @@ fn add_insert_button(
         .rounded_sm()
         .border(px(1.0))
         .border_dashed()
-        .border_color(Colors::with_alpha(Colors::slot_border(), 0.68))
+        .border_color(Colors::border_default())
+        .bg(Colors::button_bg())
         .text_size(px(9.0))
-        .font_weight(gpui::FontWeight::MEDIUM)
-        .text_color(Colors::text_faint())
+        .text_color(Colors::text_muted())
         .cursor(gpui::CursorStyle::PointingHand)
         .hover(|s| {
-            s.bg(Colors::surface_control_hover())
-                .border_color(Colors::slot_border())
-                .text_color(Colors::text_muted())
+            s.bg(Colors::button_bg_hover())
+                .border_color(Colors::accent_primary())
+                .text_color(Colors::text_secondary())
         })
         .can_drop(|dragged, _window, _cx| {
             dragged
@@ -1027,7 +1027,7 @@ fn add_insert_button(
                 .path(assets::ICON_PLUS_PATH)
                 .w(px(8.0))
                 .h(px(8.0))
-                .text_color(Colors::text_faint()),
+                .text_color(Colors::text_muted()),
         )
         .child("Insert")
         .on_mouse_down(gpui::MouseButton::Left, move |_e, w, cx| {
@@ -1100,7 +1100,7 @@ fn inserts_section(
         .h(px(height_px))
         .overflow_hidden()
         .border_b(px(1.0))
-        .border_color(Colors::divider())
+        .border_color(Colors::border_default())
         .child(section_header("INSERTS", track.color, header_plus))
         .child(
             div()
@@ -1159,7 +1159,7 @@ fn master_inserts_section(
         .h(px(height_px))
         .overflow_hidden()
         .border_b(px(1.0))
-        .border_color(Colors::divider())
+        .border_color(Colors::border_default())
         .child(section_header("INSERTS", accent, header_plus))
         .child(
             div()
@@ -1183,7 +1183,7 @@ fn send_chip(
     let (bg, text) = if send.enabled {
         (Colors::accent_muted(), Colors::text_primary())
     } else {
-        (Colors::surface_input(), Colors::text_muted())
+        (Colors::button_bg(), Colors::text_muted())
     };
     let drag_payload = SendSlotDrag {
         track_id: track_id.to_string(),
@@ -1243,7 +1243,7 @@ fn send_chip(
             div()
                 .id(gpui::SharedString::from(format!("send-remove-{}", send.id)))
                 .text_size(px(10.0))
-                .text_color(Colors::text_faint())
+                .text_color(Colors::text_muted())
                 .px(px(2.0))
                 .child("×")
                 .on_mouse_down(gpui::MouseButton::Left, move |_e, w, cx| {
@@ -1300,21 +1300,22 @@ fn add_send_button(track_id: &str, callbacks: &MixerCallbacks) -> impl IntoEleme
         .rounded_sm()
         .border(px(1.0))
         .border_dashed()
-        .border_color(Colors::with_alpha(Colors::slot_border(), 0.68))
+        .border_color(Colors::border_default())
+        .bg(Colors::button_bg())
         .text_size(px(9.0))
-        .text_color(Colors::text_faint())
+        .text_color(Colors::text_muted())
         .cursor(gpui::CursorStyle::PointingHand)
         .hover(|s| {
-            s.bg(Colors::surface_control_hover())
-                .border_color(Colors::slot_border())
-                .text_color(Colors::text_muted())
+            s.bg(Colors::button_bg_hover())
+                .border_color(Colors::accent_primary())
+                .text_color(Colors::text_secondary())
         })
         .child(
             svg()
                 .path(assets::ICON_PLUS_PATH)
                 .w(px(8.0))
                 .h(px(8.0))
-                .text_color(Colors::text_faint()),
+                .text_color(Colors::text_muted()),
         )
         .child("Send")
         .on_mouse_down(gpui::MouseButton::Left, move |event, w, cx| {
@@ -1367,7 +1368,7 @@ fn sends_section(
         .h(px(height_px))
         .overflow_hidden()
         .border_b(px(1.0))
-        .border_color(Colors::divider())
+        .border_color(Colors::border_default())
         .child(section_header("SENDS", track.color, None))
         .child(
             div()
@@ -1390,7 +1391,7 @@ fn inert_rack_section(label: &'static str, accent: gpui::Rgba, height_px: f32) -
         .h(px(height_px))
         .overflow_hidden()
         .border_b(px(1.0))
-        .border_color(Colors::divider())
+        .border_color(Colors::border_default())
         .child(section_header(label, accent, None))
         .child(
             div()
@@ -1423,13 +1424,13 @@ fn pan_section(
         .h(px(SEC_PAN_H))
         .py(px(5.0))
         .border_b(px(1.0))
-        .border_color(Colors::divider())
+        .border_color(Colors::border_default())
         .child(knob_bipolar(
             format!("mix-pan-{}", track.id),
             track.pan,
             -1.0,
             1.0,
-            track.color,
+            Colors::accent_primary(),
             None,
             0.0,
             on_pan_change,
@@ -1446,14 +1447,14 @@ fn pan_section(
                     div()
                         .text_size(px(7.0))
                         .font_weight(gpui::FontWeight::MEDIUM)
-                        .text_color(Colors::text_faint())
+                        .text_color(Colors::text_secondary())
                         .child("L"),
                 )
                 .child(
                     div()
                         .text_size(px(7.0))
                         .font_weight(gpui::FontWeight::MEDIUM)
-                        .text_color(Colors::text_faint())
+                        .text_color(Colors::text_secondary())
                         .child("R"),
                 ),
         )
@@ -1506,20 +1507,20 @@ fn fader_area(
                             .bg(if automation_reading {
                                 Colors::accent_muted()
                             } else {
-                                Colors::slot_bg()
+                                Colors::button_bg()
                             })
                             .border(px(1.0))
                             .border_color(if automation_reading {
-                                Colors::with_alpha(track.color, 0.58)
+                                Colors::accent_primary()
                             } else {
-                                Colors::slot_border()
+                                Colors::border_default()
                             })
                             .text_size(px(8.0))
                             .font_weight(gpui::FontWeight::SEMIBOLD)
                             .text_color(if automation_reading {
                                 Colors::text_primary()
                             } else {
-                                Colors::text_faint()
+                                Colors::text_muted()
                             })
                             .child("A"),
                     )
@@ -1545,7 +1546,7 @@ fn fader_area(
                         .child(render_fader(
                             format!("mix-fader-{}", track.id),
                             display_vol,
-                            track.color,
+                            Colors::accent_primary(),
                             on_vol_change,
                         )),
                 )
@@ -1567,7 +1568,7 @@ fn strip_footer(name: &str) -> impl IntoElement {
         .h(px(SEC_FOOTER_H))
         .px(px(4.0))
         .border_t(px(1.0))
-        .border_color(Colors::divider())
+        .border_color(Colors::border_default())
         .bg(Colors::surface_panel_alt())
         .child(
             div()
@@ -1600,7 +1601,7 @@ fn vertical_split_handle(
     let grip = if is_resizing {
         Colors::accent_primary()
     } else {
-        Colors::strip_border()
+        Colors::border_subtle()
     };
 
     let mut handle = div()
@@ -1618,7 +1619,7 @@ fn vertical_split_handle(
         .w_full()
         .h(px(SEC_SPLITTER_H))
         .border_b(px(1.0))
-        .border_color(Colors::divider())
+        .border_color(Colors::border_default())
         .cursor(gpui::CursorStyle::ResizeUpDown)
         .child(div().w(px(20.0)).h(px(1.0)).rounded_full().bg(grip))
         .on_mouse_down(gpui::MouseButton::Left, move |e: &MouseDownEvent, w, cx| {
@@ -1670,16 +1671,16 @@ fn channel_strip(
     };
 
     let strip_bg = if is_selected {
-        Colors::mixer_strip_selected_bg()
+        Colors::surface_card_selected()
     } else if index % 2 == 0 {
-        Colors::mixer_strip_bg()
+        Colors::surface_panel()
     } else {
-        Colors::mixer_strip_bg_alt()
+        Colors::surface_panel_alt()
     };
     let border_col = if is_selected {
-        Colors::strip_border()
+        Colors::accent_primary()
     } else {
-        Colors::strip_border_subtle()
+        Colors::border_default()
     };
 
     let select_id = track.id.clone();
@@ -1851,9 +1852,17 @@ fn vsti_output_sub_strip(
         .h_full()
         .overflow_hidden()
         .when(!gpu_decor, |s| {
-            s.bg(Colors::mixer_strip_bg_alt())
-                .border_r(px(1.0))
-                .border_color(Colors::strip_border_subtle())
+            s.bg(if is_selected {
+                Colors::surface_card_selected()
+            } else {
+                Colors::surface_panel_alt()
+            })
+            .border_r(px(1.0))
+            .border_color(if is_selected {
+                Colors::accent_primary()
+            } else {
+                Colors::border_default()
+            })
         })
         .id(("mix-vsti-sub-strip", id_num))
         .on_mouse_down(gpui::MouseButton::Left, on_select_strip)
@@ -1932,9 +1941,9 @@ pub(crate) fn master_strip(
         .min_h(px(STRIP_MIN_HEIGHT))
         .h_full()
         .overflow_hidden()
-        .bg(Colors::master_strip_bg())
+        .bg(Colors::surface_panel_alt())
         .border_l(px(1.0))
-        .border_color(Colors::master_strip_border())
+        .border_color(Colors::border_default())
         .child(div().w_full().h(px(2.0)).bg(accent))
         // Header
         .child(
@@ -1946,7 +1955,7 @@ pub(crate) fn master_strip(
                 .h(px(SEC_HEADER_H))
                 .px(px(5.0))
                 .border_b(px(1.0))
-                .border_color(Colors::divider())
+                .border_color(Colors::border_default())
                 .child(div().w(px(2.0)).h(px(20.0)).rounded_full().bg(accent))
                 .child(
                     div()
@@ -1963,7 +1972,7 @@ pub(crate) fn master_strip(
                             div()
                                 .text_size(px(7.5))
                                 .font_weight(gpui::FontWeight::MEDIUM)
-                                .text_color(Colors::text_faint())
+                                .text_color(Colors::text_secondary())
                                 .child("MST·BUS"),
                         ),
                 ),
@@ -1982,7 +1991,7 @@ pub(crate) fn master_strip(
                 .h(px(send_h))
                 .overflow_hidden()
                 .border_b(px(1.0))
-                .border_color(Colors::divider())
+                .border_color(Colors::border_default())
                 .child(section_header("SENDS", accent, None))
                 .child(
                     div()
@@ -2018,7 +2027,7 @@ pub(crate) fn master_strip(
                         .gap(px(4.0))
                         .h(px(SEC_PAN_H))
                         .border_b(px(1.0))
-                        .border_color(Colors::divider())
+                        .border_color(Colors::border_default())
                         .child(
                             div()
                                 .flex()
@@ -2028,9 +2037,9 @@ pub(crate) fn master_strip(
                                 .px(px(6.0))
                                 .h(px(14.0))
                                 .rounded_sm()
-                                .bg(Colors::slot_bg())
+                                .bg(Colors::button_bg())
                                 .border(px(1.0))
-                                .border_color(Colors::with_alpha(accent, 0.55)) // Approved: dynamic accent border highlight
+                                .border_color(Colors::accent_primary())
                                 .text_size(px(9.0))
                                 .font_weight(gpui::FontWeight::SEMIBOLD)
                                 .text_color(Colors::text_secondary())
@@ -2039,7 +2048,7 @@ pub(crate) fn master_strip(
                         .child(
                             div()
                                 .text_size(px(7.5))
-                                .text_color(Colors::text_faint())
+                                .text_color(Colors::text_secondary())
                                 .child("OUT 1-2"),
                         ),
                 )
@@ -2104,9 +2113,9 @@ pub(crate) fn master_strip(
                                 .h(px(16.0))
                                 .px(px(6.0))
                                 .rounded_sm()
-                                .bg(Colors::slot_bg())
+                                .bg(Colors::button_bg())
                                 .border(px(1.0))
-                                .border_color(Colors::slot_border())
+                                .border_color(Colors::border_default())
                                 .text_size(px(8.5))
                                 .font_weight(gpui::FontWeight::SEMIBOLD)
                                 .text_color(Colors::text_muted())
@@ -2292,7 +2301,7 @@ pub fn mixer_center_lightweight(width: f32, height: f32) -> impl IntoElement {
         .min_w(px(0.0))
         .h_full()
         .relative()
-        .bg(Colors::mixer_bg())
+        .bg(Colors::surface_window())
         .child(
             canvas(
                 move |bounds, _window, _cx| {
@@ -2323,7 +2332,7 @@ fn paint_mixer_center_grid(
         return;
     }
     let stripe_count = (width / STRIP_WIDTH).ceil().clamp(0.0, 64.0) as usize;
-    let color = Colors::strip_border_subtle();
+    let color = Colors::border_subtle();
     for i in 0..stripe_count {
         let x = i as f32 * STRIP_WIDTH;
         if x > width {
@@ -2363,16 +2372,16 @@ fn build_mixer_render_snapshot(
                 let track = &tracks[track_index];
                 let selected = selected_track_id == Some(track.id.as_str());
                 let bg = if selected {
-                    Colors::mixer_strip_selected_bg()
+                    Colors::surface_card_selected()
                 } else if track_index % 2 == 0 {
-                    Colors::mixer_strip_bg()
+                    Colors::surface_panel()
                 } else {
-                    Colors::mixer_strip_bg_alt()
+                    Colors::surface_panel_alt()
                 };
                 let separator = if selected {
-                    Colors::strip_border()
+                    Colors::accent_primary()
                 } else {
-                    Colors::strip_border_subtle()
+                    Colors::border_default()
                 };
                 MixerStripGeom {
                     x,
@@ -2400,9 +2409,17 @@ fn build_mixer_render_snapshot(
                     x,
                     width: STRIP_WIDTH,
                     height: strip_height,
-                    bg: Colors::mixer_strip_bg_alt(),
+                    bg: if selected {
+                        Colors::surface_card_selected()
+                    } else {
+                        Colors::surface_panel_alt()
+                    },
                     accent: parent.color,
-                    separator: Colors::strip_border_subtle(),
+                    separator: if selected {
+                        Colors::accent_primary()
+                    } else {
+                        Colors::border_default()
+                    },
                     selected,
                     is_master: false,
                     meter_l: child.meter_level_l,
@@ -2491,7 +2508,7 @@ pub fn mixer_panel(
             .flex()
             .flex_col()
             .size_full()
-            .bg(Colors::mixer_bg())
+            .bg(Colors::surface_window())
             .on_drag_move::<MixerSplitDrag>(move |event: &DragMoveEvent<MixerSplitDrag>, w, cx| {
                 let y: f32 = event.event.position.y.into();
                 (split_for_move.on_action)(MixerSplitAction::ResizeMove(y), w, cx);
@@ -2573,7 +2590,7 @@ pub fn mixer_panel(
         .flex()
         .flex_col()
         .size_full()
-        .bg(Colors::mixer_bg())
+        .bg(Colors::surface_window())
         .on_drag_move::<MixerSplitDrag>(move |event: &DragMoveEvent<MixerSplitDrag>, w, cx| {
             let y: f32 = event.event.position.y.into();
             (split_for_move.on_action)(MixerSplitAction::ResizeMove(y), w, cx);
@@ -2722,7 +2739,7 @@ pub(crate) fn mixer_strip_scroller(
                             .w(px(left_spacer_w))
                             .h_full()
                             .flex_none()
-                            .bg(Colors::mixer_bg()),
+                            .bg(Colors::surface_window()),
                     )
                 })
                 .children(visible_strips)
@@ -2732,7 +2749,7 @@ pub(crate) fn mixer_strip_scroller(
                             .w(px(right_spacer_w))
                             .h_full()
                             .flex_none()
-                            .bg(Colors::mixer_bg()),
+                            .bg(Colors::surface_window()),
                     )
                 }),
         )

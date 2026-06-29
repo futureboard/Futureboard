@@ -142,11 +142,6 @@ fn tap_tempo_chip(
     } else {
         Colors::surface_input()
     };
-    let border = if active {
-        Colors::with_alpha(Colors::accent_primary(), 0.45)
-    } else {
-        Colors::border_subtle()
-    };
     let text_color = if active {
         Colors::accent_primary()
     } else {
@@ -164,8 +159,6 @@ fn tap_tempo_chip(
         .px(px(4.0))
         .rounded_md()
         .bg(bg)
-        .border(px(1.0))
-        .border_color(border)
         .text_color(text_color)
         .text_size(px(8.0))
         .font_weight(gpui::FontWeight::BOLD)

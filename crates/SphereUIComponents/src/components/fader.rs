@@ -81,7 +81,7 @@ pub fn db_scale_column() -> gpui::Div {
                 .text_color(if db == 0.0 || db == volume::MAX_DB {
                     Colors::text_primary()
                 } else {
-                    Colors::fader_scale_text()
+                    Colors::text_muted()
                 })
                 .child(label),
         );
@@ -182,9 +182,9 @@ fn fader_rail(value_norm: f32, accent: gpui::Rgba) -> gpui::Div {
 /// the value reads as a proper integrated control.
 pub fn db_value_pill(db_text: impl Into<gpui::SharedString>, highlight: bool) -> impl IntoElement {
     let border = if highlight {
-        Colors::border_default()
+        Colors::accent_primary()
     } else {
-        Colors::panel_border()
+        Colors::border_default()
     };
 
     div()
@@ -197,7 +197,7 @@ pub fn db_value_pill(db_text: impl Into<gpui::SharedString>, highlight: bool) ->
         .h(px(18.0))
         .px(px(6.0))
         .rounded_sm()
-        .bg(Colors::slot_bg())
+        .bg(Colors::button_bg())
         .border(px(1.0))
         .border_color(border)
         .child(

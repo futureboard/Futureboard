@@ -26,20 +26,12 @@ pub fn section_separator() -> impl gpui::IntoElement {
 pub fn chrome_button(
     icon_path: Option<&'static str>,
     fallback_text: &'static str,
-    active: bool,
+    _active: bool,
     color: Rgba,
 ) -> Div {
-    // Active state is shown with a stroked/accent icon + a subtle 1px accent
-    // ring — never a filled background (pro-DAW toolbar feel). A transparent
-    // border on inactive buttons keeps the box size identical so toggling
-    // active never shifts layout. The `color` argument already carries the
-    // accent/status color when `active`, so the icon itself reads as accent.
-    let border_color = if active {
-        Colors::with_alpha(color, 0.45)
-    } else {
-        gpui::transparent_black().into()
-    };
-
+    // Active state is shown with an accent/status icon color — never a filled
+    // background or stroked ring (pro-DAW toolbar feel). Hover supplies the
+    // only surface feedback on inactive buttons.
     let mut button = div()
         .w(px(CHROME_ICON_BUTTON_SIZE))
         .h(px(CHROME_ICON_BUTTON_SIZE))
@@ -47,8 +39,6 @@ pub fn chrome_button(
         .items_center()
         .justify_center()
         .rounded_md()
-        .border_1()
-        .border_color(border_color)
         .text_color(color)
         .hover(|style| {
             style

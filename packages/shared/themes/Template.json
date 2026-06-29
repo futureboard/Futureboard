@@ -14,6 +14,13 @@
       "canvas": "#15161A",
       "input": "#181A1F",
       "window": "#15161A",
+      "titlebar": "#1B1C20",
+      "sidebar": "#1B1C20",
+      "card": "#202126",
+      "cardHover": "#30323A",
+      "cardSelected": "#272536",
+      "code": "#181A1F",
+      "badge": "#202126",
       "hover": "#30323A",
       "active": "#2B2D33",
       "overlay": "#00000085"
@@ -35,13 +42,21 @@
     "accent": {
       "primary": "#7B61FF",
       "primaryHover": "#8D78FF",
+      "hover": "#8D78FF",
+      "active": "#7B61FF28",
+      "focus": "#7B61FFB8",
       "soft": "#7B61FF30",
+      "muted": "#7B61FF20",
+      "pressed": "#7B61FF28",
       "onAccent": "#FFFFFF"
     },
     "status": {
       "error": "#FF6B68",
       "warning": "#E5C07B",
       "success": "#6FCF97"
+    },
+    "semantic": {
+      "warning": "#E5C07B"
     },
     "timeline": {
       "gridMajor": "#FFFFFF12",

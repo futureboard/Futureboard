@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use gpui::prelude::FluentBuilder;
 use gpui::{
@@ -7,6 +8,12 @@ use gpui::{
     ParentElement, Render, SharedString, StatefulInteractiveElement, Styled, Window,
     WindowControlArea,
 };
+use serde::Deserialize;
+use serde_json::Value;
+
+const FEED_API_URL: &str = "https://feed.futureboard.studio/api/posts";
+const FEED_PUBLIC_BASE_URL: &str = "https://futureboard.studio/blog";
+const FEED_FETCH_TIMEOUT_SECS: u64 = 8;
 
 use crate::assets;
 use crate::components::text_input::{
@@ -59,6 +66,7 @@ enum StartupNav {
     NewProject,
     OpenProject,
     RecentProjects,
+    Feed,
     AudioSetup,
 }
 
@@ -67,6 +75,42 @@ enum WelcomeSelection {
     Start(usize),
     Recent(usize),
     Continue,
+}
+
+#[derive(Debug, Clone)]
+enum FeedLoadState {
+    Idle,
+    Loading,
+    Loaded,
+    Failed(SharedString),
+}
+
+#[derive(Debug, Clone)]
+struct FeedPost {
+    title: SharedString,
+    excerpt: SharedString,
+    published_at: SharedString,
+    slug: Option<SharedString>,
+}
+
+#[derive(Debug, Deserialize)]
+struct FeedResponse {
+    docs: Vec<PayloadPost>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PayloadPost {
+    title: String,
+    slug: Option<String>,
+    published_at: Option<String>,
+    content: Option<Value>,
+    meta: Option<PayloadPostMeta>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PayloadPostMeta {
+    description: Option<String>,
 }
 
 #[derive(Clone)]
@@ -93,6 +137,8 @@ pub struct WelcomeWindow {
     audio_device_out: SharedString,
     // Open Project tab: inline validation error from the last browse attempt.
     open_error: Option<SharedString>,
+    feed_state: FeedLoadState,
+    feed_posts: Vec<FeedPost>,
 }
 
 impl WelcomeWindow {
@@ -135,6 +181,8 @@ impl WelcomeWindow {
             audio_backend: SharedString::from(schema.hardware.audio.driver_type),
             audio_device_out: SharedString::from(schema.hardware.audio.device_out),
             open_error: None,
+            feed_state: FeedLoadState::Idle,
+            feed_posts: Vec::new(),
         }
     }
 
@@ -250,10 +298,37 @@ impl WelcomeWindow {
         }
     }
 
-    /// Open Project flow (Part B): browse for a `.fbproj` via the native picker,
-    /// validate its header inline, then — only if valid — hand the path to the
-    /// app to load and enter the studio. Cancel leaves Welcome untouched; an
-    /// invalid pick shows an inline error rather than loading or crashing.
+    /// Load the public PayloadCMS feed once per Welcome window. Network work stays
+    /// on GPUI's background executor and uses the blocking HTTP client so it does
+    /// not require a Tokio runtime on the UI/task executors.
+    fn fetch_feed_if_needed(&mut self, cx: &mut Context<Self>) {
+        if !matches!(self.feed_state, FeedLoadState::Idle) {
+            return;
+        }
+        self.feed_state = FeedLoadState::Loading;
+        let entity = cx.entity().clone();
+        cx.spawn(async move |_this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async { fetch_feed_posts() })
+                .await;
+            let _ = entity.update(cx, |this, cx| {
+                match result {
+                    Ok(posts) => {
+                        this.feed_posts = posts;
+                        this.feed_state = FeedLoadState::Loaded;
+                    }
+                    Err(error) => {
+                        this.feed_posts.clear();
+                        this.feed_state = FeedLoadState::Failed(SharedString::from(error));
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     fn browse_and_open_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.open_error = None;
         cx.notify();
@@ -331,7 +406,7 @@ impl Render for WelcomeWindow {
             .flex_col()
             .size_full()
             .font(theme::ui_font())
-            .bg(Colors::surface_startup_bg())
+            .bg(Colors::surface_window())
             .child(startup_titlebar(window))
             .child(self.render_welcome(window, cx))
     }
@@ -358,6 +433,10 @@ impl WelcomeWindow {
                 self.open_error.clone(),
                 &self.callbacks,
             ),
+            StartupNav::Feed => {
+                self.fetch_feed_if_needed(cx);
+                feed_pane(&self.feed_state, &self.feed_posts)
+            }
             StartupNav::AudioSetup => {
                 audio_setup_pane(self.audio_backend.clone(), self.audio_device_out.clone())
             }
@@ -369,7 +448,7 @@ impl WelcomeWindow {
             .flex_col()
             .flex_1()
             .min_h_0()
-            .bg(Colors::surface_startup_window())
+            .bg(Colors::surface_panel())
             .child(welcome_header(self.version.clone()))
             .child(
                 div()
@@ -399,6 +478,16 @@ struct StartRow {
     shortcut: String,
     icon: &'static str,
     action: WelcomeAction,
+}
+
+fn focus_ring_shadow() -> Vec<gpui::BoxShadow> {
+    vec![gpui::BoxShadow {
+        color: Colors::accent_focus().into(),
+        offset: gpui::point(px(0.0), px(0.0)),
+        blur_radius: px(0.0),
+        spread_radius: px(1.0),
+        inset: false,
+    }]
 }
 
 fn start_rows() -> Vec<StartRow> {
@@ -540,8 +629,8 @@ fn welcome_header(version: SharedString) -> impl IntoElement {
         .h(px(72.0))
         .px(px(20.0))
         .border_b(px(1.0))
-        .border_color(Colors::border_startup_soft())
-        .bg(Colors::surface_startup_window())
+        .border_color(Colors::border_subtle())
+        .bg(Colors::surface_panel())
         .child(
             div()
                 .flex()
@@ -558,7 +647,7 @@ fn welcome_header(version: SharedString) -> impl IntoElement {
                         .rounded_md()
                         .overflow_hidden()
                         .border(px(1.0))
-                        .border_color(Colors::border_startup())
+                        .border_color(Colors::border_default())
                         .child(
                             img(SharedString::from(APP_LOGO_PATH))
                                 .w(px(42.0))
@@ -576,14 +665,14 @@ fn welcome_header(version: SharedString) -> impl IntoElement {
                                 .truncate()
                                 .text_size(px(17.0))
                                 .font_weight(gpui::FontWeight::SEMIBOLD)
-                                .text_color(Colors::text_startup_strong())
+                                .text_color(Colors::text_primary())
                                 .child("Futureboard Studio"),
                         )
                         .child(
                             div()
                                 .truncate()
                                 .text_size(px(11.0))
-                                .text_color(Colors::text_startup_muted())
+                                .text_color(Colors::text_muted())
                                 .child("Create, open, or continue."),
                         ),
                 ),
@@ -593,7 +682,7 @@ fn welcome_header(version: SharedString) -> impl IntoElement {
                 .flex_none()
                 .text_size(px(10.5))
                 .font_weight(gpui::FontWeight::MEDIUM)
-                .text_color(Colors::text_startup_muted())
+                .text_color(Colors::text_muted())
                 .child(format!("v{version}")),
         )
 }
@@ -605,8 +694,8 @@ fn left_rail(cx: &mut Context<WelcomeWindow>, active: &StartupNav) -> impl IntoE
         .w(px(176.0))
         .flex_none()
         .border_r(px(1.0))
-        .border_color(Colors::border_startup_soft())
-        .bg(Colors::surface_startup_panel())
+        .border_color(Colors::border_subtle())
+        .bg(Colors::surface_sidebar())
         .p(px(8.0))
         .gap(px(2.0))
         .child(rail_item(
@@ -638,6 +727,14 @@ fn left_rail(cx: &mut Context<WelcomeWindow>, active: &StartupNav) -> impl IntoE
             StartupNav::RecentProjects,
             "Recent",
             assets::ICON_CLOCK_PATH,
+            active,
+            None,
+        ))
+        .child(rail_item(
+            cx,
+            StartupNav::Feed,
+            "Feed",
+            assets::ICON_NEWSPAPER_PATH,
             active,
             None,
         ))
@@ -676,18 +773,14 @@ fn rail_item(
         .px(px(8.0))
         .rounded_md()
         .bg(if is_active {
-            Colors::surface_startup_elevated()
+            Colors::surface_card_selected()
         } else {
-            gpui::transparent_black().into()
+            Colors::surface_sidebar()
         })
-        .border_l(px(if is_active { 3.0 } else { 1.0 }))
-        .border_color(if is_active {
-            Colors::accent_startup()
-        } else {
-            gpui::transparent_black().into()
-        })
+        .border_l(px(if is_active { 3.0 } else { 0.0 }))
+        .border_color(Colors::accent_primary())
         .cursor(gpui::CursorStyle::PointingHand)
-        .hover(|style| style.bg(Colors::surface_startup_elevated()))
+        .hover(|style| style.bg(Colors::surface_card_hover()))
         .on_mouse_down(gpui::MouseButton::Left, move |_event, window, cx| {
             let _ = target.update(cx, |this, cx| {
                 this.active_nav = nav.clone();
@@ -704,9 +797,9 @@ fn rail_item(
                 .w(px(13.0))
                 .h(px(13.0))
                 .text_color(if is_active {
-                    Colors::text_startup_strong()
+                    Colors::text_primary()
                 } else {
-                    Colors::text_startup_muted()
+                    Colors::text_muted()
                 }),
         )
         .child(
@@ -718,9 +811,9 @@ fn rail_item(
                     gpui::FontWeight::NORMAL
                 })
                 .text_color(if is_active {
-                    Colors::text_startup_strong()
+                    Colors::text_primary()
                 } else {
-                    Colors::text_startup_muted()
+                    Colors::text_muted()
                 })
                 .child(label),
         )
@@ -784,7 +877,7 @@ fn center_actions(
         .min_w_0()
         .p(px(16.0))
         .gap(px(12.0))
-        .bg(Colors::surface_startup_window())
+        .bg(Colors::surface_panel())
         .child(section_label("Start"))
         .child(rows)
         .child(
@@ -856,17 +949,17 @@ fn new_project_pane(
                 .rounded_md()
                 .border(px(1.0))
                 .border_color(if is_active {
-                    Colors::accent_startup()
+                    Colors::accent_primary()
                 } else {
-                    Colors::border_startup_soft()
+                    Colors::border_subtle()
                 })
                 .bg(if is_active {
-                    Colors::accent_startup_soft()
+                    Colors::surface_card_selected()
                 } else {
-                    Colors::surface_startup_panel()
+                    Colors::surface_card()
                 })
                 .cursor(gpui::CursorStyle::PointingHand)
-                .hover(|style| style.bg(Colors::surface_startup_elevated()))
+                .hover(|style| style.bg(Colors::surface_card_hover()))
                 .on_mouse_down(gpui::MouseButton::Left, move |_event, _window, cx| {
                     let _ = target.update(cx, |this, cx| {
                         this.selected_template = template;
@@ -884,9 +977,9 @@ fn new_project_pane(
                             gpui::FontWeight::NORMAL
                         })
                         .text_color(if is_active {
-                            Colors::text_startup_strong()
+                            Colors::text_primary()
                         } else {
-                            Colors::text_startup_muted()
+                            Colors::text_muted()
                         })
                         .child(template.label()),
                 ),
@@ -901,7 +994,7 @@ fn new_project_pane(
         .min_h_0()
         .p(px(16.0))
         .gap(px(12.0))
-        .bg(Colors::surface_startup_window())
+        .bg(Colors::surface_panel())
         .child(
             div()
                 .flex()
@@ -911,13 +1004,13 @@ fn new_project_pane(
                     div()
                         .text_size(px(13.0))
                         .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .text_color(Colors::text_startup_strong())
+                        .text_color(Colors::text_primary())
                         .child("New Project"),
                 )
                 .child(
                     div()
                         .text_size(px(10.5))
-                        .text_color(Colors::text_startup_muted())
+                        .text_color(Colors::text_muted())
                         .child("Name it, choose a template, and start."),
                 ),
         )
@@ -933,12 +1026,12 @@ fn new_project_pane(
             div()
                 .rounded_md()
                 .border(px(1.0))
-                .border_color(Colors::border_startup_soft())
-                .bg(Colors::surface_startup_panel())
+                .border_color(Colors::border_subtle())
+                .bg(Colors::surface_card())
                 .px(px(10.0))
                 .py(px(8.0))
                 .text_size(px(10.5))
-                .text_color(Colors::text_startup())
+                .text_color(Colors::text_secondary())
                 .child(preview),
         )
         .child(form_label("Template"))
@@ -972,10 +1065,10 @@ fn new_project_pane(
                         .px(px(12.0))
                         .rounded_md()
                         .border(px(1.0))
-                        .border_color(Colors::accent_startup())
-                        .bg(Colors::accent_startup_soft())
+                        .border_color(Colors::accent_primary())
+                        .bg(Colors::surface_card_selected())
                         .cursor(gpui::CursorStyle::PointingHand)
-                        .hover(|style| style.bg(Colors::surface_startup_elevated()))
+                        .hover(|style| style.bg(Colors::surface_card_hover()))
                         .on_mouse_down(gpui::MouseButton::Left, move |_event, window, cx| {
                             let _ = create_target.update(cx, |this, cx| {
                                 this.create_project_from_welcome(window, cx);
@@ -985,7 +1078,7 @@ fn new_project_pane(
                             div()
                                 .text_size(px(11.0))
                                 .font_weight(gpui::FontWeight::SEMIBOLD)
-                                .text_color(Colors::text_startup_strong())
+                                .text_color(Colors::text_primary())
                                 .child("Create Project"),
                         ),
                 )
@@ -998,10 +1091,10 @@ fn new_project_pane(
                         .px(px(10.0))
                         .rounded_md()
                         .border(px(1.0))
-                        .border_color(Colors::border_startup())
-                        .bg(Colors::surface_startup_panel())
+                        .border_color(Colors::border_default())
+                        .bg(Colors::surface_card())
                         .cursor(gpui::CursorStyle::PointingHand)
-                        .hover(|style| style.bg(Colors::surface_startup_elevated()))
+                        .hover(|style| style.bg(Colors::surface_card_hover()))
                         .on_mouse_down(gpui::MouseButton::Left, move |_event, window, cx| {
                             let _ = continue_target.update(cx, |this, cx| {
                                 this.selected = Some(WelcomeSelection::Continue);
@@ -1013,7 +1106,7 @@ fn new_project_pane(
                             div()
                                 .text_size(px(11.0))
                                 .font_weight(gpui::FontWeight::MEDIUM)
-                                .text_color(Colors::text_startup_strong())
+                                .text_color(Colors::text_primary())
                                 .child("Continue Without Project"),
                         ),
                 ),
@@ -1038,7 +1131,7 @@ fn open_project_pane(
             .justify_center()
             .min_h(px(80.0))
             .text_size(px(11.0))
-            .text_color(Colors::text_startup_faint())
+            .text_color(Colors::text_muted())
             .child("No recent projects yet")
             .into_any_element()
     } else {
@@ -1071,7 +1164,7 @@ fn open_project_pane(
         .min_h_0()
         .p(px(16.0))
         .gap(px(12.0))
-        .bg(Colors::surface_startup_window())
+        .bg(Colors::surface_panel())
         .child(
             div()
                 .flex()
@@ -1081,13 +1174,13 @@ fn open_project_pane(
                     div()
                         .text_size(px(13.0))
                         .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .text_color(Colors::text_startup_strong())
+                        .text_color(Colors::text_primary())
                         .child("Open Project"),
                 )
                 .child(
                     div()
                         .text_size(px(10.5))
-                        .text_color(Colors::text_startup_muted())
+                        .text_color(Colors::text_muted())
                         .child("Browse or pick a recent project."),
                 ),
         )
@@ -1102,10 +1195,10 @@ fn open_project_pane(
                     .px(px(12.0))
                     .rounded_md()
                     .border(px(1.0))
-                    .border_color(Colors::accent_startup())
-                    .bg(Colors::accent_startup_soft())
+                    .border_color(Colors::accent_primary())
+                    .bg(Colors::surface_card_selected())
                     .cursor(gpui::CursorStyle::PointingHand)
-                    .hover(|style| style.bg(Colors::surface_startup_elevated()))
+                    .hover(|style| style.bg(Colors::surface_card_hover()))
                     .on_mouse_down(gpui::MouseButton::Left, move |_event, window, cx| {
                         let _ = browse_target
                             .update(cx, |this, cx| this.browse_and_open_project(window, cx));
@@ -1115,13 +1208,13 @@ fn open_project_pane(
                             .path(assets::ICON_FOLDER_OPEN_PATH)
                             .w(px(13.0))
                             .h(px(13.0))
-                            .text_color(Colors::text_startup_strong()),
+                            .text_color(Colors::text_primary()),
                     )
                     .child(
                         div()
                             .text_size(px(11.0))
                             .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .text_color(Colors::text_startup_strong())
+                            .text_color(Colors::text_primary())
                             .child("Browse"),
                     ),
             ),
@@ -1149,7 +1242,7 @@ fn open_error_banner(msg: SharedString) -> impl IntoElement {
         .rounded_md()
         .border(px(1.0))
         .border_color(Colors::status_error())
-        .bg(Colors::surface_startup_panel())
+        .bg(Colors::surface_card())
         .px(px(10.0))
         .py(px(8.0))
         .child(
@@ -1165,7 +1258,7 @@ fn form_label(label: &'static str) -> impl IntoElement {
     div()
         .text_size(px(10.0))
         .font_weight(gpui::FontWeight::MEDIUM)
-        .text_color(Colors::text_startup_muted())
+        .text_color(Colors::text_muted())
         .child(label)
 }
 
@@ -1173,12 +1266,12 @@ fn readout_chip(label: impl Into<String>) -> impl IntoElement {
     div()
         .rounded_md()
         .border(px(1.0))
-        .border_color(Colors::border_startup_soft())
-        .bg(Colors::surface_startup_panel())
+        .border_color(Colors::border_subtle())
+        .bg(Colors::surface_card())
         .px(px(8.0))
         .py(px(5.0))
         .text_size(px(10.5))
-        .text_color(Colors::text_startup_strong())
+        .text_color(Colors::text_primary())
         .child(label.into())
 }
 
@@ -1198,20 +1291,21 @@ fn start_row(
         .border(px(1.0))
         .border_l(px(if selected { 3.0 } else { 1.0 }))
         .border_color(if selected {
-            Colors::accent_startup()
+            Colors::accent_primary()
         } else {
-            Colors::border_startup_soft()
+            Colors::border_subtle()
         })
         .rounded_md()
         .bg(if selected {
-            Colors::surface_startup_elevated()
+            Colors::surface_card_selected()
         } else {
-            Colors::surface_startup_panel()
+            Colors::surface_card()
         })
+        .when(selected, |row| row.shadow(focus_ring_shadow()))
         .px(px(11.0))
         .py(px(8.0))
         .cursor(gpui::CursorStyle::PointingHand)
-        .hover(|style| style.bg(Colors::surface_startup_elevated()))
+        .hover(|style| style.bg(Colors::surface_card_hover()))
         .on_mouse_down(gpui::MouseButton::Left, move |_event, window, cx| {
             on_click(window, cx);
         })
@@ -1228,14 +1322,14 @@ fn start_row(
                         .truncate()
                         .text_size(px(12.0))
                         .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .text_color(Colors::text_startup_strong())
+                        .text_color(Colors::text_primary())
                         .child(row.title),
                 )
                 .child(
                     div()
                         .truncate()
                         .text_size(px(10.5))
-                        .text_color(Colors::text_startup_muted())
+                        .text_color(Colors::text_muted())
                         .child(row.description),
                 ),
         )
@@ -1256,18 +1350,19 @@ fn continue_row(
         .border(px(1.0))
         .border_l(px(if selected { 3.0 } else { 1.0 }))
         .border_color(if selected {
-            Colors::accent_startup()
+            Colors::accent_primary()
         } else {
-            Colors::border_startup_soft()
+            Colors::border_subtle()
         })
         .bg(if selected {
-            Colors::surface_startup_elevated()
+            Colors::surface_card_selected()
         } else {
-            Colors::surface_startup_panel()
+            Colors::surface_card()
         })
+        .when(selected, |row| row.shadow(focus_ring_shadow()))
         .px(px(11.0))
         .cursor(gpui::CursorStyle::PointingHand)
-        .hover(|style| style.bg(Colors::surface_startup_elevated()))
+        .hover(|style| style.bg(Colors::surface_card_hover()))
         .on_mouse_down(gpui::MouseButton::Left, move |_event, window, cx| {
             on_click(window, cx);
         })
@@ -1282,20 +1377,182 @@ fn continue_row(
                     div()
                         .text_size(px(12.0))
                         .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .text_color(Colors::text_startup_strong())
+                        .text_color(Colors::text_primary())
                         .child("Continue Without Project"),
                 )
                 .child(
                     div()
                         .truncate()
                         .text_size(px(10.5))
-                        .text_color(Colors::text_startup_muted())
+                        .text_color(Colors::text_muted())
                         .child("Use source files until you save"),
                 ),
         )
 }
 
-// ── Feeds tab ───────────────────────────────────────────────────────────────
+// ── Feed tab ────────────────────────────────────────────────────────────────
+
+fn feed_pane(state: &FeedLoadState, posts: &[FeedPost]) -> gpui::AnyElement {
+    let content = match state {
+        FeedLoadState::Idle | FeedLoadState::Loading => feed_status_card(
+            "Loading Futureboard Feed...",
+            "Fetching the latest public posts from feed.futureboard.studio.",
+        ),
+        FeedLoadState::Failed(error) => feed_status_card("Feed unavailable", error.to_string()),
+        FeedLoadState::Loaded if posts.is_empty() => {
+            feed_status_card("No posts yet", "Published updates will appear here.")
+        }
+        FeedLoadState::Loaded => {
+            let mut list = div()
+                .flex()
+                .flex_col()
+                .gap(px(7.0))
+                .max_w(px(640.0))
+                .w_full();
+            for post in posts.iter().take(8).cloned() {
+                list = list.child(feed_post_row(post));
+            }
+            list.into_any_element()
+        }
+    };
+
+    div()
+        .flex()
+        .flex_col()
+        .flex_1()
+        .min_w_0()
+        .min_h_0()
+        .p(px(16.0))
+        .gap(px(12.0))
+        .bg(Colors::surface_panel())
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(3.0))
+                .child(
+                    div()
+                        .text_size(px(13.0))
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .text_color(Colors::text_primary())
+                        .child("Futureboard Feed"),
+                )
+                .child(
+                    div()
+                        .text_size(px(10.5))
+                        .text_color(Colors::text_muted())
+                        .child("Latest public Studio updates."),
+                ),
+        )
+        .child(
+            div()
+                .id("welcome-feed-scroll")
+                .flex()
+                .flex_col()
+                .flex_1()
+                .min_h_0()
+                .overflow_y_scroll()
+                .child(content),
+        )
+        .into_any_element()
+}
+
+fn feed_status_card(title: impl Into<String>, detail: impl Into<String>) -> gpui::AnyElement {
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(4.0))
+        .max_w(px(640.0))
+        .w_full()
+        .rounded_md()
+        .border(px(1.0))
+        .border_color(Colors::border_subtle())
+        .bg(Colors::surface_card())
+        .px(px(12.0))
+        .py(px(10.0))
+        .child(
+            div()
+                .text_size(px(11.5))
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .text_color(Colors::text_primary())
+                .child(title.into()),
+        )
+        .child(
+            div()
+                .text_size(px(10.5))
+                .text_color(Colors::text_muted())
+                .child(detail.into()),
+        )
+        .into_any_element()
+}
+
+fn feed_post_row(post: FeedPost) -> impl IntoElement {
+    let published_at = post.published_at.clone();
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(5.0))
+        .min_h(px(70.0))
+        .rounded_md()
+        .border(px(1.0))
+        .border_color(Colors::border_subtle())
+        .bg(Colors::surface_card())
+        .px(px(12.0))
+        .py(px(10.0))
+        .hover(|style| {
+            style
+                .bg(Colors::surface_card_hover())
+                .border_color(Colors::border_default())
+        })
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .justify_between()
+                .gap(px(10.0))
+                .child(
+                    div()
+                        .truncate()
+                        .min_w_0()
+                        .flex_1()
+                        .text_size(px(12.0))
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .text_color(Colors::text_primary())
+                        .child(post.title),
+                )
+                .when(!published_at.is_empty(), |row| {
+                    row.child(
+                        div()
+                            .flex_none()
+                            .rounded_sm()
+                            .border(px(1.0))
+                            .border_color(Colors::border_subtle())
+                            .bg(Colors::surface_badge())
+                            .px(px(6.0))
+                            .py(px(2.0))
+                            .text_size(px(9.0))
+                            .font_weight(gpui::FontWeight::MEDIUM)
+                            .text_color(Colors::text_muted())
+                            .child(published_at),
+                    )
+                }),
+        )
+        .child(
+            div()
+                .text_size(px(10.5))
+                .text_color(Colors::text_secondary())
+                .child(post.excerpt),
+        )
+        .when_some(post.slug, |row, slug| {
+            row.child(
+                div()
+                    .text_size(px(9.5))
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .text_color(Colors::accent_primary())
+                    .child(format!("{FEED_PUBLIC_BASE_URL}/p/{slug}")),
+            )
+        })
+}
 
 // ── Audio Setup tab ───────────────────────────────────────────────────────────
 
@@ -1308,7 +1565,7 @@ fn audio_setup_pane(backend: SharedString, device_out: SharedString) -> gpui::An
         .min_h_0()
         .p(px(16.0))
         .gap(px(12.0))
-        .bg(Colors::surface_startup_window())
+        .bg(Colors::surface_panel())
         .child(
             div()
                 .flex()
@@ -1318,13 +1575,13 @@ fn audio_setup_pane(backend: SharedString, device_out: SharedString) -> gpui::An
                     div()
                         .text_size(px(13.0))
                         .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .text_color(Colors::text_startup_strong())
+                        .text_color(Colors::text_primary())
                         .child("Audio"),
                 )
                 .child(
                     div()
                         .text_size(px(10.5))
-                        .text_color(Colors::text_startup_muted())
+                        .text_color(Colors::text_muted())
                         .child("Current output settings."),
                 ),
         )
@@ -1337,8 +1594,8 @@ fn audio_setup_pane(backend: SharedString, device_out: SharedString) -> gpui::An
                 .w_full()
                 .rounded_md()
                 .border(px(1.0))
-                .border_color(Colors::border_startup_soft())
-                .bg(Colors::surface_startup_panel())
+                .border_color(Colors::border_subtle())
+                .bg(Colors::surface_card())
                 .px(px(12.0))
                 .py(px(4.0))
                 .child(info_row("Audio Backend", backend))
@@ -1358,14 +1615,14 @@ fn info_row(label: &'static str, value: SharedString) -> impl IntoElement {
             div()
                 .text_size(px(10.5))
                 .font_weight(gpui::FontWeight::MEDIUM)
-                .text_color(Colors::text_startup_muted())
+                .text_color(Colors::text_muted())
                 .child(label),
         )
         .child(
             div()
                 .truncate()
                 .text_size(px(10.5))
-                .text_color(Colors::text_startup_strong())
+                .text_color(Colors::text_primary())
                 .child(value),
         )
 }
@@ -1387,7 +1644,7 @@ fn right_panel(
             .justify_center()
             .min_h(px(120.0))
             .text_size(px(11.0))
-            .text_color(Colors::text_startup_faint())
+            .text_color(Colors::text_muted())
             .child("No recent projects yet")
             .into_any_element()
     } else {
@@ -1421,8 +1678,8 @@ fn right_panel(
         .flex_none()
         .min_h_0()
         .border_l(px(1.0))
-        .border_color(Colors::border_startup_soft())
-        .bg(Colors::surface_startup_panel())
+        .border_color(Colors::border_subtle())
+        .bg(Colors::surface_sidebar())
         .p(px(12.0))
         .gap(px(10.0))
         .child(section_label("Recent"))
@@ -1454,7 +1711,7 @@ fn default_location_section(
         .gap(px(6.0))
         .pt(px(10.0))
         .border_t(px(1.0))
-        .border_color(Colors::border_startup_soft())
+        .border_color(Colors::border_subtle())
         .child(
             div()
                 .flex()
@@ -1470,10 +1727,14 @@ fn default_location_section(
                         .px(px(8.0))
                         .rounded_md()
                         .border(px(1.0))
-                        .border_color(Colors::border_startup())
-                        .bg(Colors::surface_startup_elevated())
+                        .border_color(Colors::border_default())
+                        .bg(Colors::surface_card())
                         .cursor(gpui::CursorStyle::PointingHand)
-                        .hover(|style| style.border_color(Colors::accent_startup()))
+                        .hover(|style| {
+                            style
+                                .bg(Colors::surface_card_hover())
+                                .border_color(Colors::accent_hover())
+                        })
                         .on_mouse_down(gpui::MouseButton::Left, move |_event, _window, cx| {
                             let _ = target.update(cx, |this, cx| this.change_default_dir(cx));
                         })
@@ -1481,7 +1742,7 @@ fn default_location_section(
                             div()
                                 .text_size(px(10.0))
                                 .font_weight(gpui::FontWeight::MEDIUM)
-                                .text_color(Colors::text_startup_strong())
+                                .text_color(Colors::text_primary())
                                 .child("Browse"),
                         ),
                 ),
@@ -1490,14 +1751,14 @@ fn default_location_section(
             div()
                 .rounded_md()
                 .border(px(1.0))
-                .border_color(Colors::border_startup_soft())
-                .bg(Colors::surface_startup_window())
+                .border_color(Colors::border_subtle())
+                .bg(Colors::surface_input())
                 .px(px(10.0))
                 .py(px(8.0))
                 .child(
                     div()
                         .text_size(px(10.5))
-                        .text_color(Colors::text_startup())
+                        .text_color(Colors::text_secondary())
                         .child(path_label),
                 ),
         )
@@ -1505,7 +1766,7 @@ fn default_location_section(
             section.child(
                 div()
                     .text_size(px(9.5))
-                    .text_color(Colors::text_startup_faint())
+                    .text_color(Colors::text_muted())
                     .child("Folder will be created when needed."),
             )
         })
@@ -1531,15 +1792,16 @@ fn recent_row(
         .border(px(1.0))
         .border_l(px(if selected { 3.0 } else { 1.0 }))
         .border_color(if selected {
-            Colors::accent_startup()
+            Colors::accent_primary()
         } else {
-            Colors::border_startup_soft()
+            Colors::border_subtle()
         })
         .bg(if selected {
-            Colors::surface_startup_elevated()
+            Colors::surface_card_selected()
         } else {
-            Colors::surface_startup_window()
+            Colors::surface_card()
         })
+        .when(selected, |row| row.shadow(focus_ring_shadow()))
         .opacity(if missing { 0.48 } else { 1.0 })
         .px(px(10.0))
         .py(px(8.0))
@@ -1552,7 +1814,7 @@ fn recent_row(
             if missing {
                 style
             } else {
-                style.bg(Colors::surface_startup_elevated())
+                style.bg(Colors::surface_card_hover())
             }
         })
         .when(!missing, |row| {
@@ -1573,7 +1835,7 @@ fn recent_row(
                         .flex_1()
                         .text_size(px(11.5))
                         .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .text_color(Colors::text_startup_strong())
+                        .text_color(Colors::text_primary())
                         .child(recent.name),
                 )
                 .when(missing, |row| {
@@ -1581,12 +1843,12 @@ fn recent_row(
                         div()
                             .flex_none()
                             .rounded_sm()
-                            .bg(Colors::feed_badge_background())
+                            .bg(Colors::surface_badge())
                             .px(px(6.0))
                             .py(px(1.0))
                             .text_size(px(8.5))
                             .font_weight(gpui::FontWeight::MEDIUM)
-                            .text_color(Colors::status_warning())
+                            .text_color(Colors::semantic_warning())
                             .child("Missing"),
                     )
                 })
@@ -1595,7 +1857,7 @@ fn recent_row(
                         div()
                             .flex_none()
                             .text_size(px(9.0))
-                            .text_color(Colors::text_startup_faint())
+                            .text_color(Colors::text_muted())
                             .child(last_opened.clone()),
                     )
                 }),
@@ -1604,7 +1866,7 @@ fn recent_row(
             div()
                 .truncate()
                 .text_size(px(10.0))
-                .text_color(Colors::text_startup_faint())
+                .text_color(Colors::text_muted())
                 .child(path_label),
         )
 }
@@ -1612,6 +1874,104 @@ fn recent_row(
 /// Render a coarse "time ago" label from a unix-seconds timestamp. Empty when
 /// the timestamp is zero/unknown. Intentionally low-resolution — exact times
 /// add no value on the start screen.
+fn fetch_feed_posts() -> Result<Vec<FeedPost>, String> {
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(FEED_FETCH_TIMEOUT_SECS))
+        .build()
+        .map_err(|e| format!("Failed to create feed client: {e}"))?;
+
+    let response = client
+        .get(FEED_API_URL)
+        .header(reqwest::header::ACCEPT, "application/json")
+        .send()
+        .map_err(|e| format!("Could not reach the public feed API: {e}"))?;
+
+    let status = response.status();
+    if !status.is_success() {
+        return Err(format!("Feed API returned HTTP {status}."));
+    }
+
+    let payload = response
+        .json::<FeedResponse>()
+        .map_err(|e| format!("Could not read feed payload: {e}"))?;
+
+    Ok(payload
+        .docs
+        .into_iter()
+        .map(feed_post_from_payload)
+        .collect())
+}
+
+fn feed_post_from_payload(post: PayloadPost) -> FeedPost {
+    let excerpt = post
+        .meta
+        .as_ref()
+        .and_then(|meta| meta.description.as_deref())
+        .filter(|description| !description.trim().is_empty())
+        .map(trim_feed_excerpt)
+        .or_else(|| post.content.as_ref().map(lexical_excerpt))
+        .filter(|excerpt| !excerpt.trim().is_empty())
+        .unwrap_or_else(|| "Read the latest Futureboard Studio update.".to_string());
+
+    FeedPost {
+        title: SharedString::from(post.title),
+        excerpt: SharedString::from(excerpt),
+        published_at: SharedString::from(format_feed_date(post.published_at.as_deref())),
+        slug: post.slug.map(SharedString::from),
+    }
+}
+
+fn format_feed_date(value: Option<&str>) -> String {
+    let Some(value) = value else {
+        return String::new();
+    };
+    let date = value.split('T').next().unwrap_or(value);
+    let mut parts = date.split('-');
+    match (parts.next(), parts.next(), parts.next()) {
+        (Some(year), Some(month), Some(day)) => format!("{day}/{month}/{year}"),
+        _ => String::new(),
+    }
+}
+
+fn lexical_excerpt(content: &Value) -> String {
+    let mut out = String::new();
+    collect_lexical_text(content, &mut out);
+    trim_feed_excerpt(&out)
+}
+
+fn collect_lexical_text(value: &Value, out: &mut String) {
+    match value {
+        Value::Object(map) => {
+            if let Some(text) = map.get("text").and_then(Value::as_str) {
+                if !out.is_empty() && !out.ends_with(' ') {
+                    out.push(' ');
+                }
+                out.push_str(text);
+            }
+            if let Some(children) = map.get("children") {
+                collect_lexical_text(children, out);
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                collect_lexical_text(item, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn trim_feed_excerpt(input: &str) -> String {
+    let normalized = input.split_whitespace().collect::<Vec<_>>().join(" ");
+    const MAX_CHARS: usize = 170;
+    if normalized.chars().count() <= MAX_CHARS {
+        return normalized;
+    }
+    let mut trimmed: String = normalized.chars().take(MAX_CHARS).collect();
+    trimmed.push('…');
+    trimmed
+}
+
 fn format_last_opened(last_opened_at: u64) -> String {
     if last_opened_at == 0 {
         return String::new();
@@ -1644,7 +2004,7 @@ fn section_label(label: &'static str) -> impl IntoElement {
         .items_center()
         .text_size(px(10.0))
         .font_weight(gpui::FontWeight::SEMIBOLD)
-        .text_color(Colors::text_startup_muted())
+        .text_color(Colors::text_muted())
         .child(label)
 }
 
@@ -1658,14 +2018,14 @@ fn row_icon(path: &'static str) -> impl IntoElement {
         .h(px(32.0))
         .rounded_md()
         .border(px(1.0))
-        .border_color(Colors::border_startup_soft())
-        .bg(Colors::surface_startup_elevated())
+        .border_color(Colors::border_subtle())
+        .bg(Colors::surface_badge())
         .child(
             svg()
                 .path(path)
                 .w(px(14.0))
                 .h(px(14.0))
-                .text_color(Colors::text_startup()),
+                .text_color(Colors::text_secondary()),
         )
 }
 
@@ -1674,12 +2034,12 @@ fn shortcut_badge(shortcut: String) -> impl IntoElement {
         .flex_none()
         .rounded_sm()
         .border(px(1.0))
-        .border_color(Colors::border_startup_soft())
-        .bg(Colors::surface_startup_window())
+        .border_color(Colors::border_subtle())
+        .bg(Colors::surface_code())
         .px(px(7.0))
         .py(px(3.0))
         .text_size(px(9.5))
         .font_weight(gpui::FontWeight::MEDIUM)
-        .text_color(Colors::text_startup_faint())
+        .text_color(Colors::text_muted())
         .child(shortcut)
 }

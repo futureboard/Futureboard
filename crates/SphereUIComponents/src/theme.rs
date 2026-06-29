@@ -416,27 +416,6 @@ impl Colors {
             .unwrap_or_else(|| parse_theme_color(fallback).unwrap_or_else(|_| Rgba::default()))
     }
 
-    // Startup / welcome window
-    theme_color!(surface_startup_bg, "surface.startupBg", "#16181C");
-    theme_color!(surface_startup_window, "surface.startupWindow", "#1B1D22");
-    theme_color!(surface_startup_panel, "surface.startupPanel", "#1E2025");
-    theme_color!(
-        surface_startup_elevated,
-        "surface.startupElevated",
-        "#23262C"
-    );
-    theme_color!(border_startup, "border.startup", "#33363D");
-    theme_color!(border_startup_soft, "border.startupSoft", "#25272D");
-    theme_color!(text_startup, "text.startup", "#D7DAE0");
-    theme_color!(text_startup_strong, "text.startupStrong", "#F0F2F5");
-    theme_color!(text_startup_muted, "text.startupMuted", "#9BA1AD");
-    theme_color!(text_startup_faint, "text.startupFaint", "#FFFFFF55");
-    theme_color!(accent_startup, "accent.startup", "#72D7D7");
-    theme_color!(accent_startup_soft, "accent.startupSoft", "#72D7D726");
-    theme_color!(feed_badge_background, "feed.badgeBackground", "#FFFFFF12");
-    theme_color!(feed_badge_text, "feed.badgeText", "#9BA1AD");
-    theme_color!(feed_unread_dot, "feed.unreadDot", "#72D7D7");
-
     // Backgrounds
     theme_color!(surface_base, "surface.base", "#1E1F22");
     theme_color!(surface_panel, "surface.panel", "#25262B");
@@ -447,7 +426,12 @@ impl Colors {
     theme_color!(surface_input, "surface.input", "#181A1F");
     theme_color!(surface_window, "surface.window", "#15161A");
     theme_color!(surface_titlebar, "surface.titlebar", "#1B1C20");
+    theme_color!(surface_sidebar, "surface.sidebar", "#1B1C20");
     theme_color!(surface_card, "surface.card", "#202126");
+    theme_color!(surface_card_hover, "surface.cardHover", "#30323A");
+    theme_color!(surface_card_selected, "surface.cardSelected", "#272536");
+    theme_color!(surface_code, "surface.code", "#181A1F");
+    theme_color!(surface_badge, "surface.badge", "#202126");
     theme_color!(surface_hover, "surface.hover", "#30323A");
     theme_color!(surface_active, "surface.active", "#2B2D33");
     theme_color!(surface_control_hover, "surface.controlHover", "#292B31");
@@ -474,6 +458,9 @@ impl Colors {
     // Accent
     theme_color!(accent_primary, "accent.primary", "#7B61FF");
     theme_color!(accent_primary_hover, "accent.primaryHover", "#8D78FF");
+    theme_color!(accent_hover, "accent.hover", "#8D78FF");
+    theme_color!(accent_active, "accent.active", "#7B61FF28");
+    theme_color!(accent_focus, "accent.focus", "#7B61FFB8");
     theme_color!(accent_soft, "accent.soft", "#7B61FF30");
     theme_color!(accent_muted, "accent.muted", "#7B61FF20");
     theme_color!(accent_pressed, "accent.pressed", "#7B61FF28");
@@ -482,6 +469,7 @@ impl Colors {
     // Status / Alert Accents
     theme_color!(status_error, "status.error", "#FF6B68");
     theme_color!(status_warning, "status.warning", "#E5C07B");
+    theme_color!(semantic_warning, "semantic.warning", "#E5C07B");
     theme_color!(status_success, "status.success", "#6FCF97");
     theme_color!(accent_success, "accent.success", "#6FCF97");
     theme_color!(accent_warning, "accent.warning", "#E5C07B");
@@ -496,15 +484,15 @@ impl Colors {
     theme_color!(fader_rail, "fader.rail", "#FFFFFF0F");
     theme_color!(fader_thumb, "fader.thumb", "#DFE1E5");
     theme_color!(fader_tick, "fader.tick", "#FFFFFF1F");
-    theme_color!(fader_scale_text, "fader.scaleText", "#FFFFFF38");
+    theme_color!(fader_scale_text, "fader.scaleText", "#8E96A3");
     theme_color!(knob_bg, "knob.background", "#181A1F");
     theme_color!(knob_ring, "knob.ring", "#7B61FF");
-    theme_color!(slot_bg, "slot.background", "#FFFFFF08");
-    theme_color!(slot_border, "slot.border", "#FFFFFF12");
+    theme_color!(slot_bg, "slot.background", "#20232A");
+    theme_color!(slot_border, "slot.border", "#FFFFFF1F");
     theme_color!(statusbar_bg, "statusbar.background", "#1B1C20");
     theme_color!(statusbar_text, "statusbar.text", "#8E96A3");
-    theme_color!(mixer_bg, "mixer.background", "#111418");
-    theme_color!(master_strip_bg, "mixer.masterStripBackground", "#181A1F");
+    theme_color!(mixer_bg, "mixer.background", "#15161A");
+    theme_color!(master_strip_bg, "mixer.masterStripBackground", "#1B1C20");
     theme_color!(timeline_grid_major, "timeline.gridMajor", "#303642");
     theme_color!(timeline_grid_minor, "timeline.gridMinor", "#242832");
     theme_color!(timeline_grid_bar, "timeline.gridBar", "#3C4351");
@@ -637,12 +625,12 @@ impl Colors {
         "surface.bottomPanelHeader",
         "#1B1C20"
     );
-    theme_color!(mixer_strip_bg, "surface.mixerStrip", "#FFFFFF08");
-    theme_color!(mixer_strip_bg_alt, "surface.mixerStripAlt", "#FFFFFF05");
+    theme_color!(mixer_strip_bg, "surface.mixerStrip", "#25262B");
+    theme_color!(mixer_strip_bg_alt, "surface.mixerStripAlt", "#1B1C20");
     theme_color!(
         mixer_strip_selected_bg,
         "surface.mixerStripSelected",
-        "#FFFFFF14"
+        "#272536"
     );
     theme_color!(
         master_strip_header_bg,
@@ -652,13 +640,13 @@ impl Colors {
 
     // Borders
     theme_color!(panel_border, "border.panel", "#FFFFFF14");
-    theme_color!(strip_border, "border.strip", "#FFFFFF26");
-    theme_color!(strip_border_subtle, "border.stripSubtle", "#FFFFFF0A");
-    theme_color!(master_strip_border, "border.masterStrip", "#FFFFFF1A");
+    theme_color!(strip_border, "border.strip", "#FFFFFF1F");
+    theme_color!(strip_border_subtle, "border.stripSubtle", "#292D36");
+    theme_color!(master_strip_border, "border.masterStrip", "#FFFFFF1F");
 
     // Slots
-    theme_color!(slot_bg_hover, "slot.backgroundHover", "#FFFFFF14");
-    theme_color!(slot_empty_text, "slot.emptyText", "#FFFFFF45");
+    theme_color!(slot_bg_hover, "slot.backgroundHover", "#292D38");
+    theme_color!(slot_empty_text, "slot.emptyText", "#8E96A3");
 
     // Fader
     theme_color!(fader_groove, "fader.groove", "#15161A");

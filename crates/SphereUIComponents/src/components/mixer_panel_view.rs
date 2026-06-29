@@ -233,7 +233,7 @@ impl Render for MixerPanelView {
             .flex()
             .flex_col()
             .size_full()
-            .bg(Colors::mixer_bg())
+            .bg(Colors::surface_window())
             .on_drag_move::<MixerSplitDrag>(move |event, w, cx| {
                 let y: f32 = event.event.position.y.into();
                 (split_for_move.on_action)(MixerSplitAction::ResizeMove(y), w, cx);

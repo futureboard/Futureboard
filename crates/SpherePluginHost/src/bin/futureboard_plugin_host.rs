@@ -941,6 +941,7 @@ fn run_ipc_loop(mut out: io::Stdout, shutdown: Arc<AtomicBool>) {
                             "[PluginEditorLifecycle] second resize instance={} size={}x{}",
                             entry.instance_id, width, height
                         );
+                        eprintln!("[editor-size] delayed resize = {}x{}", width, height);
                         processor.embed_set_bounds(0, 0, width as i32, height as i32);
                         processor.embed_refresh();
                     }
@@ -2481,6 +2482,10 @@ fn finalize_editor_attach(
     eprintln!(
         "[PluginEditorLifecycle] initial resize instance={} size={}x{}",
         result.plugin_instance_id, result.preferred_width, result.preferred_height
+    );
+    eprintln!(
+        "[editor-size] client rect = {}x{}",
+        result.preferred_width, result.preferred_height
     );
     result.processor.embed_set_bounds(
         0,

@@ -4388,12 +4388,19 @@ sphere_daux_vst3_embed_editor(SphereDauxVst3Processor *processor,
     preferred_w = daux_view_rect_width(preferred);
     preferred_h = daux_view_rect_height(preferred);
   }
-  // IPlugView::getSize is the content/client size source of truth; otherwise we
-  // keep the provisional host-region size used to open the shell.
-  if (preferred_w > 0)
+  // IPlugView::getSize is the content/client size source of truth. If it is
+  // missing/invalid, use a safe non-tiny default instead of the provisional
+  // wrapper size so heavyweight instruments do not open clipped.
+  if (preferred_w > 0 && preferred_h > 0) {
     editor_w = preferred_w;
-  if (preferred_h > 0)
     editor_h = preferred_h;
+  } else {
+    editor_w = 900;
+    editor_h = 600;
+  }
+  editor_w = std::clamp(editor_w, 160, 4096);
+  editor_h = std::clamp(editor_h, 160, 4096);
+  daux_constrain_content_size(processor, &editor_w, &editor_h);
   const UINT dpi = daux_hwnd_dpi(parent);
   daux_log_editor_dpi(parent, "embed");
   std::fprintf(stderr, "[PluginEditor] getSize rect=%d,%d,%d,%d\n",
@@ -4412,6 +4419,11 @@ sphere_daux_vst3_embed_editor(SphereDauxVst3Processor *processor,
                static_cast<unsigned>(get_size_result), editor_w, editor_h,
                preferred.left, preferred.top, preferred.right,
                preferred.bottom);
+  std::fprintf(stderr, "[editor-size] plugin preferred size = %dx%d\n", editor_w,
+               editor_h);
+  std::fprintf(stderr, "[editor-size] titlebar height = %d\n", content_y_off);
+  std::fprintf(stderr, "[editor-size] client rect = %dx%d\n", editor_w,
+               editor_h);
   std::fprintf(stderr, "[NativeEditorShell] content_rect=(0,%d,%d,%d)\n",
                content_y_off, editor_w, editor_h);
   std::fprintf(stderr, "[PluginEditor] created child hwnd=0x%p client=%dx%d\n",
@@ -4424,6 +4436,17 @@ sphere_daux_vst3_embed_editor(SphereDauxVst3Processor *processor,
   daux_embed_apply_content_size(processor, editor_w, editor_h,
                                 "createView.getSize");
   daux_resize_child_client(content, editor_w, editor_h);
+  {
+    RECT top_rect{};
+    RECT client_rect{};
+    GetWindowRect(top, &top_rect);
+    GetClientRect(content, &client_rect);
+    std::fprintf(stderr, "[editor-size] shell outer target = %ldx%ld\n",
+                 top_rect.right - top_rect.left, top_rect.bottom - top_rect.top);
+    std::fprintf(stderr, "[editor-size] attach rect = %ld/%ld/%ld/%ld\n", 0L,
+                 static_cast<long>(content_y_off), client_rect.right,
+                 static_cast<long>(content_y_off) + client_rect.bottom);
+  }
   daux_editor_install_frame(processor);
   std::fprintf(stderr, "[PluginEditor] setFrame ok\n");
   daux_log_hwnd_state("sized_before_attach", top, content);
@@ -4561,8 +4584,12 @@ sphere_daux_vst3_embed_editor(SphereDauxVst3Processor *processor,
         processor->editor_view->getSize(&after_attach_size);
     const int after_w = daux_view_rect_width(after_attach_size);
     const int after_h = daux_view_rect_height(after_attach_size);
-    const int size_w = after_w > 0 ? after_w : editor_w;
-    const int size_h = after_h > 0 ? after_h : editor_h;
+    int size_w = after_w > 0 ? after_w : editor_w;
+    int size_h = after_h > 0 ? after_h : editor_h;
+    size_w = std::clamp(size_w, 160, 4096);
+    size_h = std::clamp(size_h, 160, 4096);
+    daux_constrain_content_size(processor, &size_w, &size_h);
+    daux_embed_apply_content_size(processor, size_w, size_h, "after_attach.getSize");
     daux_resize_child_client(content, size_w, size_h);
     std::fprintf(stderr,
                  "[vst3-editor] getSize after_attach result=0x%x width=%d "
@@ -4572,12 +4599,16 @@ sphere_daux_vst3_embed_editor(SphereDauxVst3Processor *processor,
                  after_attach_size.right, after_attach_size.bottom);
     editor_w = size_w;
     editor_h = size_h;
+    std::fprintf(stderr, "[editor-size] client rect = %dx%d\n", editor_w,
+                 editor_h);
   }
   {
     auto local = daux_local_view_rect(editor_w, editor_h);
     std::fprintf(stderr, "[PluginEditorLifecycle] initial resize size=%dx%d\n",
                  editor_w, editor_h);
     const auto on_size_res = processor->editor_view->onSize(&local);
+    std::fprintf(stderr, "[editor-size] onSize result = 0x%x\n",
+                 static_cast<unsigned>(on_size_res));
     std::fprintf(stderr, "[PluginEditor] onSize result=0x%x\n",
                  static_cast<unsigned>(on_size_res));
     std::fprintf(stderr,

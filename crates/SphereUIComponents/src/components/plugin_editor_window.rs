@@ -196,6 +196,8 @@ enum PluginEditorStatus {
 /// `IPlugView::attached`. Cap at the last entry — anything still blank past
 /// that turns into a surfaced failure.
 const READY_PROBE_DELAYS_MS: &[u64] = &[100, 500, 1000, 3000, 5000];
+const DEFAULT_PLUGIN_EDITOR_CONTENT_SIZE: (i32, i32) = (900, 600);
+const MIN_PLUGIN_EDITOR_CONTENT_SIZE: i32 = 160;
 const MAX_PLUGIN_EDITOR_PREFERRED_SIZE: i32 = 4096;
 
 pub struct PluginEditorWindow {
@@ -315,8 +317,8 @@ impl PluginEditorWindow {
     fn valid_preferred_size(width: u32, height: u32) -> Option<(i32, i32)> {
         let width = i32::try_from(width).ok()?;
         let height = i32::try_from(height).ok()?;
-        if width > 0
-            && height > 0
+        if width >= MIN_PLUGIN_EDITOR_CONTENT_SIZE
+            && height >= MIN_PLUGIN_EDITOR_CONTENT_SIZE
             && width <= MAX_PLUGIN_EDITOR_PREFERRED_SIZE
             && height <= MAX_PLUGIN_EDITOR_PREFERRED_SIZE
         {
@@ -324,6 +326,10 @@ impl PluginEditorWindow {
         } else {
             None
         }
+    }
+
+    fn preferred_size_or_default(width: u32, height: u32) -> (i32, i32) {
+        Self::valid_preferred_size(width, height).unwrap_or(DEFAULT_PLUGIN_EDITOR_CONTENT_SIZE)
     }
 
     /// Physical-pixel host region under the GPUI window: full client width, from
@@ -1056,13 +1062,14 @@ impl PluginEditorWindow {
                 );
                 // Content is a WS_CHILD embed under the GPUI window.
                 if !self.host_auto_size_applied {
-                    if let Some(size) =
-                        Self::valid_preferred_size(preferred_width, preferred_height)
-                    {
-                        self.host_preferred_size = Some(size);
-                    } else {
-                        eprintln!("[plugin-editor-window] preferred_size_invalid using_default");
+                    let size = Self::preferred_size_or_default(preferred_width, preferred_height);
+                    if Self::valid_preferred_size(preferred_width, preferred_height).is_none() {
+                        eprintln!(
+                            "[plugin-editor-window] preferred_size_invalid using_default={}x{}",
+                            size.0, size.1
+                        );
                     }
+                    self.host_preferred_size = Some(size);
                 }
                 let was = self.status.clone();
                 self.status =
@@ -1102,11 +1109,10 @@ impl PluginEditorWindow {
                 eprintln!(
                     "[plugin-bridge] event EditorContentResize instance={plugin_instance_id} width={width} height={height}"
                 );
-                if let Some(size) = Self::valid_preferred_size(width, height) {
-                    self.host_preferred_size = Some(size);
-                    self.editor_content_size = Some(size);
-                    cx.notify();
-                }
+                let size = Self::preferred_size_or_default(width, height);
+                self.host_preferred_size = Some(size);
+                self.editor_content_size = Some(size);
+                cx.notify();
             }
             ClientEvent::Host(HostEvent::EditorPreferredSize {
                 plugin_instance_id,
@@ -1116,13 +1122,16 @@ impl PluginEditorWindow {
                 eprintln!(
                     "[plugin-bridge] event EditorPreferredSize instance={plugin_instance_id} width={width} height={height}"
                 );
-                if let Some(size) = Self::valid_preferred_size(width, height) {
-                    self.host_preferred_size = Some(size);
-                    if !self.host_auto_size_applied {
-                        self.editor_content_size = Some(size);
-                    }
-                } else {
-                    eprintln!("[plugin-editor-window] preferred_size_invalid using_default");
+                let size = Self::preferred_size_or_default(width, height);
+                if Self::valid_preferred_size(width, height).is_none() {
+                    eprintln!(
+                        "[plugin-editor-window] preferred_size_invalid using_default={}x{}",
+                        size.0, size.1
+                    );
+                }
+                self.host_preferred_size = Some(size);
+                if !self.host_auto_size_applied {
+                    self.editor_content_size = Some(size);
                 }
                 cx.notify();
             }
@@ -1262,6 +1271,10 @@ impl PluginEditorWindow {
         let viewport = window.viewport_size();
         let current_w: f32 = viewport.width.into();
         let current_h: f32 = viewport.height.into();
+        eprintln!("[editor-size] plugin preferred size = {}x{}", content_w, content_h);
+        eprintln!("[editor-size] titlebar height = {:.0}", HEADER_H * scale);
+        eprintln!("[editor-size] client rect = {}x{}", content_w, content_h);
+        eprintln!("[editor-size] shell outer target = {:.0}x{:.0}", shell_w, shell_h);
         if (current_w - shell_w).abs() > 1.0 || (current_h - shell_h).abs() > 1.0 {
             eprintln!(
                 "[plugin-editor-window] auto_size content={}x{} shell={:.0}x{:.0}",
@@ -1269,6 +1282,14 @@ impl PluginEditorWindow {
             );
             window.resize(size(px(shell_w), px(shell_h)));
         }
+        let region = self.host_region_for(window);
+        eprintln!(
+            "[editor-size] attach rect = {}/{}/{}/{}",
+            region.x,
+            region.y,
+            region.x + region.width,
+            region.y + region.height
+        );
         self.sync_host_region(window);
         self.host_auto_size_applied = true;
         self.host_auto_size_settled = false;

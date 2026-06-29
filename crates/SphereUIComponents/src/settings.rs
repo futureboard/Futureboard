@@ -571,6 +571,19 @@ pub struct SettingsAudioLatencySnapshot {
     pub device_state: String,
     pub backend_name: String,
     pub last_error: Option<String>,
+    /// Active runtime sample rate (Hz) — the rate the opened stream runs at.
+    /// All timing uses this; the status bar shows this.
+    pub active_sample_rate: u32,
+    /// Sample rate requested at device open (Hz), or 0 for "device default".
+    /// When this differs from `active_sample_rate` the UI warns that timing
+    /// follows the active device rate.
+    pub requested_sample_rate: u32,
+    /// `true` when the user changed the preferred sample rate but chose "Later"
+    /// (deferred the engine restart). Timing keeps using `active_sample_rate`
+    /// until the project is re-opened / the engine restarted.
+    pub restart_pending: bool,
+    /// The deferred preferred sample rate (Hz) when `restart_pending`; 0 otherwise.
+    pub deferred_sample_rate: u32,
     pub buffer_ms: f64,
     pub buffer_frames: u32,
     pub round_trip_ms: f64,
@@ -702,6 +715,11 @@ impl SettingsAudioLatencySnapshot {
             device_state: stats.device_state,
             backend_name: stats.backend_name,
             last_error: stats.last_error,
+            active_sample_rate: stats.sample_rate,
+            requested_sample_rate: stats.requested_sample_rate,
+            // Overridden by the latency provider, which knows the deferred target.
+            restart_pending: false,
+            deferred_sample_rate: 0,
             buffer_ms: info.buffer_ms,
             buffer_frames: info.buffer_frames,
             round_trip_ms: info.buffer_ms * 2.0,

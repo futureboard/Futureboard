@@ -50,8 +50,13 @@ pub struct JsDauxStatus {
     pub backend_name: String,
     /// Active output device name.
     pub output_device: Option<String>,
-    /// Active sample rate (Hz).
+    /// Active sample rate (Hz) — the rate the opened stream actually runs at.
+    /// This is the authoritative runtime rate used for all timing.
     pub sample_rate: u32,
+    /// Sample rate the device was *requested* to open at (Hz), or 0 when no
+    /// specific rate was requested ("device default"). May differ from
+    /// `sample_rate` in WASAPI shared mode or after an exclusive-mode fallback.
+    pub requested_sample_rate: u32,
     /// Active buffer size (frames).
     pub buffer_size: u32,
     /// Estimated output latency (ms) = buffer_frames / sample_rate * 1000.

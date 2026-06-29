@@ -13,6 +13,14 @@ pub fn vst3_midi_debug_enabled() -> bool {
     })
 }
 
+fn vst3_context_debug_enabled() -> bool {
+    static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *FLAG.get_or_init(|| {
+        std::env::var_os("FUTUREBOARD_FORENSIC_TRACE").is_some()
+            || std::env::var_os("FUTUREBOARD_VST3_CONTEXT_DEBUG").is_some()
+    })
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Vst3MidiEventKind {
     NoteOff = 0,
@@ -504,6 +512,11 @@ impl Vst3RuntimeProcessor {
             class_id,
             sample_rate.max(1)
         );
+        eprintln!(
+            "[vst3-setup] plugin=\"{}\" sample_rate={}",
+            plugin_path,
+            sample_rate.max(1)
+        );
         let path = CString::new(plugin_path).ok()?;
         let class_id_c = CString::new(class_id).ok()?;
         let raw = unsafe {
@@ -855,6 +868,15 @@ impl Vst3RuntimeProcessor {
         if self.inner.raw.is_null() {
             return;
         }
+        if vst3_context_debug_enabled() {
+            eprintln!(
+                "[vst3-context] plugin=\"{}\" tempo={} projectTimeSamples={} projectTimeMusic={:.9}",
+                self.inner.plugin_path,
+                ctx.tempo_bpm,
+                ctx.project_time_samples,
+                ctx.ppq_position
+            );
+        }
         unsafe {
             sphere_daux_vst3_set_process_context(
                 self.inner.raw,
@@ -1199,6 +1221,69 @@ impl Clone for Vst3RuntimeProcessor {
         Self {
             inner: Arc::clone(&self.inner),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn process_context_keeps_tempo_raw_while_ppq_uses_sample_rate() {
+        let bpm: f64 = 128.0;
+        for sample_rate in [44_100.0_f64, 48_000.0, 88_200.0, 96_000.0, 192_000.0] {
+            let samples_per_beat: f64 = sample_rate * 60.0 / bpm;
+            let project_time_samples = samples_per_beat.round() as i64;
+            let ctx = RuntimeTransportContext {
+                tempo_bpm: bpm,
+                time_sig_num: 4,
+                time_sig_den: 4,
+                project_time_samples,
+                ppq_position: project_time_samples as f64 * bpm / (sample_rate * 60.0),
+                bar_position_ppq: 0.0,
+                playing: true,
+                recording: false,
+            };
+            assert_eq!(ctx.tempo_bpm, bpm);
+            let half_sample_ppq = bpm / (sample_rate * 60.0) * 0.5;
+            assert!(
+                (ctx.ppq_position - 1.0).abs() <= half_sample_ppq + 1e-12,
+                "sample_rate={sample_rate}"
+            );
+        }
+    }
+
+    /// Pins the exact reported scenario: when shared mode opens the device at
+    /// 96 kHz instead of the requested 48 kHz, the VST3 ProcessContext must use
+    /// the active rate (96 kHz) for sample/PPQ math while the tempo stays raw.
+    #[test]
+    fn vst3_context_at_96k_uses_active_rate_with_raw_tempo() {
+        let bpm: f64 = 128.0;
+        let active_sample_rate: f64 = 96_000.0;
+
+        // VST3 processSetup.sampleRate is the active rate; at 128 BPM a beat is
+        // exactly 45000 samples @ 96 kHz (and would be 22500 @ 48 kHz).
+        let samples_per_beat = (active_sample_rate * 60.0 / bpm) as i64;
+        assert_eq!(samples_per_beat, 45_000);
+        assert_ne!(samples_per_beat, (48_000.0 * 60.0 / bpm) as i64);
+
+        // One beat in: PPQ derived from project sample position / active rate.
+        let project_time_samples = samples_per_beat;
+        let ctx = RuntimeTransportContext {
+            tempo_bpm: bpm,
+            time_sig_num: 4,
+            time_sig_den: 4,
+            project_time_samples,
+            ppq_position: project_time_samples as f64 * bpm / (active_sample_rate * 60.0),
+            bar_position_ppq: 0.0,
+            playing: true,
+            recording: false,
+        };
+
+        // Tempo is passed through raw — never rescaled by the sample rate.
+        assert_eq!(ctx.tempo_bpm, 128.0);
+        // PPQ at one beat is exactly 1.0 when computed against the active rate.
+        assert!((ctx.ppq_position - 1.0).abs() < 1e-9);
     }
 }
 

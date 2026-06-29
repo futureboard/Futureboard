@@ -11,9 +11,11 @@ use sphere_ui_components::layout::{
     PendingCloseAction, PreparedWorkspaceFinish, ProjectOpenOptions, StudioLayout,
 };
 use sphere_ui_components::loading_session::{
-    begin_pre_studio_workspace_prepare, begin_project_session_load, begin_session_shutdown,
-    close_loading_session_window, show_loading_session_error, update_loading_session_progress,
-    LoadFailedContext, LoadedSessionPackage, SessionRollbackSnapshot, SessionShutdownSnapshot,
+    begin_pre_studio_workspace_prepare, begin_project_session_load,
+    begin_studio_project_session_load, begin_studio_session_shutdown,
+    complete_project_lifecycle, show_loading_session_error, update_loading_session_progress,
+    LoadFailedContext, LoadedSessionPackage, ProjectLifecycleTarget, SessionRollbackSnapshot,
+    SessionShutdownReason,
 };
 use sphere_ui_components::project::{FutureboardProject, ProjectTemplate};
 use sphere_ui_components::splash::SplashWindowHandle;
@@ -163,7 +165,7 @@ fn finish_loading_to_studio(cx: &mut App) {
             eprintln!("[WindowLifecycle] refused to close loader — studio shell not alive");
             return;
         }
-        close_loading_session_window(cx);
+        complete_project_lifecycle(cx, ProjectLifecycleTarget::Studio);
         if let Some(studio) = cx
             .try_global::<NativeShellWindows>()
             .and_then(|shell| shell.studio.clone())
@@ -175,6 +177,14 @@ fn finish_loading_to_studio(cx: &mut App) {
         log_window_registry(cx, "after loading ui close");
         eprintln!("[SessionLoad] studio ready");
     });
+}
+
+fn finish_loading_to_welcome(cx: &mut App) {
+    log_window_registry(cx, "before loading ui close (welcome)");
+    eprintln!("[ProjectClose] lifecycle completing target=welcome");
+    complete_project_lifecycle(cx, ProjectLifecycleTarget::Welcome);
+    log_window_registry(cx, "after loading ui close (welcome)");
+    eprintln!("[ProjectClose] close-to-welcome complete");
 }
 
 fn transition_loaded_package_to_existing_studio(
@@ -285,29 +295,25 @@ fn transition_prepared_package_to_studio(
 }
 
 fn begin_close_project_session(
-    snapshot: SessionShutdownSnapshot,
+    reason: SessionShutdownReason,
     owner_bounds: Option<gpui::Bounds<gpui::Pixels>>,
-    self_window: Option<gpui::WindowHandle<StudioLayout>>,
+    studio: gpui::WindowHandle<StudioLayout>,
     cx: &mut App,
 ) {
     let on_complete = Arc::new(move |cx: &mut App| {
-        if let Some(handle) = self_window {
-            let _ = handle.update(cx, |layout, window, cx| {
-                sphere_ui_components::window_position::persist_studio_window_from_window(
-                    window, cx,
-                );
-                window.remove_window();
-                let _ = layout;
-            });
-        }
+        let _ = studio.update(cx, |layout, window, cx| {
+            sphere_ui_components::window_position::persist_studio_window_from_window(window, cx);
+            window.remove_window();
+            let _ = layout;
+        });
         cx.update_global::<NativeShellWindows, _>(|shell, _| {
             shell.studio = None;
         });
         set_app_mode(cx, AppMode::Welcome);
         open_welcome_window(cx);
-        finish_loading_to_studio(cx);
+        finish_loading_to_welcome(cx);
     });
-    begin_session_shutdown(snapshot, owner_bounds, on_complete, cx);
+    begin_studio_session_shutdown(reason, studio, owner_bounds, true, on_complete, cx);
 }
 
 fn begin_load_project_from_welcome(path: PathBuf, open_options: ProjectOpenOptions, cx: &mut App) {
@@ -396,7 +402,7 @@ fn request_project_switch_in_studio(
         let prepared = studio.update(cx, |layout, _window, cx| {
             layout.prepare_for_in_studio_project_switch_transaction(cx)
         });
-        let Ok((rollback, shutdown, owner_bounds)) = prepared else {
+        let Ok((rollback, owner_bounds)) = prepared else {
             eprintln!("[ProjectSwitch] failed to prepare studio for in-studio switch");
             return;
         };
@@ -417,11 +423,11 @@ fn request_project_switch_in_studio(
             handle_project_switch_load_failed(studio_for_failure, ctx, cx);
         });
         eprintln!("[SessionLoad] begin target={}", path.display());
-        begin_project_session_load(
+        begin_studio_project_session_load(
             path,
             open_options,
-            Some(rollback),
-            Some(shutdown),
+            rollback,
+            studio,
             owner_bounds,
             on_success,
             on_failure,
@@ -464,7 +470,7 @@ fn handle_load_failed(ctx: LoadFailedContext, cx: &mut App) {
     }
     set_app_mode(cx, AppMode::LoadFailed);
     open_welcome_window(cx);
-    close_loading_session_window(cx);
+    complete_project_lifecycle(cx, ProjectLifecycleTarget::Welcome);
 }
 
 /// What the freshly opened workspace should do once its window exists.
@@ -576,8 +582,8 @@ fn open_studio_workspace(init: WorkspaceInit, cx: &mut App) -> Result<(), String
             layout.set_self_window(studio_handle.clone());
             layout.set_request_welcome_callback(Arc::new(|cx| open_welcome_window(cx)));
             layout.set_request_session_shutdown_callback(Arc::new({
-                move |snapshot, owner_bounds, self_window, cx| {
-                    begin_close_project_session(snapshot, owner_bounds, self_window, cx);
+                move |reason, owner_bounds, studio, cx| {
+                    begin_close_project_session(reason, owner_bounds, studio, cx);
                 }
             }));
             layout.set_request_project_load_callback(Arc::new({

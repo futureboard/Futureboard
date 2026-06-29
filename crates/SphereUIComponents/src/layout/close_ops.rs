@@ -63,6 +63,10 @@ impl StudioLayout {
             shutdown::log("request_close ignored — already shutting down");
             return;
         }
+        if crate::loading_session::is_project_lifecycle_busy() {
+            shutdown::log("request_close ignored — project lifecycle in progress");
+            return;
+        }
         let dirty = self.project_session.is_dirty;
         shutdown::log(&format!(
             "close requested action={} dirty={dirty}",
@@ -229,7 +233,12 @@ impl StudioLayout {
             crate::session_shutdown::SessionShutdownReason::AppExit,
             cx,
         );
-        crate::session_shutdown::run_session_shutdown(snapshot, |_| {});
+        if let Err(error) = crate::session_shutdown::run_session_shutdown(snapshot, |_| {}) {
+            eprintln!(
+                "[SessionShutdown] shutdown failed step={:?} error={}",
+                error.step, error.message
+            );
+        }
 
         shutdown::log("phase: audio engine shutdown");
         if let Some(engine) = self.audio_bridge.engine.as_mut() {

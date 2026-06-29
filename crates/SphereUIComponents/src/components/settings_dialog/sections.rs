@@ -522,6 +522,10 @@ pub(crate) fn audio_latency_report_section(
             i18n.tr("settings.latency.engine-closed"),
         ));
     } else {
+        let rate_mismatch = latency.requested_sample_rate > 0
+            && latency.active_sample_rate > 0
+            && latency.requested_sample_rate != latency.active_sample_rate;
+
         card = card
             .child(settings_daw_row(
                 i18n.tr("settings.field.device-state"),
@@ -534,6 +538,61 @@ pub(crate) fn audio_latency_report_section(
                     latency.device_state != "DeviceLost",
                 ),
             ))
+            .child(settings_daw_row(
+                i18n.tr("settings.field.active-sample-rate"),
+                settings_value_readout(i18n.tr_vars(
+                    "settings.latency.sample-rate-value",
+                    &[("hz", latency.active_sample_rate.max(1).to_string())],
+                )),
+            ));
+
+        // Deferred preferred-rate change ("Later"): the user picked a new sample
+        // rate but chose not to restart the engine yet. Timing keeps using the
+        // active rate until the project is re-opened / engine restarted.
+        if latency.restart_pending {
+            card = card
+                .child(settings_daw_row(
+                    i18n.tr("settings.field.preferred-sample-rate"),
+                    settings_value_readout(i18n.tr_vars(
+                        "settings.latency.sample-rate-value",
+                        &[("hz", latency.deferred_sample_rate.max(1).to_string())],
+                    )),
+                ))
+                .child(
+                    div()
+                        .pt(px(4.0))
+                        .text_size(px(11.0))
+                        .text_color(Colors::status_warning())
+                        .child(i18n.tr("settings.latency.sample-rate-restart-pending")),
+                );
+        } else if rate_mismatch {
+            // Requested vs active divergence (shared-mode resample / exclusive
+            // fallback). Allowed but must be visible — timing follows the active
+            // device rate, not the requested rate shown elsewhere in Preferences.
+            card = card
+                .child(settings_daw_row(
+                    i18n.tr("settings.field.requested-sample-rate"),
+                    settings_value_readout(i18n.tr_vars(
+                        "settings.latency.sample-rate-value",
+                        &[("hz", latency.requested_sample_rate.to_string())],
+                    )),
+                ))
+                .child(
+                    div()
+                        .pt(px(4.0))
+                        .text_size(px(11.0))
+                        .text_color(Colors::status_warning())
+                        .child(i18n.tr_vars(
+                            "settings.latency.sample-rate-mismatch",
+                            &[
+                                ("active", latency.active_sample_rate.to_string()),
+                                ("requested", latency.requested_sample_rate.to_string()),
+                            ],
+                        )),
+                );
+        }
+
+        card = card
             .child(settings_daw_row(
                 i18n.tr("settings.field.output-buffer-latency"),
                 settings_value_readout(latency_ms_label(i18n, latency.buffer_ms)),

@@ -206,7 +206,12 @@ pub struct EngineStats {
     pub bpm: f64,
     pub time_signature_num: u32,
     pub time_signature_den: u32,
+    /// Active runtime sample rate (Hz) — the rate the opened stream runs at.
+    /// Authoritative for all timing; this is what the status bar shows.
     pub sample_rate: u32,
+    /// Rate the device was requested to open at (Hz), or 0 for "device
+    /// default". Differs from `sample_rate` on a shared-mode/exclusive fallback.
+    pub requested_sample_rate: u32,
     pub buffer_size: u32,
     pub backend_name: String,
     pub output_device: Option<String>,
@@ -650,6 +655,7 @@ impl AudioEngine {
             time_signature_num: transport.time_signature[0],
             time_signature_den: transport.time_signature[1],
             sample_rate: st.sample_rate,
+            requested_sample_rate: daux.requested_sample_rate,
             buffer_size: st.buffer_size,
             backend_name: daux.backend_name,
             output_device: daux.output_device,

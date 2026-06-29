@@ -622,6 +622,12 @@ pub struct RuntimeClip {
     /// [`Self::track_id`] resolved to a track index at build time
     /// ([`RuntimeProject::resolve_indices`]); `None` when the track is missing.
     pub track_index: Option<usize>,
+    /// Canonical musical start used to rebuild sample positions when the device
+    /// sample rate changes.
+    pub start_beat: f64,
+    /// Canonical musical duration used to rebuild sample positions when the
+    /// device sample rate changes.
+    pub duration_beats: f64,
     pub start_sample: u64,
     pub duration_samples: u64,
     pub offset_seconds: f64,
@@ -673,6 +679,8 @@ impl std::fmt::Debug for RuntimeClip {
             .field("id", &self.id)
             .field("track_id", &self.track_id)
             .field("track_index", &self.track_index)
+            .field("start_beat", &self.start_beat)
+            .field("duration_beats", &self.duration_beats)
             .field("start_sample", &self.start_sample)
             .field("duration_samples", &self.duration_samples)
             .field("offset_seconds", &self.offset_seconds)
@@ -696,6 +704,8 @@ impl Clone for RuntimeClip {
             id: self.id.clone(),
             track_id: self.track_id.clone(),
             track_index: self.track_index,
+            start_beat: self.start_beat,
+            duration_beats: self.duration_beats,
             start_sample: self.start_sample,
             duration_samples: self.duration_samples,
             offset_seconds: self.offset_seconds,
@@ -920,6 +930,88 @@ impl RuntimeProject {
                 }
             }
         }
+    }
+
+    /// Rebuild all sample-rate-derived runtime state for an already-cached graph.
+    ///
+    /// This is the safety net for device reopen/sample-rate changes: cached runtime
+    /// graphs keep canonical beats, params, and sources, but clip sample positions,
+    /// MIDI event samples, plugin DSP coefficients, PDC buffers, and VST3
+    /// `setupProcessing` instances must match the active stream sample rate.
+    pub fn retarget_sample_rate(&mut self, sample_rate: u32) {
+        let sample_rate = sample_rate.max(1);
+        if self.sample_rate == sample_rate {
+            return;
+        }
+        let old_sample_rate = self.sample_rate.max(1);
+        let ratio = sample_rate as f64 / old_sample_rate as f64;
+        self.sample_rate = sample_rate;
+        let sr = sample_rate as f64;
+
+        for clip in &mut self.clips {
+            let old_duration = clip.duration_samples;
+            let old_fade_in = clip.fade_in_samples;
+            let old_fade_out = clip.fade_out_samples;
+            clip.start_sample = self.tempo_map.samples_at_beat(clip.start_beat, sr);
+            clip.duration_samples = ((old_duration as f64) * ratio).round().max(1.0) as u64;
+            clip.fade_in_samples = ((old_fade_in as f64) * ratio).round() as u64;
+            clip.fade_out_samples = ((old_fade_out as f64) * ratio).round() as u64;
+            clip.fade_in_samples = clip.fade_in_samples.min(clip.duration_samples);
+            clip.fade_out_samples = clip
+                .fade_out_samples
+                .min(clip.duration_samples.saturating_sub(clip.fade_in_samples));
+            clip.stretch_next_project_sample = None;
+        }
+
+        for clip in &mut self.midi_clips {
+            for event in &mut clip.events {
+                event.sample = self.tempo_map.samples_at_beat(event.beat, sr);
+            }
+            sort_midi_events(&mut clip.events);
+        }
+        for track in &mut self.midi_tracks {
+            for event in &mut track.events {
+                event.sample = self.tempo_map.samples_at_beat(event.beat, sr);
+            }
+            sort_midi_events(&mut track.events);
+            track.cursor = 0;
+            track.active.clear();
+        }
+
+        for track in &mut self.tracks {
+            track.plugin_latency_samples = 0;
+            for insert in &mut track.inserts {
+                insert.dsp.rebuild(
+                    canonical_plugin_id(&insert.kind),
+                    &insert.params,
+                    sample_rate,
+                );
+                if insert.kind_tag == RuntimeInsertKind::NativePlugin {
+                    let needs_recreate = insert
+                        .vst3
+                        .as_ref()
+                        .map(|processor| processor.sample_rate() != sample_rate)
+                        .unwrap_or(false);
+                    if needs_recreate {
+                        if let Some(old) = insert.vst3.take() {
+                            old.set_destroy_reason("sample-rate-change");
+                        }
+                        insert.vst3 =
+                            Vst3RuntimeProcessor::from_params(&insert.params, sample_rate);
+                    }
+                }
+                if let Some(vst3) = insert.vst3.as_ref().filter(|vst3| vst3.is_ready()) {
+                    track.plugin_latency_samples = track
+                        .plugin_latency_samples
+                        .saturating_add(vst3.get_latency_samples().max(0) as u32);
+                }
+            }
+        }
+
+        self.latency_graph =
+            plan_runtime_latency_graph(&self.tracks, &self.audio_graph, self.pdc_enabled);
+        self.ensure_pdc_delay_capacity();
+        self.reset_pdc_delay_lines();
     }
 
     #[inline]
@@ -1436,6 +1528,10 @@ impl RuntimeProject {
         } else {
             0.0
         };
+        eprintln!(
+            "[transport] sample_rate={} bpm={} samples_per_beat={:.0}",
+            output_sample_rate, snapshot.bpm, samples_per_beat
+        );
 
         if crate::forensic_trace::engine_midi_trace_enabled() {
             for track in &snapshot.tracks {
@@ -1797,13 +1893,15 @@ impl RuntimeProject {
                                 let instance_id = &self.tracks[ti].inserts[ix].id;
                                 match ev.kind {
                                     RuntimeMidiEventKind::NoteOn => eprintln!(
-                                        "[midi-scheduler] note_on pitch={} offset={offset} \
-                                         absolute_sample={abs} instance={instance_id}",
+                                        "[midi-schedule] sample_rate={} event_ppq={:.6} event_sample={abs} offset={offset} note_on pitch={} instance={instance_id}",
+                                        self.sample_rate,
+                                        ev.beat,
                                         ev.pitch
                                     ),
                                     RuntimeMidiEventKind::NoteOff => eprintln!(
-                                        "[midi-scheduler] note_off pitch={} offset={offset} \
-                                         absolute_sample={abs} instance={instance_id}",
+                                        "[midi-schedule] sample_rate={} event_ppq={:.6} event_sample={abs} offset={offset} note_off pitch={} instance={instance_id}",
+                                        self.sample_rate,
+                                        ev.beat,
                                         ev.pitch
                                     ),
                                     _ => {}
@@ -2928,7 +3026,7 @@ pub fn resolve_clip_processor_from_stretch(params: &StretchParams) -> ClipDspPro
 mod stretch_runtime_tests {
     use super::*;
     use crate::audio_file::AudioFileBuffer;
-    use crate::types::EngineFadeSnapshot;
+    use crate::types::{EngineFadeSnapshot, EngineMidiClipSnapshot, EngineMidiNoteSnapshot};
 
     fn test_source(frames: u64) -> Arc<ClipAudioSource> {
         Arc::new(ClipAudioSource::InMemory(Arc::new(AudioFileBuffer {
@@ -3013,6 +3111,80 @@ mod stretch_runtime_tests {
         assert_eq!(migrated.algorithm, StretchAlgorithm::PreservePitch);
         assert!(migrated.preserve_pitch);
         assert!((migrated.time_ratio - 2.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn midi_and_audio_ppq_offsets_match_across_sample_rates() {
+        let bpm = 128.0;
+        let beats_per_second = bpm / 60.0;
+        let tempo_map = TempoMap::static_tempo(bpm).snapshot();
+        for sample_rate in [44_100, 48_000, 88_200, 96_000, 192_000] {
+            let audio_at_zero = {
+                let mut clip = test_clip(StretchParams::default());
+                clip.start_beat = 0.0;
+                build_clip_runtime(
+                    &clip,
+                    test_source(sample_rate as u64),
+                    beats_per_second,
+                    sample_rate,
+                )
+                .expect("audio clip at ppq 0")
+            };
+            assert_eq!(audio_at_zero.start_sample, 0);
+
+            let audio_at_one = {
+                let mut clip = test_clip(StretchParams::default());
+                clip.start_beat = 1.0;
+                build_clip_runtime(
+                    &clip,
+                    test_source(sample_rate as u64),
+                    beats_per_second,
+                    sample_rate,
+                )
+                .expect("audio clip at ppq 1")
+            };
+
+            let midi_clip = EngineMidiClipSnapshot {
+                id: "midi".to_string(),
+                track_id: "track".to_string(),
+                start_beat: 0.0,
+                length_beats: 2.0,
+                notes: vec![
+                    EngineMidiNoteSnapshot {
+                        id: 1,
+                        pitch: 60,
+                        start_beat: 0.0,
+                        length_beats: 0.25,
+                        velocity: 100,
+                        channel: 0,
+                    },
+                    EngineMidiNoteSnapshot {
+                        id: 2,
+                        pitch: 61,
+                        start_beat: 1.0,
+                        length_beats: 0.25,
+                        velocity: 100,
+                        channel: 0,
+                    },
+                ],
+                controllers: Vec::new(),
+            };
+            let (_clips, tracks) = build_midi_runtime(&[midi_clip], &tempo_map, sample_rate);
+            let note_on_samples: Vec<u64> = tracks[0]
+                .events
+                .iter()
+                .filter(|event| matches!(event.kind, RuntimeMidiEventKind::NoteOn))
+                .map(|event| event.sample)
+                .collect();
+
+            let expected_ppq_1 = tempo_map.samples_at_beat(1.0, sample_rate as f64);
+            assert_eq!(note_on_samples[0], 0, "sr={sample_rate}");
+            assert_eq!(note_on_samples[1], expected_ppq_1, "sr={sample_rate}");
+            assert_eq!(
+                audio_at_one.start_sample, expected_ppq_1,
+                "sr={sample_rate}"
+            );
+        }
     }
 
     #[test]
@@ -3122,6 +3294,35 @@ mod pdc_reset_tests {
             assert!(track.pdc_delay_r.iter().all(|&s| s == 0.0));
             assert_eq!(track.pdc_write_pos, 0);
         }
+    }
+
+    /// The runtime must time everything off the *active* opened-stream rate, not
+    /// the requested/project rate carried in the snapshot. Reproduces the
+    /// reported 48 kHz-requested / 96 kHz-active divergence and pins the spec
+    /// numbers: at 128 BPM a beat is exactly 45000 samples @ 96 kHz.
+    #[test]
+    fn runtime_uses_active_rate_not_requested_for_beat_math() {
+        let mut cache = HashMap::new();
+        // Snapshot carries the *requested* project rate (48 kHz)…
+        let mut snapshot = two_track_snapshot(48_000);
+        snapshot.bpm = 128.0;
+        // …but the device opened at 96 kHz (active rate) — that is what build gets.
+        let active_rate = 96_000;
+        let runtime =
+            RuntimeProject::build(&snapshot, active_rate, &mut cache, None, true).expect("build");
+
+        assert_eq!(
+            runtime.sample_rate, active_rate,
+            "runtime must adopt the active opened-stream rate, not the snapshot's requested rate"
+        );
+
+        // PPQ conversion uses the active rate: one beat @ 128 BPM @ 96 kHz = 45000.
+        let tempo_map = TempoMap::static_tempo(snapshot.bpm);
+        let samples_per_beat = tempo_map.samples_at_beat(1.0, runtime.sample_rate as f64);
+        assert_eq!(samples_per_beat, 45_000);
+        // …and NOT the 22500 the requested 48 kHz rate would have produced.
+        assert_eq!(tempo_map.samples_at_beat(1.0, 48_000.0), 22_500);
+        assert_ne!(samples_per_beat, tempo_map.samples_at_beat(1.0, 48_000.0));
     }
 }
 
@@ -3363,6 +3564,8 @@ fn build_clip_runtime(
         id: clip.id.clone(),
         track_id: clip.track_id.clone(),
         track_index: None, // resolved by RuntimeProject::resolve_indices
+        start_beat: clip.start_beat.max(0.0),
+        duration_beats: clip.duration_beats.max(0.0),
         start_sample: seconds_to_samples(start_seconds.max(0.0), output_sample_rate),
         duration_samples,
         offset_seconds: clip.offset_seconds.max(0.0),

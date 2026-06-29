@@ -528,20 +528,36 @@ impl StudioLayout {
         if crate::shutdown::ShutdownState::global().is_shutting_down() {
             return;
         }
-        self.prepare_immediate_session_shutdown(cx);
-        let snapshot = self.capture_session_shutdown_snapshot(
-            crate::session_shutdown::SessionShutdownReason::ProjectClose,
-            cx,
-        );
+        if crate::loading_session::is_project_lifecycle_busy() {
+            eprintln!("[ProjectClose] ignored — project lifecycle already in progress");
+            return;
+        }
         let owner_bounds = self.studio_window_bounds(cx);
-        let self_window = self.window_hooks.self_window.take();
+        let Some(studio) = self.window_hooks.self_window.take() else {
+            eprintln!("[ProjectClose] ignored — studio window handle missing");
+            return;
+        };
 
         if let Some(request_shutdown) = self.window_hooks.on_request_session_shutdown.clone() {
-            request_shutdown(snapshot, owner_bounds, self_window, cx);
+            request_shutdown(
+                crate::session_shutdown::SessionShutdownReason::ProjectClose,
+                owner_bounds,
+                studio,
+                cx,
+            );
             return;
         }
 
-        crate::session_shutdown::run_session_shutdown(snapshot, |_| {});
+        let snapshot = self.capture_session_shutdown_snapshot_for_loading(
+            crate::session_shutdown::SessionShutdownReason::ProjectClose,
+            cx,
+        );
+        if let Err(error) = crate::session_shutdown::run_session_shutdown(snapshot, |_| {}) {
+            eprintln!(
+                "[ProjectClose] shutdown failed step={:?} error={}",
+                error.step, error.message
+            );
+        }
         self.reset_project(cx);
         if !crate::shutdown::ShutdownState::global().is_shutting_down() {
             self.mark_engine_media_dirty();
@@ -550,7 +566,7 @@ impl StudioLayout {
         if let Some(request_welcome) = self.window_hooks.on_request_welcome.clone() {
             request_welcome(cx);
         }
-        if let Some(handle) = self_window {
+        if let Some(handle) = Some(studio) {
             cx.spawn(async move |_this, cx| {
                 cx.background_executor()
                     .timer(std::time::Duration::from_millis(0))
@@ -772,7 +788,7 @@ impl StudioLayout {
         .detach();
     }
 
-    fn project_snapshot(&self, cx: &mut Context<Self>) -> FutureboardProject {
+    pub(super) fn project_snapshot(&self, cx: &mut Context<Self>) -> FutureboardProject {
         let tl_state = self.timeline.read(cx).state.clone();
         let mut project = FutureboardProject::from(&tl_state);
         project.id = self.project_session.id.clone();
@@ -870,6 +886,19 @@ impl StudioLayout {
             });
         })
         .detach();
+    }
+
+    pub(super) fn session_autosave_flush_payload(
+        &self,
+        cx: &mut Context<Self>,
+    ) -> (Option<PathBuf>, Option<FutureboardProject>) {
+        if !self.project_session.is_dirty {
+            return (None, None);
+        }
+        (
+            Some(self.autosave_project_path()),
+            Some(self.project_snapshot(cx)),
+        )
     }
 
     fn autosave_project_path(&self) -> PathBuf {

@@ -513,6 +513,14 @@ impl StudioLayout {
             .audio_bridge
             .dropout_notice_until
             .is_some_and(|until| until > std::time::Instant::now());
+        // Transient sample-rate notice (e.g. active != requested after a
+        // re-open). Non-blocking — outranks idle labels, below recording/errors.
+        let sample_rate_notice = self
+            .audio_bridge
+            .sample_rate_notice_until
+            .is_some_and(|until| until > std::time::Instant::now())
+            .then(|| self.audio_bridge.sample_rate_notice_text.clone())
+            .filter(|text| !text.is_empty());
         let left = match (
             self.recording.ui_state.status_text(),
             &self.audio_bridge.last_error,
@@ -520,6 +528,9 @@ impl StudioLayout {
         ) {
             (Some(status), _, _) => status,
             (None, Some(error), _) => format!("Audio: {error}"),
+            (None, None, _) if sample_rate_notice.is_some() => {
+                sample_rate_notice.clone().unwrap_or_default()
+            }
             (None, None, _) if dropout_active => "Audio dropout detected".to_string(),
             (None, _, Some(stats)) if stats.transport_playing => "Playing".to_string(),
             (None, _, Some(stats)) if stats.running => "Audio ready".to_string(),

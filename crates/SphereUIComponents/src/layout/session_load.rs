@@ -649,6 +649,51 @@ impl StudioLayout {
             &project, root, timeline, layout, cx,
         );
     }
+
+    /// Finish mounting a workspace that was prepared on the loading-session
+    /// screen (audio warm-up / plugin restore) before the studio shell opened.
+    pub fn install_prepared_workspace(
+        &mut self,
+        mut package: LoadedSessionPackage,
+        finish: PreparedWorkspaceFinish,
+        cx: &mut Context<Self>,
+    ) {
+        session_log!("install prepared workspace");
+        if let Some(handoff) = package.install_handoff.take() {
+            self.adopt_session_install_handoff(handoff, cx);
+        } else {
+            session_log!("prepared workspace missing install handoff — falling back");
+        }
+        self.session_install_status = SessionInstallStatus::Ready;
+        match finish {
+            PreparedWorkspaceFinish::EmptyUntitled => {
+                self.project_session.bind_untitled("Untitled Project", false);
+                self.project_state = ProjectState::UnsavedWorkspace;
+                self.sync_project_session_to_workspace(cx);
+                self.mark_engine_media_dirty();
+                self.schedule_audio_project_sync(cx, true, "empty_workspace");
+            }
+            PreparedWorkspaceFinish::Template(template) => {
+                self.new_project_from_template(template, cx);
+            }
+            PreparedWorkspaceFinish::OpenDialog => {
+                self.dispatch_command_id("project:open", cx);
+            }
+            PreparedWorkspaceFinish::CreateProject(options) => {
+                self.create_saved_project_from_options(options, cx);
+            }
+        }
+        cx.notify();
+    }
+}
+
+/// Post-install step after pre-studio prepare for non-file workspaces.
+#[derive(Clone)]
+pub enum PreparedWorkspaceFinish {
+    EmptyUntitled,
+    Template(crate::project::ProjectTemplate),
+    OpenDialog,
+    CreateProject(crate::project::ProjectCreateOptions),
 }
 
 enum LoadSwitchError {

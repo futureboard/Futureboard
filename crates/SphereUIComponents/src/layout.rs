@@ -6,6 +6,7 @@ use gpui::{
 pub use crate::shutdown::ShutdownState;
 pub use close_ops::PendingCloseAction;
 pub use project_ops::ProjectOpenOptions;
+pub use session_load::PreparedWorkspaceFinish;
 pub use project_switch::{ProjectSwitchConfirmDecision, ProjectSwitchRequest, ProjectSwitchSource};
 
 use std::{collections::HashSet, path::PathBuf, sync::Arc};

@@ -785,6 +785,61 @@ fn run_headless_load(
     }
 }
 
+/// Begin pre-studio prepare for a workspace that does not need file decode
+/// (empty arrangement, template seed, open-dialog shell, etc.). Shows the
+/// loading window immediately and runs audio/session install on a background
+/// thread before the studio shell mounts.
+pub fn begin_pre_studio_workspace_prepare(
+    heading: impl Into<SharedString>,
+    project: FutureboardProject,
+    on_success: LoadSuccessCb,
+    on_failure: LoadFailedCb,
+    cx: &mut App,
+) {
+    set_app_mode(cx, AppMode::LoadingSession);
+    eprintln!("[AppMode] -> LoadingSession (workspace prepare)");
+    session_log!("begin pre-studio workspace prepare");
+
+    let transaction = SessionLoadTransaction {
+        path: None,
+        open_options: ProjectOpenOptions::default(),
+        rollback: None,
+        shutdown: None,
+        on_shutdown_complete: None,
+        stage: LoadStage::SessionInstall,
+        project: Some(project),
+        on_success,
+        on_failure: on_failure.clone(),
+    };
+
+    let heading = heading.into();
+    match open_loading_session_window(None, transaction, None, cx) {
+        Ok(handle) => {
+            store_loading_session_window(cx, handle.clone());
+            let _ = handle.update(cx, |window, _win, cx| {
+                window.heading = heading;
+                window.set_detail("Preparing session", cx);
+                window.progress = ProgressBarValue::value(0.25);
+                window.schedule_tick(cx);
+            });
+        }
+        Err(err) => {
+            session_log!("loading window unavailable: {err}");
+            on_failure(
+                LoadFailedContext {
+                    title: "Open Workspace Failed".to_string(),
+                    message: "The loading window could not be shown.".to_string(),
+                    detail: Some(err),
+                    path: None,
+                    open_options: ProjectOpenOptions::default(),
+                    rollback: None,
+                },
+                cx,
+            );
+        }
+    }
+}
+
 /// Begin a pre-studio project open. Shows the loading window immediately and
 /// only invokes `on_success` after decode/validate succeed.
 pub fn begin_project_session_load(

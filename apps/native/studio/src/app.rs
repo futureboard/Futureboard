@@ -4,15 +4,18 @@ use std::sync::Arc;
 use crate::window::{studio_window_options, welcome_window_options};
 use gpui::{App, AppContext, BorrowAppContext, Global, WindowHandle};
 use sphere_ui_components::app_state::{AppMode, AppSessionGate};
+use sphere_ui_components::components::progress_dialog::ProgressBarValue;
 use sphere_ui_components::assets;
 use sphere_ui_components::boot;
-use sphere_ui_components::layout::{PendingCloseAction, ProjectOpenOptions, StudioLayout};
-use sphere_ui_components::loading_session::{
-    begin_project_session_load, begin_session_shutdown, close_loading_session_window,
-    show_loading_session_error, LoadFailedContext, LoadedSessionPackage, SessionRollbackSnapshot,
-    SessionShutdownSnapshot,
+use sphere_ui_components::layout::{
+    PendingCloseAction, PreparedWorkspaceFinish, ProjectOpenOptions, StudioLayout,
 };
-use sphere_ui_components::project::{ProjectCreateOptions, ProjectTemplate};
+use sphere_ui_components::loading_session::{
+    begin_pre_studio_workspace_prepare, begin_project_session_load, begin_session_shutdown,
+    close_loading_session_window, show_loading_session_error, update_loading_session_progress,
+    LoadFailedContext, LoadedSessionPackage, SessionRollbackSnapshot, SessionShutdownSnapshot,
+};
+use sphere_ui_components::project::{FutureboardProject, ProjectTemplate};
 use sphere_ui_components::splash::SplashWindowHandle;
 use sphere_ui_components::startup::{
     log_startup_phase, run_lightweight_boot, StartupPhase, StartupRoute,
@@ -77,8 +80,12 @@ pub fn setup(cx: &mut App) {
             StartupRoute::EmptyWorkspace => {
                 log_startup_phase(StartupPhase::OpeningStudio);
                 cx.update(|app| {
-                    open_studio_for_action(WelcomeAction::OpenEmptyWorkspace, app);
-                    boot::log("workspace entered (welcome disabled)");
+                    begin_workspace_session(
+                        "Preparing Workspace…",
+                        FutureboardProject::new("Untitled Project"),
+                        PreparedWorkspaceFinish::EmptyUntitled,
+                        app,
+                    );
                 });
             }
             StartupRoute::RestoreLastProject(path) => {
@@ -149,13 +156,22 @@ fn finish_loading_to_studio(cx: &mut App) {
     log_window_registry(cx, "before loading ui close");
     eprintln!("[ProjectSwitch] close loading ui");
     // Never close the loading window synchronously from a path that may still be
-    // inside a LoadingSessionWindow update (GPUI double-lease).
+    // inside a LoadingSessionWindow update (GPUI double-lease). Activate the
+    // studio only after the loader is gone so users never stare at an empty shell.
     cx.defer(|cx| {
         if !studio_shell_alive(cx) {
             eprintln!("[WindowLifecycle] refused to close loader — studio shell not alive");
             return;
         }
         close_loading_session_window(cx);
+        if let Some(studio) = cx
+            .try_global::<NativeShellWindows>()
+            .and_then(|shell| shell.studio.clone())
+        {
+            let _ = studio.update(cx, |_layout, window, _cx| {
+                window.activate_window();
+            });
+        }
         log_window_registry(cx, "after loading ui close");
         eprintln!("[SessionLoad] studio ready");
     });
@@ -222,20 +238,50 @@ fn open_welcome_window(cx: &mut App) {
 fn transition_loaded_package_to_studio(package: LoadedSessionPackage, cx: &mut App) {
     eprintln!("[AppMode] LoadingSession -> Studio");
     set_app_mode(cx, AppMode::Studio);
-    match open_studio_workspace(WorkspaceInit::Loaded(package), cx) {
-        Ok(()) => {
-            eprintln!("[StudioMount] mounted after ready");
-            finish_loading_to_studio(cx);
+    update_loading_session_progress(cx, "Opening studio", ProgressBarValue::value(0.98));
+    cx.defer(move |cx| {
+        match open_studio_workspace(WorkspaceInit::Loaded(package), cx) {
+            Ok(()) => {
+                eprintln!("[StudioMount] mounted after ready");
+                finish_loading_to_studio(cx);
+            }
+            Err(error) => {
+                eprintln!("[StudioOpen] studio window open failed: {error}");
+                set_app_mode(cx, AppMode::LoadFailed);
+                show_loading_session_error(
+                    cx,
+                    format!("Could not open the studio workspace.\n\nDetails: {error}"),
+                );
+            }
         }
-        Err(error) => {
-            eprintln!("[StudioOpen] studio window open failed: {error}");
-            set_app_mode(cx, AppMode::LoadFailed);
-            show_loading_session_error(
-                cx,
-                format!("Could not open the studio workspace.\n\nDetails: {error}"),
-            );
+    });
+}
+
+fn transition_prepared_package_to_studio(
+    package: LoadedSessionPackage,
+    follow_up: PreparedWorkspaceFinish,
+    cx: &mut App,
+) {
+    eprintln!("[AppMode] LoadingSession -> Studio (prepared workspace)");
+    set_app_mode(cx, AppMode::Studio);
+    update_loading_session_progress(cx, "Opening studio", ProgressBarValue::value(0.98));
+    let init = WorkspaceInit::Prepared { package, follow_up };
+    cx.defer(move |cx| {
+        match open_studio_workspace(init, cx) {
+            Ok(()) => {
+                eprintln!("[StudioMount] mounted after workspace prepare");
+                finish_loading_to_studio(cx);
+            }
+            Err(error) => {
+                eprintln!("[StudioOpen] studio window open failed: {error}");
+                set_app_mode(cx, AppMode::LoadFailed);
+                show_loading_session_error(
+                    cx,
+                    format!("Could not open the studio workspace.\n\nDetails: {error}"),
+                );
+            }
         }
-    }
+    });
 }
 
 fn begin_close_project_session(
@@ -281,6 +327,21 @@ fn begin_load_project_from_welcome(path: PathBuf, open_options: ProjectOpenOptio
         on_failure,
         cx,
     );
+}
+
+fn begin_workspace_session(
+    heading: &str,
+    project: FutureboardProject,
+    follow_up: PreparedWorkspaceFinish,
+    cx: &mut App,
+) {
+    let on_success = Arc::new(move |package: LoadedSessionPackage, cx: &mut App| {
+        transition_prepared_package_to_studio(package, follow_up.clone(), cx);
+    });
+    let on_failure = Arc::new(|ctx: LoadFailedContext, cx: &mut App| {
+        handle_load_failed(ctx, cx);
+    });
+    begin_pre_studio_workspace_prepare(heading, project, on_success, on_failure, cx);
 }
 
 fn handle_project_switch_load_failed(
@@ -408,35 +469,59 @@ fn handle_load_failed(ctx: LoadFailedContext, cx: &mut App) {
 
 /// What the freshly opened workspace should do once its window exists.
 enum WorkspaceInit {
-    /// Blank, unsaved project.
-    Empty,
-    /// New unsaved project pre-populated from a template.
-    Template(ProjectTemplate),
-    /// Show the native Open Project file picker, then load through the gate.
-    OpenDialog,
     /// Install a decoded project that was loaded before studio mounted.
     Loaded(LoadedSessionPackage),
+    /// Pre-studio handoff plus a lightweight workspace finish hook.
+    Prepared {
+        package: LoadedSessionPackage,
+        follow_up: PreparedWorkspaceFinish,
+    },
     /// Restore a rollback snapshot after a failed in-studio replace.
     Rollback(SessionRollbackSnapshot),
-    /// Create a named project on disk, then enter the saved workspace.
-    CreateProject(ProjectCreateOptions),
 }
 
 fn open_studio_for_action(action: WelcomeAction, cx: &mut App) {
-    let init = match action {
-        // Empty Project / Open Empty Workspace -> blank unsaved workspace.
-        WelcomeAction::EmptyProject | WelcomeAction::OpenEmptyWorkspace => WorkspaceInit::Empty,
-        // Template sessions create template-backed (still unsaved) workspaces.
-        WelcomeAction::MidiComposer => WorkspaceInit::Template(ProjectTemplate::BeatMaking),
-        WelcomeAction::AudioSession => WorkspaceInit::Template(ProjectTemplate::Recording),
-        WelcomeAction::MixTemplate => WorkspaceInit::Template(ProjectTemplate::Mixing),
-        WelcomeAction::OpenProject => WorkspaceInit::OpenDialog,
-        // Handled before studio mount in the Welcome callback.
+    match action {
         WelcomeAction::OpenProjectFile(_) | WelcomeAction::OpenRecent(_) => return,
-        WelcomeAction::CreateProject(options) => WorkspaceInit::CreateProject(options),
-    };
-    set_app_mode(cx, AppMode::Studio);
-    let _ = open_studio_workspace(init, cx);
+        WelcomeAction::EmptyProject | WelcomeAction::OpenEmptyWorkspace => {
+            begin_workspace_session(
+                "Preparing Workspace…",
+                FutureboardProject::new("Untitled Project"),
+                PreparedWorkspaceFinish::EmptyUntitled,
+                cx,
+            );
+        }
+        WelcomeAction::MidiComposer => begin_workspace_session(
+            "Preparing Workspace…",
+            FutureboardProject::new("Untitled Project"),
+            PreparedWorkspaceFinish::Template(ProjectTemplate::BeatMaking),
+            cx,
+        ),
+        WelcomeAction::AudioSession => begin_workspace_session(
+            "Preparing Workspace…",
+            FutureboardProject::new("Untitled Project"),
+            PreparedWorkspaceFinish::Template(ProjectTemplate::Recording),
+            cx,
+        ),
+        WelcomeAction::MixTemplate => begin_workspace_session(
+            "Preparing Workspace…",
+            FutureboardProject::new("Untitled Project"),
+            PreparedWorkspaceFinish::Template(ProjectTemplate::Mixing),
+            cx,
+        ),
+        WelcomeAction::OpenProject => begin_workspace_session(
+            "Preparing Workspace…",
+            FutureboardProject::new("Untitled Project"),
+            PreparedWorkspaceFinish::OpenDialog,
+            cx,
+        ),
+        WelcomeAction::CreateProject(options) => begin_workspace_session(
+            "Preparing Workspace…",
+            FutureboardProject::new(&options.name),
+            PreparedWorkspaceFinish::CreateProject(options),
+            cx,
+        ),
+    }
 }
 
 fn open_studio_workspace(init: WorkspaceInit, cx: &mut App) -> Result<(), String> {
@@ -476,7 +561,6 @@ fn open_studio_workspace(init: WorkspaceInit, cx: &mut App) -> Result<(), String
                 false
             });
 
-            window.activate_window();
             layout
         })
         .map_err(|e| e.to_string())?;
@@ -504,15 +588,12 @@ fn open_studio_workspace(init: WorkspaceInit, cx: &mut App) -> Result<(), String
             }));
 
             match init {
-                WorkspaceInit::Empty => layout.new_empty_project(cx),
-                WorkspaceInit::Template(template) => layout.new_project_from_template(template, cx),
-                WorkspaceInit::OpenDialog => layout.dispatch_command_id("project:open", cx),
                 WorkspaceInit::Loaded(package) => layout.install_loaded_session(package, cx),
+                WorkspaceInit::Prepared { package, follow_up } => {
+                    layout.install_prepared_workspace(package, follow_up, cx);
+                }
                 WorkspaceInit::Rollback(snapshot) => {
                     layout.restore_session_rollback_snapshot(snapshot, cx)
-                }
-                WorkspaceInit::CreateProject(options) => {
-                    layout.create_saved_project_from_options(options, cx)
                 }
             }
         })

@@ -254,6 +254,8 @@ pub struct InsertSlotState {
     pub plugin_id: Option<String>,
     pub plugin_path: Option<std::path::PathBuf>,
     pub plugin_format: Option<InsertPluginFormat>,
+    /// Plugin vendor from the registry, if available.
+    pub vendor: Option<String>,
     /// Display label shown on the mixer strip. "Empty" when no plugin
     /// is loaded; the plugin's `display_name` otherwise.
     pub display_name: String,
@@ -297,6 +299,7 @@ impl InsertSlotState {
             plugin_id: None,
             plugin_path: None,
             plugin_format: None,
+            vendor: None,
             display_name: "Empty".to_string(),
             enabled: true,
             bypassed: false,
@@ -423,6 +426,7 @@ impl TimelineState {
         plugin_id: String,
         plugin_path: Option<std::path::PathBuf>,
         plugin_format: InsertPluginFormat,
+        vendor: Option<String>,
         display_name: String,
     ) {
         if track_id == MASTER_TRACK_ID {
@@ -432,6 +436,7 @@ impl TimelineState {
             slot.plugin_id = Some(plugin_id);
             slot.plugin_path = plugin_path;
             slot.plugin_format = Some(plugin_format);
+            slot.vendor = vendor;
             slot.display_name = display_name;
             slot.load_status = InsertLoadStatus::Ready;
             slot.runtime_backend = PluginRuntimeBackend::InProcess;
@@ -465,6 +470,7 @@ impl TimelineState {
         slot.plugin_id = Some(plugin_id);
         slot.plugin_path = plugin_path;
         slot.plugin_format = Some(plugin_format);
+        slot.vendor = vendor;
         slot.display_name = display_name;
         slot.load_status = InsertLoadStatus::Ready;
         slot.runtime_backend = PluginRuntimeBackend::InProcess;
@@ -863,6 +869,32 @@ impl TimelineState {
             );
         }
         slot.parameters = parameters;
+        true
+    }
+
+    /// Update one cached normalized VST3 parameter value for a real insert.
+    /// Returns `true` if the UI snapshot changed.
+    pub fn set_insert_parameter_value(
+        &mut self,
+        track_id: &str,
+        insert_id: &str,
+        param_id: u32,
+        value_normalized: f32,
+    ) -> bool {
+        let Some(slots) = self.insert_slots_mut(track_id) else {
+            return false;
+        };
+        let Some(slot) = slots.iter_mut().find(|i| i.id == insert_id) else {
+            return false;
+        };
+        let Some(param) = slot.parameters.iter_mut().find(|p| p.id == param_id) else {
+            return false;
+        };
+        let value = value_normalized.clamp(0.0, 1.0);
+        if (param.value_normalized - value).abs() <= f32::EPSILON {
+            return false;
+        }
+        param.value_normalized = value;
         true
     }
 

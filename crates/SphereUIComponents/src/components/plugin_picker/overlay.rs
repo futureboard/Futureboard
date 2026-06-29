@@ -49,7 +49,7 @@ pub fn plugin_picker_overlay(
     let on_pick_add = callbacks.on_pick.clone();
     let on_pick_stub = callbacks.on_pick.clone();
     let debug = std::env::var_os("FUTUREBOARD_PLUGIN_PICKER_DEBUG").is_some();
-    let stub_enabled = debug || std::env::var_os("FUTUREBOARD_PLUGIN_INSERT_STUB").is_some();
+    let stub_enabled = false;
 
     let index_arc = index.unwrap_or_else(|| Arc::new(PluginSearchIndex::from_plugins(Vec::new())));
     let index_ref: &PluginSearchIndex = &index_arc;
@@ -253,7 +253,7 @@ pub fn plugin_picker_panel(
     let on_pick_add = callbacks.on_pick.clone();
     let on_pick_stub = callbacks.on_pick.clone();
     let debug = std::env::var_os("FUTUREBOARD_PLUGIN_PICKER_DEBUG").is_some();
-    let stub_enabled = debug || std::env::var_os("FUTUREBOARD_PLUGIN_INSERT_STUB").is_some();
+    let stub_enabled = false;
 
     let index_arc = index.unwrap_or_else(|| Arc::new(PluginSearchIndex::from_plugins(Vec::new())));
     let index_ref: &PluginSearchIndex = &index_arc;

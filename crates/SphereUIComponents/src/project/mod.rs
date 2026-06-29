@@ -585,7 +585,7 @@ fn timeline_insert_to_project(idx: usize, slot: &InsertSlotState) -> ProjectInse
                     .as_ref()
                     .map(|state| state.as_ref().clone())
                     .unwrap_or_default(),
-                vendor: None,
+                vendor: slot.vendor.clone(),
                 name: Some(slot.display_name.clone()),
                 version: None,
             },
@@ -647,6 +647,11 @@ fn project_insert_to_timeline(pi: &ProjectInsert) -> InsertSlotState {
                 plugin_id: Some(plugin.plugin_uid.clone()),
                 plugin_path: plugin.plugin_path.clone(),
                 plugin_format: Some(plugin_format),
+                vendor: plugin
+                    .state
+                    .vendor
+                    .clone()
+                    .filter(|vendor| !vendor.trim().is_empty()),
                 display_name: plugin.display_name.clone(),
                 enabled: true,
                 bypassed: pi.bypassed,

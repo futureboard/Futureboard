@@ -644,7 +644,9 @@ impl StudioLayout {
                 mixer_master_strip.clone(),
             )
         });
-        let effect_editor_tab = cx.new(|_| components::EffectEditorTabView::new());
+        let effect_editor_tab = cx.new(|_| {
+            components::EffectEditorTabView::new(studio_entity.clone(), timeline.clone())
+        });
         let status_bar = cx.new(|_| components::StatusBarView::new(studio_entity.clone()));
         let bottom_panel_shell = cx.new(|_| {
             components::BottomPanelShell::new(

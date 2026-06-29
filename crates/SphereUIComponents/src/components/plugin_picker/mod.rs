@@ -31,8 +31,7 @@ use std::sync::Arc;
 
 use gpui::{App, Window};
 
-/// Special plugin id used to insert the documented stub effect when the
-/// registry has no insert-capable plugin.
+/// Legacy sentinel rejected by current VST3-only insert creation.
 pub const STUB_PLUGIN_ID: &str = "futureboard.stub.gain";
 
 /// Legacy alias preserved for older call sites.

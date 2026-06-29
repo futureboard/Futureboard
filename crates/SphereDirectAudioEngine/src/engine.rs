@@ -1027,6 +1027,21 @@ impl EngineInner {
         self.send_command(EngineCommand::SetTempoMap(snapshot))
     }
 
+    pub fn set_insert_param(
+        &self,
+        track_id: String,
+        insert_id: String,
+        param_id: String,
+        value: f32,
+    ) -> Result<(), SphereAudioError> {
+        self.send_command(EngineCommand::SetInsertParam {
+            track_id,
+            insert_id,
+            param_id,
+            value,
+        })
+    }
+
     /// Stage 3b: install (or clear, with `None`) the realtime sink for
     /// `track_id` — the audio callback mixes its external plugin-host DSP output
     /// into the master. Applied between blocks; no realtime allocation.

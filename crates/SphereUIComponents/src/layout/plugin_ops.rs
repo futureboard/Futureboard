@@ -2280,6 +2280,11 @@ impl StudioLayout {
         {
             self.arm_catalog_load(cx);
         }
+        eprintln!(
+            "[plugin-picker] opened track={} slot={} kind={:?} format=VST3",
+            track_id, target_slot, desired_kind
+        );
+        self.plugin_picker.filters.format = Some(SpherePluginHost::PluginFormat::Vst3);
         if debug {
             let state_label = match &self.plugin_catalog.status {
                 PluginCatalogStatus::Loading => "LoadingCatalog",
@@ -2318,9 +2323,24 @@ impl StudioLayout {
             return None;
         }
 
+        if plugin_id == STUB_PLUGIN_ID {
+            eprintln!("[PluginAdd] rejected stub plugin selection");
+            self.plugin_picker = PluginPickerState::closed();
+            cx.notify();
+            return None;
+        }
+
         if plugin_id != STUB_PLUGIN_ID {
             if let Some(plugins) = self.plugin_catalog.available.as_ref() {
                 if let Some(reg) = plugins.iter().find(|p| p.id == plugin_id) {
+                    if reg.format != RegFmt::Vst3 {
+                        eprintln!(
+                            "[PluginAdd] rejected non-VST3 plugin id={} format={:?}",
+                            reg.id, reg.format
+                        );
+                        cx.notify();
+                        return None;
+                    }
                     if validate_insert(reg, &self.plugin_picker.insert_target)
                         != crate::components::plugin_picker::InsertValidation::Ok
                     {
@@ -2347,18 +2367,21 @@ impl StudioLayout {
                         _ => InsertPluginFormat::Unknown,
                     };
                     let id = reg.class_id.clone().unwrap_or_else(|| reg.id.clone());
-                    (id, Some(reg.path.clone()), format, reg.name.clone())
+                    (
+                        id,
+                        Some(reg.path.clone()),
+                        format,
+                        Some(reg.vendor.clone()).filter(|vendor| !vendor.trim().is_empty()),
+                        reg.name.clone(),
+                    )
                 })
         };
-        let (plugin_id_out, plugin_path, plugin_format, display_name) =
-            descriptor.unwrap_or_else(|| {
-                (
-                    STUB_PLUGIN_ID.to_string(),
-                    None,
-                    InsertPluginFormat::Vst3,
-                    "Stub Effect".to_string(),
-                )
-            });
+        let Some((plugin_id_out, plugin_path, plugin_format, vendor, display_name)) = descriptor else {
+            eprintln!("[PluginAdd] plugin instance failed to create reason=plugin_not_in_vst3_registry id={plugin_id}");
+            self.plugin_picker = PluginPickerState::closed();
+            cx.notify();
+            return None;
+        };
 
         // Replace flow: if the target slot already holds a loaded plugin, this
         // is a replace-on-top. Fully tear the OLD instance down (editor + bridge
@@ -2394,7 +2417,9 @@ impl StudioLayout {
             // a cheap no-op that keeps every add paired with a close.
             self.close_insert_editor(&track_id, &slot_id, cx);
             let log_display_name = display_name.clone();
+            eprintln!("[PluginAdd] VST3 plugin selected id={plugin_id} name={log_display_name}");
             eprintln!("[PluginAdd] track={track_id} slot={slot_id} plugin={log_display_name}");
+            eprintln!("[PluginAdd] insert added to track track={track_id} slot={slot_id}");
             eprintln!("[PluginAdd] runtime_instance_id={slot_id}");
             let bridge_class_id = plugin_id_out.clone();
             self.timeline.update(cx, |timeline, _cx| {
@@ -2404,6 +2429,7 @@ impl StudioLayout {
                     plugin_id_out,
                     plugin_path,
                     plugin_format,
+                    vendor,
                     display_name,
                 );
             });
@@ -2555,6 +2581,47 @@ impl StudioLayout {
         opened_slot
     }
 
+    pub(crate) fn set_insert_parameter_from_ui(
+        &mut self,
+        track_id: String,
+        insert_id: String,
+        param_id: u32,
+        value: f32,
+        cx: &mut Context<Self>,
+    ) {
+        let value = value.clamp(0.0, 1.0);
+        let changed = self.timeline.update(cx, |timeline, cx| {
+            let changed = timeline
+                .state
+                .set_insert_parameter_value(&track_id, &insert_id, param_id, value);
+            if changed {
+                cx.notify();
+            }
+            changed
+        });
+        eprintln!(
+            "[PluginParam] parameter changed track={} insert={} param={} value={:.4}",
+            track_id, insert_id, param_id, value
+        );
+        if let Some(engine) = self.audio_bridge.engine.as_ref() {
+            if let Err(error) = engine.set_insert_param(
+                track_id.clone(),
+                insert_id.clone(),
+                param_id.to_string(),
+                value,
+            ) {
+                eprintln!(
+                    "[PluginParam] set_parameter failed insert={} param={} error={}",
+                    insert_id, param_id, error
+                );
+            }
+        }
+        if changed {
+            self.mark_dirty();
+        }
+        cx.notify();
+    }
+
     pub(super) fn apply_dropped_plugin_preset(
         &mut self,
         track_id: &str,
@@ -2650,7 +2717,7 @@ impl StudioLayout {
             return None;
         }
 
-        let (plugin_id, plugin_path, plugin_format, display_name) =
+        let (plugin_id, plugin_path, plugin_format, vendor, display_name) =
             Self::registry_insert_descriptor(reg);
         let existing_slot_id = self
             .timeline
@@ -2680,6 +2747,7 @@ impl StudioLayout {
                 plugin_id,
                 Some(plugin_path),
                 plugin_format,
+                vendor.clone(),
                 display_name.clone(),
             );
         });
@@ -2702,7 +2770,7 @@ impl StudioLayout {
             self, CreateTrackOptions, InputMonitorMode, TrackType,
         };
 
-        let (plugin_id, plugin_path, plugin_format, display_name) =
+        let (plugin_id, plugin_path, plugin_format, vendor, display_name) =
             Self::registry_insert_descriptor(reg);
         let created = self.timeline.update(cx, |timeline, _cx| {
             let color = timeline
@@ -2724,6 +2792,7 @@ impl StudioLayout {
                 plugin_id,
                 Some(plugin_path),
                 plugin_format,
+                vendor.clone(),
                 display_name.clone(),
             );
             timeline.state.select_track(&track_id);
@@ -2779,6 +2848,7 @@ impl StudioLayout {
         String,
         std::path::PathBuf,
         crate::components::timeline::timeline_state::InsertPluginFormat,
+        Option<String>,
         String,
     ) {
         use crate::components::timeline::timeline_state::InsertPluginFormat;
@@ -2795,6 +2865,7 @@ impl StudioLayout {
             reg.class_id.clone().unwrap_or_else(|| reg.id.clone()),
             reg.path.clone(),
             plugin_format,
+            Some(reg.vendor.clone()).filter(|vendor| !vendor.trim().is_empty()),
             reg.name.clone(),
         )
     }

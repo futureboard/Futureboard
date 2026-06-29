@@ -742,6 +742,17 @@ impl AudioEngine {
         self.inner.update_track_param(track_id, param_id, value)
     }
 
+    pub fn set_insert_param(
+        &self,
+        track_id: String,
+        insert_id: String,
+        param_id: String,
+        value: f32,
+    ) -> Result<(), SphereAudioError> {
+        self.inner
+            .set_insert_param(track_id, insert_id, param_id, value)
+    }
+
     /// Clone the live runtime VST3 processor handle for an insert, if it has a
     /// ready native plugin instance. The GPUI PluginView uses this to open the
     /// editor from the *existing* instance/controller — never a new one — so

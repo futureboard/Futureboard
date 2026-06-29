@@ -68,101 +68,16 @@ fn editor_panel() -> impl IntoElement {
 
 // ─── Sub-components for Effect Editor ────────────────────────────────────────
 
-fn plugin_slot(name: &'static str, is_active: bool) -> impl IntoElement {
-    div()
-        .w(px(130.0))
-        .h(px(80.0))
-        .rounded_md()
-        .bg(Colors::surface_panel())
-        .border(px(1.0))
-        .border_color(if is_active {
-            Colors::accent_primary()
-        } else {
-            Colors::border_subtle()
-        })
-        .px(px(8.0))
-        .py(px(6.0))
-        .flex_col()
-        .justify_between()
-        .child(
-            div()
-                .flex()
-                .flex_row()
-                .items_center()
-                .justify_between()
-                .child(
-                    div()
-                        .text_color(Colors::text_primary())
-                        .text_xs()
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .child(name),
-                )
-                .child(div().w(px(8.0)).h(px(8.0)).rounded_full().bg(if is_active {
-                    Colors::accent_primary()
-                } else {
-                    Colors::text_muted()
-                })),
-        )
-        .child(
-            // Parameter slider mock
-            div()
-                .flex_col()
-                .gap_1()
-                .child(
-                    div()
-                        .text_color(Colors::text_muted())
-                        .text_size(px(8.5))
-                        .child("Mix: 80%"),
-                )
-                .child(
-                    div()
-                        .w_full()
-                        .h(px(3.0))
-                        .bg(Colors::surface_input())
-                        .rounded_full()
-                        .relative()
-                        .child(
-                            div()
-                                .absolute()
-                                .left(px(0.0))
-                                .w(px(80.0))
-                                .h_full()
-                                .bg(Colors::accent_primary())
-                                .rounded_full(),
-                        ),
-                ),
-        )
-}
-
-fn empty_plugin_slot() -> impl IntoElement {
-    div()
-        .w(px(130.0))
-        .h(px(80.0))
-        .rounded_md()
-        .border(px(1.0))
-        .border_color(Colors::panel_border())
-        .border_dashed()
-        .flex()
-        .items_center()
-        .justify_center()
-        .text_color(Colors::text_muted())
-        .text_size(px(10.0))
-        .child("+ Add Effect")
-}
-
 fn effect_editor_panel() -> impl IntoElement {
     div()
         .flex()
-        .flex_row()
         .items_center()
+        .justify_center()
         .size_full()
         .bg(Colors::surface_base())
-        .px(px(12.0))
-        .gap_3()
-        .child(plugin_slot("Equalizer", true))
-        .child(plugin_slot("Compressor", true))
-        .child(plugin_slot("Delay Unit", false))
-        .child(empty_plugin_slot())
+        .text_size(px(11.0))
+        .text_color(Colors::text_muted())
+        .child("Effect Editor is provided by the live insert-chain view")
 }
 
 // ─── Main Bottom Panel ───────────────────────────────────────────────────────

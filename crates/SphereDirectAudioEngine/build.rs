@@ -14,7 +14,18 @@ fn main() {
         "include/editor_windows.hpp",
         "src/vst3_processor.cpp",
         "src/editor_windows.cpp",
-        "src/editor_mac.mm",
+        "src/editorplatform/windows/editor_windows_api.cpp",
+        "src/editorplatform/windows/editor_windows_common.cpp",
+        "src/editorplatform/windows/editor_windows_create.cpp",
+        "src/editorplatform/windows/editor_windows_internal.hpp",
+        "src/editorplatform/windows/editor_windows_rendering.cpp",
+        "src/editorplatform/windows/editor_windows_titlebar.cpp",
+        "src/editorplatform/windows/editor_windows_utils.cpp",
+        "src/editorplatform/windows/editor_windows_windowproc.cpp",
+        "src/editorplatform/macos/editor_mac.mm",
+        "src/editorplatform/macos/editor_mac_delegate.mm",
+        "src/editorplatform/macos/editor_mac_helpers.mm",
+        "src/editorplatform/macos/editor_mac_internal.hpp",
         "src/editor_linux.cpp",
     ] {
         println!(
@@ -64,6 +75,17 @@ fn apply_vst3_platform_config(
         "windows" => {
             build.define("SMTG_OS_WINDOWS", "1");
             build.file(sdk_root.join("public.sdk/source/vst/hosting/module_win32.cpp"));
+            for source in &[
+                "src/editorplatform/windows/editor_windows_api.cpp",
+                "src/editorplatform/windows/editor_windows_common.cpp",
+                "src/editorplatform/windows/editor_windows_create.cpp",
+                "src/editorplatform/windows/editor_windows_rendering.cpp",
+                "src/editorplatform/windows/editor_windows_titlebar.cpp",
+                "src/editorplatform/windows/editor_windows_utils.cpp",
+                "src/editorplatform/windows/editor_windows_windowproc.cpp",
+            ] {
+                build.file(bridge_root.join(source));
+            }
             println!("cargo:rustc-link-lib=ole32");
             println!("cargo:rustc-link-lib=user32");
             println!("cargo:rustc-link-lib=gdi32");
@@ -74,7 +96,13 @@ fn apply_vst3_platform_config(
             build.define("SMTG_OS_MACOS", "1");
             build.flag("-fobjc-arc");
             build.file(sdk_root.join("public.sdk/source/vst/hosting/module_mac.mm"));
-            build.file(bridge_root.join("src/editor_mac.mm"));
+            for source in &[
+                "src/editorplatform/macos/editor_mac.mm",
+                "src/editorplatform/macos/editor_mac_delegate.mm",
+                "src/editorplatform/macos/editor_mac_helpers.mm",
+            ] {
+                build.file(bridge_root.join(source));
+            }
             println!("cargo:rustc-link-lib=framework=CoreFoundation");
             println!("cargo:rustc-link-lib=framework=Foundation");
             println!("cargo:rustc-link-lib=framework=AppKit");

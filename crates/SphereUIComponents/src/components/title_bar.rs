@@ -60,12 +60,25 @@ pub fn window_control_button(
     icon_path: &'static str,
     fallback_text: &'static str,
 ) -> Div {
-    chrome_button(Some(icon_path), fallback_text, false, Colors::text_muted())
+    let button = chrome_button(Some(icon_path), fallback_text, false, Colors::text_muted())
         .w(px(WINDOW_CONTROL_WIDTH))
         .h(px(TITLEBAR_HEIGHT))
         .rounded_none()
         .window_control_area(area)
-        .occlude()
+        .occlude();
+
+    #[cfg(target_os = "linux")]
+    let button = button.on_mouse_down(gpui::MouseButton::Left, move |_, window, cx| {
+        cx.stop_propagation();
+        match area {
+            WindowControlArea::Min => window.minimize_window(),
+            WindowControlArea::Max => window.zoom_window(),
+            WindowControlArea::Close => window.remove_window(),
+            WindowControlArea::Drag => {}
+        }
+    });
+
+    button
 }
 
 pub fn draggable_spacer() -> Div {

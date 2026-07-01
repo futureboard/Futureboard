@@ -10,7 +10,7 @@ use crate::assets;
 use crate::components::menu_bar;
 use crate::components::text_input::TextInputState;
 use crate::components::title_bar::{
-    chrome_button, draggable_spacer, section_separator, window_control_button, CHROME_TITLE_SIZE,
+    chrome_button, draggable_spacer, section_separator, CHROME_TITLE_SIZE, WINDOW_CONTROL_WIDTH,
 };
 use crate::platform_chrome::PlatformChromePolicy;
 use crate::theme::Colors;
@@ -812,7 +812,10 @@ fn report_bug_button() -> impl IntoElement {
         .occlude()
 }
 
-fn window_controls(window: &gpui::Window) -> impl IntoElement {
+fn window_controls(
+    window: &gpui::Window,
+    on_close: Option<ChromeActionCb>,
+) -> impl IntoElement {
     let is_maximized = window.is_maximized();
     let (max_path, max_fallback) = if is_maximized {
         (assets::ICON_RESTORE_PATH, "RESTORE")
@@ -820,25 +823,67 @@ fn window_controls(window: &gpui::Window) -> impl IntoElement {
         (assets::ICON_MAXIMIZE_PATH, "MAX")
     };
 
+    let control_button = |area: WindowControlArea,
+                          icon_path: &'static str,
+                          fallback_text: &'static str,
+                          on_linux: Option<ChromeActionCb>| {
+        let mut button = chrome_button(Some(icon_path), fallback_text, false, Colors::text_muted())
+            .w(px(WINDOW_CONTROL_WIDTH))
+            .h(px(crate::components::title_bar::TITLEBAR_HEIGHT))
+            .rounded_none()
+            .window_control_area(area)
+            .occlude();
+
+        #[cfg(target_os = "linux")]
+        {
+            let action = on_linux.clone();
+            button = button.on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                cx.stop_propagation();
+                match area {
+                    WindowControlArea::Min => window.minimize_window(),
+                    WindowControlArea::Max => window.zoom_window(),
+                    WindowControlArea::Close => {
+                        if let Some(action) = action.as_ref() {
+                            action(&(), window, cx);
+                        } else {
+                            window.remove_window();
+                        }
+                    }
+                    WindowControlArea::Drag => {}
+                }
+            });
+        }
+
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = on_linux;
+        }
+
+        button
+    };
+
     div()
         .flex()
         .flex_row()
         .items_center()
         .h_full()
-        .child(window_control_button(
+        .child(control_button(
             WindowControlArea::Min,
             assets::ICON_MINIMIZE_PATH,
             "-",
+            None,
         ))
-        .child(window_control_button(
+        .child(control_button(
             WindowControlArea::Max,
             max_path,
             max_fallback,
+            None,
         ))
-        .child(window_control_button(
+        .child(control_button(
             WindowControlArea::Close,
             assets::ICON_X_PATH,
             "X",
+            on_close,
         ))
 }
 
@@ -851,6 +896,7 @@ pub fn app_chrome(
     project: ProjectChromeState,
     transport: TransportChromeState,
     panels: PanelChromeState,
+    on_window_close: Option<ChromeActionCb>,
 ) -> impl IntoElement {
     let policy = PlatformChromePolicy::current();
     let viewport_width: f32 = window.bounds().size.width.into();
@@ -903,7 +949,7 @@ pub fn app_chrome(
         .child(section_separator());
 
     if policy.show_window_controls {
-        chrome = chrome.child(window_controls(window));
+        chrome = chrome.child(window_controls(window, on_window_close));
     }
 
     chrome

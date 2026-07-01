@@ -30,6 +30,10 @@ pub struct MidiNoteState {
     pub velocity: u8,
     /// Muted notes remain in clip data but emit no runtime note event.
     pub muted: bool,
+    /// Output channel this note plays back on when the owning track's
+    /// [`MidiOutputChannelMode`] is `PerNote`; ignored (but preserved) when
+    /// the track forces a `Fixed` channel. Defaults to channel 1.
+    pub channel: MidiChannel,
 }
 
 impl MidiNoteState {
@@ -44,6 +48,7 @@ impl MidiNoteState {
             duration: duration.max(MIN_NOTE_BEATS),
             velocity: velocity.clamp(1, 127),
             muted: false,
+            channel: MidiChannel::default(),
         }
     }
 }
@@ -442,6 +447,7 @@ impl TimelineState {
                     note.duration = s.duration;
                     note.velocity = s.velocity;
                     note.muted = s.muted;
+                    note.channel = s.channel;
                 }
             }
         }
@@ -475,6 +481,74 @@ impl TimelineState {
         for note in notes.iter_mut() {
             if ids.contains(&note.id) {
                 let pitch = (note.pitch as i32 + semitones).clamp(0, 127) as u8;
+                if note.pitch != pitch {
+                    note.pitch = pitch;
+                    changed += 1;
+                }
+            }
+        }
+        changed
+    }
+
+    /// Set the MIDI output channel on the given note ids. Returns the number
+    /// of notes changed.
+    pub fn set_midi_notes_channel(
+        &mut self,
+        clip_id: &str,
+        ids: &[u64],
+        channel: MidiChannel,
+    ) -> usize {
+        let Some(notes) = self.midi_clip_notes_mut(clip_id) else {
+            return 0;
+        };
+        let mut changed = 0;
+        for note in notes.iter_mut() {
+            if ids.contains(&note.id) && note.channel != channel {
+                note.channel = channel;
+                changed += 1;
+            }
+        }
+        changed
+    }
+
+    /// Shift the given note ids' MIDI channel by `delta`, clamped to
+    /// channel 1..=16. Returns the number of notes changed.
+    pub fn nudge_midi_notes_channel(&mut self, clip_id: &str, ids: &[u64], delta: i32) -> usize {
+        if delta == 0 {
+            return 0;
+        }
+        let Some(notes) = self.midi_clip_notes_mut(clip_id) else {
+            return 0;
+        };
+        let mut changed = 0;
+        for note in notes.iter_mut() {
+            if ids.contains(&note.id) {
+                let next = MidiChannel::from_ui((note.channel.ui() as i32 + delta).clamp(1, 16) as u8);
+                if note.channel != next {
+                    note.channel = next;
+                    changed += 1;
+                }
+            }
+        }
+        changed
+    }
+
+    /// Snap the given note ids' pitches to the nearest pitch in `scale`.
+    /// Returns the number of notes changed. A no-op for a `Chromatic` scale,
+    /// since every pitch is already "in scale".
+    pub fn snap_midi_notes_to_scale(
+        &mut self,
+        clip_id: &str,
+        ids: &[u64],
+        scale: MidiScale,
+    ) -> usize {
+        let Some(notes) = self.midi_clip_notes_mut(clip_id) else {
+            return 0;
+        };
+        let mut changed = 0;
+        for note in notes.iter_mut() {
+            if ids.contains(&note.id) {
+                let pitch = scale.nearest_pitch(note.pitch);
                 if note.pitch != pitch {
                     note.pitch = pitch;
                     changed += 1;

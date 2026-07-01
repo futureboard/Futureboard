@@ -14,13 +14,16 @@ impl PianoRoll {
                 prev,
                 dx_beats,
                 dpitch,
+                unsnap,
                 ..
             } => {
                 if prev.iter().any(|(id, _, _)| *id == n.id) {
                     // Snap the absolute resulting start (WebUI semantics), not
-                    // the raw delta, so notes always land on the grid.
-                    start = self.snap_beats(n.start + dx_beats);
-                    pitch = (n.pitch as i32 + dpitch).clamp(0, 127) as u8;
+                    // the raw delta, so notes always land on the grid. Shift
+                    // (`unsnap`) bypasses this live, same as on commit.
+                    start = self.snap_beats_live(n.start + dx_beats, *unsnap);
+                    let raw_pitch = (n.pitch as i32 + dpitch).clamp(0, 127) as u8;
+                    pitch = self.pitch_ctx.constrain_pitch(raw_pitch);
                 }
             }
             PianoDrag::Resize {
@@ -65,6 +68,7 @@ impl PianoRoll {
         };
         notes
             .iter()
+            .filter(|n| self.channel_visible(n.channel))
             .filter(|n| {
                 let d = self.display_note(n);
                 Self::rects_intersect(marquee, self.note_to_rect(&d))
@@ -78,6 +82,7 @@ impl PianoRoll {
             pitch,
             start_beat,
             end_beat,
+            ..
         } = &self.drag
         else {
             return None;
@@ -590,6 +595,66 @@ impl PianoRoll {
                             this.grid_res = this.grid_res.cycle();
                             cx.notify();
                         }),
+                    )),
+            )
+            .child(
+                toolbar_group("Scale")
+                    .child(tool_btn(
+                        "pr-scale-root",
+                        self.pitch_ctx.scale.root.label(),
+                        false,
+                        cx.listener(|this, _, _w, cx| {
+                            this.pitch_ctx.scale.root = this.pitch_ctx.scale.root.cycle();
+                            cx.notify();
+                        }),
+                    ))
+                    .child(tool_btn(
+                        "pr-scale-kind",
+                        self.pitch_ctx.scale.kind.label(),
+                        false,
+                        cx.listener(|this, _, _w, cx| {
+                            this.pitch_ctx.scale.kind = this.pitch_ctx.scale.kind.cycle();
+                            cx.notify();
+                        }),
+                    ))
+                    .child(tool_btn(
+                        "pr-scale-constrain",
+                        "Constrain",
+                        self.pitch_ctx.constrain,
+                        cx.listener(|this, _, _w, cx| {
+                            this.pitch_ctx.constrain = !this.pitch_ctx.constrain;
+                            cx.notify();
+                        }),
+                    ))
+                    .child(tool_btn(
+                        "pr-scale-snap-selection",
+                        "To Scale",
+                        false,
+                        cx.listener(|this, _, _w, cx| this.snap_selection_to_scale(cx)),
+                    )),
+            )
+            .child(
+                toolbar_group("Channel")
+                    .child(tool_btn(
+                        "pr-channel-view",
+                        &self.channel_view_label(),
+                        !self.channel_view.is_all(),
+                        cx.listener(|this, _, _w, cx| this.cycle_channel_view(cx)),
+                    ))
+                    .child(tool_btn(
+                        "pr-channel-apply",
+                        "Set Sel",
+                        false,
+                        cx.listener(|this, _, _w, cx| {
+                            let channel = this.active_note_channel(cx);
+                            this.set_selected_notes_channel(channel, cx);
+                        }),
+                    ))
+                    .child(tool_btn(
+                        "pr-channel-output-mode",
+                        "Per-Note Out",
+                        self.track_output_per_note(cx),
+                        cx.listener(|this, _, _w, cx| this.toggle_track_output_per_note(cx)),
                     )),
             )
             .child(
@@ -1150,6 +1215,24 @@ impl PianoRoll {
                 note_value_row("End", format_beats(note.start + note.duration)).into_any_element(),
             );
             content.push(note_value_row("Velocity", note.velocity.to_string()).into_any_element());
+            content.push(note_value_row("Channel", note.channel.label()).into_any_element());
+            content.push(
+                note_button_row(vec![
+                    note_action_button(
+                        "pr-note-chan-down",
+                        "Ch -1",
+                        cx.listener(|this, _, _w, cx| this.nudge_selected_channel(-1, cx)),
+                    )
+                    .into_any_element(),
+                    note_action_button(
+                        "pr-note-chan-up",
+                        "Ch +1",
+                        cx.listener(|this, _, _w, cx| this.nudge_selected_channel(1, cx)),
+                    )
+                    .into_any_element(),
+                ])
+                .into_any_element(),
+            );
             content.push(
                 note_button_row(vec![
                     note_action_button(
@@ -1239,6 +1322,24 @@ impl PianoRoll {
             content.push(note_value_row("Start", snapshot.start_label()).into_any_element());
             content.push(note_value_row("Length", snapshot.length_label()).into_any_element());
             content.push(note_value_row("Velocity", snapshot.velocity_label()).into_any_element());
+            content.push(note_value_row("Channel", snapshot.channel_label()).into_any_element());
+            content.push(
+                note_button_row(vec![
+                    note_action_button(
+                        "pr-notes-chan-down",
+                        "Ch -1",
+                        cx.listener(|this, _, _w, cx| this.nudge_selected_channel(-1, cx)),
+                    )
+                    .into_any_element(),
+                    note_action_button(
+                        "pr-notes-chan-up",
+                        "Ch +1",
+                        cx.listener(|this, _, _w, cx| this.nudge_selected_channel(1, cx)),
+                    )
+                    .into_any_element(),
+                ])
+                .into_any_element(),
+            );
             content.push(
                 note_button_row(vec![
                     note_action_button(
@@ -1786,6 +1887,7 @@ impl PianoRoll {
             };
             notes
                 .iter()
+                .filter(|n| self.channel_visible(n.channel))
                 .filter_map(|n| {
                     let d = self.display_note(n);
                     let x = self.beat_to_x(d.start);

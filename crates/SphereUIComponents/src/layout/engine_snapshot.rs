@@ -702,11 +702,13 @@ fn build_engine_project_snapshot_inner(
                 else {
                     return None;
                 };
-                let channel = track
-                    .routing
-                    .midi_channel
-                    .map(|ch| ch.saturating_sub(1).min(15))
-                    .unwrap_or(0);
+                // Fixed-channel tracks force every event onto one channel
+                // (the pre-existing behavior); PerNote tracks emit each
+                // note's own channel and controller lanes still ride the
+                // track's fixed/default channel (per-channel CC lanes are a
+                // follow-up, not part of this pass).
+                let output_mode = track.routing.output_channel_mode();
+                let lane_channel = output_mode.resolve(track.routing.default_note_channel()).raw();
                 Some(EngineMidiClipSnapshot {
                     id: clip.id.clone(),
                     track_id: track_id.clone(),
@@ -722,7 +724,7 @@ fn build_engine_project_snapshot_inner(
                             start_beat: n.start.max(0.0) as f64,
                             length_beats: n.duration.max(0.0) as f64,
                             velocity: n.velocity.clamp(1, 127),
-                            channel,
+                            channel: output_mode.resolve(n.channel).raw(),
                         })
                         .collect(),
                     controllers: controller_lanes
@@ -732,7 +734,7 @@ fn build_engine_project_snapshot_inner(
                             let controller = vst3_controller_number(lane.kind)?;
                             Some(EngineMidiControllerLane {
                                 controller,
-                                channel,
+                                channel: lane_channel,
                                 points: lane
                                     .points
                                     .iter()

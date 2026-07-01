@@ -888,7 +888,7 @@ pub(crate) fn touch_loading_session_progress<C: BorrowAppContext + AppContext>(
     progress: ProgressBarValue,
 ) {
     let detail = detail.to_string();
-    cx.update_global::<LoadingSessionGate, _>(|gate, cx| {
+    cx.update_default_global::<LoadingSessionGate, _>(|gate, cx| {
         if let Some(handle) = gate.window.as_ref() {
             let detail = detail.clone();
             let _ = handle.update(cx, |window, _win, cx| {
@@ -914,7 +914,7 @@ pub(crate) fn close_loading_session_window_for<C: BorrowAppContext + AppContext>
     session_log!("closing loading window");
     set_project_lifecycle_busy(false);
     crate::window_lifecycle::log_remove_window("LoadingSessionWindow", "session_load_complete");
-    cx.update_global::<LoadingSessionGate, _>(|gate, cx| {
+    cx.update_default_global::<LoadingSessionGate, _>(|gate, cx| {
         if let Some(handle) = gate.window.take() {
             let _ = handle.update(cx, |_view, window, _cx| window.remove_window());
         }
@@ -1322,7 +1322,7 @@ fn begin_project_session_load_inner(
     }
 }
 
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", target_os = "linux"))]
 fn open_loading_session_window(
     session_name: Option<String>,
     transaction: SessionLoadTransaction,
@@ -1350,12 +1350,12 @@ fn open_loading_session_window(
     .map_err(|e| e.to_string())
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(not(any(target_os = "windows", target_os = "linux")))]
 fn open_loading_session_window(
     _session_name: Option<String>,
     _transaction: SessionLoadTransaction,
     _owner_bounds: Option<Bounds<Pixels>>,
     _cx: &mut App,
 ) -> Result<WindowHandle<LoadingSessionWindow>, String> {
-    Err("native loading session window is only available on Windows".to_string())
+    Err("native loading session window is not available on this platform".to_string())
 }

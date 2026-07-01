@@ -145,6 +145,32 @@ pub struct TrackRoutingState {
     /// `None` means All channels. `Some` is clamped to 1..=16 by mutation
     /// helpers and project-load conversion.
     pub midi_channel: Option<u8>,
+    /// Which incoming MIDI channels this track listens to. Model only in this
+    /// pass — not yet enforced on the recording input path.
+    pub midi_input_filter: MidiInputChannelFilter,
+    /// `true` plays each note back on its own channel ([`MidiOutputChannelMode::PerNote`]);
+    /// `false` (default) forces every note onto `midi_channel` (or channel 1),
+    /// matching the pre-existing single-channel-per-track behavior.
+    pub midi_output_per_note: bool,
+}
+
+impl TrackRoutingState {
+    /// The effective output channel policy, derived from `midi_channel` /
+    /// `midi_output_per_note` so there is exactly one field driving the
+    /// existing channel selector UI and no duplicated state to fall out of
+    /// sync.
+    pub fn output_channel_mode(&self) -> MidiOutputChannelMode {
+        if self.midi_output_per_note {
+            MidiOutputChannelMode::PerNote
+        } else {
+            MidiOutputChannelMode::Fixed(MidiChannel::from_ui(self.midi_channel.unwrap_or(1)))
+        }
+    }
+
+    /// Channel newly drawn notes on this track should default to.
+    pub fn default_note_channel(&self) -> MidiChannel {
+        MidiChannel::from_ui(self.midi_channel.unwrap_or(1))
+    }
 }
 
 impl TrackRoutingState {
@@ -156,6 +182,8 @@ impl TrackRoutingState {
                 audio_format: TrackAudioFormat::Stereo,
                 midi_input: TrackMidiInputRouting::None,
                 midi_channel: None,
+                midi_input_filter: MidiInputChannelFilter::All,
+                midi_output_per_note: false,
             },
             TrackType::Instrument => Self {
                 input: TrackInputRouting::None,
@@ -163,6 +191,8 @@ impl TrackRoutingState {
                 audio_format: TrackAudioFormat::Stereo,
                 midi_input: TrackMidiInputRouting::AllInputs,
                 midi_channel: None,
+                midi_input_filter: MidiInputChannelFilter::All,
+                midi_output_per_note: false,
             },
             TrackType::Midi => Self {
                 input: TrackInputRouting::None,
@@ -170,6 +200,8 @@ impl TrackRoutingState {
                 audio_format: TrackAudioFormat::Stereo,
                 midi_input: TrackMidiInputRouting::AllInputs,
                 midi_channel: None,
+                midi_input_filter: MidiInputChannelFilter::All,
+                midi_output_per_note: false,
             },
             TrackType::Bus | TrackType::Return => Self {
                 input: TrackInputRouting::None,
@@ -177,6 +209,8 @@ impl TrackRoutingState {
                 audio_format: TrackAudioFormat::Stereo,
                 midi_input: TrackMidiInputRouting::None,
                 midi_channel: None,
+                midi_input_filter: MidiInputChannelFilter::All,
+                midi_output_per_note: false,
             },
             TrackType::Master => Self {
                 input: TrackInputRouting::None,
@@ -184,6 +218,8 @@ impl TrackRoutingState {
                 audio_format: TrackAudioFormat::Stereo,
                 midi_input: TrackMidiInputRouting::None,
                 midi_channel: None,
+                midi_input_filter: MidiInputChannelFilter::All,
+                midi_output_per_note: false,
             },
         }
     }
@@ -279,6 +315,25 @@ impl TimelineState {
                     );
                 }
                 t.routing.midi_channel = channel;
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Set the track's output channel policy (see [`TrackRoutingState::output_channel_mode`]).
+    /// Returns `true` if it changed — callers should panic/all-notes-off the
+    /// track afterwards so notes already sounding on the old channel don't stick.
+    pub fn set_track_midi_output_per_note(&mut self, track_id: &str, per_note: bool) -> bool {
+        if let Some(t) = self.tracks.iter_mut().find(|t| t.id == track_id) {
+            if t.routing.midi_output_per_note != per_note {
+                if routing_debug_enabled() {
+                    eprintln!(
+                        "[routing] midi_output_per_note track={} old={} new={}",
+                        track_id, t.routing.midi_output_per_note, per_note
+                    );
+                }
+                t.routing.midi_output_per_note = per_note;
                 return true;
             }
         }

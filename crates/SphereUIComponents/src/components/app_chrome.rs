@@ -812,10 +812,7 @@ fn report_bug_button() -> impl IntoElement {
         .occlude()
 }
 
-fn window_controls(
-    window: &gpui::Window,
-    on_close: Option<ChromeActionCb>,
-) -> impl IntoElement {
+fn window_controls(window: &gpui::Window, on_close: Option<ChromeActionCb>) -> impl IntoElement {
     let is_maximized = window.is_maximized();
     let (max_path, max_fallback) = if is_maximized {
         (assets::ICON_RESTORE_PATH, "RESTORE")
@@ -827,7 +824,7 @@ fn window_controls(
                           icon_path: &'static str,
                           fallback_text: &'static str,
                           on_linux: Option<ChromeActionCb>| {
-        let mut button = chrome_button(Some(icon_path), fallback_text, false, Colors::text_muted())
+        let button = chrome_button(Some(icon_path), fallback_text, false, Colors::text_muted())
             .w(px(WINDOW_CONTROL_WIDTH))
             .h(px(crate::components::title_bar::TITLEBAR_HEIGHT))
             .rounded_none()
@@ -835,9 +832,9 @@ fn window_controls(
             .occlude();
 
         #[cfg(target_os = "linux")]
-        {
+        let button = {
             let action = on_linux.clone();
-            button = button.on_mouse_down(MouseButton::Left, move |_, window, cx| {
+            button.on_mouse_down(MouseButton::Left, move |_, window, cx| {
                 cx.stop_propagation();
                 match area {
                     WindowControlArea::Min => window.minimize_window(),
@@ -851,8 +848,8 @@ fn window_controls(
                     }
                     WindowControlArea::Drag => {}
                 }
-            });
-        }
+            })
+        };
 
         #[cfg(not(target_os = "linux"))]
         {

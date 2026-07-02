@@ -983,6 +983,7 @@ mod tests {
             "class-a".to_string(),
             Some(std::path::PathBuf::from("C:/plugins/a.vst3")),
             InsertPluginFormat::Vst3,
+            None,
             "Plugin A".to_string(),
         );
         state.set_insert_plugin(
@@ -991,6 +992,7 @@ mod tests {
             "class-b".to_string(),
             Some(std::path::PathBuf::from("C:/plugins/b.vst3")),
             InsertPluginFormat::Vst3,
+            None,
             "Plugin B".to_string(),
         );
 
@@ -1038,6 +1040,7 @@ mod tests {
             "multiout-class".to_string(),
             Some(std::path::PathBuf::from("C:/plugins/MultiOut.vst3")),
             InsertPluginFormat::Vst3,
+            None,
             "MultiOut".to_string(),
         );
 
@@ -1114,6 +1117,7 @@ mod tests {
             "single-bus-multiout-class".to_string(),
             Some(std::path::PathBuf::from("C:/plugins/MTPower.vst3")),
             InsertPluginFormat::Vst3,
+            None,
             "MT Power".to_string(),
         );
 
@@ -1242,6 +1246,7 @@ mod tests {
             "class-a".to_string(),
             Some(std::path::PathBuf::from("C:/plugins/a.vst3")),
             InsertPluginFormat::Vst3,
+            None,
             "Plugin A".to_string(),
         );
         // Stamp a saved-state blob the way refresh_bridge_plugin_states does
@@ -1320,6 +1325,7 @@ mod tests {
             "synth-class".to_string(),
             Some(std::path::PathBuf::from("C:/plugins/synth.vst3")),
             InsertPluginFormat::Vst3,
+            None,
             "Synth".to_string(),
         );
         state.set_insert_plugin(
@@ -1328,6 +1334,7 @@ mod tests {
             "fx-class".to_string(),
             Some(std::path::PathBuf::from("C:/plugins/fx.vst3")),
             InsertPluginFormat::Vst3,
+            None,
             "FX".to_string(),
         );
 

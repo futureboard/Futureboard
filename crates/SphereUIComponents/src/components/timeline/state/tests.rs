@@ -38,6 +38,7 @@ mod instrument_lifecycle_tests {
             class_id.to_string(),
             Some(std::path::PathBuf::from(path)),
             InsertPluginFormat::Vst3,
+            None,
             class_id.to_string(),
         );
         slot
@@ -1285,6 +1286,7 @@ mod fx_reorder_tests {
                 name.to_string(),
                 Some(std::path::PathBuf::from(format!("C:/p/{name}.vst3"))),
                 InsertPluginFormat::Vst3,
+                None,
                 name.to_string(),
             );
             ids.push(slot);

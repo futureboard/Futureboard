@@ -523,6 +523,7 @@ mod tests {
             "drums".to_string(),
             Some(std::path::PathBuf::from("C:/p/drums.vst3")),
             InsertPluginFormat::Vst3,
+            None,
             "Drums".to_string(),
         );
         state.set_insert_output_bus_layout(&track_id, &slot, output_bus_layout);

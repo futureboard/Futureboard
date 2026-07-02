@@ -7,8 +7,10 @@
  * - apps/native/Cargo.toml
  *
  * Usage:
- *   node scripts/sync-version.mjs         # write updates
- *   node scripts/sync-version.mjs --check # fail if out of sync
+ *   node scripts/sync-version.mjs                    # sync from version.json
+ *   node scripts/sync-version.mjs --check            # fail if out of sync
+ *   node scripts/sync-version.mjs --version 1.2.3    # sync an explicit version
+ *   node scripts/sync-version.mjs --version 1.2.3 --check
  */
 import fs from "node:fs";
 import path from "node:path";
@@ -20,6 +22,12 @@ import { fileURLToPath } from "node:url";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, "..");
 const checkOnly = process.argv.includes("--check");
+const versionArgIdx = process.argv.indexOf("--version");
+const versionOverride =
+  versionArgIdx !== -1 ? process.argv[versionArgIdx + 1] : undefined;
+if (versionArgIdx !== -1 && !versionOverride) {
+  throw new Error("--version requires a value");
+}
 
 function readJson(p) {
   return JSON.parse(fs.readFileSync(p, "utf8"));
@@ -42,9 +50,10 @@ if (!fs.existsSync(versionPath)) {
   throw new Error(`Missing ${versionPath}`);
 }
 
-const { version } = readJson(versionPath);
+const { version: jsonVersion } = readJson(versionPath);
+const version = versionOverride ?? jsonVersion;
 if (typeof version !== "string" || version.length < 1) {
-  throw new Error(`Invalid version.json: expected { "version": "..." }`);
+  throw new Error(`Invalid version: expected a non-empty string`);
 }
 
 const targets = [

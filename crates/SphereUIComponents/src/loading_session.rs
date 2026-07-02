@@ -15,7 +15,7 @@ use gpui::{
 use crate::app_state::{AppMode, AppSessionGate};
 use crate::components::progress_dialog::{progress_bar_animated, ProgressBarValue};
 use crate::components::timeline::timeline_state::TimelineState;
-use crate::components::title_bar::{external_window_titlebar_compact, TITLEBAR_HEIGHT};
+use crate::components::title_bar::external_window_titlebar_compact;
 use crate::layout::ProjectOpenOptions;
 use crate::layout::StudioLayout;
 use crate::project::io::{load_project, validate_project_file};
@@ -1325,6 +1325,7 @@ fn open_loading_session_window(
     owner_bounds: Option<Bounds<Pixels>>,
     cx: &mut App,
 ) -> Result<WindowHandle<LoadingSessionWindow>, String> {
+    use crate::components::title_bar::TITLEBAR_HEIGHT;
     use crate::window_position::{apply_owner_display, centered_window_bounds};
     use gpui::{size, WindowBackgroundAppearance, WindowBounds, WindowKind};
 

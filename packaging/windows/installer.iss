@@ -1,7 +1,8 @@
 ; Futureboard Studio Installer
 ; Generated for Inno Setup 6.x
 ; Source build output:
-;   ..\..\target\out\*
+;   ..\..\target\release\*.exe
+;   ..\..\target\release\*.dll
 ;
 ; Install targets:
 ;   Per-user:  %LOCALAPPDATA%\Programs\Futureboard Studio
@@ -11,13 +12,16 @@
 #define MyAppPublisher "Futureboard"
 #define MyAppExeName "FutureboardNative.exe"
 #define MyAppIcon "..\..\packages\shared\app\icons\icon.ico"
-#define MySourceDir "..\..\target\out"
+#define MySourceDir "..\..\target\release"
+#ifndef MyAppVersion
+#define MyAppVersion "2026.6.17"
+#endif
 
 [Setup]
 AppId={{9A56EFD0-B65D-4A48-9B0F-F6214A69F001}
 AppName={#MyAppName}
-AppVersion=2026.8.1-alpha1
-AppVerName={#MyAppName} 2026.8.1-alpha1
+AppVersion={#MyAppVersion}
+AppVerName={#MyAppName} {#MyAppVersion}
 AppPublisher={#MyAppPublisher}
 DefaultDirName={code:GetDefaultDir}
 DefaultGroupName={#MyAppName}
@@ -49,7 +53,8 @@ Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription:
 Name: "fileassoc_apak"; Description: "Associate .apak packages with APAK Installer"; GroupDescription: "File associations:"; Flags: checkedonce
 
 [Files]
-Source: "{#MySourceDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#MySourceDir}\*.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#MySourceDir}\*.dll"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 
 [Icons]
 Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{app}"; IconFilename: "{app}\{#MyAppExeName}"

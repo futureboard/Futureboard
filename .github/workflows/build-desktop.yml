@@ -55,7 +55,7 @@ jobs:
             platform: win
             native-bin: target/release/FutureboardNative.exe
             native-artifact-name: futureboard-native-win
-            native-bundle-glob: packaging/native/out/win/**/*
+            native-bundle-glob: target/installer/*.exe
 
     steps:
       - name: Checkout
@@ -116,10 +116,14 @@ jobs:
           bash packaging/native/bundle-macos.sh
           bash packaging/native/bundle-macos-dmg.sh
 
-      - name: Bundle native app (Windows)
+      - name: Install Inno Setup
+        if: matrix.os == 'windows-latest'
+        run: choco install innosetup -y --no-progress
+
+      - name: Build Windows installer
         if: matrix.os == 'windows-latest'
         shell: pwsh
-        run: ./packaging/native/bundle-windows.ps1
+        run: ./packaging/windows/build-installer.ps1
 
       - name: Upload native app artifact
         uses: actions/upload-artifact@v4

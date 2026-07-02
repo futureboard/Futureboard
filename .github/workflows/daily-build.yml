@@ -22,9 +22,11 @@ jobs:
       - name: Read app version
         id: read
         run: |
-          VERSION=$(node -p "require('./version.json').version")
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
-          echo "App version: $VERSION"
+          BASE=$(node -p "require('./version.json').version")
+          COMMIT="${GITHUB_SHA::7}"
+          VERSION="${BASE}-alpha+${COMMIT}"
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+          echo "App version: ${VERSION}"
 
   build_native:
     name: Build Native (${{ matrix.os }})
@@ -38,7 +40,7 @@ jobs:
             platform: win
             native-bin: target/release/FutureboardNative.exe
             native-artifact-name: futureboard-native-win
-            native-bundle-glob: packaging/native/out/win/**/*
+            native-bundle-glob: target/installer/*.exe
 
     steps:
       - name: Checkout
@@ -47,10 +49,10 @@ jobs:
       - name: Initialize submodules (audio SDKs + shared icons)
         run: bash .github/workflows/submodules-init.sh
 
-      - name: Sync versions
+      - name: Sync nightly version
         run: |
-          node scripts/sync-version.mjs
-          node scripts/sync-version.mjs --check
+          node scripts/sync-version.mjs --version "${{ needs.version.outputs.app-version }}"
+          node scripts/sync-version.mjs --version "${{ needs.version.outputs.app-version }}" --check
 
       - name: Install Linux build dependencies
         if: matrix.os == 'ubuntu-24.04'
@@ -103,10 +105,14 @@ jobs:
           bash packaging/native/bundle-macos.sh
           bash packaging/native/bundle-macos-dmg.sh
 
-      - name: Bundle native app (Windows)
+      - name: Install Inno Setup
+        if: matrix.os == 'windows-latest'
+        run: choco install innosetup -y --no-progress
+
+      - name: Build Windows installer
         if: matrix.os == 'windows-latest'
         shell: pwsh
-        run: ./packaging/native/bundle-windows.ps1
+        run: ./packaging/windows/build-installer.ps1 -AppVersion "${{ needs.version.outputs.app-version }}"
 
       - name: Upload native app artifact
         uses: actions/upload-artifact@v4

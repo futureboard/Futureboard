@@ -2405,7 +2405,7 @@ dependencies = [
 
 [[package]]
 name = "futureboard_native"
-version = "2026.6.17"
+version = "2026.7.2"
 dependencies = [
  "embed-resource",
  "gpui",

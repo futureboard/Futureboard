@@ -1201,7 +1201,11 @@ mod midi_edit_tests {
         assert_eq!(note(&state, &clip_id, id).channel.ui(), 16);
 
         state.nudge_midi_notes_channel(&clip_id, &[id], -20);
-        assert_eq!(note(&state, &clip_id, id).channel.ui(), 1, "clamps down to 1");
+        assert_eq!(
+            note(&state, &clip_id, id).channel.ui(),
+            1,
+            "clamps down to 1"
+        );
     }
 
     #[test]

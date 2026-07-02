@@ -492,16 +492,40 @@ impl FileBrowserState {
             // filesystem roots (drive letters, `/`, mounted volumes) live in the
             // separate "Filesystem" group below instead of being mixed in here.
             if let Some(p) = dirs::home_dir() {
-                self.push_root("places:home", "Home", &p, BrowserIcon::UserLibrary, &mut nodes);
+                self.push_root(
+                    "places:home",
+                    "Home",
+                    &p,
+                    BrowserIcon::UserLibrary,
+                    &mut nodes,
+                );
             }
             if let Some(p) = dirs::document_dir() {
-                self.push_root("places:documents", "Documents", &p, BrowserIcon::Documents, &mut nodes);
+                self.push_root(
+                    "places:documents",
+                    "Documents",
+                    &p,
+                    BrowserIcon::Documents,
+                    &mut nodes,
+                );
             }
             if let Some(p) = dirs::desktop_dir() {
-                self.push_root("places:desktop", "Desktop", &p, BrowserIcon::Desktop, &mut nodes);
+                self.push_root(
+                    "places:desktop",
+                    "Desktop",
+                    &p,
+                    BrowserIcon::Desktop,
+                    &mut nodes,
+                );
             }
             if let Some(p) = dirs::download_dir() {
-                self.push_root("places:downloads", "Downloads", &p, BrowserIcon::Downloads, &mut nodes);
+                self.push_root(
+                    "places:downloads",
+                    "Downloads",
+                    &p,
+                    BrowserIcon::Downloads,
+                    &mut nodes,
+                );
             }
             if let Some(p) = dirs::audio_dir() {
                 self.push_root("places:music", "Music", &p, BrowserIcon::Music, &mut nodes);

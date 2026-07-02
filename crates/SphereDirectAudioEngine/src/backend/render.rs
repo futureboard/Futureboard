@@ -757,36 +757,30 @@ pub fn fill_output_f32(
     let elapsed_us = started.elapsed().as_micros().min(u32::MAX as u128) as u32;
     // Publish last/max/deadline + classify dropout-risk against the active
     // protection mode (shared with the legacy callback so both paths agree).
-    let block_frames = if channels > 0 {
-        data.len() / channels
-    } else {
-        0
-    };
+    let block_frames = data.len().checked_div(channels).unwrap_or(0);
     crate::engine::record_output_callback_timing(
         shared,
         elapsed_us,
         block_frames,
         shared.sample_rate.load(Ordering::Relaxed),
     );
-    if elapsed_us >= 2_000 {
-        if elapsed_us >= 5_000 {
-            let cb = shared.output_cb_count.load(Ordering::Relaxed);
-            let last = SLOW_CALLBACK_LAST_LOG.load(Ordering::Relaxed);
-            if cb.wrapping_sub(last) > 200 {
-                SLOW_CALLBACK_LAST_LOG.store(cb, Ordering::Relaxed);
-                let state = crate::engine::AudioEngineState::from_u8(
-                    shared.engine_state.load(Ordering::Relaxed),
-                );
-                let severity = if elapsed_us >= 10_000 {
-                    "error"
-                } else {
-                    "warning"
-                };
-                eprintln!(
-                    "[AudioCallback] slow block severity={severity} duration_us={elapsed_us} state={} frames={frames}",
-                    state.as_str()
-                );
-            }
+    if elapsed_us >= 5_000 {
+        let cb = shared.output_cb_count.load(Ordering::Relaxed);
+        let last = SLOW_CALLBACK_LAST_LOG.load(Ordering::Relaxed);
+        if cb.wrapping_sub(last) > 200 {
+            SLOW_CALLBACK_LAST_LOG.store(cb, Ordering::Relaxed);
+            let state = crate::engine::AudioEngineState::from_u8(
+                shared.engine_state.load(Ordering::Relaxed),
+            );
+            let severity = if elapsed_us >= 10_000 {
+                "error"
+            } else {
+                "warning"
+            };
+            eprintln!(
+                "[AudioCallback] slow block severity={severity} duration_us={elapsed_us} state={} frames={frames}",
+                state.as_str()
+            );
         }
     }
     frames

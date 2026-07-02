@@ -6,8 +6,8 @@ use gpui::{
 pub use crate::shutdown::ShutdownState;
 pub use close_ops::PendingCloseAction;
 pub use project_ops::ProjectOpenOptions;
-pub use session_load::PreparedWorkspaceFinish;
 pub use project_switch::{ProjectSwitchConfirmDecision, ProjectSwitchRequest, ProjectSwitchSource};
+pub use session_load::PreparedWorkspaceFinish;
 
 use std::{collections::HashSet, path::PathBuf, sync::Arc};
 
@@ -646,9 +646,8 @@ impl StudioLayout {
                 mixer_master_strip.clone(),
             )
         });
-        let effect_editor_tab = cx.new(|_| {
-            components::EffectEditorTabView::new(studio_entity.clone(), timeline.clone())
-        });
+        let effect_editor_tab = cx
+            .new(|_| components::EffectEditorTabView::new(studio_entity.clone(), timeline.clone()));
         let status_bar = cx.new(|_| components::StatusBarView::new(studio_entity.clone()));
         let bottom_panel_shell = cx.new(|_| {
             components::BottomPanelShell::new(
@@ -1227,8 +1226,7 @@ impl StudioLayout {
                 .state
                 .selection
                 .selected_clip_ids
-                .iter()
-                .next()
+                .first()
                 .cloned()
         })
     }

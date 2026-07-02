@@ -214,6 +214,22 @@ fn visible_row_from_flat(row: MixerTreeRow) -> MixerTreeVisibleRow {
     }
 }
 
+fn icon_for_kind(kind: MixerTreeNodeKind) -> Option<&'static str> {
+    match kind {
+        MixerTreeNodeKind::AudioTrack => Some(assets::ICON_VOLUME_2_PATH),
+        MixerTreeNodeKind::InstrumentTrack | MixerTreeNodeKind::Plugin => {
+            Some(assets::ICON_SLIDERS_HORIZONTAL_PATH)
+        }
+        MixerTreeNodeKind::Bus => Some(assets::ICON_SLIDERS_HORIZONTAL_PATH),
+        MixerTreeNodeKind::FxReturn => Some(assets::ICON_VOLUME_2_PATH),
+        MixerTreeNodeKind::HardwareOutput | MixerTreeNodeKind::BusOutput => {
+            Some(assets::ICON_VOLUME_2_PATH)
+        }
+        MixerTreeNodeKind::MidiTrack => Some(assets::ICON_SLIDERS_HORIZONTAL_PATH),
+        MixerTreeNodeKind::Root | MixerTreeNodeKind::Group => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -247,21 +263,5 @@ mod tests {
         cache.sync_routing_key(1, 2, "", false, None);
         cache.recompute(&tracks, &view);
         assert_eq!(cache.model_rebuild_count, 2);
-    }
-}
-
-fn icon_for_kind(kind: MixerTreeNodeKind) -> Option<&'static str> {
-    match kind {
-        MixerTreeNodeKind::AudioTrack => Some(assets::ICON_VOLUME_2_PATH),
-        MixerTreeNodeKind::InstrumentTrack | MixerTreeNodeKind::Plugin => {
-            Some(assets::ICON_SLIDERS_HORIZONTAL_PATH)
-        }
-        MixerTreeNodeKind::Bus => Some(assets::ICON_SLIDERS_HORIZONTAL_PATH),
-        MixerTreeNodeKind::FxReturn => Some(assets::ICON_VOLUME_2_PATH),
-        MixerTreeNodeKind::HardwareOutput | MixerTreeNodeKind::BusOutput => {
-            Some(assets::ICON_VOLUME_2_PATH)
-        }
-        MixerTreeNodeKind::MidiTrack => Some(assets::ICON_SLIDERS_HORIZONTAL_PATH),
-        MixerTreeNodeKind::Root | MixerTreeNodeKind::Group => None,
     }
 }

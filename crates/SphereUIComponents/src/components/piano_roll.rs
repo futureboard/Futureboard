@@ -795,7 +795,8 @@ impl PianoRoll {
     /// immediately hidden by its own view filter), otherwise the editing
     /// track's default note channel.
     fn active_note_channel(&self, cx: &Context<Self>) -> MidiChannel {
-        if let Some(channel) = MidiChannel::all().find(|ch| MidiChannelMask::single(*ch) == self.channel_view)
+        if let Some(channel) =
+            MidiChannel::all().find(|ch| MidiChannelMask::single(*ch) == self.channel_view)
         {
             return channel;
         }
@@ -2421,7 +2422,8 @@ impl PianoRoll {
     fn cycle_channel_view(&mut self, cx: &mut Context<Self>) {
         self.channel_view = if self.channel_view.is_all() {
             MidiChannelMask::single(MidiChannel::from_ui(1))
-        } else if let Some(current) = MidiChannel::all().find(|ch| self.channel_view == MidiChannelMask::single(*ch))
+        } else if let Some(current) =
+            MidiChannel::all().find(|ch| self.channel_view == MidiChannelMask::single(*ch))
         {
             if current.ui() >= 16 {
                 MidiChannelMask::ALL
@@ -2437,7 +2439,8 @@ impl PianoRoll {
     fn channel_view_label(&self) -> String {
         if self.channel_view.is_all() {
             "View: All Ch".to_string()
-        } else if let Some(ch) = MidiChannel::all().find(|ch| self.channel_view == MidiChannelMask::single(*ch))
+        } else if let Some(ch) =
+            MidiChannel::all().find(|ch| self.channel_view == MidiChannelMask::single(*ch))
         {
             format!("View: {}", ch.label())
         } else {

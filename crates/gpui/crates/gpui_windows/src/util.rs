@@ -3,17 +3,17 @@ use std::sync::OnceLock;
 use ::util::ResultExt;
 use anyhow::Context;
 use windows::{
-    core::{BOOL, PCSTR},
+    UI::{
+        Color,
+        ViewManagement::{UIColorType, UISettings},
+    },
     Win32::{
         Foundation::*,
         Graphics::{Dwm::*, Gdi::*},
         System::LibraryLoader::LoadLibraryA,
         UI::WindowsAndMessaging::*,
     },
-    UI::{
-        Color,
-        ViewManagement::{UIColorType, UISettings},
-    },
+    core::{BOOL, PCSTR},
 };
 
 use crate::*;

@@ -21,6 +21,12 @@ pub struct PluginHostJob {
 unsafe impl Send for PluginHostJob {}
 unsafe impl Sync for PluginHostJob {}
 
+impl Default for PluginHostJob {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl PluginHostJob {
     pub fn new() -> Self {
         unsafe {

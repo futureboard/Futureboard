@@ -233,7 +233,7 @@ impl TimelineState {
     }
 
     pub fn reset_track_row_height(&mut self, track_id: &str) -> bool {
-        if !self.track_view_layout.height_for(track_id).is_some() {
+        if self.track_view_layout.height_for(track_id).is_none() {
             return false;
         }
         self.track_view_layout.remove_track(track_id);

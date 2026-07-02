@@ -1,4 +1,4 @@
-use gpui::{IntoElement, ParentElement, Render, Styled, Window, div, px};
+use gpui::{div, px, IntoElement, ParentElement, Render, Styled, Window};
 
 use crate::theme::Colors;
 

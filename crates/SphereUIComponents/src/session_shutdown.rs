@@ -119,9 +119,8 @@ pub const UI_SHUTDOWN_STEPS: &[SessionLifecycleStep] = &[
     SessionLifecycleStep::CloseFileWatchers,
 ];
 
-pub const POST_SHUTDOWN_UI_STEPS: &[SessionLifecycleStep] = &[
-    SessionLifecycleStep::ReleaseProjectResources,
-];
+pub const POST_SHUTDOWN_UI_STEPS: &[SessionLifecycleStep] =
+    &[SessionLifecycleStep::ReleaseProjectResources];
 
 #[derive(Debug, Clone)]
 pub struct SessionTransitionProgress {
@@ -240,9 +239,10 @@ pub fn run_session_shutdown(
         lifecycle_log!("step begin: {}", step.label());
         progress(SessionTransitionProgress::step(phase, title, *step));
         let started = Instant::now();
-        let step_result = run_background_shutdown_step(*step, &mut snapshot, &mut report, &mut |p| {
-            progress(p);
-        });
+        let step_result =
+            run_background_shutdown_step(*step, &mut snapshot, &mut report, &mut |p| {
+                progress(p);
+            });
         let elapsed = started.elapsed();
         match step_result {
             Ok(()) => lifecycle_log!("step complete: {} ({elapsed:?})", step.label()),
@@ -463,10 +463,7 @@ pub fn flush_autosave_blocking(
         let handle = scope.spawn(move || crate::project::io::save_project(&mut project, &path));
         while !handle.is_finished() {
             if started.elapsed() >= timeout {
-                return Err(format!(
-                    "autosave flush timed out after {:?}",
-                    timeout
-                ));
+                return Err(format!("autosave flush timed out after {:?}", timeout));
             }
             std::thread::sleep(Duration::from_millis(25));
         }
@@ -477,7 +474,10 @@ pub fn flush_autosave_blocking(
     });
     match &result {
         Ok(()) => lifecycle_log!("flush autosave complete path={}", path_for_log.display()),
-        Err(error) => lifecycle_log!("flush autosave failed path={} error={error}", path_for_log.display()),
+        Err(error) => lifecycle_log!(
+            "flush autosave failed path={} error={error}",
+            path_for_log.display()
+        ),
     }
     result
 }

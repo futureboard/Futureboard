@@ -13,6 +13,7 @@
 #include "sphere_plugin_host_vst3.h"
 
 #include <cstring>
+#include <new>
 
 namespace {
 

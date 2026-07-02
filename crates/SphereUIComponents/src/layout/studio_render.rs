@@ -1594,7 +1594,7 @@ fn publish_studio_main_hwnd(window: &Window) {
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
     if let Ok(handle) = HasWindowHandle::window_handle(window) {
         if let RawWindowHandle::Win32(w) = handle.as_raw() {
-            SpherePluginHost::plugin_host_main_window::set_main_window_hwnd(w.hwnd.get() as isize);
+            SpherePluginHost::plugin_host_main_window::set_main_window_hwnd(w.hwnd.get());
         }
     }
 }

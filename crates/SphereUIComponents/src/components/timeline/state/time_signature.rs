@@ -70,7 +70,7 @@ pub fn normalize_time_signature_grouping(
 ) -> Vec<u16> {
     let numerator = numerator.clamp(TS_NUMERATOR_MIN, TS_NUMERATOR_MAX);
     if grouping.is_empty()
-        || grouping.iter().any(|&g| g == 0)
+        || grouping.contains(&0)
         || grouping.iter().map(|&g| g as u32).sum::<u32>() != numerator as u32
     {
         default_time_signature_grouping(numerator, denominator)
@@ -378,9 +378,10 @@ impl TimeSignatureMap {
         const MAX_BARS: i64 = 4096;
         let visible_start = visible_start.max(0.0);
         let visible_end = visible_end.max(visible_start);
-        let mut bar = self.bar_at_beat(visible_start);
+        let start_bar = self.bar_at_beat(visible_start);
         let mut rects = Vec::new();
-        for _ in 0..MAX_BARS {
+        for offset in 0..MAX_BARS {
+            let bar = start_bar + offset;
             let start_beat = self.bar_start_beat(bar);
             if start_beat >= visible_end - TS_BEAT_EPSILON {
                 break;
@@ -395,7 +396,6 @@ impl TimeSignatureMap {
                     end_beat,
                 });
             }
-            bar += 1;
         }
         rects
     }

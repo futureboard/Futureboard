@@ -523,7 +523,8 @@ impl TimelineState {
         let mut changed = 0;
         for note in notes.iter_mut() {
             if ids.contains(&note.id) {
-                let next = MidiChannel::from_ui((note.channel.ui() as i32 + delta).clamp(1, 16) as u8);
+                let next =
+                    MidiChannel::from_ui((note.channel.ui() as i32 + delta).clamp(1, 16) as u8);
                 if note.channel != next {
                     note.channel = next;
                     changed += 1;

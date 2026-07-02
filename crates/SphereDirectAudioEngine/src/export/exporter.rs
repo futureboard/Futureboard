@@ -215,8 +215,10 @@ mod tests {
     }
 
     fn wav_request(output: PathBuf, end: u64) -> ArrangementExportRequest {
-        let mut encode_options = AudioEncodeOptions::default();
-        encode_options.format = AudioFileFormat::Wav;
+        let encode_options = AudioEncodeOptions {
+            format: AudioFileFormat::Wav,
+            ..Default::default()
+        };
         ArrangementExportRequest {
             output_path: output,
             format: AudioFileFormat::Wav,

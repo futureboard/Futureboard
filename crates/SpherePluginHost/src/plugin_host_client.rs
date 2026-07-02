@@ -211,12 +211,35 @@ pub fn resolve_host_exe() -> (PathBuf, bool) {
         }
     }
 
+    if let Ok(path) = std::env::var(format!("CARGO_BIN_EXE_{BINARY_STEM}")) {
+        let path = PathBuf::from(path);
+        let exists = path.is_file();
+        return (path, exists);
+    }
+
     if let Ok(current_exe) = std::env::current_exe() {
         if let Some(dir) = current_exe.parent() {
             let candidate = binary_name(dir);
             if candidate.is_file() {
                 return (candidate, true);
             }
+            if dir.file_name().is_some_and(|name| name == "deps") {
+                if let Some(profile_dir) = dir.parent() {
+                    let candidate = binary_name(profile_dir);
+                    if candidate.is_file() {
+                        return (candidate, true);
+                    }
+                }
+            }
+        }
+    }
+
+    if let (Ok(target_dir), Ok(profile)) =
+        (std::env::var("CARGO_TARGET_DIR"), std::env::var("PROFILE"))
+    {
+        let candidate = binary_name(&PathBuf::from(target_dir).join(profile));
+        if candidate.is_file() {
+            return (candidate, true);
         }
     }
 

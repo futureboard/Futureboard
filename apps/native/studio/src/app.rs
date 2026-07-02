@@ -4,18 +4,17 @@ use std::sync::Arc;
 use crate::window::{studio_window_options, welcome_window_options};
 use gpui::{App, AppContext, BorrowAppContext, Global, WindowHandle};
 use sphere_ui_components::app_state::{AppMode, AppSessionGate};
-use sphere_ui_components::components::progress_dialog::ProgressBarValue;
 use sphere_ui_components::assets;
 use sphere_ui_components::boot;
+use sphere_ui_components::components::progress_dialog::ProgressBarValue;
 use sphere_ui_components::layout::{
     PendingCloseAction, PreparedWorkspaceFinish, ProjectOpenOptions, StudioLayout,
 };
 use sphere_ui_components::loading_session::{
     begin_pre_studio_workspace_prepare, begin_project_session_load,
-    begin_studio_project_session_load, begin_studio_session_shutdown,
-    complete_project_lifecycle, show_loading_session_error, update_loading_session_progress,
-    LoadFailedContext, LoadedSessionPackage, ProjectLifecycleTarget, SessionRollbackSnapshot,
-    SessionShutdownReason,
+    begin_studio_project_session_load, begin_studio_session_shutdown, complete_project_lifecycle,
+    show_loading_session_error, update_loading_session_progress, LoadFailedContext,
+    LoadedSessionPackage, ProjectLifecycleTarget, SessionRollbackSnapshot, SessionShutdownReason,
 };
 use sphere_ui_components::project::{FutureboardProject, ProjectTemplate};
 use sphere_ui_components::splash::SplashWindowHandle;
@@ -168,7 +167,7 @@ fn finish_loading_to_studio(cx: &mut App) {
         complete_project_lifecycle(cx, ProjectLifecycleTarget::Studio);
         if let Some(studio) = cx
             .try_global::<NativeShellWindows>()
-            .and_then(|shell| shell.studio.clone())
+            .and_then(|shell| shell.studio)
         {
             let _ = studio.update(cx, |_layout, window, _cx| {
                 window.activate_window();
@@ -196,11 +195,11 @@ fn transition_loaded_package_to_existing_studio(
     eprintln!("[ProjectSwitch] installing loaded session");
     eprintln!("[AppMode] LoadingSession -> Studio");
     set_app_mode(cx, AppMode::Studio);
-    store_studio_window_handle(cx, studio.clone());
+    store_studio_window_handle(cx, studio);
     let install_result = studio.update(cx, |layout, _window, cx| {
         layout.install_loaded_session(package, cx);
         if !layout.has_self_window() {
-            layout.set_self_window(studio.clone());
+            layout.set_self_window(studio);
         }
         cx.notify();
     });
@@ -249,8 +248,8 @@ fn transition_loaded_package_to_studio(package: LoadedSessionPackage, cx: &mut A
     eprintln!("[AppMode] LoadingSession -> Studio");
     set_app_mode(cx, AppMode::Studio);
     update_loading_session_progress(cx, "Opening studio", ProgressBarValue::value(0.98));
-    cx.defer(move |cx| {
-        match open_studio_workspace(WorkspaceInit::Loaded(package), cx) {
+    cx.defer(
+        move |cx| match open_studio_workspace(WorkspaceInit::Loaded(package), cx) {
             Ok(()) => {
                 eprintln!("[StudioMount] mounted after ready");
                 finish_loading_to_studio(cx);
@@ -263,8 +262,8 @@ fn transition_loaded_package_to_studio(package: LoadedSessionPackage, cx: &mut A
                     format!("Could not open the studio workspace.\n\nDetails: {error}"),
                 );
             }
-        }
-    });
+        },
+    );
 }
 
 fn transition_prepared_package_to_studio(
@@ -276,20 +275,18 @@ fn transition_prepared_package_to_studio(
     set_app_mode(cx, AppMode::Studio);
     update_loading_session_progress(cx, "Opening studio", ProgressBarValue::value(0.98));
     let init = WorkspaceInit::Prepared { package, follow_up };
-    cx.defer(move |cx| {
-        match open_studio_workspace(init, cx) {
-            Ok(()) => {
-                eprintln!("[StudioMount] mounted after workspace prepare");
-                finish_loading_to_studio(cx);
-            }
-            Err(error) => {
-                eprintln!("[StudioOpen] studio window open failed: {error}");
-                set_app_mode(cx, AppMode::LoadFailed);
-                show_loading_session_error(
-                    cx,
-                    format!("Could not open the studio workspace.\n\nDetails: {error}"),
-                );
-            }
+    cx.defer(move |cx| match open_studio_workspace(init, cx) {
+        Ok(()) => {
+            eprintln!("[StudioMount] mounted after workspace prepare");
+            finish_loading_to_studio(cx);
+        }
+        Err(error) => {
+            eprintln!("[StudioOpen] studio window open failed: {error}");
+            set_app_mode(cx, AppMode::LoadFailed);
+            show_loading_session_error(
+                cx,
+                format!("Could not open the studio workspace.\n\nDetails: {error}"),
+            );
         }
     });
 }
@@ -361,7 +358,7 @@ fn handle_project_switch_load_failed(
     );
     if let Some(snapshot) = ctx.rollback {
         set_app_mode(cx, AppMode::Studio);
-        store_studio_window_handle(cx, studio.clone());
+        store_studio_window_handle(cx, studio);
         let _ = studio.update(cx, |layout, _window, cx| {
             layout.restore_session_rollback_snapshot(snapshot, cx);
             layout.show_project_open_failed_dialog(
@@ -414,8 +411,8 @@ fn request_project_switch_in_studio(
 
         // Keep the studio shell alive — on Windows GPUI quits when the last
         // window closes (QuitMode::LastWindowClosed).
-        let studio_for_success = studio.clone();
-        let studio_for_failure = studio.clone();
+        let studio_for_success = studio;
+        let studio_for_failure = studio;
         let on_success = Arc::new(move |package: LoadedSessionPackage, cx: &mut App| {
             transition_loaded_package_to_existing_studio(studio_for_success, package, cx);
         });
@@ -442,7 +439,7 @@ fn handle_load_failed(ctx: LoadFailedContext, cx: &mut App) {
         set_app_mode(cx, AppMode::Studio);
         if let Some(studio) = cx
             .try_global::<NativeShellWindows>()
-            .and_then(|shell| shell.studio.clone())
+            .and_then(|shell| shell.studio)
         {
             log_window_registry(cx, "rollback onto existing studio");
             let _ = studio.update(cx, |layout, _window, cx| {
@@ -488,7 +485,7 @@ enum WorkspaceInit {
 
 fn open_studio_for_action(action: WelcomeAction, cx: &mut App) {
     match action {
-        WelcomeAction::OpenProjectFile(_) | WelcomeAction::OpenRecent(_) => return,
+        WelcomeAction::OpenProjectFile(_) | WelcomeAction::OpenRecent(_) => (),
         WelcomeAction::EmptyProject | WelcomeAction::OpenEmptyWorkspace => {
             begin_workspace_session(
                 "Preparing Workspace…",
@@ -572,24 +569,24 @@ fn open_studio_workspace(init: WorkspaceInit, cx: &mut App) -> Result<(), String
         .map_err(|e| e.to_string())?;
     eprintln!("[StudioOpen] studio window opened");
 
-    let studio_handle = studio.clone();
-    store_studio_window_handle(cx, studio_handle.clone());
+    let studio_handle = studio;
+    store_studio_window_handle(cx, studio_handle);
 
     studio
         .update(cx, move |layout, _window, cx| {
             // Wire the workspace lifecycle: its own window handle (so Close Project
             // can close it) and the hook that re-opens Welcome.
-            layout.set_self_window(studio_handle.clone());
-            layout.set_request_welcome_callback(Arc::new(|cx| open_welcome_window(cx)));
+            layout.set_self_window(studio_handle);
+            layout.set_request_welcome_callback(Arc::new(open_welcome_window));
             layout.set_request_session_shutdown_callback(Arc::new({
                 move |reason, owner_bounds, studio, cx| {
                     begin_close_project_session(reason, owner_bounds, studio, cx);
                 }
             }));
             layout.set_request_project_load_callback(Arc::new({
-                let studio_handle = studio_handle.clone();
+                let studio_handle = studio_handle;
                 move |path, open_options, cx| {
-                    request_project_switch_in_studio(studio_handle.clone(), path, open_options, cx);
+                    request_project_switch_in_studio(studio_handle, path, open_options, cx);
                 }
             }));
 

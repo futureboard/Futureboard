@@ -163,10 +163,8 @@ impl MixerTreeModel {
             if children.is_empty() {
                 continue;
             }
-            if show_only_selected_group {
-                if selected_group_id != Some(id) {
-                    continue;
-                }
+            if show_only_selected_group && selected_group_id != Some(id) {
+                continue;
             }
             group_nodes.push(MixerTreeNode {
                 id: id.to_string(),

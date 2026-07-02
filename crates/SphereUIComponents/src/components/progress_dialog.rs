@@ -8,9 +8,12 @@ use std::sync::Arc;
 use crate::components::title_bar::{external_window_titlebar_compact, TITLEBAR_HEIGHT};
 use crate::theme::{self, Colors};
 use gpui::{
-    div, px, App, AppContext, Bounds, Context, FocusHandle, InteractiveElement, IntoElement,
-    KeyDownEvent, ParentElement, Render, StatefulInteractiveElement, Styled, Window, WindowHandle,
+    div, px, App, Bounds, Context, FocusHandle, InteractiveElement, IntoElement, KeyDownEvent,
+    ParentElement, Render, StatefulInteractiveElement, Styled, Window, WindowHandle,
 };
+// `AppContext` (for `cx.new`) is only used by the Windows window-open path below.
+#[cfg(target_os = "windows")]
+use gpui::AppContext;
 
 pub const PROGRESS_DIALOG_WIDTH: f32 = 430.0;
 const PROGRESS_DIALOG_HEIGHT: f32 = 168.0;

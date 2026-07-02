@@ -20,7 +20,9 @@ use crate::loading_session::{
 };
 use crate::project::io::{load_project, validate_project_file};
 use crate::project::{apply_to_timeline, now_secs};
-use crate::session_shutdown::{PluginUnloadTarget, SessionLifecycleStep, SessionShutdownReason, SessionShutdownSnapshot};
+use crate::session_shutdown::{
+    PluginUnloadTarget, SessionLifecycleStep, SessionShutdownReason, SessionShutdownSnapshot,
+};
 
 use super::project_ops::ProjectOpenOptions;
 use super::{RecordingUiState, StudioLayout};
@@ -432,10 +434,7 @@ impl StudioLayout {
     pub fn prepare_for_in_studio_project_switch_transaction(
         &mut self,
         cx: &mut Context<Self>,
-    ) -> (
-        SessionRollbackSnapshot,
-        Option<gpui::Bounds<gpui::Pixels>>,
-    ) {
+    ) -> (SessionRollbackSnapshot, Option<gpui::Bounds<gpui::Pixels>>) {
         session_log!("prepare for in-studio project switch transaction");
         eprintln!("[ProjectSwitch] close project switcher popover");
         self.menu_bar.open_menu_id = None;
@@ -510,8 +509,7 @@ impl StudioLayout {
         reason: SessionShutdownReason,
         cx: &mut Context<Self>,
     ) -> SessionShutdownSnapshot {
-        let (flush_autosave_path, flush_autosave_project) =
-            self.session_autosave_flush_payload(cx);
+        let (flush_autosave_path, flush_autosave_project) = self.session_autosave_flush_payload(cx);
         let mut snapshot = self.capture_session_shutdown_snapshot(reason, cx);
         snapshot.flush_autosave_path = flush_autosave_path;
         snapshot.flush_autosave_project = flush_autosave_project;
@@ -764,7 +762,8 @@ impl StudioLayout {
         self.session_install_status = SessionInstallStatus::Ready;
         match finish {
             PreparedWorkspaceFinish::EmptyUntitled => {
-                self.project_session.bind_untitled("Untitled Project", false);
+                self.project_session
+                    .bind_untitled("Untitled Project", false);
                 self.project_state = ProjectState::UnsavedWorkspace;
                 self.sync_project_session_to_workspace(cx);
                 self.mark_engine_media_dirty();

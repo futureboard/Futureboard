@@ -25,8 +25,8 @@
 
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    AppContext, ClickEvent, DragMoveEvent, Entity, InteractiveElement, IntoElement, MouseDownEvent,
-    ParentElement, StatefulInteractiveElement, Styled, div, px, svg,
+    div, px, svg, AppContext, ClickEvent, DragMoveEvent, Entity, InteractiveElement, IntoElement,
+    MouseDownEvent, ParentElement, StatefulInteractiveElement, Styled,
 };
 use std::collections::HashSet;
 
@@ -40,10 +40,10 @@ use crate::components::panel::FxSlotDrag;
 use crate::components::reorder::{drag_handle, drop_over_highlight};
 use crate::components::sidebar::BrowserDragItem;
 use crate::components::timeline::timeline_state::{
-    InsertLoadStatus, InsertSlotState, MASTER_TRACK_ID, MasterBusState, SendSlotState, TrackState,
-    TrackType, is_vsti_output_child_track_id, volume, vsti_output_bus_flat_range,
+    is_vsti_output_child_track_id, volume, vsti_output_bus_flat_range,
     vsti_output_bus_strip_indices, vsti_output_child_channels_for_bus_layout,
-    vsti_output_child_insert_id,
+    vsti_output_child_insert_id, InsertLoadStatus, InsertSlotState, MasterBusState, SendSlotState,
+    TrackState, TrackType, MASTER_TRACK_ID,
 };
 use crate::components::timeline::vu_meter::meter_surface;
 use crate::theme::Colors;
@@ -2027,11 +2027,11 @@ struct MixerCenterGridCache {
 
 thread_local! {
     static MIXER_CENTER_GRID: std::cell::RefCell<MixerCenterGridCache> =
-        std::cell::RefCell::new(MixerCenterGridCache {
+        const { std::cell::RefCell::new(MixerCenterGridCache {
             width_q: 0,
             height_q: 0,
             rebuild_count: 0,
-        });
+        }) };
 }
 
 /// Lightweight empty mixer center: solid background + optional batched vertical
@@ -2081,7 +2081,7 @@ fn paint_mixer_center_grid(
     width: f32,
     window: &mut gpui::Window,
 ) {
-    use gpui::{Bounds, fill, point, px, size};
+    use gpui::{fill, point, px, size, Bounds};
 
     let origin_x = f32::from(bounds.origin.x);
     let origin_y = f32::from(bounds.origin.y);
@@ -2561,7 +2561,7 @@ mod vsti_output_label_tests {
 
 #[cfg(test)]
 mod collapse_filter_tests {
-    use super::{MixerRenderItem, collect_mixer_render_items, vsti_output_group_key};
+    use super::{collect_mixer_render_items, vsti_output_group_key, MixerRenderItem};
     use crate::components::timeline::timeline_state::{
         CreateTrackOptions, InputMonitorMode, InsertPluginFormat, TimelineState, TrackType,
     };

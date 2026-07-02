@@ -524,8 +524,7 @@ fn read_secret_file(path: &Path) -> Result<Vec<u8>> {
     let value = contents
         .lines()
         .map(str::trim)
-        .filter(|line| !line.is_empty() && !line.starts_with('#'))
-        .next()
+        .find(|line| !line.is_empty() && !line.starts_with('#'))
         .ok_or_else(|| ApakError::Crypto("secret file is empty".to_string()))?;
     let value = value
         .split_once('=')

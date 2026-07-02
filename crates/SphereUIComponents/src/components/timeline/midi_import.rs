@@ -125,7 +125,7 @@ fn parse_track(
         };
 
         match status {
-            0x80..=0x8f | 0x90..=0x9f => {
+            0x80..=0x9f => {
                 running_status = Some(status);
                 let pitch = r.read_u8()?.min(127);
                 let velocity = r.read_u8()?.min(127);

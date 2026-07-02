@@ -1,8 +1,9 @@
 name: CI
 
-# Quality gates for the primary maintained surface (Rust/GPUI native) plus the
-# secondary web surface. Build/packaging of release artifacts lives in
-# build-desktop.yml / daily-build.yml — this workflow only checks correctness.
+# Quality gates for the maintained desktop surface (Rust/GPUI native + audio
+# engine + plugin host). Build/packaging of release artifacts lives in
+# build-desktop.yml / daily-build.yml — this workflow only checks correctness,
+# on all three desktop targets (Windows / macOS / Linux).
 
 on:
   push:
@@ -19,8 +20,12 @@ concurrency:
 
 jobs:
   rust-fmt:
-    name: Rust format
-    runs-on: ubuntu-24.04
+    name: Rust format (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-latest, macos-latest]
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -34,16 +39,24 @@ jobs:
         run: cargo fmt --all --check
 
   rust-clippy-test:
-    name: Rust clippy + tests
-    runs-on: ubuntu-24.04
+    name: Rust clippy + tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    env:
+      CARGO_BUILD_JOBS: 2
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-latest, macos-latest]
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
       - name: Initialize submodules (audio SDKs + shared icons)
+        shell: bash
         run: bash .github/workflows/submodules-init.sh
 
       - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update -y
           sudo apt-get install -y \
@@ -82,53 +95,3 @@ jobs:
 
       - name: cargo test --workspace
         run: cargo test --workspace
-
-  web:
-    name: Web WASM build + typecheck + lint
-    runs-on: ubuntu-24.04
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Initialize submodules
-        run: bash .github/workflows/submodules-init.sh
-
-      - name: Setup Rust for WebAudio WASM
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: wasm32-unknown-unknown
-
-      - name: Cache Rust + wasm-pack
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            ~/.cargo/bin/wasm-pack
-            target
-          key: ci-web-wasm-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
-          restore-keys: |
-            ci-web-wasm-${{ runner.os }}-
-
-      - name: Install wasm-pack
-        run: |
-          if ! command -v wasm-pack >/dev/null 2>&1; then
-            cargo install wasm-pack --locked
-          fi
-
-      - name: Setup Bun
-        uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: latest
-
-      - name: Install JS workspace dependencies
-        run: bun install --frozen-lockfile
-
-      - name: Build WebAudio WASM
-        run: bun run --cwd apps/web build:audio:wasm
-
-      - name: Typecheck web app
-        run: bun run --cwd apps/web typecheck
-
-      - name: Lint web app
-        run: bun run --cwd apps/web lint

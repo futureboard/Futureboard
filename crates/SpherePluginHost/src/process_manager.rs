@@ -5,6 +5,7 @@ use std::process::Child;
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
+#[cfg(windows)]
 use crate::platform::PluginHostJob;
 use crate::plugin_host_client::{PluginHostClient, PluginHostClientError};
 use crate::plugin_host_spawn_config::PluginHostSpawnConfig;

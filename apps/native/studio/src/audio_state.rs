@@ -291,7 +291,7 @@ mod tests {
             .last_error
             .as_deref()
             .unwrap_or_default()
-            .contains("DirectAudio WDM-KS Apply failed"));
+            .contains("DAUx WDM-KS Apply failed"));
     }
 
     #[test]
@@ -309,7 +309,7 @@ mod tests {
             .last_error
             .as_deref()
             .unwrap_or_default()
-            .contains("DirectAudio WASAPI Exclusive Apply failed"));
+            .contains("DAUx WASAPI Exclusive Apply failed"));
     }
 
     #[test]
@@ -335,7 +335,7 @@ mod tests {
             .last_error
             .as_deref()
             .unwrap_or_default()
-            .contains("DirectAudio WASAPI Exclusive Apply failed"));
+            .contains("DAUx WASAPI Exclusive Apply failed"));
     }
 
     #[test]

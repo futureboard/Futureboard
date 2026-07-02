@@ -359,6 +359,7 @@ impl BridgeAudioShared {
     /// thread reuses stack buffers every block instead of allocating two `Vec`s
     /// per callback, which used to cause latency spikes on the producer and
     /// occasional missed blocks (audible as VSTi stutter / dropped notes).
+    #[allow(clippy::too_many_arguments)]
     pub fn render_single_voice(
         &self,
         instance_id: &str,
@@ -389,6 +390,7 @@ impl BridgeAudioShared {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn render_single_voice_interleaved(
         &self,
         instance_id: &str,

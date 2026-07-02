@@ -708,7 +708,9 @@ fn build_engine_project_snapshot_inner(
                 // track's fixed/default channel (per-channel CC lanes are a
                 // follow-up, not part of this pass).
                 let output_mode = track.routing.output_channel_mode();
-                let lane_channel = output_mode.resolve(track.routing.default_note_channel()).raw();
+                let lane_channel = output_mode
+                    .resolve(track.routing.default_note_channel())
+                    .raw();
                 Some(EngineMidiClipSnapshot {
                     id: clip.id.clone(),
                     track_id: track_id.clone(),

@@ -35,10 +35,22 @@ jobs:
     name: Build Native (${{ matrix.os }})
     needs: version
     runs-on: ${{ matrix.os }}
+    env:
+      CARGO_BUILD_JOBS: 2
     strategy:
       fail-fast: false
       matrix:
         include:
+          - os: ubuntu-24.04
+            platform: linux
+            native-bin: target/release/FutureboardNative
+            native-artifact-name: futureboard-native-linux
+            native-bundle-glob: ""
+          - os: macos-latest
+            platform: macos
+            native-bin: target/release/FutureboardNative
+            native-artifact-name: futureboard-native-macos
+            native-bundle-glob: packaging/native/out/**/*
           - os: windows-latest
             platform: win
             native-bin: target/release/FutureboardNative.exe
@@ -50,6 +62,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Initialize submodules (audio SDKs + shared icons)
+        shell: bash
         run: bash .github/workflows/submodules-init.sh
 
       - name: Install Linux build dependencies

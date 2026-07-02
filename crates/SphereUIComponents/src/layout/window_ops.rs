@@ -352,7 +352,8 @@ impl StudioLayout {
                                                 plugin_uid,
                                                 Some(reg.path.clone()),
                                                 format,
-                                                Some(reg.vendor.clone()).filter(|vendor| !vendor.trim().is_empty()),
+                                                Some(reg.vendor.clone())
+                                                    .filter(|vendor| !vendor.trim().is_empty()),
                                                 reg.name.clone(),
                                             );
                                             if format == InsertPluginFormat::Vst3 {

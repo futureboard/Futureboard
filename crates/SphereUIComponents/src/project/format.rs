@@ -34,7 +34,10 @@ pub const PROJECT_MAGIC: &[u8; 8] = b"FBSTUD1\0";
 /// v20 persists mixer tree expanded/pinned/hidden channel state.
 /// v21 persists per-automation-point curve tension. Pre-v21 points load with
 /// tension 0.0 (a straight segment), so older projects are unchanged.
-pub const PROJECT_VERSION: u32 = 21;
+/// v22 adds a per-note MIDI channel (pre-v22 notes default to channel 1) and
+/// a per-track "play each note on its own channel" toggle (pre-v22 tracks
+/// default to `false`, matching the pre-existing fixed-channel behavior).
+pub const PROJECT_VERSION: u32 = 22;
 
 /// Minimum on-disk header size: magic (8) + version (4) + reserved (4) + body_len (4).
 pub const PROJECT_HEADER_SIZE: usize = 20;
@@ -482,6 +485,7 @@ fn encode_midi_note(w: &mut FbWriter, n: &MidiNote) {
     w.write_f32(n.duration_beats);
     w.write_u8(n.velocity);
     w.write_bool(n.muted); // v4
+    w.write_u8(n.channel.clamp(1, 16)); // v22
 }
 
 /// v5: controller kind tag. CC carries its number; the rest are tag-only.
@@ -708,6 +712,7 @@ fn encode_track(w: &mut FbWriter, t: &ProjectTrack) {
     encode_track_audio_format(w, t.routing.audio_format);
     encode_track_midi_input_routing(w, &t.routing.midi_input);
     w.write_opt_u8(&t.routing.midi_channel.map(|ch| ch.clamp(1, 16)));
+    w.write_bool(t.routing.midi_output_per_note); // v22
     let output_bus = routing_output_bus_id(&t.routing.output);
     w.write_opt_str(&output_bus);
     w.write_u32(t.routing.sends.len() as u32);
@@ -993,6 +998,12 @@ fn decode_midi_note(r: &mut FbReader, version: u32) -> Result<MidiNote, ProjectE
         velocity: r.read_u8()?,
         // v4 added the muted flag; older files default to unmuted.
         muted: if version >= 4 { r.read_bool()? } else { false },
+        // v22 added a per-note MIDI channel; older files default to channel 1.
+        channel: if version >= 22 {
+            r.read_u8()?.clamp(1, 16)
+        } else {
+            1
+        },
     })
 }
 
@@ -1293,12 +1304,21 @@ fn decode_track(r: &mut FbReader, version: u32) -> Result<ProjectTrack, ProjectE
     let input_monitor = decode_input_monitor(r)?;
 
     let mut routing = if version >= 3 {
+        let input = decode_track_input_routing(r)?;
+        let output = decode_track_output_routing(r)?;
+        let audio_format = decode_track_audio_format(r)?;
+        let midi_input = decode_track_midi_input_routing(r)?;
+        let midi_channel = r.read_opt_u8()?.map(|ch| ch.clamp(1, 16));
+        // v22 added a per-track "play each note on its own channel" toggle;
+        // older files default to `false` (the pre-existing fixed-channel behavior).
+        let midi_output_per_note = if version >= 22 { r.read_bool()? } else { false };
         TrackRouting {
-            input: decode_track_input_routing(r)?,
-            output: decode_track_output_routing(r)?,
-            audio_format: decode_track_audio_format(r)?,
-            midi_input: decode_track_midi_input_routing(r)?,
-            midi_channel: r.read_opt_u8()?.map(|ch| ch.clamp(1, 16)),
+            input,
+            output,
+            audio_format,
+            midi_input,
+            midi_channel,
+            midi_output_per_note,
             sends: Vec::new(),
         }
     } else {
@@ -1699,6 +1719,7 @@ mod tests {
             duration_beats: 0.5,
             velocity: 90,
             muted,
+            channel: 1,
         }
     }
 
@@ -1732,6 +1753,35 @@ mod tests {
         let n = decode_midi_note(&mut r, 3).unwrap();
         assert_eq!(n.pitch, 72);
         assert!(!n.muted, "older files must default to unmuted");
+    }
+
+    #[test]
+    fn midi_note_channel_roundtrips_v22() {
+        let mut n = note(60, false);
+        n.channel = 5;
+        let mut w = FbWriter::new();
+        encode_midi_note(&mut w, &n);
+        let bytes = w.into_bytes();
+
+        let mut r = FbReader::new(&bytes);
+        let got = decode_midi_note(&mut r, PROJECT_VERSION).unwrap();
+        assert_eq!(got.channel, 5);
+    }
+
+    #[test]
+    fn pre_v22_notes_decode_channel_one() {
+        // v21 and earlier wrote no channel byte: pitch, start, dur, velocity, muted.
+        let mut w = FbWriter::new();
+        w.write_u8(72);
+        w.write_f32(0.0);
+        w.write_f32(1.0);
+        w.write_u8(100);
+        w.write_bool(false);
+        let bytes = w.into_bytes();
+
+        let mut r = FbReader::new(&bytes);
+        let n = decode_midi_note(&mut r, 21).unwrap();
+        assert_eq!(n.channel, 1, "older files must default to channel 1");
     }
 
     #[test]

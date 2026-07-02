@@ -1477,6 +1477,15 @@ impl Render for StudioLayout {
             .children(ime_bridge)
             .child({
                 let _s = crate::perf::PerfScope::enter("AppChrome");
+                let close_target = cx.entity().clone();
+                let on_window_close: components::ChromeActionCb = std::sync::Arc::new(
+                    move |_: &(), window: &mut Window, cx: &mut gpui::App| {
+                        let owner_bounds = Some(window.bounds());
+                        let _ = close_target.update(cx, |studio, cx| {
+                            studio.request_close(PendingCloseAction::QuitApp, owner_bounds, cx);
+                        });
+                    },
+                );
                 components::app_chrome(
                     window,
                     open_menu_id.as_deref(),
@@ -1484,6 +1493,7 @@ impl Render for StudioLayout {
                     project_chrome,
                     transport_chrome,
                     panel_chrome,
+                    Some(on_window_close),
                 )
             })
             .child({
@@ -1584,7 +1594,7 @@ fn publish_studio_main_hwnd(window: &Window) {
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
     if let Ok(handle) = HasWindowHandle::window_handle(window) {
         if let RawWindowHandle::Win32(w) = handle.as_raw() {
-            SpherePluginHost::plugin_host_main_window::set_main_window_hwnd(w.hwnd.get() as isize);
+            SpherePluginHost::plugin_host_main_window::set_main_window_hwnd(w.hwnd.get());
         }
     }
 }

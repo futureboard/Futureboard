@@ -103,7 +103,7 @@ export function InspectorPanel({ width }: { width?: number } = {}) {
         }}
       >
         <div className="flex items-center gap-2">
-          <div className="h-3 w-[2px] rounded-full" style={{ background: "rgba(95,206,208,0.45)" }} />
+          <div className="h-3 w-0.5 rounded-full" style={{ background: "rgba(95,206,208,0.45)" }} />
           <span
             className="text-[9px] font-bold uppercase"
             style={{ color: "rgba(154,167,184,0.7)", letterSpacing: "0.13em" }}
@@ -126,7 +126,7 @@ export function InspectorPanel({ width }: { width?: number } = {}) {
         </div>
         <button
           onClick={toggleInspector}
-          className="flex h-5 w-5 items-center justify-center rounded transition-colors hover:bg-white/[0.06]"
+          className="flex h-5 w-5 items-center justify-center rounded transition-colors hover:bg-white/6"
           style={{ color: "rgba(95,108,124,0.6)" }}
         >
           <X size={11} />
@@ -146,7 +146,7 @@ export function InspectorPanel({ width }: { width?: number } = {}) {
         {mode === "master" && (
           <>
             <div className="flex items-stretch border-b border-daw-border">
-              <div className="w-[2px] shrink-0" style={{ background: "#48d1cc" }} />
+              <div className="w-0.5 shrink-0" style={{ background: "#48d1cc" }} />
               <div className="flex-1 px-3 py-2.5">
                 <span className="truncate text-[12px] font-semibold text-daw-text">
                   Master
@@ -189,7 +189,7 @@ export function InspectorPanel({ width }: { width?: number } = {}) {
           return (
             <>
               <div className="flex items-stretch border-b border-daw-border">
-                <div className="w-[2px] shrink-0" style={{ background: "#f3c969" }} />
+                <div className="w-0.5 shrink-0" style={{ background: "#f3c969" }} />
                 <div className="flex-1 px-3 py-2.5">
                   <input
                     defaultValue={clip.name}
@@ -238,7 +238,7 @@ export function InspectorPanel({ width }: { width?: number } = {}) {
                       history().execute(new UpdateClipCommand(clip.id, { muted }, muted ? "Mute Clip" : "Unmute Clip"));
                       void activeAudioEngine.updateClipMute(clip.id, muted);
                     }}
-                    className="flex h-[22px] w-8 items-center justify-center rounded text-[9px] font-bold transition-colors"
+                    className="flex h-5.5 w-8 items-center justify-center rounded text-[9px] font-bold transition-colors"
                     style={{
                       background: (clip.muted ?? false) ? "#f3c969" : "rgba(255,255,255,0.028)",
                       border: `1px solid ${(clip.muted ?? false) ? "#f3c969" : "rgba(255,255,255,0.07)"}`,
@@ -327,7 +327,7 @@ export function InspectorPanel({ width }: { width?: number } = {}) {
           <>
             {/* Track identity */}
             <div className="flex items-stretch border-b border-daw-border">
-              <div className="w-[2px] shrink-0" style={{ background: track.color }} />
+              <div className="w-0.5 shrink-0" style={{ background: track.color }} />
               <div className="flex-1 px-3 py-2.5">
                 <div className="flex items-baseline justify-between gap-2">
                   <span className="truncate text-[12px] font-semibold text-daw-text">
@@ -435,7 +435,7 @@ export function InspectorPanel({ width }: { width?: number } = {}) {
                             type="button"
                             title={enabled ? "Disable send" : "Enable send"}
                             onClick={() => updateTrackSend(track.id, send.id, { enabled: !enabled })}
-                            className="h-2 w-2 shrink-0 rounded-full border border-white/[0.16]"
+                            className="h-2 w-2 shrink-0 rounded-full border border-white/16"
                             style={{ background: enabled ? "rgba(114,215,215,0.85)" : "transparent" }}
                           />
                           <span className="min-w-0 flex-1 truncate text-[10px] text-daw-dim">
@@ -823,7 +823,7 @@ function TrackRoutingSection({ trackId }: { trackId: string }) {
           <button
             type="button"
             onClick={() => audioDeviceService.requestAudioPermission()}
-            className="ml-[42px] flex h-6 items-center gap-1.5 rounded px-2 text-[10px] text-daw-faint transition-colors hover:bg-white/[0.06] hover:text-daw-text"
+            className="ml-10.5 flex h-6 items-center gap-1.5 rounded px-2 text-[10px] text-daw-faint transition-colors hover:bg-white/6 hover:text-daw-text"
             style={{ border: "1px solid rgba(255,255,255,0.08)" }}
           >
             <AlertCircle size={9} className="text-yellow-400" />
@@ -831,12 +831,12 @@ function TrackRoutingSection({ trackId }: { trackId: string }) {
           </button>
         )}
         {showAudioDenied && (
-          <p className="ml-[42px] text-[9px] text-red-400/80">
+          <p className="ml-10.5 text-[9px] text-red-400/80">
             Microphone access denied — check browser settings
           </p>
         )}
         {showMidiUnsupported && (
-          <p className="ml-[42px] text-[9px] text-daw-faint opacity-60">
+          <p className="ml-10.5 text-[9px] text-daw-faint opacity-60">
             MIDI unavailable in this browser
           </p>
         )}
@@ -844,7 +844,7 @@ function TrackRoutingSection({ trackId }: { trackId: string }) {
           <button
             type="button"
             onClick={() => midiDeviceService.requestMidiAccess()}
-            className="ml-[42px] flex h-6 items-center gap-1.5 rounded px-2 text-[10px] text-daw-faint transition-colors hover:bg-white/[0.06] hover:text-daw-text"
+            className="ml-10.5 flex h-6 items-center gap-1.5 rounded px-2 text-[10px] text-daw-faint transition-colors hover:bg-white/6 hover:text-daw-text"
             style={{ border: "1px solid rgba(255,255,255,0.08)" }}
           >
             <AlertCircle size={9} className="text-yellow-400" />
@@ -852,7 +852,7 @@ function TrackRoutingSection({ trackId }: { trackId: string }) {
           </button>
         )}
         {showMidiDenied && (
-          <p className="ml-[42px] text-[9px] text-red-400/80">
+          <p className="ml-10.5 text-[9px] text-red-400/80">
             MIDI access denied — check browser settings
           </p>
         )}
@@ -1041,7 +1041,7 @@ const MIDI_TYPE_LABEL: Record<MidiEventType, string> = {
 
 function MidiEventRow({ event }: { event: MidiEventLog }) {
   return (
-    <div className="flex items-center gap-2 rounded border border-daw-border bg-daw-bg px-2 py-[3px]">
+    <div className="flex items-center gap-2 rounded border border-daw-border bg-daw-bg px-2 py-0.75">
       <span
         className="w-7 shrink-0 text-center text-[8px] font-bold tabular-nums"
         style={{ color: MIDI_TYPE_COLOR[event.type] }}
@@ -1194,7 +1194,7 @@ function InspectorTrackBtn({
       title={title}
       aria-pressed={active}
       onClick={onClick}
-      className="flex h-[22px] w-8 shrink-0 items-center justify-center rounded text-[9px] font-bold transition-colors"
+      className="flex h-5.5 w-8 shrink-0 items-center justify-center rounded text-[9px] font-bold transition-colors"
       style={{
         background: active ? activeColor : "rgba(255,255,255,0.028)",
         border: `1px solid ${active ? activeColor : "rgba(255,255,255,0.07)"}`,
@@ -1319,7 +1319,7 @@ function ClipProcessSection({ clip }: { clip: DawClip }) {
             style={{ accentColor: "#5fced0", height: "3px" }}
           />
           <NumberInput
-            className="w-16 !h-5"
+            className="w-16 h-5!"
             min={0.25}
             max={4}
             step={0.05}
@@ -1349,7 +1349,7 @@ function ClipProcessSection({ clip }: { clip: DawClip }) {
             style={{ accentColor: "#a99cff", height: "3px" }}
           />
           <NumberInput
-            className="w-16 !h-5"
+            className="w-16 h-5!"
             min={-24}
             max={24}
             step={1}

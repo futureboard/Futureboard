@@ -79,6 +79,47 @@ impl BackendKind {
             _ => BackendKind::Auto,
         }
     }
+
+    /// Backends that are actually selectable on the current build target.
+    /// `Auto` is always valid everywhere — it falls back to cpal's
+    /// platform-default backend (WASAPI Shared / CoreAudio / ALSA).
+    pub fn allowed_for_current_platform() -> &'static [BackendKind] {
+        #[cfg(target_os = "windows")]
+        {
+            &[
+                BackendKind::Auto,
+                BackendKind::WasapiShared,
+                BackendKind::WasapiExclusive,
+                BackendKind::WdmKs,
+                BackendKind::MmeFallback,
+            ]
+        }
+        #[cfg(target_os = "macos")]
+        {
+            &[BackendKind::Auto, BackendKind::CoreAudio]
+        }
+        #[cfg(all(unix, not(target_os = "macos")))]
+        {
+            &[BackendKind::Auto, BackendKind::Alsa]
+        }
+    }
+
+    /// Whether this backend can actually be selected on the current platform.
+    pub fn is_allowed_on_current_platform(&self) -> bool {
+        Self::allowed_for_current_platform().contains(self)
+    }
+
+    /// Normalize a saved/persisted backend id for the current platform. A
+    /// backend that isn't valid here (e.g. a Windows id loaded on Linux)
+    /// becomes `Auto` in memory — the persisted value on disk is left
+    /// untouched unless the user explicitly changes and saves a setting.
+    pub fn sanitize_for_current_platform(saved: BackendKind) -> BackendKind {
+        if saved.is_allowed_on_current_platform() {
+            saved
+        } else {
+            BackendKind::Auto
+        }
+    }
 }
 
 // ── Configuration ─────────────────────────────────────────────────────────────

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Bundle target/release/FutureboardNative into a macOS .app using apps/shared assets.
+# Bundle target/release/FutureboardNative into a macOS .app using shared app assets.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -13,7 +13,7 @@ if [[ ! -f "$BIN" ]]; then
   exit 1
 fi
 
-ICON_SRC="$ROOT/apps/shared/icon.icns"
+ICON_SRC="$ROOT/packages/shared/app/icons/icon.icns"
 PLIST_SRC="$ROOT/packaging/native/Info.plist"
 
 rm -rf "$APP_DIR"

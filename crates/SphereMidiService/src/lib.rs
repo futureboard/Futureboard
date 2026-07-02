@@ -27,7 +27,7 @@ pub struct MidiDeviceSetting {
     pub clock_enabled: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct MidiHardwareSettings {
     #[serde(default)]
     pub devices: Vec<MidiDeviceSetting>,
@@ -37,17 +37,6 @@ pub struct MidiHardwareSettings {
     pub enabled_inputs: Vec<String>,
     #[serde(default, skip_serializing)]
     pub enabled_outputs: Vec<String>,
-}
-
-impl Default for MidiHardwareSettings {
-    fn default() -> Self {
-        Self {
-            devices: Vec::new(),
-            clock_sync: false,
-            enabled_inputs: Vec::new(),
-            enabled_outputs: Vec::new(),
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

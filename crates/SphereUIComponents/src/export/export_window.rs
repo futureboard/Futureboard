@@ -12,9 +12,8 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use gpui::{
-    div, px, App, AppContext, Bounds, Context, FocusHandle, InteractiveElement, IntoElement,
-    KeyDownEvent, ParentElement, Render, SharedString, StatefulInteractiveElement, Styled, Window,
-    WindowHandle,
+    div, px, App, Bounds, Context, FocusHandle, InteractiveElement, IntoElement, KeyDownEvent,
+    ParentElement, Render, SharedString, StatefulInteractiveElement, Styled, Window, WindowHandle,
 };
 
 use sphere_encoder::AudioFileFormat;
@@ -25,8 +24,13 @@ use DirectAudio::{
 
 use crate::components::form::select::{select, SelectOption};
 use crate::components::progress_dialog::{progress_bar, ProgressBarValue};
-use crate::components::title_bar::{external_window_titlebar_compact, TITLEBAR_HEIGHT};
+use crate::components::title_bar::external_window_titlebar_compact;
+#[cfg(target_os = "windows")]
+use crate::components::title_bar::TITLEBAR_HEIGHT;
 use crate::theme::{self, Colors};
+// `AppContext` (for `cx.new`) is only used by the Windows window-open path below.
+#[cfg(target_os = "windows")]
+use gpui::AppContext;
 
 use super::export_settings::{
     ExportChannelMode, ExportNormalizeChoice, ExportProjectDefaults, ExportRangeChoice,

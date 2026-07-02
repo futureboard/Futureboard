@@ -1,5 +1,9 @@
 #include "sphere_plugin_host_vst3.h"
 
+#if !defined(_WIN32)
+#error "plugin_editor_window.cpp is Windows-only and must not be compiled on this platform. Use plugin_editor_stub.cpp instead."
+#endif
+
 #include <algorithm>
 #include <atomic>
 #include <cassert>
@@ -1545,6 +1549,7 @@ extern "C" SpherePluginHostString sphere_plugin_editor_drain_param_events_json()
 #endif
 }
 
+#ifdef _WIN32
 // Complete an embed attach using a prepared Vst3EditorAttachment (createView
 // already done; getSize may have been queried before attach).
 unsigned long long embed_complete_attach(
@@ -1712,6 +1717,7 @@ unsigned long long embed_complete_attach(
   }
   return handle;
 }
+#endif // _WIN32
 
 // ── Embedded editor C ABI (GPUI-hosted) ─────────────────────────────────────
 

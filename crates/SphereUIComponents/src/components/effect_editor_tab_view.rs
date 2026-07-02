@@ -1,10 +1,15 @@
 //! Effect Editor bottom-tab content backed by the selected track's real insert chain.
 
-use gpui::{canvas, div, px, App, Context, Entity, InteractiveElement, IntoElement, ParentElement, Render, StatefulInteractiveElement, Styled, Window};
+use gpui::{
+    canvas, div, px, App, Context, Entity, InteractiveElement, IntoElement, ParentElement, Render,
+    StatefulInteractiveElement, Styled, Window,
+};
 
 use crate::components::slider::slider;
 use crate::components::timeline::timeline::Timeline;
-use crate::components::timeline::timeline_state::{InsertLoadStatus, InsertPluginFormat, InsertSlotState, TrackState};
+use crate::components::timeline::timeline_state::{
+    InsertLoadStatus, InsertPluginFormat, InsertSlotState, TrackState,
+};
 use crate::layout::StudioLayout;
 use crate::theme::Colors;
 
@@ -246,14 +251,25 @@ fn device_card(
         .w(px(148.0))
         .h(px(96.0))
         .rounded_md()
-        .bg(if selected { Colors::surface_selected() } else { Colors::surface_panel() })
+        .bg(if selected {
+            Colors::surface_selected()
+        } else {
+            Colors::surface_panel()
+        })
         .border(px(1.0))
-        .border_color(if selected { Colors::accent_primary() } else { Colors::border_subtle() })
+        .border_color(if selected {
+            Colors::accent_primary()
+        } else {
+            Colors::border_subtle()
+        })
         .px(px(8.0))
         .py(px(6.0))
         .flex_col()
         .justify_between()
-        .id(gpui::SharedString::from(format!("effect-device-{}", slot.id)))
+        .id(gpui::SharedString::from(format!(
+            "effect-device-{}",
+            slot.id
+        )))
         .on_click(move |_, _window, cx| {
             let selected = select_id.clone();
             let _ = view.update(cx, |view, cx| {
@@ -287,7 +303,11 @@ fn device_card(
                                 .truncate()
                                 .text_color(Colors::text_muted())
                                 .text_size(px(9.0))
-                                .child(slot.vendor.clone().unwrap_or_else(|| "Unknown vendor".to_string())),
+                                .child(
+                                    slot.vendor
+                                        .clone()
+                                        .unwrap_or_else(|| "Unknown vendor".to_string()),
+                                ),
                         ),
                 )
                 .child(format_chip(plugin_format_label(&slot))),
@@ -311,8 +331,15 @@ fn device_card(
                         .w(px(9.0))
                         .h(px(9.0))
                         .rounded_sm()
-                        .bg(if slot.bypassed { Colors::text_faint() } else { Colors::accent_primary() })
-                        .id(gpui::SharedString::from(format!("effect-bypass-{}", bypass_pair.1)))
+                        .bg(if slot.bypassed {
+                            Colors::text_faint()
+                        } else {
+                            Colors::accent_primary()
+                        })
+                        .id(gpui::SharedString::from(format!(
+                            "effect-bypass-{}",
+                            bypass_pair.1
+                        )))
                         .on_click(move |_, window, cx| {
                             eprintln!(
                                 "[PluginBypass] bypass changed requested track={} insert={}",
@@ -332,7 +359,10 @@ fn device_card(
                 .border_color(Colors::border_subtle())
                 .text_size(px(9.0))
                 .text_color(Colors::text_secondary())
-                .id(gpui::SharedString::from(format!("effect-open-{}", open_target.2)))
+                .id(gpui::SharedString::from(format!(
+                    "effect-open-{}",
+                    open_target.2
+                )))
                 .on_click(move |_, window, cx| {
                     eprintln!(
                         "[PluginEditor] editor open requested track={} insert={}",
@@ -439,7 +469,11 @@ fn parameter_panel(
                                 .truncate()
                                 .text_size(px(10.0))
                                 .text_color(Colors::text_muted())
-                                .child(slot.vendor.clone().unwrap_or_else(|| "Unknown vendor".to_string())),
+                                .child(
+                                    slot.vendor
+                                        .clone()
+                                        .unwrap_or_else(|| "Unknown vendor".to_string()),
+                                ),
                         ),
                 )
                 .child(format_chip(plugin_format_label(&slot))),
@@ -505,7 +539,11 @@ fn parameter_row(
                     div()
                         .truncate()
                         .text_size(px(10.0))
-                        .text_color(if disabled { Colors::text_faint() } else { Colors::text_secondary() })
+                        .text_color(if disabled {
+                            Colors::text_faint()
+                        } else {
+                            Colors::text_secondary()
+                        })
                         .child(param.name),
                 )
                 .child(
@@ -518,7 +556,11 @@ fn parameter_row(
         .child(slider(
             gpui::SharedString::from(format!("effect-param-{}-{}", insert_id, param_id)),
             param.value_normalized,
-            if disabled { Colors::text_faint() } else { Colors::accent_primary() },
+            if disabled {
+                Colors::text_faint()
+            } else {
+                Colors::accent_primary()
+            },
             move |value, _window, cx| {
                 if disabled {
                     return;
@@ -541,7 +583,11 @@ fn status_line(slot: &InsertSlotState) -> impl IntoElement {
         .child(format!(
             "{} · editor {} · {} parameters",
             plugin_state_label(slot),
-            if editor_available(slot) { "available" } else { "not reported" },
+            if editor_available(slot) {
+                "available"
+            } else {
+                "not reported"
+            },
             slot.parameters.len()
         ))
 }

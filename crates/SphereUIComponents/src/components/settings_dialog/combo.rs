@@ -52,7 +52,8 @@ pub(crate) fn hardware_combo_overlay(
 
     let menu = match open_combo {
         HardwareCombo::AudioDriver => {
-            let selected = schema.hardware.audio.driver_type.clone();
+            let selected =
+                sanitized_backend_label(&schema.hardware.audio.driver_type, available_backends);
             let up = on_update.clone();
             let filtered_backends: Vec<String> = if experimental_asio {
                 available_backends.to_vec()

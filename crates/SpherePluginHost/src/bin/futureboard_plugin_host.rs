@@ -466,7 +466,10 @@ fn service_audio_bridge(
     // later, compensate it). Refreshed periodically — latency rarely changes,
     // so this avoids an FFI getter + voice lookup on every block.
     static LATENCY_REPORT_BLOCKS: AtomicU64 = AtomicU64::new(0);
-    if LATENCY_REPORT_BLOCKS.fetch_add(1, Ordering::Relaxed) % 64 == 0 {
+    if LATENCY_REPORT_BLOCKS
+        .fetch_add(1, Ordering::Relaxed)
+        .is_multiple_of(64)
+    {
         if let Some(latency) = dsp.voice_latency_samples(plugin_instance_id) {
             bridge
                 .latency_samples
@@ -479,7 +482,9 @@ fn service_audio_bridge(
     static VST3_PROCESS_LOG_BLOCKS: AtomicU64 = AtomicU64::new(0);
     if debug_audio_out_enabled()
         && (peak_l > 0.0001 || peak_r > 0.0001)
-        && VST3_PROCESS_LOG_BLOCKS.fetch_add(1, Ordering::Relaxed) % 256 == 0
+        && VST3_PROCESS_LOG_BLOCKS
+            .fetch_add(1, Ordering::Relaxed)
+            .is_multiple_of(256)
     {
         eprintln!(
             "[vst3-process] instance={plugin_instance_id} frames={frames} channels={produced_channels} midi_events={midi_count} output_peak_l={peak_l:.6} output_peak_r={peak_r:.6}",
@@ -1544,6 +1549,7 @@ fn dispatch(
             #[cfg(not(windows))]
             {
                 let _ = region_slots;
+                let _ = &plugin_instance_id;
                 eprintln!("[plugin-host-bridge] AttachSharedAudio unsupported on this platform name={name}");
                 let _ = ipc::write_frame(
                     out,
@@ -2027,6 +2033,7 @@ fn resolve_editor_owner_hwnd(requested_owner: u64, parent_hwnd: u64, editor_mode
     0
 }
 
+#[allow(clippy::too_many_arguments)]
 fn schedule_unified_editor_attach(
     plugin_instance_id: &str,
     parent_hwnd: u64,
@@ -2136,7 +2143,9 @@ fn schedule_unified_editor_attach(
         return;
     }
     eprintln!("[PluginHost] instance lookup result=found instance_id={plugin_instance_id}");
-    eprintln!("[editor-open] 06 instance_lookup ok insert_id={plugin_instance_id} plugin={display_title}");
+    eprintln!(
+        "[editor-open] 06 instance_lookup ok insert_id={plugin_instance_id} plugin={display_title}"
+    );
     if !platform::is_window(parent_hwnd) {
         eprintln!("[editor-open] shell/parent invalid plugin={display_title} insert={plugin_instance_id} hwnd=0x{parent_hwnd:x} result=failed");
         emit_attach_failed(out, plugin_instance_id, "parent_hwnd is not a valid window");
@@ -3086,7 +3095,7 @@ mod platform {
                 // Generic dialog routing: only treat real `#32770` dialogs as
                 // dialogs; never run IsDialogMessage against plugin windows.
                 if let Some(dialog) = dialog_ancestor(msg.hwnd) {
-                    if IsDialogMessageW(dialog, &mut msg).as_bool() {
+                    if IsDialogMessageW(dialog, &msg).as_bool() {
                         pumped += 1;
                         continue;
                     }
@@ -3096,7 +3105,7 @@ mod platform {
             }
             if pumped > 0 {
                 let n = PUMP_LOG.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                if n % 120 == 0 {
+                if n.is_multiple_of(120) {
                     eprintln!("[PluginEditor] modal/dialog message pump active drained={pumped}");
                 }
             }
@@ -3321,7 +3330,7 @@ mod platform {
                     if DIALOG_RATE.allow() {
                         eprintln!("[PluginUIThread] dialog candidate hwnd=0x{dialog_candidate:x}");
                     }
-                    dialog_handled = IsDialogMessageW(dialog, &mut msg).as_bool();
+                    dialog_handled = IsDialogMessageW(dialog, &msg).as_bool();
                     if dialog_handled && debug && !safe {
                         eprintln!(
                             "[PluginUIThread] IsDialogMessage handled msg=0x{:04x} hwnd=0x{:x}",

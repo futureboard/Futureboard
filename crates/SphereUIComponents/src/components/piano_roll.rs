@@ -31,8 +31,8 @@ use crate::assets;
 use crate::components::edit::{normalize_range, EditCommand};
 use crate::components::timeline::timeline::Timeline;
 use crate::components::timeline::timeline_state::{
-    midi_debug_enabled, MidiControllerKind, MidiControllerPoint, MidiNoteState, TimelineState,
-    MIN_NOTE_BEATS,
+    midi_debug_enabled, MidiChannel, MidiChannelMask, MidiControllerKind, MidiControllerPoint,
+    MidiNoteState, PitchTransformContext, TimelineState, MIN_NOTE_BEATS,
 };
 use crate::theme::Colors;
 
@@ -89,13 +89,15 @@ struct ClipboardNote {
     duration: f32,
     velocity: u8,
     muted: bool,
+    channel: MidiChannel,
 }
 
 /// Internal clipboard format version. Bumped if [`ClipboardNote`] layout or
 /// semantics change so a paste can reject data it doesn't understand instead of
 /// mis-reading it. The clipboard is process-local today, but versioning keeps
 /// the contract explicit for a future cross-process / serialized clipboard.
-const MIDI_CLIPBOARD_VERSION: u32 = 1;
+/// v2 added the per-note MIDI channel.
+const MIDI_CLIPBOARD_VERSION: u32 = 2;
 
 /// Versioned clipboard payload — a version tag plus the copied notes.
 #[derive(Clone)]
@@ -309,6 +311,10 @@ enum PianoDrag {
         dpitch: i32,
         grab_pitch: u8,
         clone_on_commit: bool,
+        /// Live Shift-held state, refreshed every mouse move: bypasses grid
+        /// snapping for this drag without touching the persistent `snap_on`
+        /// toggle. Checked continuously, not just at mouse-down.
+        unsnap: bool,
     },
     /// Resize notes from a right-edge handle. If the grabbed note is part of a
     /// multi-selection, every selected note receives the same duration delta.
@@ -322,6 +328,9 @@ enum PianoDrag {
         prev_durs: Vec<(u64, f32)>,
         delta_dur: f32,
         new_dur: f32,
+        /// Live Shift-held state, refreshed every mouse move (see
+        /// `PianoDrag::Move::unsnap`).
+        unsnap: bool,
     },
     /// Drag a velocity bar. When the grabbed note is part of a multi-selection,
     /// every selected note moves by the same delta. `prev` snapshots each
@@ -345,6 +354,13 @@ enum PianoDrag {
         pitch: u8,
         start_beat: f32,
         end_beat: f32,
+        /// Live Shift-held state, refreshed every mouse move (see
+        /// `PianoDrag::Move::unsnap`).
+        unsnap: bool,
+        /// Channel the new note is created with — the active channel-view
+        /// filter's single channel if narrowed, otherwise the track/clip
+        /// default. Fixed at mouse-down; drawing never changes a note's channel.
+        channel: MidiChannel,
     },
     /// Right-drag erase — ids collected until mouse-up.
     EraseNotes {
@@ -451,6 +467,14 @@ pub struct PianoRoll {
     key_lane_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
     focus: FocusHandle,
     focus_lost_subscription: Option<Subscription>,
+    /// Scale/root + constrain toggle for scale-aware pitch editing. Off
+    /// (`constrain: false`) preserves raw chromatic drag/draw behavior.
+    pitch_ctx: PitchTransformContext,
+    /// Channel view/edit filter: `ALL` (default) renders and allows editing
+    /// every note unchanged; narrowed to a single channel via the toolbar
+    /// cycle button, notes on other channels are hidden (and therefore not
+    /// reachable by mouse gestures — no separate editability check needed).
+    channel_view: MidiChannelMask,
 }
 
 impl PianoRoll {
@@ -493,6 +517,8 @@ impl PianoRoll {
             key_lane_bounds: Rc::new(Cell::new(None)),
             focus: cx.focus_handle(),
             focus_lost_subscription: None,
+            pitch_ctx: PitchTransformContext::default(),
+            channel_view: MidiChannelMask::ALL,
         }
     }
 
@@ -604,6 +630,7 @@ impl PianoRoll {
                 pitch,
                 start_beat,
                 end_beat,
+                ..
             } => {
                 let (lo, hi) = normalize_range(*start_beat, *end_beat);
                 format!(
@@ -755,6 +782,32 @@ impl PianoRoll {
         let tl = self.timeline.read(cx);
         let cid = tl.state.selection.selected_clip_ids.first()?.clone();
         tl.state.midi_clip_notes(&cid).map(|_| cid)
+    }
+
+    /// `true` when a note on `channel` should render / be reachable by editor
+    /// gestures under the current channel-view filter.
+    fn channel_visible(&self, channel: MidiChannel) -> bool {
+        self.channel_view.contains(channel)
+    }
+
+    /// Channel newly drawn notes should be created with: the channel-view
+    /// filter's single channel when narrowed (so a drawn note is never
+    /// immediately hidden by its own view filter), otherwise the editing
+    /// track's default note channel.
+    fn active_note_channel(&self, cx: &Context<Self>) -> MidiChannel {
+        if let Some(channel) =
+            MidiChannel::all().find(|ch| MidiChannelMask::single(*ch) == self.channel_view)
+        {
+            return channel;
+        }
+        let tl = self.timeline.read(cx);
+        tl.state
+            .selection
+            .selected_clip_ids
+            .first()
+            .and_then(|clip_id| tl.state.find_clip(clip_id))
+            .map(|(track, _)| track.routing.default_note_channel())
+            .unwrap_or_default()
     }
 
     fn preview_target(&self, cx: &Context<Self>) -> Option<(String, u8)> {
@@ -911,6 +964,16 @@ impl PianoRoll {
             return beats.max(0.0);
         }
         ((beats / step).floor() * step).max(0.0)
+    }
+
+    /// Same as [`Self::snap_beats`], but `unsnap` (live Shift state of the
+    /// current drag) bypasses the grid regardless of the persistent `snap_on`
+    /// toggle. Centralizes the Shift-to-unsnap behavior for note move/resize/draw.
+    fn snap_beats_live(&self, beats: f32, unsnap: bool) -> f32 {
+        if unsnap {
+            return beats.max(0.0);
+        }
+        self.snap_beats(beats)
     }
 
     // ── Coordinate helpers (local px → beat / pitch) ──────────────────────
@@ -1356,6 +1419,7 @@ impl PianoRoll {
         };
         notes
             .iter()
+            .filter(|n| self.channel_visible(n.channel))
             .filter(|n| Self::rects_intersect(rect, self.note_to_rect(&self.display_note(n))))
             .map(|n| n.id)
             .collect()
@@ -1398,7 +1462,7 @@ impl PianoRoll {
 
         match self.tool {
             PianoTool::Draw => {
-                let pitch = self.y_to_pitch(ly);
+                let pitch = self.pitch_ctx.constrain_pitch(self.y_to_pitch(ly));
                 let start = self.snap_beats(self.x_to_beat(lx));
                 if let Some((track_id, channel)) = self.preview_target(cx) {
                     eprintln!(
@@ -1407,10 +1471,13 @@ impl PianoRoll {
                     );
                 }
                 self.begin_preview_note(pitch, 100, "draw_start", cx);
+                let channel = self.active_note_channel(cx);
                 self.drag = PianoDrag::DrawNote {
                     pitch,
                     start_beat: start,
                     end_beat: start,
+                    unsnap: false,
+                    channel,
                 };
                 cx.notify();
             }
@@ -1547,6 +1614,7 @@ impl PianoRoll {
             dpitch: 0,
             grab_pitch,
             clone_on_commit,
+            unsnap: false,
         };
         // Audition the grabbed pitch immediately; on_move switches it as the
         // drag changes pitch, on_up / cancel stops it.
@@ -1598,6 +1666,7 @@ impl PianoRoll {
             prev_durs,
             delta_dur: 0.0,
             new_dur: prev_dur,
+            unsnap: event.modifiers.shift,
         };
         cx.notify();
     }
@@ -1843,8 +1912,12 @@ impl PianoRoll {
             return;
         }
         if matches!(self.drag, PianoDrag::DrawNote { .. }) {
+            if let PianoDrag::DrawNote { unsnap, .. } = &mut self.drag {
+                *unsnap = event.modifiers.shift;
+            }
             if let Some((lx, _)) = self.grid_local(event.position) {
-                let beat = self.snap_beats(self.x_to_beat(lx));
+                let live_unsnap = matches!(self.drag, PianoDrag::DrawNote { unsnap: true, .. });
+                let beat = self.snap_beats_live(self.x_to_beat(lx), live_unsnap);
                 if let PianoDrag::DrawNote { end_beat, .. } = &mut self.drag {
                     *end_beat = beat;
                     cx.notify();
@@ -1866,6 +1939,7 @@ impl PianoRoll {
             let cur_x: f32 = event.position.x.into();
             let cur_y: f32 = event.position.y.into();
             let ppb = self.ppb.max(0.0001);
+            let pitch_ctx = self.pitch_ctx;
             let mut audition_pitch: Option<u8> = None;
             if let PianoDrag::Move {
                 start_x,
@@ -1873,6 +1947,7 @@ impl PianoRoll {
                 dx_beats,
                 dpitch,
                 grab_pitch,
+                unsnap,
                 ..
             } = &mut self.drag
             {
@@ -1880,7 +1955,9 @@ impl PianoRoll {
                 // each note's absolute start in `display_note` / commit.
                 *dx_beats = (cur_x - *start_x) / ppb;
                 *dpitch = -(((cur_y - *start_y) / ROW_H).round() as i32);
-                audition_pitch = Some((*grab_pitch as i32 + *dpitch).clamp(0, 127) as u8);
+                *unsnap = event.modifiers.shift;
+                let raw_pitch = (*grab_pitch as i32 + *dpitch).clamp(0, 127) as u8;
+                audition_pitch = Some(pitch_ctx.constrain_pitch(raw_pitch));
             }
             // Switch the live audition note when the dragged pitch changes; a
             // horizontal-only (timing) move never retriggers.
@@ -1905,12 +1982,14 @@ impl PianoRoll {
                 prev_dur,
                 delta_dur,
                 new_dur,
+                unsnap,
                 ..
             } => {
+                *unsnap = event.modifiers.shift;
                 let cur_x: f32 = event.position.x.into();
                 let mut d =
                     (*prev_dur + (cur_x - *start_x) / self.ppb.max(0.0001)).max(MIN_NOTE_BEATS);
-                if self.snap_on {
+                if self.snap_on && !*unsnap {
                     let step = self.grid_res.beats();
                     d = ((d / step).round() * step).max(MIN_NOTE_BEATS);
                 }
@@ -1935,6 +2014,8 @@ impl PianoRoll {
             pitch,
             start_beat,
             end_beat,
+            unsnap,
+            channel,
         } = drag
         else {
             return;
@@ -1945,13 +2026,14 @@ impl PianoRoll {
         let (lo, hi) = normalize_range(start_beat, end_beat);
         let step = self.step_beats().max(MIN_NOTE_BEATS);
         let mut duration = (hi - lo).max(step);
-        if self.snap_on {
+        if self.snap_on && !unsnap {
             duration = ((duration / step).ceil() * step).max(MIN_NOTE_BEATS);
         }
         // Do not clamp the note into the current clip length — a note drawn past
         // the clip end auto-expands the clip (see `CreateMidiNote::execute`).
         // `MidiNoteState::new` clamps start >= 0, pitch 0..=127, dur >= MIN.
-        let note = MidiNoteState::new(pitch, lo, duration, 100);
+        let mut note = MidiNoteState::new(pitch, lo, duration, 100);
+        note.channel = channel;
         let id = note.id;
         self.run_edit_command(EditCommand::CreateMidiNote { clip_id, note }, cx);
         self.selection = HashSet::from([id]);
@@ -2046,16 +2128,19 @@ impl PianoRoll {
                 dx_beats,
                 dpitch,
                 clone_on_commit,
+                unsnap,
                 ..
             } => {
                 if dx_beats.abs() < 0.0001 && dpitch == 0 {
                     return;
                 }
+                let pitch_ctx = self.pitch_ctx;
                 let updates: Vec<(u64, f32, u8)> = prev
                     .iter()
                     .map(|(id, start, pitch)| {
-                        let new_start = self.snap_beats(*start + dx_beats);
-                        let new_pitch = (*pitch as i32 + dpitch).clamp(0, 127) as u8;
+                        let new_start = self.snap_beats_live(*start + dx_beats, unsnap);
+                        let raw_pitch = (*pitch as i32 + dpitch).clamp(0, 127) as u8;
+                        let new_pitch = pitch_ctx.constrain_pitch(raw_pitch);
                         (*id, new_start, new_pitch)
                     })
                     .collect();
@@ -2087,6 +2172,7 @@ impl PianoRoll {
                                 source.velocity,
                             );
                             note.muted = source.muted;
+                            note.channel = source.channel;
                             Some(note)
                         })
                         .collect();
@@ -2250,6 +2336,118 @@ impl PianoRoll {
         });
     }
 
+    /// Snap the selected notes' pitches to the nearest note in the active
+    /// scale (independent of the live `constrain` toggle used for drag).
+    /// No-op when nothing is selected or the active scale is Chromatic.
+    fn snap_selection_to_scale(&mut self, cx: &mut Context<Self>) {
+        let ids: Vec<u64> = self.selection.iter().copied().collect();
+        if ids.is_empty() {
+            return;
+        }
+        let scale = self.pitch_ctx.scale;
+        let target_ids = ids.clone();
+        self.commit_note_transform(cx, &ids, move |state, cid| {
+            state.snap_midi_notes_to_scale(cid, &target_ids, scale);
+        });
+    }
+
+    /// Set the MIDI channel on the selected notes. No-op when nothing is
+    /// selected.
+    fn set_selected_notes_channel(&mut self, channel: MidiChannel, cx: &mut Context<Self>) {
+        let ids: Vec<u64> = self.selection.iter().copied().collect();
+        if ids.is_empty() {
+            return;
+        }
+        let target_ids = ids.clone();
+        self.commit_note_transform(cx, &ids, move |state, cid| {
+            state.set_midi_notes_channel(cid, &target_ids, channel);
+        });
+    }
+
+    /// Shift the selected notes' MIDI channel by `delta` (clamped 1..=16).
+    fn nudge_selected_channel(&mut self, delta: i32, cx: &mut Context<Self>) {
+        let ids: Vec<u64> = self.selection.iter().copied().collect();
+        if ids.is_empty() {
+            return;
+        }
+        let target_ids = ids.clone();
+        self.commit_note_transform(cx, &ids, move |state, cid| {
+            state.nudge_midi_notes_channel(cid, &target_ids, delta);
+        });
+    }
+
+    /// Toggle the editing track's output channel policy between `Fixed` (the
+    /// pre-existing single-channel behavior) and `PerNote`. Panics the track's
+    /// active notes first so nothing sticks on the channel it was playing on.
+    fn toggle_track_output_per_note(&mut self, cx: &mut Context<Self>) {
+        let Some(clip_id) = self.editing_clip_id(cx) else {
+            return;
+        };
+        let Some(track_id) = self
+            .timeline
+            .read(cx)
+            .state
+            .find_clip(&clip_id)
+            .map(|(track, _)| track.id.clone())
+        else {
+            return;
+        };
+        let next = !self
+            .timeline
+            .read(cx)
+            .state
+            .find_track(&track_id)
+            .map(|t| t.routing.midi_output_per_note)
+            .unwrap_or(false);
+        self.cleanup_midi_before_destructive_edit("midi_output_mode_change", cx);
+        self.timeline.update(cx, |tl, tcx| {
+            tl.state.set_track_midi_output_per_note(&track_id, next);
+            tcx.notify();
+        });
+    }
+
+    fn track_output_per_note(&self, cx: &Context<Self>) -> bool {
+        self.editing_clip_id(cx)
+            .and_then(|clip_id| {
+                self.timeline
+                    .read(cx)
+                    .state
+                    .find_clip(&clip_id)
+                    .map(|(track, _)| track.routing.midi_output_per_note)
+            })
+            .unwrap_or(false)
+    }
+
+    /// Cycle the channel-view filter: All -> Ch1 -> Ch2 -> ... -> Ch16 -> All.
+    fn cycle_channel_view(&mut self, cx: &mut Context<Self>) {
+        self.channel_view = if self.channel_view.is_all() {
+            MidiChannelMask::single(MidiChannel::from_ui(1))
+        } else if let Some(current) =
+            MidiChannel::all().find(|ch| self.channel_view == MidiChannelMask::single(*ch))
+        {
+            if current.ui() >= 16 {
+                MidiChannelMask::ALL
+            } else {
+                MidiChannelMask::single(MidiChannel::from_ui(current.ui() + 1))
+            }
+        } else {
+            MidiChannelMask::ALL
+        };
+        cx.notify();
+    }
+
+    fn channel_view_label(&self) -> String {
+        if self.channel_view.is_all() {
+            "View: All Ch".to_string()
+        } else if let Some(ch) =
+            MidiChannel::all().find(|ch| self.channel_view == MidiChannelMask::single(*ch))
+        {
+            format!("View: {}", ch.label())
+        } else {
+            "View: Custom".to_string()
+        }
+    }
+
     fn delete_selection(&mut self, cx: &mut Context<Self>) {
         let Some(clip_id) = self.editing_clip_id(cx) else {
             return;
@@ -2399,8 +2597,10 @@ impl PianoRoll {
         let mut left =
             MidiNoteState::new(original.pitch, original.start, left_len, original.velocity);
         left.muted = original.muted;
+        left.channel = original.channel;
         let mut right = MidiNoteState::new(original.pitch, cut, right_len, original.velocity);
         right.muted = original.muted;
+        right.channel = original.channel;
         let new_ids = [left.id, right.id];
         self.run_edit_command(
             EditCommand::SplitMidiNote {
@@ -2458,6 +2658,7 @@ impl PianoRoll {
                 duration: n.duration,
                 velocity: n.velocity,
                 muted: n.muted,
+                channel: n.channel,
             })
             .collect();
         MIDI_NOTE_CLIPBOARD.with(|cb| {
@@ -2492,6 +2693,7 @@ impl PianoRoll {
                         c.velocity,
                     );
                     note.muted = c.muted;
+                    note.channel = c.channel;
                     note
                 })
                 .collect()
@@ -2585,6 +2787,7 @@ impl PianoRoll {
                 let mut note =
                     MidiNoteState::new(n.pitch, n.start + offset, n.duration, n.velocity);
                 note.muted = n.muted;
+                note.channel = n.channel;
                 note
             })
             .collect();
@@ -2821,6 +3024,12 @@ impl NoteInspectorSnapshot {
     fn velocity_label(&self) -> String {
         uniform_u8(&self.selected, |n| n.velocity)
             .map(|v| v.to_string())
+            .unwrap_or_else(|| "Mixed".to_string())
+    }
+
+    fn channel_label(&self) -> String {
+        uniform_u8(&self.selected, |n| n.channel.raw())
+            .map(|raw| MidiChannel::from_raw(raw).label())
             .unwrap_or_else(|| "Mixed".to_string())
     }
 

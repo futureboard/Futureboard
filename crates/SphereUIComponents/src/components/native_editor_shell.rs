@@ -334,7 +334,7 @@ mod imp {
             {
                 let _ = TranslateMessage(&msg);
                 if let Some(dialog) = dialog_ancestor(msg.hwnd) {
-                    if IsDialogMessageW(dialog, &mut msg).as_bool() {
+                    if IsDialogMessageW(dialog, &msg).as_bool() {
                         pumped += 1;
                         continue;
                     }

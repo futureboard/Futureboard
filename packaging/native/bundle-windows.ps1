@@ -41,7 +41,7 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 # Ship shared PNG for shortcuts / installers (optional).
-$iconPng = Join-Path $Root "apps\shared\app.png"
+$iconPng = Join-Path $Root "packages\shared\app\icons\app.png"
 if (Test-Path $iconPng) {
     Copy-Item -Force $iconPng (Join-Path $stage "app.png")
 }

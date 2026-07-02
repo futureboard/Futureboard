@@ -143,7 +143,7 @@ pub extern "C" fn sphere_stretch_set_params(
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn sphere_stretch_process_stereo(
+pub unsafe extern "C" fn sphere_stretch_process_stereo(
     handle: *mut SphereStretchHandle,
     input_l: *const f32,
     input_r: *const f32,
@@ -252,14 +252,16 @@ mod tests {
         let mut output_r = [0.0; 4];
 
         assert_eq!(
-            sphere_stretch_process_stereo(
-                handle,
-                input_l.as_ptr(),
-                input_r.as_ptr(),
-                output_l.as_mut_ptr(),
-                output_r.as_mut_ptr(),
-                4
-            ),
+            unsafe {
+                sphere_stretch_process_stereo(
+                    handle,
+                    input_l.as_ptr(),
+                    input_r.as_ptr(),
+                    output_l.as_mut_ptr(),
+                    output_r.as_mut_ptr(),
+                    4,
+                )
+            },
             0
         );
 

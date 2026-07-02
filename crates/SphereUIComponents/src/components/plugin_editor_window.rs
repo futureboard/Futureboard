@@ -1271,10 +1271,16 @@ impl PluginEditorWindow {
         let viewport = window.viewport_size();
         let current_w: f32 = viewport.width.into();
         let current_h: f32 = viewport.height.into();
-        eprintln!("[editor-size] plugin preferred size = {}x{}", content_w, content_h);
+        eprintln!(
+            "[editor-size] plugin preferred size = {}x{}",
+            content_w, content_h
+        );
         eprintln!("[editor-size] titlebar height = {:.0}", HEADER_H * scale);
         eprintln!("[editor-size] client rect = {}x{}", content_w, content_h);
-        eprintln!("[editor-size] shell outer target = {:.0}x{:.0}", shell_w, shell_h);
+        eprintln!(
+            "[editor-size] shell outer target = {:.0}x{:.0}",
+            shell_w, shell_h
+        );
         if (current_w - shell_w).abs() > 1.0 || (current_h - shell_h).abs() > 1.0 {
             eprintln!(
                 "[plugin-editor-window] auto_size content={}x{} shell={:.0}x{:.0}",

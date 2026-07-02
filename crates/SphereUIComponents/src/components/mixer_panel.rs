@@ -25,8 +25,8 @@
 
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    div, px, svg, App, AppContext, ClickEvent, DragMoveEvent, Empty, Entity, InteractiveElement,
-    IntoElement, MouseDownEvent, ParentElement, Render, StatefulInteractiveElement, Styled, Window,
+    div, px, svg, AppContext, ClickEvent, DragMoveEvent, Entity, InteractiveElement, IntoElement,
+    MouseDownEvent, ParentElement, StatefulInteractiveElement, Styled,
 };
 use std::collections::HashSet;
 
@@ -48,143 +48,12 @@ use crate::components::timeline::timeline_state::{
 use crate::components::timeline::vu_meter::meter_surface;
 use crate::theme::Colors;
 
-// ── Section dimensions ─────────────────────────────────────────────────────
-pub const STRIP_WIDTH: f32 = 88.0;
-/// Minimum height for a channel strip. Below this the mixer should scroll/clip
-/// as a whole rather than compressing the pan/fader controls into unusability.
-pub const STRIP_MIN_HEIGHT: f32 = 320.0;
-
-const SEC_HEADER_H: f32 = 40.0;
-const SEC_SECTION_HEADER_H: f32 = 20.0;
-const SEC_PAN_H: f32 = 60.0;
-const SEC_BUTTONS_H: f32 = 24.0;
-const SEC_FOOTER_H: f32 = 22.0;
-const SEC_FADER_MIN_H: f32 = 66.0;
-const LOWER_CONTROL_MIN_H: f32 = SEC_PAN_H + SEC_FADER_MIN_H + SEC_BUTTONS_H;
-
-// ── Vertical mixer section resizing ─────────────────────────────────────────
-// Inserts and sends each own a fixed-height clipped viewport with their own
-// vertical scrolling. Heights are shared across all strips so rows stay aligned
-// across the mixer. Splitter actions are routed to `StudioLayout`, which owns
-// the shared values and mirrors them into the detached mixer window snapshot.
-/// Visual + hitbox height of the splitter handle.
-const SEC_SPLITTER_H: f32 = 6.0;
-const SECTION_VIEWPORT_MIN_H: f32 = 42.0;
-const SECTION_VIEWPORT_MAX_H: f32 = 180.0;
-pub const MIXER_INSERT_SECTION_DEFAULT_PX: f32 = 72.0;
-pub const MIXER_SEND_SECTION_DEFAULT_PX: f32 = 54.0;
-
-/// Clamp one insert/send section height into the static supported range.
-pub fn clamp_mixer_section_height_px(value: f32) -> f32 {
-    value.clamp(SECTION_VIEWPORT_MIN_H, SECTION_VIEWPORT_MAX_H)
-}
-
-/// Clamp both section heights while preserving a usable lower pan/fader area
-/// for the current strip allocation.
-pub fn clamp_mixer_section_heights_for_strip(
-    insert_px: f32,
-    send_px: f32,
-    strip_available_px: f32,
-) -> (f32, f32) {
-    let mut insert_px = clamp_mixer_section_height_px(insert_px);
-    let mut send_px = clamp_mixer_section_height_px(send_px);
-    let fixed_without_sections =
-        2.0 + SEC_HEADER_H + (SEC_SPLITTER_H * 2.0) + LOWER_CONTROL_MIN_H + SEC_FOOTER_H;
-    let max_total = (strip_available_px - fixed_without_sections).max(SECTION_VIEWPORT_MIN_H * 2.0);
-
-    let total = insert_px + send_px;
-    if total > max_total {
-        let overflow = total - max_total;
-        let shrinkable_insert = insert_px - SECTION_VIEWPORT_MIN_H;
-        let shrinkable_send = send_px - SECTION_VIEWPORT_MIN_H;
-        let shrinkable_total = shrinkable_insert + shrinkable_send;
-        if shrinkable_total > 0.0 {
-            insert_px -= overflow * (shrinkable_insert / shrinkable_total);
-            send_px -= overflow * (shrinkable_send / shrinkable_total);
-        }
-        insert_px = clamp_mixer_section_height_px(insert_px);
-        send_px = clamp_mixer_section_height_px(send_px);
-    }
-
-    (insert_px, send_px)
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum MixerSplitTarget {
-    InsertSend,
-    SendFader,
-}
-
-/// Splitter drag/reset intents emitted by the channel-strip splitter handle.
-/// Pointer Y values are window-space (matches `MouseDownEvent::position.y`).
-#[derive(Clone, Copy, Debug)]
-pub enum MixerSplitAction {
-    /// Pointer pressed on the splitter — record the drag anchor.
-    ResizeStart(MixerSplitTarget, f32),
-    /// Pointer moved while dragging — recompute the shared rack height.
-    ResizeMove(f32),
-    /// Pointer released — commit the drag.
-    ResizeEnd,
-    /// Double-click — reset the targeted section to its default height.
-    Reset(MixerSplitTarget),
-}
-
-/// Shared split layout passed into the mixer. Insert/send heights are already
-/// clamped by the owner; `on_action` routes splitter intents back to the owner
-/// so all strips resize together.
-#[derive(Clone)]
-pub struct MixerSplit {
-    pub insert_px: f32,
-    pub send_px: f32,
-    pub active_target: Option<MixerSplitTarget>,
-    pub on_action: std::sync::Arc<dyn Fn(MixerSplitAction, &mut Window, &mut App) + 'static>,
-}
-
-impl MixerSplit {
-    /// Inert split for fallback UI (no live owner to route drags to).
-    pub fn inert() -> Self {
-        Self {
-            insert_px: MIXER_INSERT_SECTION_DEFAULT_PX,
-            send_px: MIXER_SEND_SECTION_DEFAULT_PX,
-            active_target: None,
-            on_action: std::sync::Arc::new(|_, _, _| {}),
-        }
-    }
-}
-
-/// Zero-sized GPUI drag payload for the mixer splitter handle. Mirrors the
-/// bottom-panel resize pattern: `on_drag` registers it, `on_drag_move` on the
-/// mixer root recomputes height while the pointer is captured.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct MixerSplitDrag;
-
-impl Render for MixerSplitDrag {
-    fn render(&mut self, _w: &mut Window, _cx: &mut gpui::Context<Self>) -> impl IntoElement {
-        Empty
-    }
-}
-
-#[derive(Clone, Debug)]
-struct SendSlotDrag {
-    track_id: String,
-    send_id: String,
-    target_name: String,
-}
-
-impl Render for SendSlotDrag {
-    fn render(&mut self, _w: &mut Window, _cx: &mut gpui::Context<Self>) -> impl IntoElement {
-        div()
-            .px(px(8.0))
-            .h(px(20.0))
-            .rounded_sm()
-            .bg(Colors::surface_overlay())
-            .border(px(1.0))
-            .border_color(Colors::accent_primary())
-            .text_size(px(10.0))
-            .text_color(Colors::text_primary())
-            .child(format!("Send -> {}", self.target_name))
-    }
-}
+mod callbacks;
+mod drag;
+mod split;
+pub use callbacks::*;
+use drag::SendSlotDrag;
+pub use split::*;
 
 /// Maximum insert slots per track. Once reached, the trailing empty "+ Add
 /// Insert" slot and the INSERTS header "+" are hidden/disabled.
@@ -196,112 +65,6 @@ const MAX_INSERT_SLOTS: usize = 8;
 struct HeaderPlus {
     id: gpui::SharedString,
     on_click: std::sync::Arc<dyn Fn(&mut gpui::Window, &mut gpui::App)>,
-}
-
-/// Bundle of mixer interactions hooked up from the layout. Closures land in
-/// the same TimelineState mutation methods used by the TrackHeader so the two
-/// views can never disagree.
-#[derive(Clone)]
-pub struct MixerCallbacks {
-    pub on_select_track:
-        std::sync::Arc<dyn Fn(&String, &mut gpui::Window, &mut gpui::App) + 'static>,
-    pub on_volume_change:
-        std::sync::Arc<dyn Fn(&(String, f32), &mut gpui::Window, &mut gpui::App) + 'static>,
-    pub on_pan_change:
-        std::sync::Arc<dyn Fn(&(String, f32), &mut gpui::Window, &mut gpui::App) + 'static>,
-    pub on_toggle_mute:
-        std::sync::Arc<dyn Fn(&String, &mut gpui::Window, &mut gpui::App) + 'static>,
-    pub on_toggle_solo:
-        std::sync::Arc<dyn Fn(&String, &mut gpui::Window, &mut gpui::App) + 'static>,
-    pub on_toggle_arm: std::sync::Arc<dyn Fn(&String, &mut gpui::Window, &mut gpui::App) + 'static>,
-    pub on_toggle_input:
-        std::sync::Arc<dyn Fn(&String, &mut gpui::Window, &mut gpui::App) + 'static>,
-    pub on_master_volume_change:
-        std::sync::Arc<dyn Fn(&f32, &mut gpui::Window, &mut gpui::App) + 'static>,
-    pub on_context_menu: Option<
-        std::sync::Arc<dyn Fn(&(String, f32, f32), &mut gpui::Window, &mut gpui::App) + 'static>,
-    >,
-    /// Open the insert plugin picker overlay for the track (Phase 2b). The
-    /// slot is created only when the user picks a plugin; an empty registry
-    /// offers a stub fallback so the project round-trip stays exercisable.
-    pub on_add_insert: std::sync::Arc<dyn Fn(&String, &mut gpui::Window, &mut gpui::App) + 'static>,
-    /// Remove the named insert slot from the track.
-    pub on_remove_insert:
-        std::sync::Arc<dyn Fn(&(String, String), &mut gpui::Window, &mut gpui::App) + 'static>,
-    /// Toggle bypass on the named insert slot.
-    pub on_toggle_insert_bypass:
-        std::sync::Arc<dyn Fn(&(String, String), &mut gpui::Window, &mut gpui::App) + 'static>,
-    /// Expand/collapse the VSTi output sub-strips for a track/insert group.
-    pub on_toggle_vsti_output_group:
-        std::sync::Arc<dyn Fn(&String, &mut gpui::Window, &mut gpui::App) + 'static>,
-    /// Drag-reorder commit for an insert slot. `(track_id, dragged_insert_id,
-    /// insertion_index)` where `insertion_index` is the gap (0..=len) the
-    /// dragged slot moves into. Identity is the stable `plugin_instance_id`,
-    /// never the visual index. One completed drag = one undo entry (mirrors the
-    /// Inspector's `on_reorder_insert` / `reorder_insert_cb`).
-    pub on_reorder_insert: std::sync::Arc<
-        dyn Fn(&(String, String, usize), &mut gpui::Window, &mut gpui::App) + 'static,
-    >,
-    /// Drop a `.pst` plug-in preset from the browser into a concrete insert slot.
-    /// `(preset_path, track_id, insert_index)` uses the full insert-chain index.
-    pub on_drop_plugin_preset: std::sync::Arc<
-        dyn Fn(&(std::path::PathBuf, String, usize), &mut gpui::Window, &mut gpui::App) + 'static,
-    >,
-    /// User clicked the slot chip — Phase 4 will open the native plugin
-    /// editor; Phase 1 logs the request.
-    pub on_open_insert_editor: std::sync::Arc<
-        dyn Fn(&(String, usize, String), &mut gpui::Window, &mut gpui::App) + 'static,
-    >,
-    /// Open the send target picker for `(track_id, x, y)`.
-    pub on_add_send:
-        std::sync::Arc<dyn Fn(&(String, f32, f32), &mut gpui::Window, &mut gpui::App) + 'static>,
-    /// Remove the named send `(track_id, send_id)`.
-    pub on_remove_send:
-        std::sync::Arc<dyn Fn(&(String, String), &mut gpui::Window, &mut gpui::App) + 'static>,
-    /// Drag-reorder commit for a send slot. `(track_id, dragged_send_id,
-    /// insertion_index)` where `insertion_index` is the visual gap.
-    pub on_reorder_send: std::sync::Arc<
-        dyn Fn(&(String, String, usize), &mut gpui::Window, &mut gpui::App) + 'static,
-    >,
-}
-
-/// Inert callbacks for fallback UI when the studio entity is unavailable.
-pub fn noop_mixer_callbacks() -> MixerCallbacks {
-    use std::sync::Arc;
-
-    let noop_track = Arc::new(|_: &String, _: &mut Window, _: &mut App| {});
-    let noop_vol = Arc::new(|_: &(String, f32), _: &mut Window, _: &mut App| {});
-    let noop_pan = Arc::new(|_: &(String, f32), _: &mut Window, _: &mut App| {});
-    let noop_master = Arc::new(|_: &f32, _: &mut Window, _: &mut App| {});
-    let noop_insert_pair = Arc::new(|_: &(String, String), _: &mut Window, _: &mut App| {});
-    let noop_insert_open = Arc::new(|_: &(String, usize, String), _: &mut Window, _: &mut App| {});
-    let noop_insert_reorder =
-        Arc::new(|_: &(String, String, usize), _: &mut Window, _: &mut App| {});
-    let noop_preset_drop =
-        Arc::new(|_: &(std::path::PathBuf, String, usize), _: &mut Window, _: &mut App| {});
-    let noop_add_send = Arc::new(|_: &(String, f32, f32), _: &mut Window, _: &mut App| {});
-    let noop_send_reorder = Arc::new(|_: &(String, String, usize), _: &mut Window, _: &mut App| {});
-    MixerCallbacks {
-        on_select_track: noop_track.clone(),
-        on_volume_change: noop_vol,
-        on_pan_change: noop_pan,
-        on_toggle_mute: noop_track.clone(),
-        on_toggle_solo: noop_track.clone(),
-        on_toggle_arm: noop_track.clone(),
-        on_toggle_input: noop_track.clone(),
-        on_master_volume_change: noop_master,
-        on_context_menu: None,
-        on_add_insert: noop_track.clone(),
-        on_remove_insert: noop_insert_pair.clone(),
-        on_toggle_insert_bypass: noop_insert_pair.clone(),
-        on_toggle_vsti_output_group: Arc::new(|_: &String, _: &mut Window, _: &mut App| {}),
-        on_reorder_insert: noop_insert_reorder,
-        on_drop_plugin_preset: noop_preset_drop,
-        on_open_insert_editor: noop_insert_open.clone(),
-        on_add_send: noop_add_send,
-        on_remove_send: noop_insert_pair,
-        on_reorder_send: noop_send_reorder,
-    }
 }
 
 // ─── Mixer sub-header ("Mixer  N ch") ────────────────────────────────────────
@@ -734,12 +497,7 @@ fn log_vsti_child_meter_subscribe_once(track: &TrackState) {
         .unwrap_or(0);
     eprintln!(
         "[METER SUBSCRIBE]\nstrip_view_id={}\nsubscription_key={}\nmixer_channel_id={}\nbus_index={}\ninitial_peak_l={:.6}\ninitial_peak_r={:.6}",
-        track.id,
-        track.id,
-        track.id,
-        bus_index,
-        track.meter_level_l,
-        track.meter_level_r
+        track.id, track.id, track.id, bus_index, track.meter_level_l, track.meter_level_r
     );
 }
 
@@ -2269,11 +2027,11 @@ struct MixerCenterGridCache {
 
 thread_local! {
     static MIXER_CENTER_GRID: std::cell::RefCell<MixerCenterGridCache> =
-        std::cell::RefCell::new(MixerCenterGridCache {
+        const { std::cell::RefCell::new(MixerCenterGridCache {
             width_q: 0,
             height_q: 0,
             rebuild_count: 0,
-        });
+        }) };
 }
 
 /// Lightweight empty mixer center: solid background + optional batched vertical
@@ -2827,6 +2585,7 @@ mod collapse_filter_tests {
             "drums".to_string(),
             Some(std::path::PathBuf::from("C:/p/drums.vst3")),
             InsertPluginFormat::Vst3,
+            None,
             "drums".to_string(),
         );
         state.set_insert_output_bus_layout(&track_id, &slot, output_bus_layout);

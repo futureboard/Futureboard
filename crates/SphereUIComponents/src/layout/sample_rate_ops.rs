@@ -92,9 +92,10 @@ impl StudioLayout {
         let options = MessageBoxOptions {
             kind: MessageBoxKind::Question,
             title: "Re-open Project?".to_string(),
-            message: "Changing the sample rate requires restarting the audio engine and \
+            message:
+                "Changing the sample rate requires restarting the audio engine and \
                       re-opening the current project so plugins, timing, and playback stay in sync."
-                .to_string(),
+                    .to_string(),
             detail: Some(format!(
                 "Current sample rate: {current_active} Hz\nNew requested sample rate: {new_rate} Hz"
             )),
@@ -123,7 +124,12 @@ impl StudioLayout {
         }
     }
 
-    fn resolve_sample_rate_change(&mut self, response: usize, new_rate: u32, cx: &mut Context<Self>) {
+    fn resolve_sample_rate_change(
+        &mut self,
+        response: usize,
+        new_rate: u32,
+        cx: &mut Context<Self>,
+    ) {
         match response {
             // Re-open Project.
             0 => {
@@ -256,8 +262,11 @@ impl StudioLayout {
             Err(message) => {
                 eprintln!("[audio-device] re-open failed: {message}");
                 self.audio_bridge.last_error = Some(message);
-                self.audio_bridge.stats =
-                    self.audio_bridge.engine.as_ref().map(|engine| engine.stats());
+                self.audio_bridge.stats = self
+                    .audio_bridge
+                    .engine
+                    .as_ref()
+                    .map(|engine| engine.stats());
             }
         }
         cx.notify();

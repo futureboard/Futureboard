@@ -110,7 +110,7 @@ impl From<std::io::Error> for PeakFileError {
 
 /// Project-relative path for an asset's peak cache file.
 pub fn waveform_peak_relative_path_for_asset(asset_id: &str) -> String {
-    let safe = asset_id.replace('/', "__").replace('\\', "__");
+    let safe = asset_id.replace(['/', '\\'], "__");
     format!("Cache/Waveforms/{safe}.peaks")
 }
 

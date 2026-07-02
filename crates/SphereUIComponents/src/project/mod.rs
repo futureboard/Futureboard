@@ -117,6 +117,9 @@ pub struct MidiNote {
     pub duration_beats: f32,
     pub velocity: u8,
     pub muted: bool,
+    /// UI-facing channel number, 1..=16. Older projects have no per-note
+    /// channel data and default to 1 on load.
+    pub channel: u8,
 }
 
 /// Serialized MIDI controller stream selector. Mirrors
@@ -259,6 +262,11 @@ pub struct TrackRouting {
     pub audio_format: ProjectTrackAudioFormat,
     pub midi_input: ProjectTrackMidiInputRouting,
     pub midi_channel: Option<u8>,
+    /// `true` plays each note back on its own channel; `false` (default)
+    /// forces every note onto `midi_channel` (or channel 1). Added alongside
+    /// per-note MIDI channels; missing/old data defaults to `false`, matching
+    /// the pre-existing single-channel-per-track behavior.
+    pub midi_output_per_note: bool,
     pub sends: Vec<ProjectSend>,
 }
 
@@ -270,6 +278,7 @@ impl Default for TrackRouting {
             audio_format: ProjectTrackAudioFormat::Stereo,
             midi_input: ProjectTrackMidiInputRouting::None,
             midi_channel: None,
+            midi_output_per_note: false,
             sends: Vec::new(),
         }
     }
@@ -744,6 +753,7 @@ impl From<&TimelineState> for FutureboardProject {
                                         duration_beats: n.duration,
                                         velocity: n.velocity,
                                         muted: n.muted,
+                                        channel: n.channel.ui(),
                                     })
                                     .collect(),
                                 controller_lanes: controller_lanes
@@ -816,6 +826,7 @@ impl From<&TimelineState> for FutureboardProject {
                         audio_format: timeline_audio_format_to_project(t.routing.audio_format),
                         midi_input: timeline_midi_input_to_project(&t.routing.midi_input),
                         midi_channel: t.routing.midi_channel.map(|ch| ch.clamp(1, 16)),
+                        midi_output_per_note: t.routing.midi_output_per_note,
                         sends: t
                             .sends
                             .iter()
@@ -911,7 +922,7 @@ impl From<&TimelineState> for FutureboardProject {
 /// Apply a loaded `FutureboardProject` back onto an existing `TimelineState`.
 pub fn apply_to_timeline(project: &FutureboardProject, tl: &mut TimelineState) {
     use crate::components::timeline::timeline_state::{
-        AutomationLaneState, AutomationPoint as TlAutoPoint, ClipState,
+        AutomationLaneState, AutomationPoint as TlAutoPoint, ClipState, MidiChannel,
         MidiControllerLane as TlControllerLane, MidiControllerPoint as TlControllerPoint,
         MidiNoteState, SendSlotState, TrackState,
     };
@@ -1059,6 +1070,7 @@ pub fn apply_to_timeline(project: &FutureboardProject, tl: &mut TimelineState) {
                                         n.velocity,
                                     );
                                     note.muted = n.muted;
+                                    note.channel = MidiChannel::from_ui(n.channel);
                                     note
                                 })
                                 .collect(),
@@ -1333,6 +1345,7 @@ fn project_routing_to_timeline(
         }
     };
     state.midi_channel = routing.midi_channel.map(|ch| ch.clamp(1, 16));
+    state.midi_output_per_note = routing.midi_output_per_note;
     state
 }
 

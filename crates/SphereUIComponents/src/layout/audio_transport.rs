@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::components;
-use crate::components::mixer_panel::{vsti_output_meter_key, VstiOutputMeterState};
+use crate::components::mixer_panel::vsti_output_meter_key;
 
 use super::engine_snapshot::{build_engine_project_snapshot, log_engine_sync_snapshot};
 use super::helpers::{smooth_meter_value, update_meter_clip, update_meter_hold};
@@ -920,11 +920,7 @@ impl StudioLayout {
             let channel = meter.channel.clamp(1, 32) as u8;
             let key = vsti_output_meter_key(&meter.track_id, &meter.insert_id, channel);
             live_keys.insert(key.clone());
-            let entry = self
-                .mixer_view
-                .vsti_output_meters
-                .entry(key)
-                .or_insert_with(VstiOutputMeterState::default);
+            let entry = self.mixer_view.vsti_output_meters.entry(key).or_default();
             let next = meter.peak.clamp(0.0, 1.0) as f32;
             if crate::forensic_trace::forensic_trace_enabled() && next > 0.0001 {
                 let bus_index = (channel.saturating_sub(1)) / 2;

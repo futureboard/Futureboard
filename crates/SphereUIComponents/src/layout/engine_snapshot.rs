@@ -702,11 +702,15 @@ fn build_engine_project_snapshot_inner(
                 else {
                     return None;
                 };
-                let channel = track
-                    .routing
-                    .midi_channel
-                    .map(|ch| ch.saturating_sub(1).min(15))
-                    .unwrap_or(0);
+                // Fixed-channel tracks force every event onto one channel
+                // (the pre-existing behavior); PerNote tracks emit each
+                // note's own channel and controller lanes still ride the
+                // track's fixed/default channel (per-channel CC lanes are a
+                // follow-up, not part of this pass).
+                let output_mode = track.routing.output_channel_mode();
+                let lane_channel = output_mode
+                    .resolve(track.routing.default_note_channel())
+                    .raw();
                 Some(EngineMidiClipSnapshot {
                     id: clip.id.clone(),
                     track_id: track_id.clone(),
@@ -722,7 +726,7 @@ fn build_engine_project_snapshot_inner(
                             start_beat: n.start.max(0.0) as f64,
                             length_beats: n.duration.max(0.0) as f64,
                             velocity: n.velocity.clamp(1, 127),
-                            channel,
+                            channel: output_mode.resolve(n.channel).raw(),
                         })
                         .collect(),
                     controllers: controller_lanes
@@ -732,7 +736,7 @@ fn build_engine_project_snapshot_inner(
                             let controller = vst3_controller_number(lane.kind)?;
                             Some(EngineMidiControllerLane {
                                 controller,
-                                channel,
+                                channel: lane_channel,
                                 points: lane
                                     .points
                                     .iter()
@@ -981,6 +985,7 @@ mod tests {
             "class-a".to_string(),
             Some(std::path::PathBuf::from("C:/plugins/a.vst3")),
             InsertPluginFormat::Vst3,
+            None,
             "Plugin A".to_string(),
         );
         state.set_insert_plugin(
@@ -989,6 +994,7 @@ mod tests {
             "class-b".to_string(),
             Some(std::path::PathBuf::from("C:/plugins/b.vst3")),
             InsertPluginFormat::Vst3,
+            None,
             "Plugin B".to_string(),
         );
 
@@ -1036,6 +1042,7 @@ mod tests {
             "multiout-class".to_string(),
             Some(std::path::PathBuf::from("C:/plugins/MultiOut.vst3")),
             InsertPluginFormat::Vst3,
+            None,
             "MultiOut".to_string(),
         );
 
@@ -1112,6 +1119,7 @@ mod tests {
             "single-bus-multiout-class".to_string(),
             Some(std::path::PathBuf::from("C:/plugins/MTPower.vst3")),
             InsertPluginFormat::Vst3,
+            None,
             "MT Power".to_string(),
         );
 
@@ -1240,6 +1248,7 @@ mod tests {
             "class-a".to_string(),
             Some(std::path::PathBuf::from("C:/plugins/a.vst3")),
             InsertPluginFormat::Vst3,
+            None,
             "Plugin A".to_string(),
         );
         // Stamp a saved-state blob the way refresh_bridge_plugin_states does
@@ -1318,6 +1327,7 @@ mod tests {
             "synth-class".to_string(),
             Some(std::path::PathBuf::from("C:/plugins/synth.vst3")),
             InsertPluginFormat::Vst3,
+            None,
             "Synth".to_string(),
         );
         state.set_insert_plugin(
@@ -1326,6 +1336,7 @@ mod tests {
             "fx-class".to_string(),
             Some(std::path::PathBuf::from("C:/plugins/fx.vst3")),
             InsertPluginFormat::Vst3,
+            None,
             "FX".to_string(),
         );
 

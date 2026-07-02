@@ -350,6 +350,9 @@ impl SharedAudioBuffer {
         let extra_pair_gain = 0.70710677f32;
         for i in 0..n {
             let base = i * channels;
+            // `ch_ix` is a raw-pointer offset into the interleaved block, not
+            // merely a `peaks` index — the explicit range loop is intentional.
+            #[allow(clippy::needless_range_loop)]
             for ch_ix in 0..channels {
                 let sample = unsafe { *src.add(base + ch_ix) };
                 peaks[ch_ix] = peaks[ch_ix].max(sample.abs());

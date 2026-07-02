@@ -20,12 +20,12 @@ use crate::layout::ProjectOpenOptions;
 use crate::layout::StudioLayout;
 use crate::project::io::{load_project, validate_project_file};
 use crate::project::{FutureboardProject, ProjectSession};
-pub use crate::session_shutdown::{
-    SessionLifecycleStep, SessionShutdownReason, SessionShutdownSnapshot,
-};
 use crate::session_shutdown::{
     flush_autosave_blocking, run_session_shutdown, SessionShutdownError, POST_SHUTDOWN_UI_STEPS,
     UI_SHUTDOWN_STEPS,
+};
+pub use crate::session_shutdown::{
+    SessionLifecycleStep, SessionShutdownReason, SessionShutdownSnapshot,
 };
 use crate::theme::{self, Colors};
 
@@ -215,12 +215,7 @@ async fn run_studio_ui_step_with_timeout(
     slot.lock()
         .ok()
         .and_then(|mut guard| guard.take())
-        .unwrap_or_else(|| {
-            Err(format!(
-                "{} did not report a result",
-                step.label()
-            ))
-        })
+        .unwrap_or_else(|| Err(format!("{} did not report a result", step.label())))
         .map_err(|message| SessionShutdownError { step, message })
 }
 
@@ -289,7 +284,8 @@ async fn run_async_session_shutdown(
             if *step == SessionLifecycleStep::FlushAutosave {
                 continue;
             }
-            run_studio_ui_step_with_timeout(studio, cx, ui.clone(), *step, clear_session_state).await?;
+            run_studio_ui_step_with_timeout(studio, cx, ui.clone(), *step, clear_session_state)
+                .await?;
         }
     }
 
@@ -318,7 +314,11 @@ async fn run_async_session_shutdown(
         let flush_result = cx
             .background_executor()
             .spawn(async move {
-                flush_autosave_blocking(path, project, SessionLifecycleStep::FlushAutosave.timeout())
+                flush_autosave_blocking(
+                    path,
+                    project,
+                    SessionLifecycleStep::FlushAutosave.timeout(),
+                )
             })
             .await;
         if let Err(message) = flush_result {
@@ -353,8 +353,10 @@ async fn run_async_session_shutdown(
         result
     });
     while !shutdown_done.load(Ordering::Acquire) {
-        if let Ok(guard) = progress_slot.lock() {
-            let (detail, bar) = guard.clone();
+        // Snapshot + drop the mutex guard before awaiting — never hold a lock
+        // across an await point.
+        let progress = progress_slot.lock().ok().as_deref().cloned();
+        if let Some((detail, bar)) = progress {
             touch_loading_progress(cx, &ui, &detail, bar).await;
         }
         cx.background_executor()
@@ -441,23 +443,21 @@ impl LoadingSessionWindow {
             return;
         }
         self.animation_active = true;
-        cx.spawn(async move |entity, cx| {
-            loop {
-                cx.background_executor().timer(STAGE_TICK).await;
-                let still_active = entity
-                    .update(cx, |window, cx| {
-                        if !window.animation_active {
-                            return false;
-                        }
-                        window.indeterminate_phase =
-                            (window.indeterminate_phase + 0.035).rem_euclid(1.0);
-                        cx.notify();
-                        true
-                    })
-                    .unwrap_or(false);
-                if !still_active {
-                    break;
-                }
+        cx.spawn(async move |entity, cx| loop {
+            cx.background_executor().timer(STAGE_TICK).await;
+            let still_active = entity
+                .update(cx, |window, cx| {
+                    if !window.animation_active {
+                        return false;
+                    }
+                    window.indeterminate_phase =
+                        (window.indeterminate_phase + 0.035).rem_euclid(1.0);
+                    cx.notify();
+                    true
+                })
+                .unwrap_or(false);
+            if !still_active {
+                break;
             }
         })
         .detach();
@@ -702,11 +702,7 @@ impl LoadingSessionWindow {
         cx.notify();
     }
 
-    fn finish_shutdown_failure(
-        &mut self,
-        error: SessionShutdownError,
-        cx: &mut Context<Self>,
-    ) {
+    fn finish_shutdown_failure(&mut self, error: SessionShutdownError, cx: &mut Context<Self>) {
         session_log!(
             "shutdown failed step={} error={}",
             error.step.label(),
@@ -888,7 +884,7 @@ pub(crate) fn touch_loading_session_progress<C: BorrowAppContext + AppContext>(
     progress: ProgressBarValue,
 ) {
     let detail = detail.to_string();
-    cx.update_global::<LoadingSessionGate, _>(|gate, cx| {
+    cx.update_default_global::<LoadingSessionGate, _>(|gate, cx| {
         if let Some(handle) = gate.window.as_ref() {
             let detail = detail.clone();
             let _ = handle.update(cx, |window, _win, cx| {
@@ -914,7 +910,7 @@ pub(crate) fn close_loading_session_window_for<C: BorrowAppContext + AppContext>
     session_log!("closing loading window");
     set_project_lifecycle_busy(false);
     crate::window_lifecycle::log_remove_window("LoadingSessionWindow", "session_load_complete");
-    cx.update_global::<LoadingSessionGate, _>(|gate, cx| {
+    cx.update_default_global::<LoadingSessionGate, _>(|gate, cx| {
         if let Some(handle) = gate.window.take() {
             let _ = handle.update(cx, |_view, window, _cx| window.remove_window());
         }
@@ -1322,7 +1318,7 @@ fn begin_project_session_load_inner(
     }
 }
 
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", target_os = "linux"))]
 fn open_loading_session_window(
     session_name: Option<String>,
     transaction: SessionLoadTransaction,
@@ -1350,12 +1346,12 @@ fn open_loading_session_window(
     .map_err(|e| e.to_string())
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(not(any(target_os = "windows", target_os = "linux")))]
 fn open_loading_session_window(
     _session_name: Option<String>,
     _transaction: SessionLoadTransaction,
     _owner_bounds: Option<Bounds<Pixels>>,
     _cx: &mut App,
 ) -> Result<WindowHandle<LoadingSessionWindow>, String> {
-    Err("native loading session window is only available on Windows".to_string())
+    Err("native loading session window is not available on this platform".to_string())
 }

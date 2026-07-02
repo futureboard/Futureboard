@@ -37,6 +37,10 @@ fn main() {
     );
     println!(
         "cargo:rerun-if-changed={}",
+        backend_root.join("src/plugin_editor_stub.cpp").display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
         backend_root
             .join("include/sphere_plugin_host_vst3.h")
             .display()
@@ -97,7 +101,10 @@ fn apply_vst3_platform_config(
     match target_os.as_str() {
         "windows" => {
             build.define("SMTG_OS_WINDOWS", "1");
+            build.define("FB_PLATFORM_WINDOWS", None);
             build
+                // Windows-only native editor window host (HWND). Must never be
+                // compiled on other platforms — see the guard at the top of the file.
                 .file(backend_root.join("src/plugin_editor_window.cpp"))
                 .file(sdk_root.join("public.sdk/source/vst/hosting/module_win32.cpp"));
             println!("cargo:rustc-link-lib=ole32");
@@ -107,8 +114,10 @@ fn apply_vst3_platform_config(
         }
         "macos" => {
             build.define("SMTG_OS_MACOS", "1");
+            build.define("FB_PLATFORM_MACOS", None);
             build
-                .file(backend_root.join("src/plugin_editor_window.cpp"))
+                // No native editor host on macOS yet — stub reports Unsupported.
+                .file(backend_root.join("src/plugin_editor_stub.cpp"))
                 .flag("-fobjc-arc")
                 .file(sdk_root.join("public.sdk/source/vst/hosting/module_mac.mm"));
             println!("cargo:rustc-link-lib=framework=CoreFoundation");
@@ -116,13 +125,18 @@ fn apply_vst3_platform_config(
         }
         "linux" => {
             build.define("SMTG_OS_LINUX", "1");
+            build.define("FB_PLATFORM_LINUX", None);
             build
-                .file(backend_root.join("src/plugin_editor_window.cpp"))
+                // No native editor host on Linux yet — stub reports Unsupported.
+                // plugin_editor_window.cpp is Windows-only (uses HWND) and must
+                // not be compiled here.
+                .file(backend_root.join("src/plugin_editor_stub.cpp"))
                 .file(sdk_root.join("public.sdk/source/vst/hosting/module_linux.cpp"));
             println!("cargo:rustc-link-lib=dl");
         }
         _ => {
-            build.file(backend_root.join("src/plugin_editor_window.cpp"));
+            build.define("FB_PLATFORM_UNKNOWN", None);
+            build.file(backend_root.join("src/plugin_editor_stub.cpp"));
         }
     }
 }

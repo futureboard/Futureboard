@@ -2033,43 +2033,6 @@ fn with_basic_mode(s: &AudioClipStretchState, mode: StretchBasicMode) -> AudioCl
     next
 }
 
-#[cfg(test)]
-mod stretch_inspector_tests {
-    use super::*;
-
-    #[test]
-    fn preserve_pitch_availability_matches_mode() {
-        assert!(!mode_supports_preserve_pitch(StretchMode::Resample));
-        assert!(mode_supports_preserve_pitch(StretchMode::Manual));
-        assert!(mode_supports_preserve_pitch(StretchMode::TempoSync));
-        assert!(mode_supports_preserve_pitch(StretchMode::Warp));
-    }
-
-    #[test]
-    fn switching_to_resample_clears_preserve_pitch() {
-        let state = AudioClipStretchState {
-            preserve_pitch: true,
-            ..AudioClipStretchState::default()
-        };
-        let next = with_mode(&state, StretchMode::Resample);
-        assert!(!next.preserve_pitch);
-    }
-
-    #[test]
-    fn basic_mode_maps_to_real_stretch_params() {
-        let state = AudioClipStretchState::default();
-        let repitch = with_basic_mode(&state, StretchBasicMode::RePitch);
-        assert_eq!(repitch.mode, StretchMode::Manual);
-        assert_eq!(repitch.algorithm, StretchAlgorithm::ResampleOnly);
-        assert!(!repitch.preserve_pitch);
-
-        let preserve = with_basic_mode(&state, StretchBasicMode::PreservePitch);
-        assert_eq!(preserve.mode, StretchMode::Manual);
-        assert_eq!(preserve.algorithm, StretchAlgorithm::PhaseVocoder);
-        assert!(preserve.preserve_pitch);
-    }
-}
-
 fn stretch_backend_summary(s: &AudioClipStretchState) -> &'static str {
     match stretch_basic_mode(s) {
         StretchBasicMode::Off => "Off",
@@ -2569,10 +2532,7 @@ fn stretch_section_body(
         .child(stretch_metric_row("Length", length_summary))
         .child(stretch_metric_row("Backend", backend))
         .children((stretch_enabled && !preserve_mode).then(|| {
-            inspector_hint_text(format!(
-                "Pitch follows speed. Extra pitch: {}",
-                format!("{:+.2} st", semi)
-            ))
+            inspector_hint_text(format!("Pitch follows speed. Extra pitch: {semi:+.2} st"))
         }))
         .children(
             (stretch_enabled && preserve_mode).then(|| {
@@ -3205,5 +3165,42 @@ pub fn clip_type_label(clip_type: &ClipType) -> &'static str {
     match clip_type {
         ClipType::Audio { .. } => "Audio",
         ClipType::Midi { .. } => "MIDI",
+    }
+}
+
+#[cfg(test)]
+mod stretch_inspector_tests {
+    use super::*;
+
+    #[test]
+    fn preserve_pitch_availability_matches_mode() {
+        assert!(!mode_supports_preserve_pitch(StretchMode::Resample));
+        assert!(mode_supports_preserve_pitch(StretchMode::Manual));
+        assert!(mode_supports_preserve_pitch(StretchMode::TempoSync));
+        assert!(mode_supports_preserve_pitch(StretchMode::Warp));
+    }
+
+    #[test]
+    fn switching_to_resample_clears_preserve_pitch() {
+        let state = AudioClipStretchState {
+            preserve_pitch: true,
+            ..AudioClipStretchState::default()
+        };
+        let next = with_mode(&state, StretchMode::Resample);
+        assert!(!next.preserve_pitch);
+    }
+
+    #[test]
+    fn basic_mode_maps_to_real_stretch_params() {
+        let state = AudioClipStretchState::default();
+        let repitch = with_basic_mode(&state, StretchBasicMode::RePitch);
+        assert_eq!(repitch.mode, StretchMode::Manual);
+        assert_eq!(repitch.algorithm, StretchAlgorithm::ResampleOnly);
+        assert!(!repitch.preserve_pitch);
+
+        let preserve = with_basic_mode(&state, StretchBasicMode::PreservePitch);
+        assert_eq!(preserve.mode, StretchMode::Manual);
+        assert_eq!(preserve.algorithm, StretchAlgorithm::PhaseVocoder);
+        assert!(preserve.preserve_pitch);
     }
 }

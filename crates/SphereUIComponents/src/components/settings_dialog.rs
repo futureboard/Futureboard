@@ -242,6 +242,23 @@ pub(crate) fn concise_driver_status(full: &str) -> String {
     }
 }
 
+/// Sanitize a persisted audio backend selection for display. A backend id
+/// that isn't valid on the current platform (e.g. a Windows-only driver type
+/// loaded from settings.json on Linux) must never show up as "selected" —
+/// it falls back to the first available option (`Auto`, except on Windows
+/// where the default is `WASAPI Shared`). The persisted value on disk is
+/// left untouched; this only affects what's rendered.
+pub(crate) fn sanitized_backend_label(driver_type: &str, available_backends: &[String]) -> String {
+    if available_backends.iter().any(|b| b == driver_type) {
+        driver_type.to_string()
+    } else {
+        available_backends
+            .first()
+            .cloned()
+            .unwrap_or_else(|| "Auto".to_string())
+    }
+}
+
 /// Full (untruncated) driver-status text for the Details panel / tooltip.
 fn driver_status_full(i18n: &I18n, latency: &SettingsAudioLatencySnapshot) -> String {
     if let Some(error) = latency
@@ -372,7 +389,7 @@ fn build_settings_content(
     input_test: &InputTestMeterState,
     available_inputs: &[String],
     available_outputs: &[String],
-    _available_backends: &[String],
+    available_backends: &[String],
     available_input_channels: &[(String, u32)],
     available_output_channels: &[(String, u32)],
 ) -> (Vec<gpui::AnyElement>, Vec<gpui::AnyElement>) {
@@ -386,37 +403,8 @@ fn build_settings_content(
         label.to_lowercase().contains(q) || keywords.iter().any(|k| k.to_lowercase().contains(q))
     };
 
-    let mut sidebar_items: Vec<gpui::AnyElement> = Vec::new();
-    let mut nav_index = 0usize;
-    for (group_key, tabs) in SettingsTab::nav_groups() {
-        let visible_tabs: Vec<SettingsTab> = tabs
-            .iter()
-            .copied()
-            .filter(|tab| tab_matches_search(*tab, query.as_str(), &is_match))
-            .collect();
-        if visible_tabs.is_empty() {
-            continue;
-        }
-        sidebar_items.push(settings_nav_group_header(i18n.tr(group_key)).into_any_element());
-        for tab in visible_tabs {
-            let active = state.active_tab == tab && query.is_empty();
-            let search_hit = !query.is_empty();
-            let cb = callbacks.on_select_tab.clone();
-            let idx = nav_index;
-            nav_index += 1;
-            sidebar_items.push(
-                settings_nav_item(
-                    ("settings-tab", idx),
-                    i18n.tr(tab.label_key()),
-                    tab.icon(),
-                    active,
-                    search_hit,
-                    move |window, cx| cb(&tab, window, cx),
-                )
-                .into_any_element(),
-            );
-        }
-    }
+    let sidebar_items =
+        build_settings_sidebar_items(state, callbacks, i18n, query.as_str(), &is_match);
 
     // Right Side Content Views Builder
     let mut sections = Vec::new();
@@ -448,48 +436,30 @@ fn build_settings_content(
                         on_toggle,
                     )
                 }))
-                .child(settings_daw_row(
-                    i18n.tr("settings.field.start-wizard"),
-                    div()
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap(px(8.0))
-                        .child({
-                            let val = schema.general.show_start_screen;
-                            let up = on_update.clone();
-                            fb_checkbox("show-start-screen", val, move |_, w, cx| {
-                                up(Arc::new(move |s| s.general.show_start_screen = !val), w, cx);
-                            })
-                        })
-                        .child(
-                            div()
-                                .text_size(px(10.0))
-                                .text_color(Colors::text_muted())
-                                .child(i18n.tr("settings.show-start-screen")),
-                        ),
-                ))
-                .child(settings_daw_row(
-                    i18n.tr("settings.field.update-check"),
-                    div()
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap(px(8.0))
-                        .child({
-                            let val = schema.general.check_updates;
-                            let up = on_update.clone();
-                            fb_checkbox("check-updates", val, move |_, w, cx| {
-                                up(Arc::new(move |s| s.general.check_updates = !val), w, cx);
-                            })
-                        })
-                        .child(
-                            div()
-                                .text_size(px(10.0))
-                                .text_color(Colors::text_muted())
-                                .child(i18n.tr("settings.check-updates")),
-                        ),
-                ))
+                .child(settings_daw_row(i18n.tr("settings.field.start-wizard"), {
+                    let val = schema.general.show_start_screen;
+                    let up = on_update.clone();
+                    settings_labeled_checkbox(
+                        "show-start-screen",
+                        val,
+                        i18n.tr("settings.show-start-screen"),
+                        move |_, w, cx| {
+                            up(Arc::new(move |s| s.general.show_start_screen = !val), w, cx);
+                        },
+                    )
+                }))
+                .child(settings_daw_row(i18n.tr("settings.field.update-check"), {
+                    let val = schema.general.check_updates;
+                    let up = on_update.clone();
+                    settings_labeled_checkbox(
+                        "check-updates",
+                        val,
+                        i18n.tr("settings.check-updates"),
+                        move |_, w, cx| {
+                            up(Arc::new(move |s| s.general.check_updates = !val), w, cx);
+                        },
+                    )
+                }))
                 .into_any_element(),
         );
     }
@@ -508,27 +478,18 @@ fn build_settings_content(
                     "settings.section.autosave-backup",
                     assets::ICON_FILE_PATH,
                 ))
-                .child(settings_daw_row(
-                    i18n.tr("settings.field.autosave"),
-                    div()
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap(px(8.0))
-                        .child({
-                            let val = schema.general.autosave.enabled;
-                            let up = on_update.clone();
-                            fb_checkbox("autosave-enabled", val, move |_, w, cx| {
-                                up(Arc::new(move |s| s.general.autosave.enabled = !val), w, cx);
-                            })
-                        })
-                        .child(
-                            div()
-                                .text_size(px(10.0))
-                                .text_color(Colors::text_muted())
-                                .child(i18n.tr("settings.autosave.enabled")),
-                        ),
-                ))
+                .child(settings_daw_row(i18n.tr("settings.field.autosave"), {
+                    let val = schema.general.autosave.enabled;
+                    let up = on_update.clone();
+                    settings_labeled_checkbox(
+                        "autosave-enabled",
+                        val,
+                        i18n.tr("settings.autosave.enabled"),
+                        move |_, w, cx| {
+                            up(Arc::new(move |s| s.general.autosave.enabled = !val), w, cx);
+                        },
+                    )
+                }))
                 .child(settings_daw_row(i18n.tr("settings.field.interval"), {
                     let open_combo = callbacks.open_hardware_combo;
                     let on_toggle = callbacks.on_toggle_hardware_combo.clone();
@@ -562,44 +523,32 @@ fn build_settings_content(
                     "settings.section.notifications",
                     assets::ICON_FILE_PATH,
                 ))
-                .child(settings_daw_row(
-                    i18n.tr("settings.field.warnings"),
-                    div()
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap(px(8.0))
-                        .child({
-                            let val = schema.general.notifications.enable_warnings;
-                            let up = on_update.clone();
-                            fb_checkbox("notif-warnings-enabled", val, move |_, w, cx| {
-                                up(
-                                    Arc::new(move |s| {
-                                        s.general.notifications.enable_warnings = !val
-                                    }),
-                                    w,
-                                    cx,
-                                );
-                            })
-                        })
-                        .child(
-                            div()
-                                .text_size(px(10.0))
-                                .text_color(Colors::text_muted())
-                                .child(i18n.tr("settings.notifications.warnings")),
-                        ),
-                ))
+                .child(settings_daw_row(i18n.tr("settings.field.warnings"), {
+                    let val = schema.general.notifications.enable_warnings;
+                    let up = on_update.clone();
+                    settings_labeled_checkbox(
+                        "notif-warnings-enabled",
+                        val,
+                        i18n.tr("settings.notifications.warnings"),
+                        move |_, w, cx| {
+                            up(
+                                Arc::new(move |s| s.general.notifications.enable_warnings = !val),
+                                w,
+                                cx,
+                            );
+                        },
+                    )
+                }))
                 .child(settings_daw_row(
                     i18n.tr("settings.field.system-notifications"),
-                    div()
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap(px(8.0))
-                        .child({
-                            let val = schema.general.notifications.enable_system_notifications;
-                            let up = on_update.clone();
-                            fb_checkbox("notif-system-enabled", val, move |_, w, cx| {
+                    {
+                        let val = schema.general.notifications.enable_system_notifications;
+                        let up = on_update.clone();
+                        settings_labeled_checkbox(
+                            "notif-system-enabled",
+                            val,
+                            i18n.tr("settings.notifications.system"),
+                            move |_, w, cx| {
                                 up(
                                     Arc::new(move |s| {
                                         s.general.notifications.enable_system_notifications = !val
@@ -607,14 +556,9 @@ fn build_settings_content(
                                     w,
                                     cx,
                                 );
-                            })
-                        })
-                        .child(
-                            div()
-                                .text_size(px(10.0))
-                                .text_color(Colors::text_muted())
-                                .child(i18n.tr("settings.notifications.system")),
-                        ),
+                            },
+                        )
+                    },
                 ))
                 .into_any_element(),
         );
@@ -707,10 +651,12 @@ fn build_settings_content(
         let open_combo = callbacks.open_hardware_combo;
         let on_toggle = callbacks.on_toggle_hardware_combo.clone();
 
+        let driver_label =
+            sanitized_backend_label(&schema.hardware.audio.driver_type, available_backends);
         let driver_select = hardware_select(
             HardwareCombo::AudioDriver,
             "settings-audio-driver",
-            &schema.hardware.audio.driver_type,
+            &driver_label,
             open_combo,
             on_toggle.clone(),
         );
@@ -775,9 +721,22 @@ fn build_settings_content(
         );
 
         // Input / Output channel routes for the currently selected devices.
+        // When no device is explicitly chosen (device_in/out empty — "Default"),
+        // fall back to the first scanned device's channel count instead of 0,
+        // so a real scan result isn't reported as "No channels reported".
         let in_count = available_input_channels
             .iter()
             .find(|(name, _)| *name == schema.hardware.audio.device_in)
+            .or_else(|| {
+                schema
+                    .hardware
+                    .audio
+                    .device_in
+                    .trim()
+                    .is_empty()
+                    .then(|| available_input_channels.first())
+                    .flatten()
+            })
             .map(|(_, count)| *count)
             .unwrap_or(0);
         sections.push(audio_channel_section(
@@ -788,6 +747,16 @@ fn build_settings_content(
         let out_count = available_output_channels
             .iter()
             .find(|(name, _)| *name == schema.hardware.audio.device_out)
+            .or_else(|| {
+                schema
+                    .hardware
+                    .audio
+                    .device_out
+                    .trim()
+                    .is_empty()
+                    .then(|| available_output_channels.first())
+                    .flatten()
+            })
             .map(|(_, count)| *count)
             .unwrap_or(0);
         sections.push(audio_channel_section(

@@ -10,6 +10,13 @@ pub use windows_process::PluginHostJob;
 pub struct PluginHostJob;
 
 #[cfg(not(windows))]
+impl Default for PluginHostJob {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(not(windows))]
 impl PluginHostJob {
     pub fn new() -> Self {
         Self

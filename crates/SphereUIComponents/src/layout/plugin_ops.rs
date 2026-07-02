@@ -1055,9 +1055,7 @@ impl StudioLayout {
                 eprintln!(
                     "[plugin-editor-window] open bridge editor FAILED instance={instance_id} err={e}"
                 );
-                eprintln!(
-                    "[editor-open] FAILED stage=ipc_send instance={instance_id} reason={e}"
-                );
+                eprintln!("[editor-open] FAILED stage=ipc_send instance={instance_id} reason={e}");
                 // Never fail silently: surface the IPC failure on the editor shell
                 // so the user sees the failing stage instead of a dead window.
                 shell.set_status(
@@ -2376,7 +2374,8 @@ impl StudioLayout {
                     )
                 })
         };
-        let Some((plugin_id_out, plugin_path, plugin_format, vendor, display_name)) = descriptor else {
+        let Some((plugin_id_out, plugin_path, plugin_format, vendor, display_name)) = descriptor
+        else {
             eprintln!("[PluginAdd] plugin instance failed to create reason=plugin_not_in_vst3_registry id={plugin_id}");
             self.plugin_picker = PluginPickerState::closed();
             cx.notify();

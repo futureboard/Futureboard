@@ -2927,9 +2927,7 @@ pub(crate) fn sample_rate_mismatch(requested: u32, active: u32) -> Option<(u32, 
 /// visible. Exclusive-mode mismatch means an implicit fallback happened and is
 /// surfaced as a warning string the caller can store in `last_daux_error`.
 fn log_sample_rate_decision(requested: u32, active: u32, backend: &BackendKind) -> Option<String> {
-    let Some((req, act)) = sample_rate_mismatch(requested, active) else {
-        return None;
-    };
+    let (req, act) = sample_rate_mismatch(requested, active)?;
     let mode = sample_rate_mode_label(backend);
     eprintln!("[audio-device] requested_sample_rate={req} active_sample_rate={act} mode={mode}");
     eprintln!("[audio-device] sample rate mismatch: using active device rate for timing");
@@ -3727,7 +3725,7 @@ where
                 // ── Dropout watchdog: publish timing + classify this block ────
                 shared.output_cb_count.fetch_add(1, Ordering::Relaxed);
                 let elapsed_us = cb_started.elapsed().as_micros().min(u32::MAX as u128) as u32;
-                let block_frames = if ch > 0 { data.len() / ch } else { 0 };
+                let block_frames = data.len().checked_div(ch).unwrap_or(0);
                 crate::engine::record_output_callback_timing(
                     &shared,
                     elapsed_us,
@@ -3845,7 +3843,10 @@ mod sample_rate_mismatch_tests {
 
     #[test]
     fn mode_labels_are_stable() {
-        assert_eq!(sample_rate_mode_label(&BackendKind::WasapiShared), "WASAPI_SHARED");
+        assert_eq!(
+            sample_rate_mode_label(&BackendKind::WasapiShared),
+            "WASAPI_SHARED"
+        );
         assert_eq!(
             sample_rate_mode_label(&BackendKind::WasapiExclusive),
             "WASAPI_EXCLUSIVE"

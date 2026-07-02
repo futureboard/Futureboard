@@ -1,6 +1,8 @@
 use std::{path::PathBuf, sync::Arc};
 
-use crate::platform::{ELEVATED_WARNING_GUI, is_process_elevated, show_startup_error};
+#[cfg(target_os = "windows")]
+use crate::platform::show_startup_error;
+use crate::platform::{ELEVATED_WARNING_GUI, is_process_elevated};
 use apak::{
     InstallOptions, InstallRoots, default_secret_file, ensure_secret_file, install_package,
     read_package_info,
@@ -23,7 +25,7 @@ const WINDOW_H: f32 = 300.0;
 pub fn run(initial_package: Option<PathBuf>) {
     application()
         .with_assets(EmbeddedAssets::new())
-        .run(move |cx| setup(cx, initial_package.clone()));
+        .run(move |cx| setup(cx, initial_package));
 }
 
 fn setup(cx: &mut App, initial_package: Option<PathBuf>) {
@@ -268,7 +270,7 @@ impl ApakInstallerWindow {
 
 impl Render for ApakInstallerWindow {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let target = cx.entity().clone();
+        let target = cx.entity();
         let can_install = matches!(self.status, InstallStatus::Ready | InstallStatus::Error)
             && self.summary.is_some();
         let progress = if self.status == InstallStatus::Installing {
@@ -365,7 +367,7 @@ impl Render for ApakInstallerWindow {
                                         FbButtonKind::Primary,
                                         can_install,
                                         {
-                                            let target = target.clone();
+                                            let target = target;
                                             move |_, _window, cx| {
                                                 let _ = target.update(cx, |this, cx| {
                                                     this.install_selected(cx);

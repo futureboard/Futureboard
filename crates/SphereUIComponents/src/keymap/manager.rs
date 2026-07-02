@@ -169,7 +169,7 @@ impl KeymapManager {
             .unwrap_or_else(|_| KeymapProfile::default());
         profile.name = self.active_profile_label().to_string();
         profile.extends = Some(self.active_profile_id.clone());
-        profile.bindings = self.user_overrides.bindings.iter().cloned().collect();
+        profile.bindings = self.user_overrides.bindings.to_vec();
         profile
     }
 

@@ -1435,7 +1435,10 @@ pub(crate) fn apply_external_bridge_insert_block(
     if bridge_debug_enabled() && got > 0 {
         static MULTIOUT_PEAK_LOG: std::sync::atomic::AtomicU64 =
             std::sync::atomic::AtomicU64::new(0);
-        if MULTIOUT_PEAK_LOG.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % 256 == 0 {
+        if MULTIOUT_PEAK_LOG
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            .is_multiple_of(256)
+        {
             let mut ch_peaks = [0.0f32; 32];
             for (i, peak) in ch_peaks.iter_mut().enumerate() {
                 *peak = sink.output_channel_peak((i as u8) + 1);

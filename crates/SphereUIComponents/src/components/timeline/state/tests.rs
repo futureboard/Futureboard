@@ -38,6 +38,7 @@ mod instrument_lifecycle_tests {
             class_id.to_string(),
             Some(std::path::PathBuf::from(path)),
             InsertPluginFormat::Vst3,
+            None,
             class_id.to_string(),
         );
         slot
@@ -1167,6 +1168,47 @@ mod midi_edit_tests {
     }
 
     #[test]
+    fn new_midi_note_defaults_to_channel_one() {
+        let (mut state, clip_id) = state_with_midi_clip();
+        let id = state.add_midi_note(&clip_id, 60, 0.0, 1.0, 100).unwrap();
+        assert_eq!(note(&state, &clip_id, id).channel.ui(), 1);
+    }
+
+    #[test]
+    fn set_midi_notes_channel_updates_selected_only() {
+        let (mut state, clip_id) = state_with_midi_clip();
+        let a = state.add_midi_note(&clip_id, 60, 0.0, 1.0, 100).unwrap();
+        let b = state.add_midi_note(&clip_id, 64, 1.0, 1.0, 100).unwrap();
+
+        let changed = state.set_midi_notes_channel(&clip_id, &[a], MidiChannel::from_ui(5));
+        assert_eq!(changed, 1);
+        assert_eq!(note(&state, &clip_id, a).channel.ui(), 5);
+        assert_eq!(note(&state, &clip_id, b).channel.ui(), 1, "b untouched");
+
+        // No-op when already on the target channel.
+        let changed = state.set_midi_notes_channel(&clip_id, &[a], MidiChannel::from_ui(5));
+        assert_eq!(changed, 0);
+    }
+
+    #[test]
+    fn nudge_midi_notes_channel_clamps_into_range() {
+        let (mut state, clip_id) = state_with_midi_clip();
+        let id = state.add_midi_note(&clip_id, 60, 0.0, 1.0, 100).unwrap();
+        state.set_midi_notes_channel(&clip_id, &[id], MidiChannel::from_ui(16));
+
+        let changed = state.nudge_midi_notes_channel(&clip_id, &[id], 5);
+        assert_eq!(changed, 0, "already clamped at 16, no-op");
+        assert_eq!(note(&state, &clip_id, id).channel.ui(), 16);
+
+        state.nudge_midi_notes_channel(&clip_id, &[id], -20);
+        assert_eq!(
+            note(&state, &clip_id, id).channel.ui(),
+            1,
+            "clamps down to 1"
+        );
+    }
+
+    #[test]
     fn split_midi_note_roundtrips() {
         let (mut state, clip_id) = state_with_midi_clip();
         let id = state.add_midi_note(&clip_id, 60, 0.0, 2.0, 100).unwrap();
@@ -1248,6 +1290,7 @@ mod fx_reorder_tests {
                 name.to_string(),
                 Some(std::path::PathBuf::from(format!("C:/p/{name}.vst3"))),
                 InsertPluginFormat::Vst3,
+                None,
                 name.to_string(),
             );
             ids.push(slot);

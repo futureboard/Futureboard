@@ -217,7 +217,14 @@ impl Default for FileBrowserState {
             filter: String::new(),
             preview_enabled: false,
             waveform_inflight: HashSet::new(),
-            collapsed_groups: HashSet::new(),
+            collapsed_groups: {
+                // "Filesystem" (raw drives / `/` / mounted volumes) is advanced,
+                // beginner-unfriendly territory — start collapsed. Every other
+                // group defaults to expanded.
+                let mut collapsed = HashSet::new();
+                collapsed.insert("group:filesystem".to_string());
+                collapsed
+            },
             expanded_virtual: HashSet::new(),
             visible_nodes: Vec::new(),
         };
@@ -480,7 +487,58 @@ impl FileBrowserState {
                     &mut nodes,
                 );
             }
-            // Local drives / mounted volumes.
+            // Friendly, platform-provided user folders (Home/Documents/Desktop/
+            // Downloads/Music) — the normal beginner-facing entries. Raw
+            // filesystem roots (drive letters, `/`, mounted volumes) live in the
+            // separate "Filesystem" group below instead of being mixed in here.
+            if let Some(p) = dirs::home_dir() {
+                self.push_root(
+                    "places:home",
+                    "Home",
+                    &p,
+                    BrowserIcon::UserLibrary,
+                    &mut nodes,
+                );
+            }
+            if let Some(p) = dirs::document_dir() {
+                self.push_root(
+                    "places:documents",
+                    "Documents",
+                    &p,
+                    BrowserIcon::Documents,
+                    &mut nodes,
+                );
+            }
+            if let Some(p) = dirs::desktop_dir() {
+                self.push_root(
+                    "places:desktop",
+                    "Desktop",
+                    &p,
+                    BrowserIcon::Desktop,
+                    &mut nodes,
+                );
+            }
+            if let Some(p) = dirs::download_dir() {
+                self.push_root(
+                    "places:downloads",
+                    "Downloads",
+                    &p,
+                    BrowserIcon::Downloads,
+                    &mut nodes,
+                );
+            }
+            if let Some(p) = dirs::audio_dir() {
+                self.push_root("places:music", "Music", &p, BrowserIcon::Music, &mut nodes);
+            }
+        }
+
+        // ── Filesystem (advanced) ────────────────────────────────────────
+        // Raw drive letters / `/` / mounted volumes. Collapsed by default so
+        // beginners see the friendly Places list first; full root access
+        // remains one click away.
+        if !self.root_drives.is_empty()
+            && self.push_group_header("group:filesystem", "Filesystem", &mut nodes)
+        {
             let drives = self.root_drives.clone();
             for drive in &drives {
                 if let Some(drive_path) = drive.root_path.as_ref() {
@@ -918,6 +976,10 @@ fn enumerate_filesystem_roots() -> Vec<PathBuf> {
     drives
 }
 
+// Note: the user's home directory is surfaced separately as the friendly
+// "Home" place (see `update_visible_nodes`), so it is intentionally not
+// duplicated in the raw root list below.
+
 #[cfg(target_os = "macos")]
 fn enumerate_filesystem_roots() -> Vec<PathBuf> {
     let mut roots = vec![PathBuf::from("/")];
@@ -929,9 +991,6 @@ fn enumerate_filesystem_roots() -> Vec<PathBuf> {
                 roots.push(p);
             }
         }
-    }
-    if let Some(home) = dirs::home_dir() {
-        roots.push(home);
     }
     roots
 }
@@ -948,9 +1007,6 @@ fn enumerate_filesystem_roots() -> Vec<PathBuf> {
                 }
             }
         }
-    }
-    if let Some(home) = dirs::home_dir() {
-        roots.push(home);
     }
     roots
 }

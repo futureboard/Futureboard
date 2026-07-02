@@ -124,6 +124,26 @@ pub fn fb_checkbox(
         })
 }
 
+pub(crate) fn settings_labeled_checkbox(
+    id: impl Into<gpui::ElementId>,
+    checked: bool,
+    label: String,
+    on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
+) -> impl IntoElement {
+    div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(8.0))
+        .child(fb_checkbox(id, checked, on_click))
+        .child(
+            div()
+                .text_size(px(10.0))
+                .text_color(Colors::text_muted())
+                .child(label),
+        )
+}
+
 pub(crate) fn settings_header(title: &'static str, _icon_path: &'static str) -> impl IntoElement {
     settings_section_title(title)
 }
@@ -408,6 +428,47 @@ pub(crate) fn performance_section(
                 }
             }),
         ))
+}
+
+pub(crate) fn build_settings_sidebar_items(
+    state: &SettingsDialogState,
+    callbacks: &SettingsDialogCallbacks,
+    i18n: I18n,
+    query: &str,
+    is_match: &dyn Fn(&str, &[&str]) -> bool,
+) -> Vec<gpui::AnyElement> {
+    let mut sidebar_items = Vec::new();
+    let mut nav_index = 0usize;
+    for (group_key, tabs) in SettingsTab::nav_groups() {
+        let visible_tabs: Vec<SettingsTab> = tabs
+            .iter()
+            .copied()
+            .filter(|tab| tab_matches_search(*tab, query, is_match))
+            .collect();
+        if visible_tabs.is_empty() {
+            continue;
+        }
+        sidebar_items.push(settings_nav_group_header(i18n.tr(group_key)).into_any_element());
+        for tab in visible_tabs {
+            let active = state.active_tab == tab && query.is_empty();
+            let search_hit = !query.is_empty();
+            let cb = callbacks.on_select_tab.clone();
+            let idx = nav_index;
+            nav_index += 1;
+            sidebar_items.push(
+                settings_nav_item(
+                    ("settings-tab", idx),
+                    i18n.tr(tab.label_key()),
+                    tab.icon(),
+                    active,
+                    search_hit,
+                    move |window, cx| cb(&tab, window, cx),
+                )
+                .into_any_element(),
+            );
+        }
+    }
+    sidebar_items
 }
 
 pub(crate) fn tab_matches_search(

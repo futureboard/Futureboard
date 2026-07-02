@@ -988,11 +988,10 @@ fn load_rauf(path: &Path) -> Result<AudioFileBuffer, String> {
     // gigabytes via the `vec![0u8; byte_len]` below.
     let file_size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
     let bytes_per_frame = (channels as u64).saturating_mul(4);
-    let frames = if bytes_per_frame == 0 {
-        0
-    } else {
-        frames.min(file_size.saturating_sub(header.data_offset) / bytes_per_frame)
-    };
+    let frames = file_size
+        .saturating_sub(header.data_offset)
+        .checked_div(bytes_per_frame)
+        .map_or(0, |max_frames| frames.min(max_frames));
     let sample_count = (frames as usize).saturating_mul(channels);
     let mut file = File::open(path).map_err(|e| format!("open failed: {e}"))?;
     file.seek(SeekFrom::Start(header.data_offset))
@@ -1051,7 +1050,7 @@ fn read_wav_header(file: &mut File) -> Result<(WavFmt, u64, u64), String> {
                 // `len` is an untrusted 32-bit header field. Validate it against a
                 // sane ceiling *before* allocating so a crafted file can't drive a
                 // multi-gigabyte `vec![0u8; len]` (OOM/abort on import/probe).
-                if len < 16 || len > MAX_WAV_FMT_CHUNK_BYTES {
+                if !(16..=MAX_WAV_FMT_CHUNK_BYTES).contains(&len) {
                     return Err(format!("invalid fmt chunk length: {len}"));
                 }
                 let mut buf = vec![0u8; len as usize];

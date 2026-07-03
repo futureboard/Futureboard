@@ -157,6 +157,7 @@ impl TimelineState {
                         MidiNoteState::new(60, 7.0, 1.0, 80),
                     ],
                     controller_lanes: Vec::new(),
+                    sysex_events: Vec::new(),
                 },
                 muted: false,
                 audio_import: AudioImportState::default(),

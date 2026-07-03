@@ -698,6 +698,7 @@ fn build_engine_project_snapshot_inner(
                 let ClipType::Midi {
                     notes,
                     controller_lanes,
+                    ..
                 } = &clip.clip_type
                 else {
                     return None;

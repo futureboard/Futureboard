@@ -1,6 +1,20 @@
 use super::*;
 
 #[derive(Debug, Clone, PartialEq)]
+pub enum MidiSysExKind {
+    Normal,
+    Escaped,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct MidiSysExEvent {
+    pub kind: MidiSysExKind,
+    pub tick: u64,
+    pub beat: f32,
+    pub data: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub enum ClipType {
     Audio {
         file_id: String,
@@ -12,6 +26,11 @@ pub enum ClipType {
         notes: Vec<MidiNoteState>,
         /// MIDI controller (CC / pitch-bend / pressure) lanes for this clip.
         controller_lanes: Vec<MidiControllerLane>,
+        /// Imported SysEx payloads preserved for future playback/export support.
+        ///
+        /// TODO(midi-export/playback): carry these through the engine/export
+        /// snapshot once Futureboard has an explicit SysEx scheduling path.
+        sysex_events: Vec<MidiSysExEvent>,
     },
 }
 
@@ -321,6 +340,7 @@ impl TimelineState {
             ClipType::Midi {
                 notes,
                 controller_lanes,
+                sysex_events,
             } => ClipType::Midi {
                 notes: notes
                     .iter()
@@ -349,6 +369,7 @@ impl TimelineState {
                         collapsed: lane.collapsed,
                     })
                     .collect(),
+                sysex_events: sysex_events.clone(),
             },
         };
         cloned

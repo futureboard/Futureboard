@@ -264,6 +264,127 @@ impl Render for PianoRoll {
 }
 
 impl PianoRoll {
+    fn render_select_menu(
+        &self,
+        menu: PianoSelectMenu,
+        id: &'static str,
+        label: String,
+        options: Vec<(String, bool, gpui::AnyElement)>,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let open = self.open_select_menu == Some(menu);
+        let mut dropdown: Option<gpui::AnyElement> = None;
+        if open {
+            let mut panel = div()
+                .absolute()
+                .top(px(26.0))
+                .left_0()
+                .w(px(148.0))
+                .flex()
+                .flex_col()
+                .p(px(3.0))
+                .gap(px(1.0))
+                .rounded(px(6.0))
+                .bg(Colors::surface_card())
+                .border(px(1.0))
+                .border_color(Colors::border_subtle())
+                .shadow_lg()
+                .occlude()
+                .on_mouse_down(MouseButton::Left, |_, _window, cx| cx.stop_propagation());
+
+            for (i, (_text, selected, action)) in options.into_iter().enumerate() {
+                panel = panel.child(
+                    div()
+                        .id((id, i))
+                        .flex()
+                        .items_center()
+                        .h(px(20.0))
+                        .px(px(7.0))
+                        .rounded(px(4.0))
+                        .text_size(px(10.0))
+                        .text_color(if selected {
+                            Colors::accent_primary()
+                        } else {
+                            Colors::text_secondary()
+                        })
+                        .hover(|s| s.bg(Colors::surface_hover()))
+                        .cursor(gpui::CursorStyle::PointingHand)
+                        .child(action),
+                );
+            }
+            dropdown = Some(
+                panel
+                    .with_animation(
+                        "pr-select-menu-open",
+                        Animation::new(Duration::from_millis(90))
+                            .with_easing(pulsating_between(0.9, 1.0)),
+                        |this, delta| this.opacity(delta),
+                    )
+                    .into_any_element(),
+            );
+        }
+
+        div()
+            .relative()
+            .flex()
+            .items_center()
+            .occlude()
+            .child(
+                div()
+                    .id(id)
+                    .flex()
+                    .items_center()
+                    .h(px(22.0))
+                    .min_w(px(72.0))
+                    .pl(px(7.0))
+                    .pr(px(5.0))
+                    .gap(px(6.0))
+                    .rounded(px(4.0))
+                    .text_size(px(10.0))
+                    .text_color(if open {
+                        Colors::text_primary()
+                    } else {
+                        Colors::text_secondary()
+                    })
+                    .bg(if open {
+                        Colors::surface_hover()
+                    } else {
+                        Colors::with_alpha(Colors::text_primary(), 0.0)
+                    })
+                    .border(px(1.0))
+                    .border_color(if open {
+                        Colors::border_subtle()
+                    } else {
+                        Colors::with_alpha(Colors::text_primary(), 0.0)
+                    })
+                    .hover(|s| s.bg(Colors::surface_hover()))
+                    .cursor(gpui::CursorStyle::PointingHand)
+                    .on_click(cx.listener(move |this, _ev, _w, cx| {
+                        cx.stop_propagation();
+                        this.open_select_menu = if this.open_select_menu == Some(menu) {
+                            None
+                        } else {
+                            Some(menu)
+                        };
+                        cx.notify();
+                    }))
+                    .child(div().flex_1().truncate().child(label))
+                    .child(
+                        svg()
+                            .path(assets::ICON_CHEVRON_DOWN_PATH)
+                            .w(px(10.0))
+                            .h(px(10.0))
+                            .flex_shrink_0()
+                            .text_color(if open {
+                                Colors::text_secondary()
+                            } else {
+                                Colors::text_faint()
+                            }),
+                    ),
+            )
+            .when_some(dropdown, |root, panel| root.child(panel))
+    }
+
     /// Compact selector for the single controller lane: a button showing the
     /// active lane that opens a dropdown of choices (Velocity / common CCs /
     /// pitch-bend / pressure / custom CC), plus a collapse toggle. Alt+wheel on
@@ -272,11 +393,11 @@ impl PianoRoll {
     pub(super) fn render_lane_selector(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let current = self.current_lane();
         let label = format!("Lane: {}", self.lane_name());
-        let open = self.lane_menu_open;
+        let open = self.open_select_menu == Some(PianoSelectMenu::Lane);
         let visible = self.lane_visible;
         let custom = self.custom_cc;
 
-        let mut dropdown: Option<gpui::Div> = None;
+        let mut dropdown: Option<gpui::AnyElement> = None;
         if open {
             let mut panel = div()
                 .absolute()
@@ -409,7 +530,16 @@ impl PianoRoll {
                             .child("+"),
                     ),
             );
-            dropdown = Some(panel);
+            dropdown = Some(
+                panel
+                    .with_animation(
+                        "pr-lane-menu-open",
+                        Animation::new(Duration::from_millis(90))
+                            .with_easing(pulsating_between(0.92, 1.0)),
+                        |this, delta| this.opacity(delta),
+                    )
+                    .into_any_element(),
+            );
         }
 
         div()
@@ -451,7 +581,12 @@ impl PianoRoll {
                     .cursor(gpui::CursorStyle::PointingHand)
                     .on_click(cx.listener(|this, _ev, _w, cx| {
                         cx.stop_propagation();
-                        this.lane_menu_open = !this.lane_menu_open;
+                        this.open_select_menu =
+                            if this.open_select_menu == Some(PianoSelectMenu::Lane) {
+                                None
+                            } else {
+                                Some(PianoSelectMenu::Lane)
+                            };
                         cx.notify();
                     }))
                     // Alt + mouse wheel cycles lanes (Part 7 optional shortcut).
@@ -488,9 +623,7 @@ impl PianoRoll {
                 !visible,
                 cx.listener(|this, _ev, _w, cx| this.toggle_lane_visible(cx)),
             ))
-            .when_some(dropdown, |root, panel| {
-                root.child(deferred(panel).with_priority(LANE_MENU_PRIORITY))
-            })
+            .when_some(dropdown, |root, panel| root.child(panel))
     }
 
     pub(super) fn render_toolbar(
@@ -512,6 +645,78 @@ impl PianoRoll {
         let snap_on = self.snap_on;
         let grid_label = format!("Grid: {}", self.grid_res.label());
         let status = self.toolbar_status(note_count, sel_count);
+        let grid_options = GridRes::ALL
+            .iter()
+            .enumerate()
+            .map(|(idx, res)| {
+                let res = *res;
+                (
+                    res.label().to_string(),
+                    res == self.grid_res,
+                    div()
+                        .id(("pr-grid-choice", idx))
+                        .size_full()
+                        .flex()
+                        .items_center()
+                        .child(res.label().to_string())
+                        .on_click(cx.listener(move |this, _ev, _w, cx| {
+                            cx.stop_propagation();
+                            this.grid_res = res;
+                            this.open_select_menu = None;
+                            cx.notify();
+                        }))
+                        .into_any_element(),
+                )
+            })
+            .collect();
+        let root_options = ScaleRoot::ALL
+            .iter()
+            .enumerate()
+            .map(|(idx, root)| {
+                let root = *root;
+                (
+                    root.label().to_string(),
+                    root == self.pitch_ctx.scale.root,
+                    div()
+                        .id(("pr-root-choice", idx))
+                        .size_full()
+                        .flex()
+                        .items_center()
+                        .child(root.label())
+                        .on_click(cx.listener(move |this, _ev, _w, cx| {
+                            cx.stop_propagation();
+                            this.pitch_ctx.scale.root = root;
+                            this.open_select_menu = None;
+                            cx.notify();
+                        }))
+                        .into_any_element(),
+                )
+            })
+            .collect();
+        let scale_options = ScaleKind::ALL
+            .iter()
+            .enumerate()
+            .map(|(idx, kind)| {
+                let kind = *kind;
+                (
+                    kind.label().to_string(),
+                    kind == self.pitch_ctx.scale.kind,
+                    div()
+                        .id(("pr-scale-choice", idx))
+                        .size_full()
+                        .flex()
+                        .items_center()
+                        .child(kind.label())
+                        .on_click(cx.listener(move |this, _ev, _w, cx| {
+                            cx.stop_propagation();
+                            this.pitch_ctx.scale.kind = kind;
+                            this.open_select_menu = None;
+                            cx.notify();
+                        }))
+                        .into_any_element(),
+                )
+            })
+            .collect();
 
         div()
             .flex()
@@ -587,42 +792,37 @@ impl PianoRoll {
                             cx.notify();
                         }),
                     ))
-                    .child(tool_btn(
-                        "pr-grid",
-                        &grid_label,
-                        false,
-                        cx.listener(|this, _, _w, cx| {
-                            this.grid_res = this.grid_res.cycle();
-                            cx.notify();
-                        }),
+                    .child(self.render_select_menu(
+                        PianoSelectMenu::Grid,
+                        "pr-grid-select",
+                        grid_label,
+                        grid_options,
+                        cx,
                     )),
             )
             .child(
                 toolbar_group("Scale")
-                    .child(tool_btn(
+                    .child(self.render_select_menu(
+                        PianoSelectMenu::ScaleRoot,
                         "pr-scale-root",
-                        self.pitch_ctx.scale.root.label(),
-                        false,
-                        cx.listener(|this, _, _w, cx| {
-                            this.pitch_ctx.scale.root = this.pitch_ctx.scale.root.cycle();
-                            cx.notify();
-                        }),
+                        self.pitch_ctx.scale.root.label().to_string(),
+                        root_options,
+                        cx,
                     ))
-                    .child(tool_btn(
+                    .child(self.render_select_menu(
+                        PianoSelectMenu::ScaleKind,
                         "pr-scale-kind",
-                        self.pitch_ctx.scale.kind.label(),
-                        false,
-                        cx.listener(|this, _, _w, cx| {
-                            this.pitch_ctx.scale.kind = this.pitch_ctx.scale.kind.cycle();
-                            cx.notify();
-                        }),
+                        self.pitch_ctx.scale.kind.label().to_string(),
+                        scale_options,
+                        cx,
                     ))
                     .child(tool_btn(
                         "pr-scale-constrain",
-                        "Constrain",
+                        "Lock",
                         self.pitch_ctx.constrain,
                         cx.listener(|this, _, _w, cx| {
                             this.pitch_ctx.constrain = !this.pitch_ctx.constrain;
+                            this.open_select_menu = None;
                             cx.notify();
                         }),
                     ))

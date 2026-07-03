@@ -470,6 +470,7 @@ impl StudioLayout {
                     clip_type: ClipType::Midi {
                         notes: result.notes,
                         controller_lanes: Vec::<MidiControllerLane>::new(),
+                        sysex_events: Vec::new(),
                     },
                     muted: false,
                     audio_import: AudioImportState::default(),

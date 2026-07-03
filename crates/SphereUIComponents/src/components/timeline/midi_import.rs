@@ -8,7 +8,30 @@ use super::timeline_state::{
 pub struct ImportedMidiClip {
     pub notes: Vec<MidiNoteState>,
     pub controller_lanes: Vec<MidiControllerLane>,
+    pub sysex_events: Vec<ImportedSysExEvent>,
+    pub markers: Vec<ImportedMidiMarker>,
     pub duration_beats: f32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ImportedSysExKind {
+    Normal,
+    Escaped,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ImportedSysExEvent {
+    pub kind: ImportedSysExKind,
+    pub absolute_tick: u64,
+    pub beat: f32,
+    pub data: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ImportedMidiMarker {
+    pub text: String,
+    pub absolute_tick: u64,
+    pub beat: f32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -55,6 +78,8 @@ pub fn parse_smf_notes(data: &[u8]) -> Result<ImportedMidiClip, MidiImportError>
 
     let mut notes = Vec::new();
     let mut controller_lanes = Vec::new();
+    let mut sysex_events = Vec::new();
+    let mut markers = Vec::new();
     let mut max_tick = 0u64;
     for _ in 0..track_count {
         if r.remaining() < 8 {
@@ -70,6 +95,8 @@ pub fn parse_smf_notes(data: &[u8]) -> Result<ImportedMidiClip, MidiImportError>
             ticks_per_beat,
             &mut notes,
             &mut controller_lanes,
+            &mut sysex_events,
+            &mut markers,
             &mut max_tick,
         )?;
     }
@@ -95,6 +122,8 @@ pub fn parse_smf_notes(data: &[u8]) -> Result<ImportedMidiClip, MidiImportError>
     Ok(ImportedMidiClip {
         notes,
         controller_lanes,
+        sysex_events,
+        markers,
         duration_beats: note_end.max(controller_end).max(tick_end),
     })
 }
@@ -104,6 +133,8 @@ fn parse_track(
     ticks_per_beat: u32,
     notes: &mut Vec<MidiNoteState>,
     controller_lanes: &mut Vec<MidiControllerLane>,
+    sysex_events: &mut Vec<ImportedSysExEvent>,
+    markers: &mut Vec<ImportedMidiMarker>,
     max_tick: &mut u64,
 ) -> Result<(), MidiImportError> {
     let mut r = Reader::new(data);
@@ -191,7 +222,14 @@ fn parse_track(
                 running_status = None;
                 let meta_type = r.read_u8()?;
                 let len = r.read_vlq()? as usize;
-                r.skip(len)?;
+                let payload = r.read_exact(len)?;
+                if meta_type == 0x06 {
+                    markers.push(ImportedMidiMarker {
+                        text: decode_midi_text(payload),
+                        absolute_tick: tick,
+                        beat: ticks_to_beats(tick, ticks_per_beat),
+                    });
+                }
                 if meta_type == 0x2f {
                     break;
                 }
@@ -199,13 +237,27 @@ fn parse_track(
             0xf0 | 0xf7 => {
                 running_status = None;
                 let len = r.read_vlq()? as usize;
-                r.skip(len)?;
+                let payload = r.read_exact(len)?;
+                sysex_events.push(ImportedSysExEvent {
+                    kind: if status == 0xf0 {
+                        ImportedSysExKind::Normal
+                    } else {
+                        ImportedSysExKind::Escaped
+                    },
+                    absolute_tick: tick,
+                    beat: ticks_to_beats(tick, ticks_per_beat),
+                    data: payload.to_vec(),
+                });
             }
             _ => return Err(MidiImportError::InvalidHeader),
         }
     }
 
     Ok(())
+}
+
+fn decode_midi_text(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(bytes).trim().to_string()
 }
 
 fn ticks_to_beats(tick: u64, ticks_per_beat: u32) -> f32 {
@@ -384,5 +436,32 @@ mod tests {
             .unwrap();
         assert!((pressure.points[0].beat - 2.0).abs() < 1.0e-4);
         assert!((pressure.points[0].value - 100.0 / 127.0).abs() < 1.0e-4);
+    }
+
+    #[test]
+    fn preserves_normal_and_escaped_sysex_events() {
+        let data = smf(&[
+            0, 0xf0, 3, 0x43, 0x12, 0x00, 0x83, 0x60, 0xf7, 2, 0x7d, 0x01, 0, 0xff, 0x2f, 0,
+        ]);
+        let imported = parse_smf_notes(&data).unwrap();
+        assert_eq!(imported.sysex_events.len(), 2);
+        assert_eq!(imported.sysex_events[0].kind, ImportedSysExKind::Normal);
+        assert_eq!(imported.sysex_events[0].absolute_tick, 0);
+        assert_eq!(imported.sysex_events[0].data, vec![0x43, 0x12, 0x00]);
+        assert_eq!(imported.sysex_events[1].kind, ImportedSysExKind::Escaped);
+        assert!((imported.sysex_events[1].beat - 1.0).abs() < 1.0e-4);
+        assert_eq!(imported.sysex_events[1].data, vec![0x7d, 0x01]);
+    }
+
+    #[test]
+    fn parses_marker_meta_events() {
+        let data = smf(&[
+            0x83, 0x60, 0xff, 0x06, 5, b'V', b'e', b'r', b's', b'e', 0, 0xff, 0x2f, 0,
+        ]);
+        let imported = parse_smf_notes(&data).unwrap();
+        assert_eq!(imported.markers.len(), 1);
+        assert_eq!(imported.markers[0].text, "Verse");
+        assert_eq!(imported.markers[0].absolute_tick, 480);
+        assert!((imported.markers[0].beat - 1.0).abs() < 1.0e-4);
     }
 }

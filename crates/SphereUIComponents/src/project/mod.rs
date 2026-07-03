@@ -106,6 +106,7 @@ pub enum ClipSource {
     Midi {
         notes: Vec<MidiNote>,
         controller_lanes: Vec<MidiControllerLane>,
+        sysex_events: Vec<MidiSysExEvent>,
     },
     Empty,
 }
@@ -146,6 +147,20 @@ pub struct MidiControllerLane {
     pub visible: bool,
     pub height: f32,
     pub collapsed: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MidiSysExKind {
+    Normal,
+    Escaped,
+}
+
+#[derive(Debug, Clone)]
+pub struct MidiSysExEvent {
+    pub kind: MidiSysExKind,
+    pub tick: u64,
+    pub beat: f32,
+    pub data: Vec<u8>,
 }
 
 use crate::components::timeline::timeline_state::MidiControllerKind as TlControllerKind;
@@ -744,6 +759,7 @@ impl From<&TimelineState> for FutureboardProject {
                             ClipType::Midi {
                                 notes,
                                 controller_lanes,
+                                sysex_events,
                             } => ClipSource::Midi {
                                 notes: notes
                                     .iter()
@@ -771,6 +787,22 @@ impl From<&TimelineState> for FutureboardProject {
                                         visible: lane.visible,
                                         height: lane.height,
                                         collapsed: lane.collapsed,
+                                    })
+                                    .collect(),
+                                sysex_events: sysex_events
+                                    .iter()
+                                    .map(|event| MidiSysExEvent {
+                                        kind: match event.kind {
+                                            crate::components::timeline::timeline_state::MidiSysExKind::Normal => {
+                                                MidiSysExKind::Normal
+                                            }
+                                            crate::components::timeline::timeline_state::MidiSysExKind::Escaped => {
+                                                MidiSysExKind::Escaped
+                                            }
+                                        },
+                                        tick: event.tick,
+                                        beat: event.beat,
+                                        data: event.data.clone(),
                                     })
                                     .collect(),
                             },
@@ -1059,6 +1091,7 @@ pub fn apply_to_timeline(project: &FutureboardProject, tl: &mut TimelineState) {
                         ClipSource::Midi {
                             notes,
                             controller_lanes,
+                            sysex_events,
                         } => ClipType::Midi {
                             notes: notes
                                 .iter()
@@ -1088,10 +1121,23 @@ pub fn apply_to_timeline(project: &FutureboardProject, tl: &mut TimelineState) {
                                     collapsed: lane.collapsed,
                                 })
                                 .collect(),
+                            sysex_events: sysex_events
+                                .iter()
+                                .map(|event| crate::components::timeline::timeline_state::MidiSysExEvent {
+                                    kind: match event.kind {
+                                        MidiSysExKind::Normal => crate::components::timeline::timeline_state::MidiSysExKind::Normal,
+                                        MidiSysExKind::Escaped => crate::components::timeline::timeline_state::MidiSysExKind::Escaped,
+                                    },
+                                    tick: event.tick,
+                                    beat: event.beat,
+                                    data: event.data.clone(),
+                                })
+                                .collect(),
                         },
                         ClipSource::Empty => ClipType::Midi {
                             notes: Vec::new(),
                             controller_lanes: Vec::new(),
+                            sysex_events: Vec::new(),
                         },
                     };
                     ClipState {

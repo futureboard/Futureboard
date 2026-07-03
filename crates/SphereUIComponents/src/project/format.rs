@@ -1,10 +1,11 @@
 use super::{
     AutomationLane, AutomationPoint, AutomationTargetDesc, ClipSource, FutureboardProject,
     InputMonitorMode, MidiControllerKind, MidiControllerLane, MidiControllerPoint, MidiNote,
-    PluginFormat, PluginStateBlob, ProjectAsset, ProjectClip, ProjectInsert, ProjectMixer,
-    ProjectPluginInstance, ProjectSend, ProjectTempoPoint, ProjectTimelineMarker,
-    ProjectTimelineRegion, ProjectTrack, ProjectTrackAudioFormat, ProjectTrackInputRouting,
-    ProjectTrackMidiInputRouting, ProjectTrackOutputRouting, ProjectTrackType, TrackRouting,
+    MidiSysExEvent, MidiSysExKind, PluginFormat, PluginStateBlob, ProjectAsset, ProjectClip,
+    ProjectInsert, ProjectMixer, ProjectPluginInstance, ProjectSend, ProjectTempoPoint,
+    ProjectTimelineMarker, ProjectTimelineRegion, ProjectTrack, ProjectTrackAudioFormat,
+    ProjectTrackInputRouting, ProjectTrackMidiInputRouting, ProjectTrackOutputRouting,
+    ProjectTrackType, TrackRouting,
 };
 use crate::components::timeline::timeline_state::{
     AudioClipStretchState, StretchAlgorithm, StretchMode, WarpMarker,
@@ -37,7 +38,8 @@ pub const PROJECT_MAGIC: &[u8; 8] = b"FBSTUD1\0";
 /// v22 adds a per-note MIDI channel (pre-v22 notes default to channel 1) and
 /// a per-track "play each note on its own channel" toggle (pre-v22 tracks
 /// default to `false`, matching the pre-existing fixed-channel behavior).
-pub const PROJECT_VERSION: u32 = 22;
+/// v23 preserves imported MIDI SysEx events on MIDI clips.
+pub const PROJECT_VERSION: u32 = 23;
 
 /// Minimum on-disk header size: magic (8) + version (4) + reserved (4) + body_len (4).
 pub const PROJECT_HEADER_SIZE: usize = 20;
@@ -514,6 +516,16 @@ fn encode_controller_lane(w: &mut FbWriter, lane: &MidiControllerLane) {
     }
 }
 
+fn encode_sysex_event(w: &mut FbWriter, event: &MidiSysExEvent) {
+    w.write_u8(match event.kind {
+        MidiSysExKind::Normal => 0,
+        MidiSysExKind::Escaped => 1,
+    });
+    w.write_u64(event.tick);
+    w.write_f32(event.beat);
+    w.write_bytes(&event.data);
+}
+
 /// v16: per-clip non-destructive stretch/pitch block. `dirty` is transient and
 /// intentionally not persisted (decodes as `false`).
 fn encode_stretch(w: &mut FbWriter, s: &AudioClipStretchState) {
@@ -590,6 +602,7 @@ fn encode_clip(w: &mut FbWriter, c: &ProjectClip) {
         ClipSource::Midi {
             notes,
             controller_lanes,
+            sysex_events,
         } => {
             w.write_u8(2);
             w.write_u32(notes.len() as u32);
@@ -600,6 +613,11 @@ fn encode_clip(w: &mut FbWriter, c: &ProjectClip) {
             w.write_u32(controller_lanes.len() as u32);
             for lane in controller_lanes {
                 encode_controller_lane(w, lane);
+            }
+            // v23: SysEx events are preserved for future playback/export.
+            w.write_u32(sysex_events.len() as u32);
+            for event in sysex_events {
+                encode_sysex_event(w, event);
             }
         }
     }
@@ -1043,6 +1061,24 @@ fn decode_controller_lane(r: &mut FbReader) -> Result<MidiControllerLane, Projec
     })
 }
 
+fn decode_sysex_event(r: &mut FbReader) -> Result<MidiSysExEvent, ProjectError> {
+    let kind = match r.read_u8()? {
+        0 => MidiSysExKind::Normal,
+        1 => MidiSysExKind::Escaped,
+        t => {
+            return Err(ProjectError::Corrupted(format!(
+                "unknown SysEx event kind tag {t}"
+            )))
+        }
+    };
+    Ok(MidiSysExEvent {
+        kind,
+        tick: r.read_u64()?,
+        beat: r.read_f32()?,
+        data: r.read_bytes()?,
+    })
+}
+
 /// v16: per-clip stretch/pitch block. See [`encode_stretch`].
 fn decode_stretch(r: &mut FbReader) -> Result<AudioClipStretchState, ProjectError> {
     let mode = StretchMode::from_tag(r.read_u8()?);
@@ -1149,9 +1185,20 @@ fn decode_clip(r: &mut FbReader, version: u32) -> Result<ProjectClip, ProjectErr
             } else {
                 Vec::new()
             };
+            let sysex_events = if version >= 23 {
+                let event_count = r.read_u32()? as usize;
+                let mut events = Vec::with_capacity(event_count);
+                for _ in 0..event_count {
+                    events.push(decode_sysex_event(r)?);
+                }
+                events
+            } else {
+                Vec::new()
+            };
             ClipSource::Midi {
                 notes,
                 controller_lanes,
+                sysex_events,
             }
         }
         t => {

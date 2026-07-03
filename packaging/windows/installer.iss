@@ -13,6 +13,7 @@
 #define MyAppExeName "FutureboardNative.exe"
 #define MyAppIcon "..\..\packages\shared\app\icons\icon.ico"
 #define MySourceDir "..\..\target\release"
+
 #ifndef MyAppVersion
 #define MyAppVersion "2026.6.17"
 #endif
@@ -53,17 +54,24 @@ Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription:
 Name: "fileassoc_apak"; Description: "Associate .apak packages with APAK Installer"; GroupDescription: "File associations:"; Flags: checkedonce
 
 [Files]
+; Main app + helper executables
 Source: "{#MySourceDir}\*.exe"; DestDir: "{app}"; Flags: ignoreversion
+
+; Runtime / engine / bridge DLLs
 Source: "{#MySourceDir}\*.dll"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 
 [Icons]
 Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{app}"; IconFilename: "{app}\{#MyAppExeName}"
-Name: "{group}\APAK Installer"; Filename: "{app}\bin\apakinstaller.exe"; WorkingDir: "{app}"; IconFilename: "{app}\apakinstaller.exe"; Check: FileExists(ExpandConstant('{app}\apakinstaller.exe'))
+
+Name: "{group}\APAK Installer"; Filename: "{app}\apakinstaller.exe"; WorkingDir: "{app}"; IconFilename: "{app}\apakinstaller.exe"; Check: FileExists(ExpandConstant('{app}\apakinstaller.exe'))
+
 Name: "{group}\Uninstall {#MyAppName}"; Filename: "{uninstallexe}"
+
 Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{app}"; IconFilename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
 
 [Registry]
-; .apak file association. This is per-user when running non-elevated and HKLM when elevated by install mode.
+; .apak file association.
+; This is per-user when running non-elevated and HKLM when elevated by install mode.
 Root: HKA; Subkey: "Software\Classes\.apak"; ValueType: string; ValueName: ""; ValueData: "Futureboard.APAK"; Flags: uninsdeletevalue; Tasks: fileassoc_apak
 Root: HKA; Subkey: "Software\Classes\Futureboard.APAK"; ValueType: string; ValueName: ""; ValueData: "Futureboard Audio Package"; Flags: uninsdeletekey; Tasks: fileassoc_apak
 Root: HKA; Subkey: "Software\Classes\Futureboard.APAK\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: "{app}\apakinstaller.exe,0"; Tasks: fileassoc_apak

@@ -48,6 +48,7 @@ pub fn midi_clip(
     if let ClipType::Midi {
         notes,
         controller_lanes,
+        ..
     } = &clip.clip_type
     {
         let in_bounds: Vec<_> = notes

@@ -230,6 +230,7 @@ impl TimelineState {
             clip_type: ClipType::Midi {
                 notes: Vec::new(),
                 controller_lanes: Vec::new(),
+                sysex_events: Vec::new(),
             },
             muted: false,
             audio_import: AudioImportState::default(),
@@ -263,6 +264,23 @@ impl TimelineState {
             clip_type: ClipType::Midi {
                 notes: imported.notes,
                 controller_lanes: imported.controller_lanes,
+                sysex_events: imported
+                    .sysex_events
+                    .into_iter()
+                    .map(|event| MidiSysExEvent {
+                        kind: match event.kind {
+                            crate::components::timeline::midi_import::ImportedSysExKind::Normal => {
+                                MidiSysExKind::Normal
+                            }
+                            crate::components::timeline::midi_import::ImportedSysExKind::Escaped => {
+                                MidiSysExKind::Escaped
+                            }
+                        },
+                        tick: event.absolute_tick,
+                        beat: event.beat,
+                        data: event.data,
+                    })
+                    .collect(),
             },
             muted: false,
             audio_import: AudioImportState::default(),
@@ -602,7 +620,11 @@ impl TimelineState {
             _ => self.create_midi_track(),
         };
         let start_beat = self.snap_beats(self.x_to_beats(drop_x.max(0.0))).max(0.0);
+        let markers = imported.markers.clone();
         self.build_imported_midi_clip(&track_id, clip_name, start_beat, imported)
-            .map(|clip| (track_id, clip))
+            .map(|clip| {
+                self.import_midi_markers(start_beat, &markers);
+                (track_id, clip)
+            })
     }
 }

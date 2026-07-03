@@ -8,6 +8,30 @@ pub struct TimelineMarkerState {
     pub color_hex: String,
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn imported_midi_markers_are_added_at_clip_relative_beats() {
+        let mut state = TimelineState::default();
+        state.import_midi_markers(
+            8.0,
+            &[
+                crate::components::timeline::midi_import::ImportedMidiMarker {
+                    text: "Chorus".to_string(),
+                    absolute_tick: 960,
+                    beat: 2.0,
+                },
+            ],
+        );
+
+        assert_eq!(state.markers.len(), 1);
+        assert_eq!(state.markers[0].name, "Chorus");
+        assert!((state.markers[0].beat - 10.0).abs() < 1.0e-6);
+    }
+}
+
 impl TimelineMarkerState {
     pub fn new(beat: f64, name: impl Into<String>, color_hex: impl Into<String>) -> Self {
         Self::with_id("", beat, name, color_hex)
@@ -94,6 +118,30 @@ impl TimelineState {
         self.markers
             .sort_by(|a, b| a.beat.total_cmp(&b.beat).then_with(|| a.id.cmp(&b.id)));
         id
+    }
+
+    pub fn import_midi_markers(
+        &mut self,
+        clip_start_beat: f32,
+        markers: &[crate::components::timeline::midi_import::ImportedMidiMarker],
+    ) {
+        if markers.is_empty() {
+            return;
+        }
+        for marker in markers {
+            let name = if marker.text.trim().is_empty() {
+                format!("MIDI Marker {}", self.markers.len() + 1)
+            } else {
+                marker.text.clone()
+            };
+            self.markers.push(TimelineMarkerState::new(
+                (clip_start_beat + marker.beat) as f64,
+                name,
+                "#7C5CFF",
+            ));
+        }
+        self.markers
+            .sort_by(|a, b| a.beat.total_cmp(&b.beat).then_with(|| a.id.cmp(&b.id)));
     }
 
     pub fn add_region_at_beat(&mut self, beat: f64) -> String {

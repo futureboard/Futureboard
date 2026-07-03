@@ -18,13 +18,14 @@
 use std::cell::Cell;
 use std::collections::HashSet;
 use std::rc::Rc;
+use std::time::Duration;
 
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    canvas, deferred, div, fill, point, px, size, svg, Bounds, Context, Entity, FocusHandle,
-    InteractiveElement, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, ParentElement, Pixels, Render, ScrollWheelEvent, StatefulInteractiveElement,
-    Styled, Subscription, Window,
+    canvas, div, fill, point, pulsating_between, px, size, svg, Animation, AnimationExt, Bounds,
+    Context, Entity, FocusHandle, InteractiveElement, IntoElement, KeyDownEvent, MouseButton,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, Render, ScrollWheelEvent,
+    StatefulInteractiveElement, Styled, Subscription, Window,
 };
 
 use crate::assets;
@@ -32,7 +33,7 @@ use crate::components::edit::{normalize_range, EditCommand};
 use crate::components::timeline::timeline::Timeline;
 use crate::components::timeline::timeline_state::{
     midi_debug_enabled, MidiChannel, MidiChannelMask, MidiControllerKind, MidiControllerPoint,
-    MidiNoteState, PitchTransformContext, TimelineState, MIN_NOTE_BEATS,
+    MidiNoteState, PitchTransformContext, ScaleKind, ScaleRoot, TimelineState, MIN_NOTE_BEATS,
 };
 use crate::theme::Colors;
 
@@ -233,6 +234,15 @@ impl UiMidiPreviewCommand {
 }
 
 impl GridRes {
+    const ALL: [GridRes; 6] = [
+        GridRes::Whole,
+        GridRes::Half,
+        GridRes::Quarter,
+        GridRes::Eighth,
+        GridRes::Sixteenth,
+        GridRes::ThirtySecond,
+    ];
+
     fn beats(self) -> f32 {
         match self {
             GridRes::Whole => 4.0,
@@ -263,6 +273,14 @@ impl GridRes {
             GridRes::ThirtySecond => GridRes::Whole,
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PianoSelectMenu {
+    Grid,
+    ScaleRoot,
+    ScaleKind,
+    Lane,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -440,8 +458,9 @@ pub struct PianoRoll {
     /// `false` collapses the controller lane entirely (grid uses the full
     /// height). Toggled from the selector / commands.
     lane_visible: bool,
-    /// Selector dropdown open state.
-    lane_menu_open: bool,
+    /// Toolbar dropdown open state. This is transient UI state only; musical
+    /// scale/root/lock data live in `pitch_ctx`.
+    open_select_menu: Option<PianoSelectMenu>,
     /// CC number bound to the selector's "Custom CC" stepper (0..=127).
     custom_cc: u8,
     /// Bounds of the CC strip, captured at paint for cursor → beat/value mapping.
@@ -506,7 +525,7 @@ impl PianoRoll {
             active_cc: MidiControllerKind::CC(1),
             lane_shows_velocity: true,
             lane_visible: true,
-            lane_menu_open: false,
+            open_select_menu: None,
             custom_cc: 74,
             cc_bounds: Rc::new(Cell::new(None)),
             cc_edit_prev: None,
@@ -700,7 +719,7 @@ impl PianoRoll {
             }
         }
         self.lane_visible = true;
-        self.lane_menu_open = false;
+        self.open_select_menu = None;
         // Geometry of the active lane may differ; force a fresh bounds capture.
         self.cc_bounds.set(None);
         cx.notify();
@@ -717,7 +736,7 @@ impl PianoRoll {
 
     fn toggle_lane_visible(&mut self, cx: &mut Context<Self>) {
         self.lane_visible = !self.lane_visible;
-        self.lane_menu_open = false;
+        self.open_select_menu = None;
         cx.notify();
     }
 
@@ -1437,7 +1456,7 @@ impl PianoRoll {
     ) {
         cx.stop_propagation();
         // Any grid interaction dismisses the lane selector dropdown.
-        self.lane_menu_open = false;
+        self.open_select_menu = None;
         window.focus(&self.focus, cx);
         let Some((lx, ly)) = self.grid_local(event.position) else {
             // Bounds not captured yet (first frame) — ignore to avoid creating

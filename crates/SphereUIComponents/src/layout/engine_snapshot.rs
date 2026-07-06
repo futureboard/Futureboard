@@ -542,7 +542,11 @@ fn build_engine_project_snapshot_inner(
                 timeline_state::TrackOutputRouting::Bus { bus_id } => Some(bus_id.clone()),
                 timeline_state::TrackOutputRouting::Main
                 | timeline_state::TrackOutputRouting::None
-                | timeline_state::TrackOutputRouting::HardwareOutput { .. } => None,
+                | timeline_state::TrackOutputRouting::HardwareOutput { .. }
+                // Instrument-routing redirects MIDI events (see `midi_clips`
+                // below), not audio bus summing — a MIDI track has no audio
+                // of its own to route.
+                | timeline_state::TrackOutputRouting::Instrument { .. } => None,
             },
             inserts: {
                 let inserts = build_engine_inserts(track, export_mode);
@@ -690,7 +694,14 @@ fn build_engine_project_snapshot_inner(
         .tracks
         .iter()
         .flat_map(|track| {
-            let track_id = track.id.clone();
+            // A MIDI track with no Instrument plugin of its own can route its
+            // notes to an Instrument track's plugin instead
+            // (`TrackOutputRouting::Instrument`); everything else (including
+            // an Instrument track's own clips) keeps playing through its own
+            // track id, unchanged.
+            let track_id = state
+                .effective_instrument_track_id(&track.id)
+                .unwrap_or_else(|| track.id.clone());
             track.clips.iter().filter_map(move |clip| {
                 if clip.muted {
                     return None;

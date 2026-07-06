@@ -1,5 +1,10 @@
 use super::*;
 
+/// Arrangement overview zoom floor. At 120 BPM this is 0.25 px/beat, enough to
+/// fit very long MIDI songs on screen while the grid LOD thins bar lines.
+const TIMELINE_MIN_PIXELS_PER_SECOND: f32 = 0.5;
+const TIMELINE_MAX_PIXELS_PER_SECOND: f32 = 4000.0;
+
 /// Playback follow / auto-scroll behavior for the timeline viewport.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AutoScrollMode {
@@ -197,7 +202,10 @@ impl TimelineState {
     pub fn zoom_by(&mut self, factor: f32, anchor_x: f32) {
         let factor = factor.max(0.0001);
         let old_pps = self.viewport.pixels_per_second.max(0.0001);
-        let new_pps = (old_pps * factor).clamp(4.0, 4000.0);
+        let new_pps = (old_pps * factor).clamp(
+            TIMELINE_MIN_PIXELS_PER_SECOND,
+            TIMELINE_MAX_PIXELS_PER_SECOND,
+        );
         if (new_pps - old_pps).abs() < 0.0001 {
             return;
         }

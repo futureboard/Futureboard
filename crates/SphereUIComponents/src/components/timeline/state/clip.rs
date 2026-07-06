@@ -103,21 +103,29 @@ pub enum ClipTimebase {
     Absolute,
 }
 
-impl TimelineState {
-    pub fn next_clip_id(&self) -> String {
-        let mut n = 0u32;
-        for t in &self.tracks {
-            for c in &t.clips {
-                if let Some(rest) = c.id.strip_prefix("clip-") {
-                    if let Ok(v) = rest.parse::<u32>() {
-                        if v > n {
-                            n = v;
-                        }
+/// Highest numeric suffix among existing `clip-N` ids, plus one. Exposed so
+/// callers that mint several clip ids in a row (e.g. multi-track MIDI import)
+/// can reserve a run of ids locally instead of re-scanning `tracks` — clips
+/// built but not yet attached to a track are invisible to that scan.
+pub fn next_clip_id_number(tracks: &[TrackState]) -> u32 {
+    let mut n = 0u32;
+    for t in tracks {
+        for c in &t.clips {
+            if let Some(rest) = c.id.strip_prefix("clip-") {
+                if let Ok(v) = rest.parse::<u32>() {
+                    if v > n {
+                        n = v;
                     }
                 }
             }
         }
-        format!("clip-{}", n + 1)
+    }
+    n + 1
+}
+
+impl TimelineState {
+    pub fn next_clip_id(&self) -> String {
+        format!("clip-{}", next_clip_id_number(&self.tracks))
     }
 
     /// Length of a clip in beats, if it exists.

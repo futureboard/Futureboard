@@ -473,14 +473,14 @@ impl Render for Timeline {
         let on_zoom_in = cx.listener(|this, _: &(), window, cx| {
             let viewport_w: f32 = window.bounds().size.width.into();
             let anchor = ((viewport_w - SIDEBAR_WIDTH - HEADER_WIDTH) * 0.5).max(0.0);
-            this.state.zoom_by(1.10, anchor);
+            this.state.zoom_by(1.35, anchor);
             cx.notify();
         });
 
         let on_zoom_out = cx.listener(|this, _: &(), window, cx| {
             let viewport_w: f32 = window.bounds().size.width.into();
             let anchor = ((viewport_w - SIDEBAR_WIDTH - HEADER_WIDTH) * 0.5).max(0.0);
-            this.state.zoom_by(1.0 / 1.10, anchor);
+            this.state.zoom_by(1.0 / 1.35, anchor);
             cx.notify();
         });
 
@@ -1212,7 +1212,7 @@ impl Render for Timeline {
 
             let x: f32 = event.position.x.into();
             let anchor = (x - SIDEBAR_WIDTH - HEADER_WIDTH).max(0.0);
-            let factor = (1.0018_f32).powf(-delta.1);
+            let factor = (1.0024_f32).powf(-delta.1);
             this.state.zoom_by(factor, anchor);
             let (max_x, max_y) = this.max_scroll_offsets(window);
             this.state.clamp_scroll(max_x, max_y);

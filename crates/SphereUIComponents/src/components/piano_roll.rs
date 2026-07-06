@@ -22,10 +22,10 @@ use std::time::Duration;
 
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    canvas, div, fill, point, pulsating_between, px, size, svg, Animation, AnimationExt, Bounds,
-    Context, Entity, FocusHandle, InteractiveElement, IntoElement, KeyDownEvent, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, Render, ScrollWheelEvent,
-    StatefulInteractiveElement, Styled, Subscription, Window,
+    canvas, deferred, div, fill, point, pulsating_between, px, size, svg, Animation, AnimationExt,
+    Bounds, Context, Entity, FocusHandle, InteractiveElement, IntoElement, KeyDownEvent,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, Render,
+    ScrollWheelEvent, StatefulInteractiveElement, Styled, Subscription, Window,
 };
 
 use crate::assets;
@@ -44,6 +44,17 @@ mod render;
 const ROW_H: f32 = 14.0; // px per semitone
 const PITCH_CNT: i32 = 128;
 const TOTAL_H: f32 = PITCH_CNT as f32 * ROW_H;
+/// Horizontal overview zoom floor for long MIDI clips. 1 px/beat lets a
+/// 200-bar/800-beat song fit in an ~800px editor while preserving interactions.
+const PIANO_ROLL_MIN_PPB: f32 = 1.0;
+const PIANO_ROLL_MAX_PPB: f32 = 400.0;
+/// Paint priority for the toolbar's deferred dropdown menus (Grid / Scale /
+/// Lane). Without `deferred()`, an absolutely-positioned panel still paints
+/// in normal tree order and gets covered by the piano roll body (keys/grid),
+/// which is a later sibling with an opaque background. Matches the priority
+/// used by other popovers in this crate (e.g. `SELECT_MENU_PRIORITY`).
+const PIANO_ROLL_MENU_PRIORITY: usize = 100;
+const PIANO_ROLL_FIT_PAD_PX: f32 = 48.0;
 
 /// Reversed-pitch row mapping shared by the note grid and the left piano-key
 /// lane: higher pitches sit at the top, lower at the bottom, offset by the
@@ -839,17 +850,31 @@ impl PianoRoll {
                 .map(|ch| ch.saturating_sub(1).min(15))
                 .unwrap_or(0)
         };
+        // Preview must reach whichever plugin instance actually plays this
+        // track's notes: a MIDI track routed to an Instrument via
+        // `TrackOutputRouting::Instrument` previews through that target, not
+        // through itself (it owns no plugin). Keeps live audition in sync
+        // with the same redirect the playback engine snapshot applies.
+        let resolved_target = |track: &crate::components::timeline::timeline_state::TrackState| {
+            tl.state
+                .effective_instrument_track_id(&track.id)
+                .map(|target_id| (target_id, channel_for(track)))
+        };
+        // Once a MIDI clip/track is actually selected, trust that as the
+        // preview target rather than falling through to an unrelated track —
+        // an unrouted MIDI track should stay silent, not surprise-preview
+        // through whichever other track happens to own a plugin.
         if let Some(clip_id) = tl.state.selection.selected_clip_ids.first() {
             if let Some((track, clip)) = tl.state.find_clip(clip_id) {
                 if matches!(clip.clip_type, ClipType::Midi { .. }) {
-                    return Some((track.id.clone(), channel_for(track)));
+                    return resolved_target(track);
                 }
             }
         }
         if let Some(track_id) = tl.state.selection.selected_track_id.as_deref() {
             if let Some(track) = tl.state.find_track(track_id) {
                 if matches!(track.track_type, TrackType::Instrument | TrackType::Midi) {
-                    return Some((track.id.clone(), channel_for(track)));
+                    return resolved_target(track);
                 }
             }
         }
@@ -1268,8 +1293,8 @@ impl PianoRoll {
 
     /// Scroll/zoom the grid so selected notes (or all notes) are visible.
     fn fit_piano_roll_to_notes(&mut self, cx: &Context<Self>, clip_id: &str) {
-        let (_, view_h) = self.grid_view_size();
-        if view_h <= 1.0 {
+        let (view_w, view_h) = self.grid_view_size();
+        if view_w <= 1.0 || view_h <= 1.0 {
             return;
         }
 
@@ -1301,13 +1326,25 @@ impl PianoRoll {
         let target_scroll = ((PITCH_CNT - 1) as f32 - mid) * ROW_H - view_h * 0.5 + ROW_H * 0.5;
         self.scroll_y = target_scroll.clamp(0.0, self.max_scroll_y());
 
+        let (_, clip_len) = self.clip_meta(cx, clip_id);
         if !target_notes.is_empty() {
             let min_start = target_notes
                 .iter()
                 .map(|n| n.start)
-                .fold(f32::INFINITY, f32::min);
-            self.scroll_x = (min_start * self.ppb - 24.0).max(0.0);
+                .fold(f32::INFINITY, f32::min)
+                .max(0.0);
+            let max_end = target_notes
+                .iter()
+                .map(|n| n.start + n.duration)
+                .fold(0.0_f32, f32::max)
+                .min(clip_len.max(0.0));
+            let span = (max_end - min_start).max(1.0);
+            let fit_w = (view_w - PIANO_ROLL_FIT_PAD_PX * 2.0).max(96.0);
+            self.ppb = (fit_w / span).clamp(PIANO_ROLL_MIN_PPB, PIANO_ROLL_MAX_PPB);
+            self.scroll_x = (min_start * self.ppb - PIANO_ROLL_FIT_PAD_PX).max(0.0);
         } else {
+            let fit_w = (view_w - PIANO_ROLL_FIT_PAD_PX * 2.0).max(96.0);
+            self.ppb = (fit_w / clip_len.max(1.0)).clamp(PIANO_ROLL_MIN_PPB, PIANO_ROLL_MAX_PPB);
             self.scroll_x = 0.0;
         }
 
@@ -2980,7 +3017,7 @@ impl PianoRoll {
     /// Scale horizontal zoom by `factor`, clamped to the same range as wheel
     /// zoom. Used by the toolbar zoom buttons.
     fn zoom_by(&mut self, factor: f32, cx: &mut Context<Self>) {
-        self.ppb = (self.ppb * factor).clamp(20.0, 400.0);
+        self.ppb = (self.ppb * factor).clamp(PIANO_ROLL_MIN_PPB, PIANO_ROLL_MAX_PPB);
         cx.notify();
     }
 
@@ -2991,8 +3028,8 @@ impl PianoRoll {
         };
         if event.modifiers.control || event.modifiers.platform {
             // Zoom horizontal.
-            let factor = (1.0015_f32).powf(-dy);
-            self.ppb = (self.ppb * factor).clamp(20.0, 400.0);
+            let factor = (1.0022_f32).powf(-dy);
+            self.ppb = (self.ppb * factor).clamp(PIANO_ROLL_MIN_PPB, PIANO_ROLL_MAX_PPB);
         } else if event.modifiers.shift {
             self.scroll_x = (self.scroll_x - dy - dx).max(0.0);
         } else {

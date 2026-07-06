@@ -323,7 +323,18 @@ pub fn inspector_panel<'a>(
             .into_any_element()
     } else if let Some(tid) = selected_track_id {
         match tracks.iter().find(|t| t.id == tid) {
-            Some(t) => track_inspector(t, name_input, name_focused, callbacks).into_any_element(),
+            Some(t) => {
+                // MIDI Out needs the live Instrument-track roster (id, name)
+                // to offer/label real VSTi routing targets instead of the
+                // audio-only `Main` bus. Cheap: a handful of tracks at most.
+                let instrument_targets: Vec<(String, String)> = tracks
+                    .iter()
+                    .filter(|track| track.track_type == TrackType::Instrument)
+                    .map(|track| (track.id.clone(), track.name.clone()))
+                    .collect();
+                track_inspector(t, name_input, name_focused, &instrument_targets, callbacks)
+                    .into_any_element()
+            }
             None => no_selection(tracks.len()).into_any_element(),
         }
     } else {
@@ -840,6 +851,9 @@ fn audio_output_combo_label(
         TrackOutputRouting::HardwareOutput { channel, .. } => {
             format!("Channel {}", channel + 1)
         }
+        // Audio/Instrument tracks never carry `Instrument` routing (it only
+        // applies to MIDI tracks); kept for exhaustiveness.
+        TrackOutputRouting::Instrument { track_id } => format!("Instrument - {track_id}"),
         TrackOutputRouting::None => "None".to_string(),
     }
 }
@@ -884,10 +898,60 @@ fn midi_channel_options() -> Vec<String> {
         .collect()
 }
 
-fn midi_output_options(detected: &[String]) -> Vec<String> {
-    let mut options = vec!["Main".to_string(), "None".to_string()];
-    options.extend(detected.iter().cloned());
-    options
+/// MIDI Out destinations for a `TrackType::Midi` track: real Instrument
+/// (VSTi) tracks in the project to actually make sound, plus any detected
+/// external MIDI hardware/virtual ports. Deliberately excludes `Main` — a
+/// MIDI track has no audio to send to the Master bus, so offering it there
+/// just looked like a mislabeled audio-output field.
+fn build_midi_output_options(
+    track: &TrackState,
+    instrument_targets: &[(String, String)],
+    detected_midi_outputs: &[String],
+) -> Vec<(String, TrackOutputRouting)> {
+    let mut out = vec![("None".to_string(), TrackOutputRouting::None)];
+    for (track_id, name) in instrument_targets {
+        out.push((
+            format!("Instrument - {name}"),
+            TrackOutputRouting::Instrument {
+                track_id: track_id.clone(),
+            },
+        ));
+    }
+    for device in detected_midi_outputs {
+        out.push((
+            format!("MIDI Device - {device}"),
+            TrackOutputRouting::HardwareOutput {
+                device_id: device.clone(),
+                channel: 0,
+            },
+        ));
+    }
+    if !out.iter().any(|(_, r)| *r == track.routing.output) {
+        out.push((
+            format!(
+                "Missing - {}",
+                midi_output_combo_label(&track.routing.output, instrument_targets)
+            ),
+            track.routing.output.clone(),
+        ));
+    }
+    out
+}
+
+/// Display label for the MIDI Out trigger/selected value, resolving an
+/// `Instrument` target's live track name when it's still known.
+fn midi_output_combo_label(routing: &TrackOutputRouting, instrument_targets: &[(String, String)]) -> String {
+    match routing {
+        TrackOutputRouting::Instrument { track_id } => instrument_targets
+            .iter()
+            .find(|(id, _)| id == track_id)
+            .map(|(_, name)| format!("Instrument - {name}"))
+            .unwrap_or_else(|| routing.label()),
+        TrackOutputRouting::HardwareOutput { device_id, .. } => {
+            format!("MIDI Device - {device_id}")
+        }
+        _ => routing.label(),
+    }
 }
 
 fn parse_midi_input_option(label: &str) -> TrackMidiInputRouting {
@@ -905,17 +969,6 @@ fn parse_midi_channel_option(label: &str) -> Option<u8> {
         None
     } else {
         label.parse::<u8>().ok().map(|ch| ch.clamp(1, 16))
-    }
-}
-
-fn parse_midi_output_option(label: &str) -> TrackOutputRouting {
-    match label {
-        "Main" => TrackOutputRouting::Main,
-        "None" => TrackOutputRouting::None,
-        device => TrackOutputRouting::HardwareOutput {
-            device_id: device.to_string(),
-            channel: 0,
-        },
     }
 }
 
@@ -969,10 +1022,14 @@ fn midi_channel_selector(track: &TrackState, callbacks: &InspectorCallbacks) -> 
     )
 }
 
-fn midi_output_selector(track: &TrackState, callbacks: &InspectorCallbacks) -> impl IntoElement {
+fn midi_output_selector(
+    track: &TrackState,
+    instrument_targets: &[(String, String)],
+    callbacks: &InspectorCallbacks,
+) -> impl IntoElement {
     routing_combo_trigger(
         "inspector-midi-output-combo",
-        track.routing.output.label(),
+        midi_output_combo_label(&track.routing.output, instrument_targets),
         InspectorRoutingCombo::MidiOut,
         callbacks.open_routing_combo,
         callbacks.on_toggle_routing_combo.clone(),
@@ -996,12 +1053,16 @@ pub fn inspector_routing_combo_overlay(
     audio_output_buses: Vec<(String, String)>,
     // Selected output device `(name, channel_count)` for hardware output routes.
     audio_output_device: Option<(String, u32)>,
+    // Instrument (VSTi) tracks in the project as `(track_id, display_name)` —
+    // the real MIDI Out destinations for a plain MIDI track.
+    instrument_targets: Vec<(String, String)>,
+    // Real, Preferences-enabled MIDI hardware/virtual ports from the shared
+    // `device_registry` cache (same source Settings → MIDI renders from).
+    detected_midi_inputs: Vec<String>,
+    detected_midi_outputs: Vec<String>,
 ) -> impl IntoElement {
     let position =
         inspector_combo_menu_position(anchor, INSPECTOR_WIDTH, ROUTING_COMBO_MENU_HEIGHT, window);
-    // Placeholder until DirectAudio exposes MIDI device lists to the UI shell.
-    let detected_midi_inputs: Vec<String> = Vec::new();
-    let detected_midi_outputs: Vec<String> = Vec::new();
 
     let track_id = track.id.clone();
     let menu = match open_combo {
@@ -1122,17 +1183,27 @@ pub fn inspector_routing_combo_overlay(
             .into_any_element()
         }
         InspectorRoutingCombo::MidiOut => {
-            let selected = track.routing.output.label();
-            let options = midi_output_options(&detected_midi_outputs);
+            let routing_options =
+                build_midi_output_options(track, &instrument_targets, &detected_midi_outputs);
+            let selected = routing_options
+                .iter()
+                .find(|(_, r)| *r == track.routing.output)
+                .map(|(l, _)| l.clone())
+                .unwrap_or_else(|| midi_output_combo_label(&track.routing.output, &instrument_targets));
+            let labels: Vec<String> = routing_options.iter().map(|(l, _)| l.clone()).collect();
             let cb = callbacks.on_set_output_routing.clone();
             let close = on_close.clone();
             combo_box_string_menu(
                 "inspector-midi-output-menu",
                 position,
                 &selected,
-                &options,
+                &labels,
                 Arc::new(move |value, window, cx| {
-                    let output = parse_midi_output_option(&value);
+                    let output = routing_options
+                        .iter()
+                        .find(|(l, _)| *l == value)
+                        .map(|(_, r)| r.clone())
+                        .unwrap_or(TrackOutputRouting::None);
                     cb(&(track_id.clone(), output), window, cx);
                     close(cx);
                 }),
@@ -1151,7 +1222,11 @@ pub fn inspector_routing_combo_overlay(
         .child(menu)
 }
 
-fn routing_section(track: &TrackState, callbacks: &InspectorCallbacks) -> impl IntoElement {
+fn routing_section(
+    track: &TrackState,
+    instrument_targets: &[(String, String)],
+    callbacks: &InspectorCallbacks,
+) -> impl IntoElement {
     let mut section = div()
         .flex()
         .flex_col()
@@ -1189,7 +1264,7 @@ fn routing_section(track: &TrackState, callbacks: &InspectorCallbacks) -> impl I
                 ))
                 .child(fb_form_row(
                     "MIDI Out",
-                    midi_output_selector(track, callbacks),
+                    midi_output_selector(track, instrument_targets, callbacks),
                 ));
         }
         TrackType::Bus | TrackType::Return | TrackType::Master => {
@@ -1569,6 +1644,7 @@ fn track_inspector(
     track: &TrackState,
     name_input: &TextInputState,
     name_focused: bool,
+    instrument_targets: &[(String, String)],
     callbacks: &InspectorCallbacks,
 ) -> impl IntoElement {
     let automation_points: usize = track
@@ -1757,7 +1833,7 @@ fn track_inspector(
                 ))
                 .child(fb_form_row("State", state_row)),
         )
-        .child(routing_section(track, callbacks))
+        .child(routing_section(track, instrument_targets, callbacks))
         .when(track.track_type == TrackType::Instrument, |this| {
             this.child(instrument_section(track, callbacks))
         })

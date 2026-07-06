@@ -660,6 +660,15 @@ impl TimelineState {
 
         let multi_track = musical_tracks.len() > 1;
         let mut clips = Vec::with_capacity(musical_tracks.len());
+        // `next_clip_id()` only scans clips already attached to `self.tracks`.
+        // Clips built in this loop aren't pushed onto their track until the
+        // caller applies the returned batch (`BatchCreateClips`), so calling
+        // `next_clip_id()` per iteration would hand out the *same* id to every
+        // channel-split clip. Reserve one id up front and increment it
+        // locally so each clip in the batch gets a distinct id — otherwise
+        // clips across split tracks share an id and selecting one selects
+        // all of them (they compare equal).
+        let mut next_id_num = next_clip_id_number(&self.tracks);
         for (index, imported_track) in musical_tracks.into_iter().enumerate() {
             let track_id = if index == 0 {
                 first_track_id.clone()
@@ -682,9 +691,11 @@ impl TimelineState {
                         file_stem.clone()
                     }
                 });
-            if let Some(clip) =
+            if let Some(mut clip) =
                 self.build_imported_midi_clip(&track_id, clip_name, start_beat, imported_track.clip)
             {
+                clip.id = format!("clip-{next_id_num}");
+                next_id_num += 1;
                 clips.push((track_id, clip));
             }
         }

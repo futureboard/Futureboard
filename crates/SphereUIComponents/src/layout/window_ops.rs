@@ -156,8 +156,9 @@ pub(crate) struct ExternalWindows {
     /// Keymap / keyboard shortcuts editor window.
     pub keymap: Option<gpui::WindowHandle<crate::components::keymap_window::KeymapWindow>>,
     /// Built-in Soundfont Player MDI window.
-    pub soundfont_player:
-        Option<gpui::WindowHandle<crate::components::soundfont_player_window::SoundfontPlayerWindow>>,
+    pub soundfont_player: Option<
+        gpui::WindowHandle<crate::components::soundfont_player_window::SoundfontPlayerWindow>,
+    >,
 }
 
 impl StudioLayout {
@@ -392,9 +393,7 @@ impl StudioLayout {
                                 // plugin registry, so it gets a plain track marker
                                 // instead of an insert. Inspector shows an Open button
                                 // that opens the Soundfont Player MDI window for it.
-                                timeline
-                                    .state
-                                    .set_track_builtin_soundfont_player(&id, true);
+                                timeline.state.set_track_builtin_soundfont_player(&id, true);
                             }
                             created_ids.push(id.clone());
                             selected_track_id = Some(id);

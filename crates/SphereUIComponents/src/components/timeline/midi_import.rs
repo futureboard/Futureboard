@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use super::timeline_state::{
-    MidiControllerKind, MidiControllerLane, MidiControllerPoint, MidiNoteState,
+    MidiChannel, MidiControllerKind, MidiControllerLane, MidiControllerPoint, MidiNoteState,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -11,6 +11,13 @@ pub struct ImportedMidiClip {
     pub sysex_events: Vec<ImportedSysExEvent>,
     pub markers: Vec<ImportedMidiMarker>,
     pub duration_beats: f32,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ImportedMidiTrack {
+    pub name: Option<String>,
+    pub channel_hint: Option<MidiChannel>,
+    pub clip: ImportedMidiClip,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -56,6 +63,20 @@ impl std::fmt::Display for MidiImportError {
 impl std::error::Error for MidiImportError {}
 
 pub fn parse_smf_notes(data: &[u8]) -> Result<ImportedMidiClip, MidiImportError> {
+    let tracks = parse_smf_tracks(data)?;
+    let mut merged = empty_imported_clip();
+    for track in tracks {
+        merged.notes.extend(track.clip.notes);
+        merge_controller_lanes(&mut merged.controller_lanes, track.clip.controller_lanes);
+        merged.sysex_events.extend(track.clip.sysex_events);
+        merged.markers.extend(track.clip.markers);
+        merged.duration_beats = merged.duration_beats.max(track.clip.duration_beats);
+    }
+    finalize_imported_clip(&mut merged, 1);
+    Ok(merged)
+}
+
+pub fn parse_smf_tracks(data: &[u8]) -> Result<Vec<ImportedMidiTrack>, MidiImportError> {
     let mut r = Reader::new(data);
     if r.read_exact(4)? != b"MThd" {
         return Err(MidiImportError::InvalidHeader);
@@ -76,11 +97,7 @@ pub fn parse_smf_notes(data: &[u8]) -> Result<ImportedMidiClip, MidiImportError>
     let ticks_per_beat = (division as u32).max(1);
     r.skip(header_len - 6)?;
 
-    let mut notes = Vec::new();
-    let mut controller_lanes = Vec::new();
-    let mut sysex_events = Vec::new();
-    let mut markers = Vec::new();
-    let mut max_tick = 0u64;
+    let mut imported_tracks = Vec::new();
     for _ in 0..track_count {
         if r.remaining() < 8 {
             break;
@@ -89,43 +106,118 @@ pub fn parse_smf_notes(data: &[u8]) -> Result<ImportedMidiClip, MidiImportError>
             return Err(MidiImportError::InvalidHeader);
         }
         let len = r.read_u32()? as usize;
-        let track = r.read_exact(len)?;
+        let track_data = r.read_exact(len)?;
+        let mut clip = empty_imported_clip();
+        let mut track_name = None;
+        let mut max_tick = 0u64;
         parse_track(
-            track,
+            track_data,
             ticks_per_beat,
-            &mut notes,
-            &mut controller_lanes,
-            &mut sysex_events,
-            &mut markers,
+            &mut clip.notes,
+            &mut clip.controller_lanes,
+            &mut clip.sysex_events,
+            &mut clip.markers,
             &mut max_tick,
+            &mut track_name,
         )?;
+        clip.duration_beats = max_tick as f32 / ticks_per_beat as f32;
+        finalize_imported_clip(&mut clip, ticks_per_beat);
+        let track_name = track_name.filter(|name| !name.is_empty());
+        imported_tracks.extend(split_imported_track_by_channel(track_name, clip));
     }
 
-    notes.sort_by(|a, b| {
+    Ok(imported_tracks)
+}
+
+fn empty_imported_clip() -> ImportedMidiClip {
+    ImportedMidiClip {
+        notes: Vec::new(),
+        controller_lanes: Vec::new(),
+        sysex_events: Vec::new(),
+        markers: Vec::new(),
+        duration_beats: 0.0,
+    }
+}
+
+fn finalize_imported_clip(clip: &mut ImportedMidiClip, _ticks_per_beat: u32) {
+    clip.notes.sort_by(|a, b| {
         a.start
             .total_cmp(&b.start)
             .then(a.pitch.cmp(&b.pitch))
             .then(a.id.cmp(&b.id))
     });
-    controller_lanes.retain(|lane| !lane.points.is_empty());
-    controller_lanes
+    clip.controller_lanes.retain(|lane| !lane.points.is_empty());
+    clip.controller_lanes
         .sort_by(|a, b| controller_kind_sort_key(a.kind).cmp(&controller_kind_sort_key(b.kind)));
-    let note_end = notes
+    let note_end = clip
+        .notes
         .iter()
         .map(|note| note.start + note.duration)
         .fold(0.0_f32, f32::max);
-    let controller_end = controller_lanes
+    let controller_end = clip
+        .controller_lanes
         .iter()
         .flat_map(|lane| lane.points.iter().map(|point| point.beat))
         .fold(0.0_f32, f32::max);
-    let tick_end = max_tick as f32 / ticks_per_beat as f32;
-    Ok(ImportedMidiClip {
-        notes,
-        controller_lanes,
-        sysex_events,
-        markers,
-        duration_beats: note_end.max(controller_end).max(tick_end),
-    })
+    clip.duration_beats = clip.duration_beats.max(note_end).max(controller_end);
+}
+
+fn split_imported_track_by_channel(
+    track_name: Option<String>,
+    clip: ImportedMidiClip,
+) -> Vec<ImportedMidiTrack> {
+    let mut channels: Vec<MidiChannel> = Vec::new();
+    for note in &clip.notes {
+        if !channels.contains(&note.channel) {
+            channels.push(note.channel);
+        }
+    }
+    channels.sort_by_key(|channel| channel.raw());
+
+    if channels.len() <= 1 {
+        return vec![ImportedMidiTrack {
+            name: track_name,
+            channel_hint: channels.first().copied(),
+            clip,
+        }];
+    }
+
+    channels
+        .into_iter()
+        .map(|channel| {
+            let mut channel_clip = ImportedMidiClip {
+                notes: clip
+                    .notes
+                    .iter()
+                    .filter(|note| note.channel == channel)
+                    .cloned()
+                    .collect(),
+                // The current controller-lane model is clip-global, so keep CC /
+                // pitch-bend data available on each split channel clip instead of
+                // silently dropping it during a type-0/channel-split import.
+                controller_lanes: clip.controller_lanes.clone(),
+                sysex_events: clip.sysex_events.clone(),
+                markers: clip.markers.clone(),
+                duration_beats: clip.duration_beats,
+            };
+            finalize_imported_clip(&mut channel_clip, 1);
+            ImportedMidiTrack {
+                name: track_name
+                    .as_ref()
+                    .map(|name| format!("{} Ch {}", name, channel.ui())),
+                channel_hint: Some(channel),
+                clip: channel_clip,
+            }
+        })
+        .collect()
+}
+
+fn merge_controller_lanes(target: &mut Vec<MidiControllerLane>, lanes: Vec<MidiControllerLane>) {
+    for lane in lanes {
+        for point in lane.points {
+            push_controller_point(target, lane.kind, point.beat, point.value);
+        }
+    }
 }
 
 fn parse_track(
@@ -136,6 +228,7 @@ fn parse_track(
     sysex_events: &mut Vec<ImportedSysExEvent>,
     markers: &mut Vec<ImportedMidiMarker>,
     max_tick: &mut u64,
+    track_name: &mut Option<String>,
 ) -> Result<(), MidiImportError> {
     let mut r = Reader::new(data);
     let mut tick = 0u64;
@@ -175,6 +268,7 @@ fn parse_track(
                             start_tick,
                             tick,
                             start_velocity,
+                            channel,
                         );
                     }
                 }
@@ -223,6 +317,12 @@ fn parse_track(
                 let meta_type = r.read_u8()?;
                 let len = r.read_vlq()? as usize;
                 let payload = r.read_exact(len)?;
+                if meta_type == 0x03 {
+                    let name = decode_midi_text(payload);
+                    if !name.is_empty() {
+                        *track_name = Some(name);
+                    }
+                }
                 if meta_type == 0x06 {
                     markers.push(ImportedMidiMarker {
                         text: decode_midi_text(payload),
@@ -312,13 +412,16 @@ fn push_note(
     start_tick: u64,
     end_tick: u64,
     velocity: u8,
+    channel: u8,
 ) {
     if end_tick <= start_tick {
         return;
     }
     let start = start_tick as f32 / ticks_per_beat as f32;
     let duration = (end_tick - start_tick) as f32 / ticks_per_beat as f32;
-    notes.push(MidiNoteState::new(pitch, start, duration, velocity.max(1)));
+    let mut note = MidiNoteState::new(pitch, start, duration, velocity.max(1));
+    note.channel = MidiChannel::from_raw(channel);
+    notes.push(note);
 }
 
 struct Reader<'a> {
@@ -387,11 +490,19 @@ mod tests {
     use super::*;
 
     fn smf(track: &[u8]) -> Vec<u8> {
-        let mut data = vec![
-            b'M', b'T', b'h', b'd', 0, 0, 0, 6, 0, 0, 0, 1, 1, 224, b'M', b'T', b'r', b'k',
-        ];
-        data.extend_from_slice(&(track.len() as u32).to_be_bytes());
-        data.extend_from_slice(track);
+        smf_format(0, &[track])
+    }
+
+    fn smf_format(format: u16, tracks: &[&[u8]]) -> Vec<u8> {
+        let mut data = vec![b'M', b'T', b'h', b'd', 0, 0, 0, 6];
+        data.extend_from_slice(&format.to_be_bytes());
+        data.extend_from_slice(&(tracks.len() as u16).to_be_bytes());
+        data.extend_from_slice(&480u16.to_be_bytes());
+        for track in tracks {
+            data.extend_from_slice(b"MTrk");
+            data.extend_from_slice(&(track.len() as u32).to_be_bytes());
+            data.extend_from_slice(track);
+        }
         data
     }
 
@@ -403,6 +514,51 @@ mod tests {
         assert_eq!(imported.notes[0].pitch, 60);
         assert_eq!(imported.notes[0].velocity, 100);
         assert!((imported.notes[0].duration - 1.0).abs() < 1.0e-4);
+    }
+
+    #[test]
+    fn parses_format_one_tracks_separately() {
+        let track_a = [
+            0, 0xff, 0x03, 5, b'P', b'i', b'a', b'n', b'o', 0, 0x90, 60, 100, 0x83, 0x60, 0x80, 60,
+            0, 0, 0xff, 0x2f, 0,
+        ];
+        let track_b = [
+            0, 0xff, 0x03, 4, b'B', b'a', b's', b's', 0, 0x91, 48, 96, 0x83, 0x60, 0x81, 48, 0, 0,
+            0xff, 0x2f, 0,
+        ];
+        let data = smf_format(1, &[&track_a, &track_b]);
+        let tracks = parse_smf_tracks(&data).unwrap();
+
+        assert_eq!(tracks.len(), 2);
+        assert_eq!(tracks[0].name.as_deref(), Some("Piano"));
+        assert_eq!(tracks[1].name.as_deref(), Some("Bass"));
+        assert_eq!(tracks[0].clip.notes.len(), 1);
+        assert_eq!(tracks[1].clip.notes.len(), 1);
+        assert_eq!(tracks[0].clip.notes[0].pitch, 60);
+        assert_eq!(tracks[1].clip.notes[0].pitch, 48);
+
+        let merged = parse_smf_notes(&data).unwrap();
+        assert_eq!(merged.notes.len(), 2);
+    }
+
+    #[test]
+    fn splits_single_track_multichannel_midi_by_channel() {
+        let track = [
+            0, 0xff, 0x03, 5, b'S', b'o', b'n', b'g', b'1', 0, 0x90, 60, 100, 0, 0x91, 48, 96,
+            0x83, 0x60, 0x80, 60, 0, 0, 0x81, 48, 0, 0, 0xff, 0x2f, 0,
+        ];
+        let data = smf(&track);
+        let tracks = parse_smf_tracks(&data).unwrap();
+
+        assert_eq!(tracks.len(), 2);
+        assert_eq!(tracks[0].name.as_deref(), Some("Song1 Ch 1"));
+        assert_eq!(tracks[1].name.as_deref(), Some("Song1 Ch 2"));
+        assert_eq!(tracks[0].channel_hint.unwrap().ui(), 1);
+        assert_eq!(tracks[1].channel_hint.unwrap().ui(), 2);
+        assert_eq!(tracks[0].clip.notes.len(), 1);
+        assert_eq!(tracks[1].clip.notes.len(), 1);
+        assert_eq!(tracks[0].clip.notes[0].channel.ui(), 1);
+        assert_eq!(tracks[1].clip.notes[0].channel.ui(), 2);
     }
 
     #[test]

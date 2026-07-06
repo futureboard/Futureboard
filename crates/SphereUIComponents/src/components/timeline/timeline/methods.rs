@@ -125,6 +125,7 @@ impl Timeline {
 
     pub fn reset_input_state(&mut self) {
         self.log_input_state("reset-before");
+        self.file_drop_hint = None;
         self.clip_drag_origin = None;
         self.clip_drag_target_track_index = None;
         self.clip_clone_drag_id = None;
@@ -167,6 +168,7 @@ impl Timeline {
             on_add_track: None,
             on_plugin_preset_drop: None,
             last_drag_position: None,
+            file_drop_hint: None,
             clip_drag_origin: None,
             clip_drag_target_track_index: None,
             clip_clone_drag_id: None,
@@ -208,6 +210,7 @@ impl Timeline {
             on_add_track: None,
             on_plugin_preset_drop: None,
             last_drag_position: None,
+            file_drop_hint: None,
             clip_drag_origin: None,
             clip_drag_target_track_index: None,
             clip_clone_drag_id: None,
@@ -1508,7 +1511,7 @@ impl Timeline {
                 return false;
             }
         };
-        let imported = match super::super::midi_import::parse_smf_notes(&bytes) {
+        let imported_tracks = match super::super::midi_import::parse_smf_tracks(&bytes) {
             Ok(imported) => imported,
             Err(error) => {
                 eprintln!(
@@ -1524,27 +1527,35 @@ impl Timeline {
             .map(|s| s.to_string())
             .unwrap_or_else(|| "Imported MIDI".to_string());
         let (drop_x, drop_y) = self.drop_position_or_new_track(force_new_track);
-        let Some((track_id, clip)) = self
+        let clips = self
             .state
-            .import_midi_at(clip_name, imported, drop_x, drop_y)
-        else {
+            .import_midi_tracks_at(clip_name, imported_tracks, drop_x, drop_y);
+        if clips.is_empty() {
             return false;
-        };
+        }
         if crate::components::timeline::timeline_state::midi_debug_enabled() {
-            eprintln!(
-                "[MidiImport] imported path={} track={} clip={} notes={}",
-                path.display(),
-                track_id,
-                clip.id,
-                match &clip.clip_type {
+            let note_count: usize = clips
+                .iter()
+                .map(|(_, clip)| match &clip.clip_type {
                     crate::components::timeline::timeline_state::ClipType::Midi {
                         notes, ..
                     } => notes.len(),
                     _ => 0,
-                }
+                })
+                .sum();
+            eprintln!(
+                "[MidiImport] imported path={} clips={} notes={}",
+                path.display(),
+                clips.len(),
+                note_count,
             );
         }
-        self.run_edit_command(EditCommand::CreateClip { track_id, clip }, cx);
+        if clips.len() == 1 {
+            let (track_id, clip) = clips.into_iter().next().expect("single imported clip");
+            self.run_edit_command(EditCommand::CreateClip { track_id, clip }, cx);
+        } else {
+            self.run_edit_command(EditCommand::BatchCreateClips { clips }, cx);
+        }
         true
     }
 

@@ -11,7 +11,10 @@
 
 use std::sync::Arc;
 
-use gpui::{div, px, svg, AnyElement, App, InteractiveElement, IntoElement, ParentElement, StatefulInteractiveElement, Styled, Window};
+use gpui::{
+    div, px, svg, AnyElement, App, InteractiveElement, IntoElement, ParentElement,
+    StatefulInteractiveElement, Styled, Window,
+};
 
 use crate::assets;
 use crate::components::controls::{fb_button, fb_checkbox, fb_stepper_button, FbButtonKind};
@@ -208,7 +211,11 @@ fn header_row(title: &str, subtitle: &str) -> AnyElement {
         .into_any_element()
 }
 
-fn field_row(label: &'static str, value: impl IntoElement, action: Option<AnyElement>) -> AnyElement {
+fn field_row(
+    label: &'static str,
+    value: impl IntoElement,
+    action: Option<AnyElement>,
+) -> AnyElement {
     let mut row = div()
         .flex()
         .flex_row()
@@ -283,7 +290,11 @@ fn preset_row(panel: &SoundfontPlayerPanelState, cb: &SoundfontPlayerCallbacks) 
         "—".to_string()
     };
     let toggle = cb.on_toggle_preset_list.clone();
-    let toggle_label = if panel.preset_list_open { "Close" } else { "Choose…" };
+    let toggle_label = if panel.preset_list_open {
+        "Close"
+    } else {
+        "Choose…"
+    };
     field_row(
         "Preset",
         value,

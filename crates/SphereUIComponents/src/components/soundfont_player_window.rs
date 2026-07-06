@@ -327,9 +327,16 @@ impl Render for SoundfontPlayerWindow {
                 },
             ))
             .child(
-                div().flex_1().min_h(px(0.0)).relative().child(
-                    soundfont_player_mdi_workspace(&self.workspace, callbacks, &panel, panel_callbacks),
-                ),
+                div()
+                    .flex_1()
+                    .min_h(px(0.0))
+                    .relative()
+                    .child(soundfont_player_mdi_workspace(
+                        &self.workspace,
+                        callbacks,
+                        &panel,
+                        panel_callbacks,
+                    )),
             )
     }
 }

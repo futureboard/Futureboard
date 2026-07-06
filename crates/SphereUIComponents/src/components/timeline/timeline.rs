@@ -68,6 +68,12 @@ struct RangeSelectDrag {
     dragging: bool,
 }
 
+#[derive(Clone, Debug)]
+struct FileDropHint {
+    position: gpui::Point<gpui::Pixels>,
+    label: &'static str,
+}
+
 fn is_supported_audio_ext(path: &std::path::Path) -> bool {
     matches!(
         path.extension()
@@ -118,6 +124,7 @@ pub struct Timeline {
     /// a synthetic MouseUp, so we have to remember the last cursor position
     /// observed during the drag.
     last_drag_position: Option<gpui::Point<gpui::Pixels>>,
+    file_drop_hint: Option<FileDropHint>,
     clip_drag_origin: Option<gpui::Point<gpui::Pixels>>,
     clip_drag_target_track_index: Option<usize>,
     clip_clone_drag_id: Option<String>,

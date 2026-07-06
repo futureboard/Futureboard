@@ -64,16 +64,10 @@ impl Render for Timeline {
                 this.clip_clone_drag_id = clone_drag.then(|| clip_id.clone());
                 if *additive {
                     this.state.select_clip_additive(clip_id);
-                } else if this.state.selection.selected_clip_ids.len() > 1
-                    && this
-                        .state
-                        .selection
-                        .selected_clip_ids
-                        .iter()
-                        .any(|id| id == clip_id)
-                {
-                    this.state.arrangement_range = None;
                 } else {
+                    // Plain click is an explicit single-clip selection. Multi-select is
+                    // preserved only with Ctrl/Cmd additive clicks; this keeps imported
+                    // multi-channel MIDI clips from behaving like an inseparable group.
                     this.state.select_clip(clip_id);
                 }
                 cx.notify();
@@ -875,6 +869,10 @@ impl Render for Timeline {
             .pen_clip_draw
             .as_ref()
             .and_then(|preview| pen_clip_draw_overlay(preview, state));
+        let file_drop_overlay = self
+            .file_drop_hint
+            .as_ref()
+            .and_then(|hint| file_drop_hint_overlay(hint, state));
         let on_zoom_in_btn = on_zoom_in.clone();
         let on_zoom_out_btn = on_zoom_out.clone();
 
@@ -893,8 +891,13 @@ impl Render for Timeline {
         // Track the mouse position throughout an external file drag so that
         // when `on_drop` fires we can resolve the drop coordinates.
         let on_drag_track = cx.listener(
-            |this, event: &gpui::DragMoveEvent<ExternalPaths>, _window, _cx| {
+            |this, event: &gpui::DragMoveEvent<ExternalPaths>, _window, cx| {
                 this.last_drag_position = Some(event.event.position);
+                this.file_drop_hint = Some(FileDropHint {
+                    position: event.event.position,
+                    label: "Drop files to import",
+                });
+                cx.notify();
             },
         );
 
@@ -910,24 +913,35 @@ impl Render for Timeline {
                 any_imported |= imported;
                 force_new_track |= imported;
             }
+            let had_hint = this.file_drop_hint.take().is_some();
             if any_imported {
                 this.last_drag_position = None;
+            }
+            if any_imported || had_hint {
                 cx.notify();
             }
         });
 
         let on_browser_drag_track = cx.listener(
-            |this, event: &gpui::DragMoveEvent<BrowserDragItem>, _window, _cx| {
+            |this, event: &gpui::DragMoveEvent<BrowserDragItem>, _window, cx| {
                 this.last_drag_position = Some(event.event.position);
+                this.file_drop_hint = Some(FileDropHint {
+                    position: event.event.position,
+                    label: "Drop browser item to import",
+                });
+                cx.notify();
             },
         );
 
         let on_browser_file_dropped = cx.listener(|this, item: &BrowserDragItem, window, cx| {
-            if this.import_midi_path_at_last_drag(&item.path, false, window, cx)
+            let had_hint = this.file_drop_hint.take().is_some();
+            let imported = this.import_midi_path_at_last_drag(&item.path, false, window, cx)
                 || this.import_audio_path_at_last_drag(&item.path, false, window, cx)
-                || this.drop_plugin_preset_at_last_drag(&item.path, window, cx)
-            {
+                || this.drop_plugin_preset_at_last_drag(&item.path, window, cx);
+            if imported {
                 this.last_drag_position = None;
+            }
+            if imported || had_hint {
                 cx.notify();
             }
         });
@@ -936,6 +950,7 @@ impl Render for Timeline {
             |this, event: &gpui::DragMoveEvent<ClipDragItem>, window, cx| {
                 let drag = event.drag(cx).clone();
                 this.last_drag_position = Some(event.event.position);
+                this.file_drop_hint = None;
                 if this.clip_clone_drag_id.as_deref() == Some(drag.clip_id.as_str()) {
                     let origin = *this.clip_drag_origin.get_or_insert(event.event.position);
                     let (target_index, _) =
@@ -1021,6 +1036,7 @@ impl Render for Timeline {
             this.clip_drag_target_track_index = None;
             this.clip_clone_drag_id = None;
             this.last_drag_position = None;
+            this.file_drop_hint = None;
             cx.notify();
         });
 
@@ -1378,6 +1394,18 @@ impl Render for Timeline {
             // Live pen-draw MIDI clip ghost preview (same lane coordinate space
             // as the arrangement overlay; above content, below the playhead).
             .children(pen_preview_overlay.map(|overlay| {
+                div()
+                    .absolute()
+                    .left(px(HEADER_WIDTH))
+                    .right_0()
+                    .top(px(content_top))
+                    .bottom_0()
+                    .overflow_hidden()
+                    .child(overlay)
+            }))
+            // External/browser file-drop hint. Drawn above lane content and below
+            // playhead/tools; it is UI-only and follows the last GPUI drag move.
+            .children(file_drop_overlay.map(|overlay| {
                 div()
                     .absolute()
                     .left(px(HEADER_WIDTH))
@@ -1777,6 +1805,110 @@ pub(crate) fn format_arrangement_target_debug(target: &ArrangementHitTarget) -> 
             timeline_beat,
         } => format!("track_id={track_id}\nlane_id={lane_id}\ntimeline_beat={timeline_beat:.3}"),
     }
+}
+
+fn file_drop_hint_overlay(hint: &FileDropHint, state: &TimelineState) -> Option<gpui::AnyElement> {
+    let window_x: f32 = hint.position.x.into();
+    let window_y: f32 = hint.position.y.into();
+    let lane_x = (window_x - SIDEBAR_WIDTH - HEADER_WIDTH).max(0.0);
+    let lane_y = (window_y - APP_CHROME_HEIGHT - state.arrangement_content_top()).max(0.0);
+    let beat = state.snap_beats(state.x_to_beats(lane_x)).max(0.0);
+    let track_index = state.track_index_at_y(lane_y);
+    let row_layout = state.track_row_layout();
+    let (target_top, target_h, target_name, target_color) = if let Some(index) = track_index {
+        let row = row_layout.row_for_index(index)?;
+        let track = state.tracks.get(index)?;
+        (
+            row.y - state.viewport.scroll_y,
+            row.height,
+            track.name.clone(),
+            track.color,
+        )
+    } else {
+        let y = state.total_track_rows_height() - state.viewport.scroll_y;
+        (
+            y.max(0.0),
+            DEFAULT_TRACK_HEIGHT,
+            "New MIDI/Audio Track".to_string(),
+            Colors::accent_primary(),
+        )
+    };
+
+    let marker_x = state.beats_to_x(beat).max(0.0);
+    let label_top = (target_top + 8.0).max(4.0);
+    let label_left = (marker_x + 10.0).max(8.0);
+    let accent = Colors::accent_primary();
+
+    let lane_highlight = div()
+        .absolute()
+        .left_0()
+        .right_0()
+        .top(px(target_top.max(0.0)))
+        .h(px(target_h.max(24.0)))
+        .bg(Colors::with_alpha(target_color, 0.10))
+        .border_t(px(1.0))
+        .border_b(px(1.0))
+        .border_color(Colors::with_alpha(accent, 0.42))
+        .with_animation(
+            "timeline-file-drop-lane-pulse",
+            Animation::new(Duration::from_millis(900))
+                .repeat()
+                .with_easing(pulsating_between(0.18, 0.38)),
+            move |this, delta| this.bg(Colors::with_alpha(target_color, delta)),
+        );
+
+    let beat_guide = div()
+        .absolute()
+        .left(px((marker_x - 0.5).max(0.0)))
+        .top_0()
+        .bottom_0()
+        .w(px(1.0))
+        .bg(Colors::with_alpha(accent, 0.65));
+
+    let label = div()
+        .absolute()
+        .left(px(label_left))
+        .top(px(label_top))
+        .px(px(8.0))
+        .py(px(5.0))
+        .rounded_md()
+        .border(px(1.0))
+        .border_color(Colors::with_alpha(accent, 0.62))
+        .bg(Colors::with_alpha(Colors::surface_panel(), 0.96))
+        .shadow_lg()
+        .flex()
+        .flex_col()
+        .gap(px(2.0))
+        .child(
+            div()
+                .text_size(px(10.0))
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .text_color(Colors::text_primary())
+                .child(hint.label),
+        )
+        .child(
+            div()
+                .text_size(px(9.0))
+                .text_color(Colors::text_muted())
+                .child(format!("{} · {}", target_name, state.format_bar_beat(beat))),
+        )
+        .with_animation(
+            "timeline-file-drop-label-pulse",
+            Animation::new(Duration::from_millis(900))
+                .repeat()
+                .with_easing(pulsating_between(0.78, 1.0)),
+            |this, delta| this.opacity(delta),
+        );
+
+    Some(
+        div()
+            .absolute()
+            .inset_0()
+            .child(lane_highlight)
+            .child(beat_guide)
+            .child(label)
+            .into_any_element(),
+    )
 }
 
 /// Live ghost-clip overlay for the in-flight pen MIDI clip draw. Translucent,

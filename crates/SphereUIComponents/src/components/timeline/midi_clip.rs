@@ -1,6 +1,6 @@
 use crate::components::timeline::timeline_state::{
     midi_debug_enabled, ClipDragItem, ClipEdge, ClipResizeDrag, ClipState, ClipType,
-    MidiControllerKind, MidiControllerPoint, TimelineState,
+    MidiControllerKind, MidiControllerPoint, MidiNoteState, TimelineState,
 };
 use crate::{custom_cursors, theme::Colors};
 use gpui::{
@@ -42,7 +42,9 @@ pub fn midi_clip(
     let clip_h = row_height - pad * 2.0;
     let note_h = clip_h - 14.0; // height for notes preview
 
-    // Draw notes inside notes preview area (clip-relative beats, clip bounds).
+    // Draw notes and controller previews with canvases instead of one GPUI element
+    // per note. Dense imported MIDI can contain thousands of notes per clip; the
+    // canvas path keeps render cost proportional to visible pixels, not event count.
     let mut note_elements: Vec<gpui::AnyElement> = Vec::new();
     let clip_len = clip.duration_beats;
     if let ClipType::Midi {
@@ -51,45 +53,18 @@ pub fn midi_clip(
         ..
     } = &clip.clip_type
     {
-        let in_bounds: Vec<_> = notes
+        let in_bounds: Vec<MidiNoteState> = notes
             .iter()
             .filter(|n| n.start < clip_len && n.start + n.duration > 0.0)
+            .cloned()
             .collect();
-        let mut top_pitch = 72u8;
-        let mut bottom_pitch = 48u8;
-        if !in_bounds.is_empty() {
-            let lo = in_bounds.iter().map(|n| n.pitch).min().unwrap_or(48);
-            let hi = in_bounds.iter().map(|n| n.pitch).max().unwrap_or(72);
-            top_pitch = hi.saturating_add(2).min(127);
-            bottom_pitch = lo.saturating_sub(2);
-        }
-        let pitch_range = (top_pitch as i32 - bottom_pitch as i32).max(12) as f32;
         let ppb = pixels_per_second * seconds_per_beat;
-
         let preview_count = in_bounds.len();
-        for note in &in_bounds {
-            let visible_end = (note.start + note.duration).min(clip_len);
-            let visible_start = note.start.max(0.0);
-            if visible_end <= visible_start {
-                continue;
-            }
-            let note_left = visible_start * ppb;
-            let note_width = ((visible_end - visible_start) * ppb).max(2.0);
-            let norm_pitch = (note.pitch as i32 - bottom_pitch as i32) as f32 / pitch_range;
-            let note_top = (1.0 - norm_pitch) * (note_h - 4.0) + 1.0;
-
+        if !in_bounds.is_empty() {
             note_elements.push(
-                div()
+                midi_note_preview_canvas(in_bounds, clip_len, ppb, track_color)
                     .absolute()
-                    .left(px(note_left))
-                    .top(px(note_top))
-                    .w(px(note_width))
-                    .h(px(2.0))
-                    .bg({
-                        let mut c = track_color;
-                        c.a = 0.8;
-                        c
-                    })
+                    .inset_0()
                     .into_any_element(),
             );
         }
@@ -104,15 +79,10 @@ pub fn midi_clip(
         if !controller_preview_lanes.is_empty() {
             let lane_count = controller_preview_lanes.len();
             note_elements.push(
-                midi_controller_preview_canvas(
-                    controller_preview_lanes.clone(),
-                    clip_len,
-                    ppb,
-                    track_color,
-                )
-                .absolute()
-                .inset_0()
-                .into_any_element(),
+                midi_controller_preview_canvas(controller_preview_lanes.clone(), clip_len, ppb)
+                    .absolute()
+                    .inset_0()
+                    .into_any_element(),
             );
             if width >= 44.0 && note_h >= 18.0 {
                 let band_h = controller_preview_band_h(note_h, lane_count);
@@ -312,11 +282,110 @@ pub fn midi_clip(
         )
 }
 
+fn midi_note_preview_canvas(
+    notes: Vec<MidiNoteState>,
+    clip_len: f32,
+    ppb: f32,
+    track_color: gpui::Rgba,
+) -> gpui::Canvas<()> {
+    canvas(
+        |_bounds, _window, _cx| {},
+        move |bounds: Bounds<Pixels>, (), window, _cx| {
+            let width: f32 = bounds.size.width.into();
+            let height: f32 = bounds.size.height.into();
+            if notes.is_empty() || width <= 1.0 || height <= 16.0 || ppb <= 0.0 {
+                return;
+            }
+
+            let note_area_h = (height - 14.0).max(1.0);
+            let visible_start_beat = 0.0_f32;
+            let visible_end_beat = (width / ppb).min(clip_len).max(0.0);
+            let visible_notes: Vec<_> = notes
+                .iter()
+                .filter(|note| {
+                    note.start < visible_end_beat && note.start + note.duration > visible_start_beat
+                })
+                .collect();
+            if visible_notes.is_empty() {
+                return;
+            }
+
+            let lo = visible_notes.iter().map(|n| n.pitch).min().unwrap_or(48);
+            let hi = visible_notes.iter().map(|n| n.pitch).max().unwrap_or(72);
+            let top_pitch = hi.saturating_add(2).min(127);
+            let bottom_pitch = lo.saturating_sub(2);
+            let pitch_range = (top_pitch as i32 - bottom_pitch as i32).max(12) as f32;
+
+            let mut note_color = track_color;
+            note_color.a = 0.86;
+            let min_note_w = if ppb < 3.0 { 1.0 } else { 2.0 };
+            let note_h = if note_area_h < 30.0 { 1.4 } else { 2.0 };
+
+            // Very dense/zoomed-out MIDI can map many notes to the same pixel.
+            // Coalesce to one vertical span per x-column so paint calls stay bounded
+            // by clip width rather than note count while preserving the musical mass.
+            if ppb < 5.0 || visible_notes.len() > width as usize * 3 {
+                let columns = width.ceil().clamp(1.0, 2400.0) as usize;
+                let mut spans: Vec<Option<(f32, f32)>> = vec![None; columns];
+                for note in visible_notes {
+                    let visible_start = note.start.max(0.0);
+                    let visible_end = (note.start + note.duration).min(clip_len);
+                    if visible_end <= visible_start {
+                        continue;
+                    }
+                    let x0 = (visible_start * ppb)
+                        .floor()
+                        .clamp(0.0, (columns - 1) as f32) as usize;
+                    let x1 = (visible_end * ppb)
+                        .ceil()
+                        .clamp(x0 as f32, (columns - 1) as f32)
+                        as usize;
+                    let norm_pitch = (note.pitch as i32 - bottom_pitch as i32) as f32 / pitch_range;
+                    let y = (1.0 - norm_pitch) * (note_area_h - 4.0) + 1.0;
+                    for col in x0..=x1 {
+                        spans[col] = Some(match spans[col] {
+                            Some((top, bottom)) => (top.min(y), bottom.max(y + note_h)),
+                            None => (y, y + note_h),
+                        });
+                    }
+                }
+                for (col, span) in spans.into_iter().enumerate() {
+                    if let Some((top, bottom)) = span {
+                        window.paint_quad(fill(
+                            Bounds::new(
+                                bounds.origin + point(px(col as f32), px(top)),
+                                size(px(1.0), px((bottom - top).max(1.0))),
+                            ),
+                            note_color,
+                        ));
+                    }
+                }
+                return;
+            }
+
+            for note in visible_notes {
+                let visible_end = (note.start + note.duration).min(clip_len);
+                let visible_start = note.start.max(0.0);
+                if visible_end <= visible_start {
+                    continue;
+                }
+                let x = visible_start * ppb;
+                let w = ((visible_end - visible_start) * ppb).max(min_note_w);
+                let norm_pitch = (note.pitch as i32 - bottom_pitch as i32) as f32 / pitch_range;
+                let y = (1.0 - norm_pitch) * (note_area_h - 4.0) + 1.0;
+                window.paint_quad(fill(
+                    Bounds::new(bounds.origin + point(px(x), px(y)), size(px(w), px(note_h))),
+                    note_color,
+                ));
+            }
+        },
+    )
+}
+
 fn midi_controller_preview_canvas(
     lanes: Vec<(MidiControllerKind, Vec<MidiControllerPoint>)>,
     clip_len: f32,
     ppb: f32,
-    track_color: gpui::Rgba,
 ) -> gpui::Canvas<()> {
     canvas(
         |_bounds, _window, _cx| {},
@@ -342,10 +411,13 @@ fn midi_controller_preview_canvas(
                 let default_value = midi_controller_default_value(*kind);
                 let baseline_y = row_top + (1.0 - default_value) * (row_h - 2.0).max(1.0) + 1.0;
                 let mut line_color = match kind {
-                    MidiControllerKind::PitchBend => Colors::accent_primary(),
-                    _ => track_color,
+                    MidiControllerKind::PitchBend => Colors::accent_purple(),
+                    MidiControllerKind::CC(_) => Colors::automation_curve(),
+                    MidiControllerKind::ChannelPressure | MidiControllerKind::PolyPressure => {
+                        Colors::accent_warning()
+                    }
                 };
-                line_color.a = (0.78 - lane_idx as f32 * 0.14).clamp(0.38, 0.78);
+                line_color.a = (0.82 - lane_idx as f32 * 0.14).clamp(0.42, 0.82);
                 let mut baseline_color = Colors::text_primary();
                 baseline_color.a = 0.12;
 
@@ -358,6 +430,7 @@ fn midi_controller_preview_canvas(
                 ));
 
                 let mut prev_y: Option<f32> = None;
+                let mut point_index = 0usize;
                 for col in 0..=columns {
                     let x = (col as f32 * step_px).min(width);
                     let beat = if ppb <= 0.0 {
@@ -365,7 +438,12 @@ fn midi_controller_preview_canvas(
                     } else {
                         (x / ppb).clamp(0.0, clip_len.max(0.0))
                     };
-                    let value = evaluate_midi_controller_points(points, beat, default_value);
+                    let value = evaluate_midi_controller_points_cursor(
+                        points,
+                        beat,
+                        default_value,
+                        &mut point_index,
+                    );
                     let y = row_top + (1.0 - value) * (row_h - 2.0).max(1.0) + 1.0;
                     if let Some(prev) = prev_y {
                         let top = prev.min(y);
@@ -399,32 +477,38 @@ fn midi_controller_default_value(kind: MidiControllerKind) -> f32 {
     }
 }
 
-fn evaluate_midi_controller_points(
+fn evaluate_midi_controller_points_cursor(
     points: &[MidiControllerPoint],
     beat: f32,
     default_value: f32,
+    point_index: &mut usize,
 ) -> f32 {
     if points.is_empty() {
         return default_value.clamp(0.0, 1.0);
     }
     let beat = beat.max(0.0);
     if beat <= points[0].beat {
+        *point_index = 0;
         return points[0].value.clamp(0.0, 1.0);
     }
     let last = points.len() - 1;
     if beat >= points[last].beat {
+        *point_index = last.saturating_sub(1);
         return points[last].value.clamp(0.0, 1.0);
     }
-    for pair in points.windows(2) {
-        let a = &pair[0];
-        let b = &pair[1];
-        if beat >= a.beat && beat <= b.beat {
-            let span = (b.beat - a.beat).max(1.0e-6);
-            let t = ((beat - a.beat) / span).clamp(0.0, 1.0);
-            return (a.value + (b.value - a.value) * t).clamp(0.0, 1.0);
-        }
+
+    while *point_index + 1 < points.len() && beat > points[*point_index + 1].beat {
+        *point_index += 1;
     }
-    default_value.clamp(0.0, 1.0)
+    while *point_index > 0 && beat < points[*point_index].beat {
+        *point_index -= 1;
+    }
+    let next = (*point_index + 1).min(last);
+    let a = &points[*point_index];
+    let b = &points[next];
+    let span = (b.beat - a.beat).max(1.0e-6);
+    let t = ((beat - a.beat) / span).clamp(0.0, 1.0);
+    (a.value + (b.value - a.value) * t).clamp(0.0, 1.0)
 }
 
 fn midi_controller_kind_label(kind: MidiControllerKind) -> String {

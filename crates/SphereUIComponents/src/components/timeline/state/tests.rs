@@ -1420,3 +1420,130 @@ mod fx_reorder_tests {
         assert_eq!(sorted, expected);
     }
 }
+
+#[cfg(test)]
+mod midi_import_tests {
+    use super::*;
+    use crate::components::timeline::midi_import::{ImportedMidiClip, ImportedMidiTrack};
+
+    fn imported_track(name: &str, pitch: u8) -> ImportedMidiTrack {
+        ImportedMidiTrack {
+            name: Some(name.to_string()),
+            channel_hint: None,
+            clip: ImportedMidiClip {
+                notes: vec![MidiNoteState::new(pitch, 0.0, 1.0, 100)],
+                controller_lanes: Vec::new(),
+                sysex_events: Vec::new(),
+                markers: Vec::new(),
+                duration_beats: 4.0,
+            },
+        }
+    }
+
+    /// Regression test: importing a multi-track MIDI batch (e.g. a
+    /// channel-split file) must give every resulting clip a distinct id.
+    /// `next_clip_id()` only sees clips already attached to `state.tracks`,
+    /// so before this fix, clips built earlier in the same batch (still only
+    /// in the local `clips` Vec, not yet pushed to any track) were invisible
+    /// to later `next_clip_id()` calls and all received the same id — which
+    /// broke solo-selecting a single clip, since selection matches by id and
+    /// every split clip compared equal.
+    #[test]
+    fn multi_track_import_assigns_distinct_clip_ids() {
+        let mut state = TimelineState::default();
+        state.tracks.clear();
+        let imported = vec![
+            imported_track("Ch 1", 60),
+            imported_track("Ch 2", 64),
+            imported_track("Ch 3", 67),
+        ];
+        let clips = state.import_midi_tracks_at("Song".to_string(), imported, 0.0, 0.0);
+
+        assert_eq!(clips.len(), 3, "all three channel clips should build");
+        let ids: std::collections::HashSet<&String> =
+            clips.iter().map(|(_, clip)| &clip.id).collect();
+        assert_eq!(
+            ids.len(),
+            3,
+            "every imported clip must have a unique id, got {:?}",
+            clips.iter().map(|(_, c)| &c.id).collect::<Vec<_>>()
+        );
+        let track_ids: std::collections::HashSet<&String> =
+            clips.iter().map(|(track_id, _)| track_id).collect();
+        assert_eq!(track_ids.len(), 3, "each channel should land on its own track");
+    }
+}
+
+#[cfg(test)]
+mod midi_output_routing_tests {
+    use super::*;
+
+    fn track(state: &mut TimelineState, track_type: TrackType, name: &str) -> String {
+        state.create_track(CreateTrackOptions {
+            track_type,
+            name: name.to_string(),
+            color: gpui::Rgba {
+                r: 0.0,
+                g: 0.0,
+                b: 0.0,
+                a: 1.0,
+            },
+            volume: 1.0,
+            pan: 0.0,
+            armed: false,
+            input_monitor: InputMonitorMode::Off,
+        })
+    }
+
+    /// A MIDI track routed to a real Instrument track resolves to that
+    /// instrument for both playback (`engine_snapshot`) and live preview.
+    #[test]
+    fn midi_track_routes_to_instrument_target() {
+        let mut state = TimelineState::default();
+        state.tracks.clear();
+        let inst_id = track(&mut state, TrackType::Instrument, "Synth");
+        let midi_id = track(&mut state, TrackType::Midi, "Notes");
+        state.set_track_output_routing(
+            &midi_id,
+            TrackOutputRouting::Instrument {
+                track_id: inst_id.clone(),
+            },
+        );
+
+        assert_eq!(
+            state.effective_instrument_track_id(&midi_id),
+            Some(inst_id.clone())
+        );
+        assert_eq!(
+            state.effective_instrument_track_id(&inst_id),
+            Some(inst_id)
+        );
+    }
+
+    /// An unrouted MIDI track (default `TrackOutputRouting::None`) has no
+    /// effective instrument — it should stay silent rather than guessing a
+    /// target, matching the "no silent misrouting" rule.
+    #[test]
+    fn unrouted_midi_track_has_no_effective_instrument() {
+        let mut state = TimelineState::default();
+        state.tracks.clear();
+        let midi_id = track(&mut state, TrackType::Midi, "Notes");
+        assert_eq!(state.effective_instrument_track_id(&midi_id), None);
+    }
+
+    /// Routing to a track id that no longer exists (or isn't an Instrument
+    /// track anymore) resolves to `None` instead of panicking or guessing.
+    #[test]
+    fn stale_instrument_target_resolves_to_none() {
+        let mut state = TimelineState::default();
+        state.tracks.clear();
+        let midi_id = track(&mut state, TrackType::Midi, "Notes");
+        state.set_track_output_routing(
+            &midi_id,
+            TrackOutputRouting::Instrument {
+                track_id: "does-not-exist".to_string(),
+            },
+        );
+        assert_eq!(state.effective_instrument_track_id(&midi_id), None);
+    }
+}

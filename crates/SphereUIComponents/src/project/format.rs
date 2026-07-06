@@ -685,6 +685,10 @@ fn encode_track_output_routing(w: &mut FbWriter, output: &ProjectTrackOutputRout
             w.write_u32(*channel);
         }
         ProjectTrackOutputRouting::None => w.write_u8(3),
+        ProjectTrackOutputRouting::Instrument { track_id } => {
+            w.write_u8(4);
+            w.write_str(track_id);
+        }
     }
 }
 
@@ -1301,6 +1305,9 @@ fn decode_track_output_routing(
             channel: r.read_u32()?,
         },
         3 => ProjectTrackOutputRouting::None,
+        4 => ProjectTrackOutputRouting::Instrument {
+            track_id: r.read_str()?,
+        },
         t => {
             return Err(ProjectError::Corrupted(format!(
                 "unknown track output routing {t}"

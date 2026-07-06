@@ -73,6 +73,11 @@ pub enum TrackOutputRouting {
     Main,
     Bus { bus_id: String },
     HardwareOutput { device_id: String, channel: u32 },
+    /// A MIDI track's notes/controllers are redirected to the named
+    /// Instrument track's own plugin instead of that instrument's own clips.
+    /// Only meaningful on `TrackType::Midi` tracks; see
+    /// `TimelineState::effective_instrument_track_id`.
+    Instrument { track_id: String },
     None,
 }
 
@@ -84,6 +89,10 @@ impl TrackOutputRouting {
             Self::HardwareOutput { device_id, channel } => {
                 format!("{device_id} ch {}", channel + 1)
             }
+            // Callers that know the live track list should prefer
+            // `panel::midi_output_combo_label`, which resolves the target's
+            // display name; this is the id-only fallback.
+            Self::Instrument { track_id } => format!("Instrument - {track_id}"),
             Self::None => "None".to_string(),
         }
     }
@@ -243,6 +252,29 @@ impl TimelineState {
             }
         }
         false
+    }
+
+    /// Resolve which track's plugin instance should actually receive a
+    /// track's MIDI events during playback/preview: an Instrument track
+    /// plays its own clips; a MIDI track routed via
+    /// `TrackOutputRouting::Instrument` plays through that target instead
+    /// (only while the target still exists and is still an Instrument
+    /// track — a stale/retyped target yields `None`, i.e. silence, rather
+    /// than guessing a different destination).
+    pub fn effective_instrument_track_id(&self, track_id: &str) -> Option<String> {
+        let track = self.tracks.iter().find(|t| t.id == track_id)?;
+        match track.track_type {
+            TrackType::Instrument => Some(track.id.clone()),
+            TrackType::Midi => match &track.routing.output {
+                TrackOutputRouting::Instrument { track_id: target_id } => self
+                    .tracks
+                    .iter()
+                    .find(|t| t.id == *target_id && t.track_type == TrackType::Instrument)
+                    .map(|t| t.id.clone()),
+                _ => None,
+            },
+            _ => None,
+        }
     }
 
     pub fn set_track_output_routing(&mut self, track_id: &str, output: TrackOutputRouting) -> bool {

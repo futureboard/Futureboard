@@ -99,6 +99,60 @@ impl Render for StudioLayout {
         } else {
             None
         };
+        let instrument_targets: Vec<(String, String)> = if self.overlay.inspector_routing_combo
+            == Some(crate::components::panel::InspectorRoutingCombo::MidiOut)
+        {
+            tracks
+                .iter()
+                .filter(|track| {
+                    track.track_type == crate::components::timeline::timeline_state::TrackType::Instrument
+                })
+                .map(|track| (track.id.clone(), track.name.clone()))
+                .collect()
+        } else {
+            Vec::new()
+        };
+        // Real MIDI hardware/virtual ports, enabled in Preferences → MIDI —
+        // the same cached registry Settings renders from (`device_registry`),
+        // not a mocked/empty placeholder. Only enabled ports are offered as
+        // routing targets, matching the Preferences toggle the user set.
+        let (detected_midi_inputs, detected_midi_outputs): (Vec<String>, Vec<String>) =
+            if matches!(
+                self.overlay.inspector_routing_combo,
+                Some(crate::components::panel::InspectorRoutingCombo::MidiInput)
+                    | Some(crate::components::panel::InspectorRoutingCombo::MidiOut)
+            ) {
+                let saved = self.settings.read(cx).current.hardware.midi.devices.clone();
+                let detected = crate::device_registry::cached_midi_devices();
+                let resolved = sphere_midi_service::resolve_midi_devices(&saved, &detected);
+                let inputs = resolved
+                    .iter()
+                    .filter(|d| {
+                        d.enabled
+                            && matches!(
+                                d.direction,
+                                crate::settings::MidiDeviceDirection::Input
+                                    | crate::settings::MidiDeviceDirection::InputOutput
+                            )
+                    })
+                    .map(|d| d.name.clone())
+                    .collect();
+                let outputs = resolved
+                    .iter()
+                    .filter(|d| {
+                        d.enabled
+                            && matches!(
+                                d.direction,
+                                crate::settings::MidiDeviceDirection::Output
+                                    | crate::settings::MidiDeviceDirection::InputOutput
+                            )
+                    })
+                    .map(|d| d.name.clone())
+                    .collect();
+                (inputs, outputs)
+            } else {
+                (Vec::new(), Vec::new())
+            };
         let inspector_routing_combo_overlay: Option<gpui::AnyElement> =
             if let (Some(combo), Some(anchor)) = (
                 self.overlay.inspector_routing_combo,
@@ -126,6 +180,9 @@ impl Render for StudioLayout {
                             audio_input_device.clone(),
                             audio_output_buses.clone(),
                             audio_output_device.clone(),
+                            instrument_targets.clone(),
+                            detected_midi_inputs.clone(),
+                            detected_midi_outputs.clone(),
                         )
                         .into_any_element()
                     })

@@ -313,14 +313,18 @@ impl PianoRoll {
                 );
             }
             dropdown = Some(
-                panel
-                    .with_animation(
-                        "pr-select-menu-open",
-                        Animation::new(Duration::from_millis(90))
-                            .with_easing(pulsating_between(0.9, 1.0)),
-                        |this, delta| this.opacity(delta),
-                    )
-                    .into_any_element(),
+                deferred(
+                    panel
+                        .with_animation(
+                            "pr-select-menu-open",
+                            Animation::new(Duration::from_millis(90))
+                                .with_easing(pulsating_between(0.9, 1.0)),
+                            |this, delta| this.opacity(delta),
+                        )
+                        .into_any_element(),
+                )
+                .with_priority(PIANO_ROLL_MENU_PRIORITY)
+                .into_any_element(),
             );
         }
 
@@ -397,6 +401,46 @@ impl PianoRoll {
         let visible = self.lane_visible;
         let custom = self.custom_cc;
 
+        // Controller kinds that actually carry points in the clip being
+        // edited. Merged into the dropdown below so CC lanes that come from
+        // an imported/recorded MIDI clip (any of the 128 CC numbers, not
+        // just the six common ones in `LANE_CYCLE`) are still reachable
+        // without the user having to already know the CC number to type into
+        // the "Custom CC" stepper.
+        let clip_lane_kinds: Vec<(MidiControllerKind, bool)> = self
+            .editing_clip_id(cx)
+            .map(|clip_id| {
+                let tl = self.timeline.read(cx);
+                tl.state
+                    .midi_clip_controller_lanes(&clip_id)
+                    .map(|lanes| {
+                        lanes
+                            .iter()
+                            .map(|lane| (lane.kind, !lane.points.is_empty()))
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default()
+            })
+            .unwrap_or_default();
+        let has_data = |kind: MidiControllerKind| {
+            clip_lane_kinds.iter().any(|(k, has)| *k == kind && *has)
+        };
+        // CC lanes with real data that aren't already offered by the common
+        // `LANE_CYCLE` list get their own "In This Clip" section.
+        let mut extra_kinds: Vec<MidiControllerKind> = clip_lane_kinds
+            .iter()
+            .filter(|(kind, has)| {
+                *has && !LANE_CYCLE.contains(&ControllerLaneKind::Controller(*kind))
+            })
+            .map(|(kind, _)| *kind)
+            .collect();
+        extra_kinds.sort_by_key(|kind| match kind {
+            MidiControllerKind::CC(n) => *n as u16,
+            MidiControllerKind::PitchBend => 200,
+            MidiControllerKind::ChannelPressure => 201,
+            MidiControllerKind::PolyPressure => 202,
+        });
+
         let mut dropdown: Option<gpui::AnyElement> = None;
         if open {
             let mut panel = div()
@@ -422,11 +466,16 @@ impl PianoRoll {
                     ControllerLaneKind::Velocity => "Velocity".to_string(),
                     ControllerLaneKind::Controller(k) => cc_kind_label(k),
                 };
+                let lane_has_data = match kind {
+                    ControllerLaneKind::Velocity => false,
+                    ControllerLaneKind::Controller(k) => has_data(k),
+                };
                 panel = panel.child(
                     div()
                         .id(("pr-lane-opt", i))
                         .flex()
                         .items_center()
+                        .justify_between()
                         .h(px(20.0))
                         .px(px(7.0))
                         .rounded(px(4.0))
@@ -442,8 +491,68 @@ impl PianoRoll {
                             cx.stop_propagation();
                             this.set_lane(kind, cx);
                         }))
-                        .child(text),
+                        .child(text)
+                        .when(lane_has_data, |row| {
+                            row.child(
+                                div()
+                                    .size(px(4.0))
+                                    .rounded(px(2.0))
+                                    .bg(Colors::accent_primary())
+                                    .flex_shrink_0(),
+                            )
+                        }),
                 );
+            }
+            if !extra_kinds.is_empty() {
+                panel = panel.child(
+                    div()
+                        .h(px(1.0))
+                        .mt(px(2.0))
+                        .mb(px(2.0))
+                        .bg(Colors::divider()),
+                );
+                panel = panel.child(
+                    div()
+                        .px(px(7.0))
+                        .text_size(px(9.0))
+                        .text_color(Colors::text_faint())
+                        .child("In This Clip"),
+                );
+                for (i, kind) in extra_kinds.iter().enumerate() {
+                    let kind = *kind;
+                    let lane_kind = ControllerLaneKind::Controller(kind);
+                    let selected = lane_kind == current;
+                    panel = panel.child(
+                        div()
+                            .id(("pr-lane-extra", i))
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .h(px(20.0))
+                            .px(px(7.0))
+                            .rounded(px(4.0))
+                            .text_size(px(10.0))
+                            .text_color(if selected {
+                                Colors::accent_primary()
+                            } else {
+                                Colors::text_secondary()
+                            })
+                            .hover(|s| s.bg(Colors::surface_hover()))
+                            .cursor(gpui::CursorStyle::PointingHand)
+                            .on_click(cx.listener(move |this, _ev, _w, cx| {
+                                cx.stop_propagation();
+                                this.set_lane(lane_kind, cx);
+                            }))
+                            .child(cc_kind_label(kind))
+                            .child(
+                                div()
+                                    .size(px(4.0))
+                                    .rounded(px(2.0))
+                                    .bg(Colors::accent_primary())
+                                    .flex_shrink_0(),
+                            ),
+                    );
+                }
             }
             // Custom CC row: − / CCnn (select) / + . Steppers keep the menu open.
             panel = panel.child(
@@ -531,14 +640,18 @@ impl PianoRoll {
                     ),
             );
             dropdown = Some(
-                panel
-                    .with_animation(
-                        "pr-lane-menu-open",
-                        Animation::new(Duration::from_millis(90))
-                            .with_easing(pulsating_between(0.92, 1.0)),
-                        |this, delta| this.opacity(delta),
-                    )
-                    .into_any_element(),
+                deferred(
+                    panel
+                        .with_animation(
+                            "pr-lane-menu-open",
+                            Animation::new(Duration::from_millis(90))
+                                .with_easing(pulsating_between(0.92, 1.0)),
+                            |this, delta| this.opacity(delta),
+                        )
+                        .into_any_element(),
+                )
+                .with_priority(PIANO_ROLL_MENU_PRIORITY)
+                .into_any_element(),
             );
         }
 
@@ -926,13 +1039,13 @@ impl PianoRoll {
                         "pr-zoom-out",
                         "−",
                         false,
-                        cx.listener(|this, _, _w, cx| this.zoom_by(0.8, cx)),
+                        cx.listener(|this, _, _w, cx| this.zoom_by(0.5, cx)),
                     ))
                     .child(tool_btn(
                         "pr-zoom-in",
                         "+",
                         false,
-                        cx.listener(|this, _, _w, cx| this.zoom_by(1.25, cx)),
+                        cx.listener(|this, _, _w, cx| this.zoom_by(2.0, cx)),
                     ))
                     .child(tool_btn(
                         "pr-c4",
@@ -1652,13 +1765,22 @@ impl PianoRoll {
         let show_beats = ppb >= 10.0;
         let sub_step = self.grid_res.beats().max(1.0 / 32.0);
         let show_subs = show_beats && sub_step * ppb >= 7.0 && ppb >= 24.0;
+        let bar_step = if ppb * bpb >= 18.0 {
+            bpb
+        } else {
+            let mut bars = 2.0_f32;
+            while bars * bpb * ppb < 18.0 && bars < 256.0 {
+                bars *= 2.0;
+            }
+            bpb * bars
+        };
 
         let iter_step = if show_subs {
             sub_step
         } else if show_beats {
             1.0
         } else {
-            bpb
+            bar_step
         };
 
         let mut out = Vec::new();
@@ -1679,7 +1801,7 @@ impl PianoRoll {
                 GridLineKind::Subdivision
             };
             let keep = match kind {
-                GridLineKind::Bar => true,
+                GridLineKind::Bar => is_multiple(b, bar_step),
                 GridLineKind::Beat => show_beats,
                 GridLineKind::Subdivision => show_subs,
             };
@@ -1936,9 +2058,19 @@ impl PianoRoll {
     ) -> Vec<gpui::AnyElement> {
         let ppb = self.ppb.max(0.0001);
         let bpb = bpb.max(1.0);
-        // Label each beat when zoomed in; otherwise label only bar starts.
+        // Label each beat when zoomed in; otherwise label sparse bar starts.
         let label_beats = ppb >= 36.0;
-        let step = if label_beats { 1.0 } else { bpb };
+        let step = if label_beats {
+            1.0
+        } else if ppb * bpb >= 56.0 {
+            bpb
+        } else {
+            let mut bars = 2.0_f32;
+            while bars * bpb * ppb < 56.0 && bars < 256.0 {
+                bars *= 2.0;
+            }
+            bpb * bars
+        };
 
         let mut out: Vec<gpui::AnyElement> = Vec::new();
         let mut beat = (start_beat / step).floor() * step;

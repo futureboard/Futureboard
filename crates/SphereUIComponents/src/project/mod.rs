@@ -254,6 +254,7 @@ pub enum ProjectTrackOutputRouting {
     Main,
     Bus { bus_id: String },
     HardwareOutput { device_id: String, channel: u32 },
+    Instrument { track_id: String },
     None,
 }
 
@@ -1307,6 +1308,9 @@ fn timeline_output_to_project(
             device_id: device_id.clone(),
             channel: *channel,
         },
+        T::Instrument { track_id } => ProjectTrackOutputRouting::Instrument {
+            track_id: track_id.clone(),
+        },
         T::None => ProjectTrackOutputRouting::None,
     }
 }
@@ -1377,6 +1381,9 @@ fn project_routing_to_timeline(
                 channel: *channel,
             }
         }
+        ProjectTrackOutputRouting::Instrument { track_id } => TrackOutputRouting::Instrument {
+            track_id: track_id.clone(),
+        },
         ProjectTrackOutputRouting::None => TrackOutputRouting::None,
     };
     state.audio_format = match routing.audio_format {

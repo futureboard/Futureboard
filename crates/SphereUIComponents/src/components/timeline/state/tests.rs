@@ -1470,7 +1470,11 @@ mod midi_import_tests {
         );
         let track_ids: std::collections::HashSet<&String> =
             clips.iter().map(|(track_id, _)| track_id).collect();
-        assert_eq!(track_ids.len(), 3, "each channel should land on its own track");
+        assert_eq!(
+            track_ids.len(),
+            3,
+            "each channel should land on its own track"
+        );
     }
 }
 
@@ -1514,10 +1518,7 @@ mod midi_output_routing_tests {
             state.effective_instrument_track_id(&midi_id),
             Some(inst_id.clone())
         );
-        assert_eq!(
-            state.effective_instrument_track_id(&inst_id),
-            Some(inst_id)
-        );
+        assert_eq!(state.effective_instrument_track_id(&inst_id), Some(inst_id));
     }
 
     /// An unrouted MIDI track (default `TrackOutputRouting::None`) has no

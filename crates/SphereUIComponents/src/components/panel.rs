@@ -940,7 +940,10 @@ fn build_midi_output_options(
 
 /// Display label for the MIDI Out trigger/selected value, resolving an
 /// `Instrument` target's live track name when it's still known.
-fn midi_output_combo_label(routing: &TrackOutputRouting, instrument_targets: &[(String, String)]) -> String {
+fn midi_output_combo_label(
+    routing: &TrackOutputRouting,
+    instrument_targets: &[(String, String)],
+) -> String {
     match routing {
         TrackOutputRouting::Instrument { track_id } => instrument_targets
             .iter()
@@ -1189,7 +1192,9 @@ pub fn inspector_routing_combo_overlay(
                 .iter()
                 .find(|(_, r)| *r == track.routing.output)
                 .map(|(l, _)| l.clone())
-                .unwrap_or_else(|| midi_output_combo_label(&track.routing.output, &instrument_targets));
+                .unwrap_or_else(|| {
+                    midi_output_combo_label(&track.routing.output, &instrument_targets)
+                });
             let labels: Vec<String> = routing_options.iter().map(|(l, _)| l.clone()).collect();
             let cb = callbacks.on_set_output_routing.clone();
             let close = on_close.clone();

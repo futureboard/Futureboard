@@ -342,8 +342,8 @@ fn midi_note_preview_canvas(
                         as usize;
                     let norm_pitch = (note.pitch as i32 - bottom_pitch as i32) as f32 / pitch_range;
                     let y = (1.0 - norm_pitch) * (note_area_h - 4.0) + 1.0;
-                    for col in x0..=x1 {
-                        spans[col] = Some(match spans[col] {
+                    for cell in &mut spans[x0..=x1] {
+                        *cell = Some(match *cell {
                             Some((top, bottom)) => (top.min(y), bottom.max(y + note_h)),
                             None => (y, y + note_h),
                         });

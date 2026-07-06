@@ -19,6 +19,12 @@ fn main() {
     // Plugin runtime selection diagnostics. External PluginHost bridge is the
     // default; legacy in-process VST3 requires FUTUREBOARD_PLUGIN_LEGACY_IN_PROCESS=1.
     sphere_ui_components::plugin_host_client::log_bridge_env();
+    let soundfont_backend =
+        sphere_ui_components::soundfont_player::soundfont_player_backend_status();
+    boot::log(&format!(
+        "soundfont player backend: {} available={}",
+        soundfont_backend.backend, soundfont_backend.available
+    ));
     sphere_ui_components::plugin_host_lifecycle::init_plugin_host_job();
     // Same explicit AppUserModelID as the plugin-host process: keeps any
     // app-visible plugin window from spawning a stray taskbar identity.

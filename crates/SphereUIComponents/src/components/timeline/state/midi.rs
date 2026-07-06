@@ -608,7 +608,45 @@ impl TimelineState {
         drop_x: f32,
         drop_y: f32,
     ) -> Option<(String, ClipState)> {
-        let track_id = match self.track_index_at_y(drop_y) {
+        self.import_midi_tracks_at(
+            clip_name,
+            vec![
+                crate::components::timeline::midi_import::ImportedMidiTrack {
+                    name: None,
+                    channel_hint: None,
+                    clip: imported,
+                },
+            ],
+            drop_x,
+            drop_y,
+        )
+        .into_iter()
+        .next()
+    }
+
+    pub fn import_midi_tracks_at(
+        &mut self,
+        file_stem: String,
+        imported_tracks: Vec<crate::components::timeline::midi_import::ImportedMidiTrack>,
+        drop_x: f32,
+        drop_y: f32,
+    ) -> Vec<(String, ClipState)> {
+        let start_beat = self.snap_beats(self.x_to_beats(drop_x.max(0.0))).max(0.0);
+        let mut markers = Vec::new();
+        let mut musical_tracks = Vec::new();
+        for track in imported_tracks {
+            markers.extend(track.clip.markers.iter().cloned());
+            if imported_midi_clip_has_payload(&track.clip) {
+                musical_tracks.push(track);
+            }
+        }
+        if musical_tracks.is_empty() {
+            return Vec::new();
+        }
+
+        self.import_midi_markers(start_beat, &markers);
+
+        let first_track_id = match self.track_index_at_y(drop_y) {
             Some(idx)
                 if matches!(
                     self.tracks[idx].track_type,
@@ -619,12 +657,43 @@ impl TimelineState {
             }
             _ => self.create_midi_track(),
         };
-        let start_beat = self.snap_beats(self.x_to_beats(drop_x.max(0.0))).max(0.0);
-        let markers = imported.markers.clone();
-        self.build_imported_midi_clip(&track_id, clip_name, start_beat, imported)
-            .map(|clip| {
-                self.import_midi_markers(start_beat, &markers);
-                (track_id, clip)
-            })
+
+        let multi_track = musical_tracks.len() > 1;
+        let mut clips = Vec::with_capacity(musical_tracks.len());
+        for (index, imported_track) in musical_tracks.into_iter().enumerate() {
+            let track_id = if index == 0 {
+                first_track_id.clone()
+            } else {
+                self.create_midi_track()
+            };
+            if let Some(channel) = imported_track.channel_hint {
+                self.set_track_midi_channel(&track_id, Some(channel.ui()));
+            }
+            let channel_hint = imported_track.channel_hint;
+            let clip_name = imported_track
+                .name
+                .filter(|name| !name.is_empty())
+                .unwrap_or_else(|| {
+                    if let Some(channel) = channel_hint {
+                        format!("{} Ch {}", file_stem, channel.ui())
+                    } else if multi_track {
+                        format!("{} T{}", file_stem, index + 1)
+                    } else {
+                        file_stem.clone()
+                    }
+                });
+            if let Some(clip) =
+                self.build_imported_midi_clip(&track_id, clip_name, start_beat, imported_track.clip)
+            {
+                clips.push((track_id, clip));
+            }
+        }
+        clips
     }
+}
+
+fn imported_midi_clip_has_payload(
+    clip: &crate::components::timeline::midi_import::ImportedMidiClip,
+) -> bool {
+    !clip.notes.is_empty() || !clip.controller_lanes.is_empty() || !clip.sysex_events.is_empty()
 }

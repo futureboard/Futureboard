@@ -60,6 +60,7 @@ pub mod project;
 pub mod session_shutdown;
 pub mod settings;
 pub mod shutdown;
+pub mod soundfont_player;
 pub mod tap_tempo;
 pub mod window_lifecycle;
 pub mod window_position;

@@ -75,6 +75,7 @@ impl TimelineState {
             sends: Vec::new(),
             routing: TrackRoutingState::for_track_type(TrackType::Audio),
             instrument_plugin_instance_id: None,
+            builtin_soundfont_player: false,
         };
 
         let track2 = TrackState {
@@ -118,6 +119,7 @@ impl TimelineState {
             sends: Vec::new(),
             routing: TrackRoutingState::for_track_type(TrackType::Audio),
             instrument_plugin_instance_id: None,
+            builtin_soundfont_player: false,
         };
 
         let track3 = TrackState {
@@ -170,6 +172,7 @@ impl TimelineState {
             sends: Vec::new(),
             routing: TrackRoutingState::for_track_type(TrackType::Midi),
             instrument_plugin_instance_id: None,
+            builtin_soundfont_player: false,
         };
 
         Self {

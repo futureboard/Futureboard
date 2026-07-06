@@ -199,6 +199,7 @@ impl StudioLayout {
         let on_open_clip_bottom_editor = self.open_clip_bottom_editor_cb(owner.clone());
         let on_open_clip_external_midi_editor =
             self.open_clip_external_midi_editor_cb(owner.clone());
+        let on_open_soundfont_player = self.open_soundfont_player_cb(owner.clone());
 
         let open_routing_combo = self.overlay.inspector_routing_combo;
         let owner_routing_combo = owner.clone();
@@ -273,6 +274,7 @@ impl StudioLayout {
             on_clip_warp_clear,
             on_open_clip_bottom_editor,
             on_open_clip_external_midi_editor,
+            on_open_soundfont_player,
             open_routing_combo,
             on_toggle_routing_combo,
         }
@@ -678,6 +680,24 @@ impl StudioLayout {
                 });
                 inspector_debug(&format!("open_midi_editor clip={clip_id}"));
                 this.open_midi_editor_external_window(Some(bounds), cx);
+            });
+        })
+    }
+
+    /// Opens (or focuses) the built-in Soundfont Player MDI window for the
+    /// Instrument track whose `builtin_soundfont_player` marker is set. See
+    /// [`InspectorCallbacks::on_open_soundfont_player`].
+    fn open_soundfont_player_cb(&self, owner: Entity<Self>) -> StrCb {
+        Arc::new(move |track_id: &String, window, cx| {
+            let track_id = track_id.clone();
+            let bounds = window.bounds();
+            StudioLayout::defer_update(&owner, cx, move |this, cx| {
+                let _ = this.timeline.update(cx, |timeline, cx| {
+                    timeline.state.select_track(&track_id);
+                    cx.notify();
+                });
+                inspector_debug(&format!("open_soundfont_player track={track_id}"));
+                this.open_soundfont_player_window(Some(bounds), cx);
             });
         })
     }

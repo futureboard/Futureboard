@@ -1,10 +1,10 @@
-use gpui::{Bounds, Context, Window};
+use gpui::{App, Bounds, Context, Window};
 
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::components::add_track_dialog::{
-    open_add_track_window, AddTrackDialogState, AddTrackKind, AudioFormat,
+    open_add_track_window, AddTrackDialogState, AddTrackKind, AudioFormat, InstrumentMode,
 };
 use crate::components::combo_box::dedupe_preserve_order;
 use crate::components::keymap_window::{open_keymap_window, KeymapChangedCb};
@@ -155,6 +155,10 @@ pub(crate) struct ExternalWindows {
     pub export_arrangement: Option<gpui::WindowHandle<crate::export::ExportArrangementWindow>>,
     /// Keymap / keyboard shortcuts editor window.
     pub keymap: Option<gpui::WindowHandle<crate::components::keymap_window::KeymapWindow>>,
+    /// Built-in Soundfont Player MDI window.
+    pub soundfont_player: Option<
+        gpui::WindowHandle<crate::components::soundfont_player_window::SoundfontPlayerWindow>,
+    >,
 }
 
 impl StudioLayout {
@@ -315,7 +319,9 @@ impl StudioLayout {
                                 timeline.state.set_track_input_routing(&id, input);
                                 timeline.state.set_track_output_routing(&id, output);
                             }
-                            if dialog.selected_kind == AddTrackKind::Instrument {
+                            if dialog.selected_kind == AddTrackKind::Instrument
+                                && dialog.instrument_mode == InstrumentMode::Vsti
+                            {
                                 if let Some(plugin_id) = dialog.instrument_plugin_id.as_deref() {
                                     let instrument_registry =
                                         add_track_instrument_plugins_from_catalog(
@@ -379,6 +385,15 @@ impl StudioLayout {
                                         }
                                     }
                                 }
+                            } else if dialog.selected_kind == AddTrackKind::Instrument
+                                && dialog.instrument_mode == InstrumentMode::SoundfontPlayer
+                            {
+                                // Built-in Soundfont Player is not a hosted plugin — it
+                                // never goes through the VST3/CLAP/AU/LV2 bridge or
+                                // plugin registry, so it gets a plain track marker
+                                // instead of an insert. Inspector shows an Open button
+                                // that opens the Soundfont Player MDI window for it.
+                                timeline.state.set_track_builtin_soundfont_player(&id, true);
                             }
                             created_ids.push(id.clone());
                             selected_track_id = Some(id);
@@ -642,6 +657,46 @@ impl StudioLayout {
         match open_keymap_window(owner_bounds, manager, on_changed, cx) {
             Ok(handle) => self.external_windows.keymap = Some(handle),
             Err(err) => eprintln!("[keymap] failed to open window: {err}"),
+        }
+    }
+
+    /// Opens the built-in Soundfont Player MDI window, or focuses it (and its
+    /// document) if already open. Called from the Inspector's Open button for
+    /// an Instrument track whose `builtin_soundfont_player` marker is set.
+    pub(super) fn open_soundfont_player_window(
+        &mut self,
+        owner_bounds: Option<Bounds<gpui::Pixels>>,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(handle) = self.external_windows.soundfont_player.clone() {
+            let activated = handle
+                .update(cx, |window, w, cx| {
+                    window.focus_soundfont_player();
+                    w.activate_window();
+                    cx.notify();
+                })
+                .is_ok();
+            if activated {
+                return;
+            }
+            self.external_windows.soundfont_player = None;
+        }
+
+        let studio = cx.entity().clone();
+        let on_close: Arc<dyn Fn(&mut Window, &mut App) + Send + Sync> = Arc::new(move |_, app| {
+            let _ = studio.update(app, |layout, cx| {
+                layout.external_windows.soundfont_player = None;
+                cx.notify();
+            });
+        });
+
+        match crate::components::soundfont_player_window::open_soundfont_player_window(
+            owner_bounds,
+            on_close,
+            cx,
+        ) {
+            Ok(handle) => self.external_windows.soundfont_player = Some(handle),
+            Err(err) => eprintln!("[soundfont-player] failed to open window: {err}"),
         }
     }
 

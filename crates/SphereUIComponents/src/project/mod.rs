@@ -1244,6 +1244,8 @@ pub fn apply_to_timeline(project: &FutureboardProject, tl: &mut TimelineState) {
                 sends,
                 routing: project_routing_to_timeline(&pt.routing, track_type),
                 instrument_plugin_instance_id,
+                // Session-only marker, not part of the project file format yet.
+                builtin_soundfont_player: false,
             }
         })
         .collect();

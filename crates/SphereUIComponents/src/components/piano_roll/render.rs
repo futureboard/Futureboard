@@ -422,9 +422,8 @@ impl PianoRoll {
                     .unwrap_or_default()
             })
             .unwrap_or_default();
-        let has_data = |kind: MidiControllerKind| {
-            clip_lane_kinds.iter().any(|(k, has)| *k == kind && *has)
-        };
+        let has_data =
+            |kind: MidiControllerKind| clip_lane_kinds.iter().any(|(k, has)| *k == kind && *has);
         // CC lanes with real data that aren't already offered by the common
         // `LANE_CYCLE` list get their own "In This Clip" section.
         let mut extra_kinds: Vec<MidiControllerKind> = clip_lane_kinds

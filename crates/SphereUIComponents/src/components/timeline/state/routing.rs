@@ -71,13 +71,20 @@ impl TrackInputRouting {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TrackOutputRouting {
     Main,
-    Bus { bus_id: String },
-    HardwareOutput { device_id: String, channel: u32 },
+    Bus {
+        bus_id: String,
+    },
+    HardwareOutput {
+        device_id: String,
+        channel: u32,
+    },
     /// A MIDI track's notes/controllers are redirected to the named
     /// Instrument track's own plugin instead of that instrument's own clips.
     /// Only meaningful on `TrackType::Midi` tracks; see
     /// `TimelineState::effective_instrument_track_id`.
-    Instrument { track_id: String },
+    Instrument {
+        track_id: String,
+    },
     None,
 }
 
@@ -266,7 +273,9 @@ impl TimelineState {
         match track.track_type {
             TrackType::Instrument => Some(track.id.clone()),
             TrackType::Midi => match &track.routing.output {
-                TrackOutputRouting::Instrument { track_id: target_id } => self
+                TrackOutputRouting::Instrument {
+                    track_id: target_id,
+                } => self
                     .tracks
                     .iter()
                     .find(|t| t.id == *target_id && t.track_type == TrackType::Instrument)

@@ -27,11 +27,17 @@ pub enum SoundfontPlayerError {
     /// `(bank, patch)` requested but not present in the loaded SoundFont's
     /// preset list — distinct from `InvalidBank`/`InvalidPatch`, which reject
     /// out-of-range values before ever consulting the font.
-    PresetNotFound { bank: i32, patch: i32 },
+    PresetNotFound {
+        bank: i32,
+        patch: i32,
+    },
     Io(std::io::Error),
     SoundFont(rustysynth::SoundFontError),
     Synthesizer(rustysynth::SynthesizerError),
-    BufferLengthMismatch { left: usize, right: usize },
+    BufferLengthMismatch {
+        left: usize,
+        right: usize,
+    },
 }
 
 impl std::fmt::Display for SoundfontPlayerError {
@@ -46,7 +52,10 @@ impl std::fmt::Display for SoundfontPlayerError {
             Self::InvalidBank(bank) => write!(f, "invalid preset bank: {bank}"),
             Self::InvalidPatch(patch) => write!(f, "invalid preset patch: {patch}"),
             Self::PresetNotFound { bank, patch } => {
-                write!(f, "no preset at bank {bank} patch {patch} in this SoundFont")
+                write!(
+                    f,
+                    "no preset at bank {bank} patch {patch} in this SoundFont"
+                )
             }
             Self::Io(error) => write!(f, "SoundFont I/O failed: {error}"),
             Self::SoundFont(error) => write!(f, "SoundFont load failed: {error:?}"),

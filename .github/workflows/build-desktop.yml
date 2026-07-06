@@ -43,17 +43,14 @@ jobs:
         include:
           - os: ubuntu-24.04
             platform: linux
-            native-bin: target/release/FutureboardNative
             native-artifact-name: futureboard-native-linux
-            native-bundle-glob: ""
+            native-bundle-glob: target/appimage/*.AppImage
           - os: macos-latest
-            platform: macos
-            native-bin: target/release/FutureboardNative
+            platform: mac
             native-artifact-name: futureboard-native-macos
-            native-bundle-glob: packaging/native/out/**/*
+            native-bundle-glob: packaging/native/out/*.app
           - os: windows-latest
             platform: win
-            native-bin: target/release/FutureboardNative.exe
             native-artifact-name: futureboard-native-win
             native-bundle-glob: target/installer/*.exe
 
@@ -107,14 +104,12 @@ jobs:
           done
           echo "Shared app assets OK"
 
-      - name: Build native app (futureboard_native)
-        run: cargo build --release -p futureboard_native
+      - name: Build workspace (release)
+        run: cargo build --release --workspace
 
       - name: Bundle native app (macOS)
         if: matrix.os == 'macos-latest'
-        run: |
-          bash packaging/native/bundle-macos.sh
-          bash packaging/native/bundle-macos-dmg.sh
+        run: bash packaging/native/bundle-macos.sh
 
       - name: Install Inno Setup
         if: matrix.os == 'windows-latest'
@@ -123,13 +118,49 @@ jobs:
       - name: Build Windows installer
         if: matrix.os == 'windows-latest'
         shell: pwsh
-        run: ./packaging/windows/build-installer.ps1
+        run: ./packaging/windows/build-installer.ps1 -AppVersion "${{ needs.version.outputs.app-version }}"
+
+      # Bare `version.json` version (no nightly suffix here — this workflow
+      # only runs on tagged releases), matching the AUR PKGBUILD's `pkgver`
+      # so its hardcoded AppImage filename resolves against this release.
+      - name: Build AppImage (Linux)
+        if: matrix.os == 'ubuntu-24.04'
+        run: bash packaging/linux/bundle-appimage.sh
+
+      # Every workspace member's binaries/libraries land directly in
+      # `target/release/` (dependency artifacts stay under `deps/`), so a
+      # per-OS filter here is enough to grab "all" of them without needing to
+      # enumerate crate/bin names as they're added or removed:
+      #   win:   *.exe + *.dll
+      #   linux: extension-less executables + *.so
+      #   mac:   extension-less executables + *.dylib
+      - name: Stage release binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist-native
+          case "${{ matrix.platform }}" in
+            win)
+              cp target/release/*.exe dist-native/
+              cp target/release/*.dll dist-native/
+              ;;
+            linux)
+              find target/release -maxdepth 1 -type f -perm -111 ! -name "*.*" -exec cp {} dist-native/ \;
+              cp target/release/*.so dist-native/
+              ;;
+            mac)
+              find target/release -maxdepth 1 -type f -perm -111 ! -name "*.*" -exec cp {} dist-native/ \;
+              cp target/release/*.dylib dist-native/
+              ;;
+          esac
+          echo "Staged native binaries:"
+          ls -la dist-native/
 
       - name: Upload native app artifact
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.native-artifact-name }}
-          path: ${{ matrix.native-bin }}
+          path: dist-native/*
           if-no-files-found: error
           retention-days: 7
 

@@ -17,7 +17,7 @@ MAIN_BIN_NAME="$(basename "$BIN")"
 # This must match CFBundleExecutable in Info.plist.
 # If Info.plist says futureboard_native, keep this.
 # If Info.plist says FutureboardNative, change this to FutureboardNative.
-APP_EXECUTABLE_NAME="futureboard_native"
+APP_EXECUTABLE_NAME="FutureboardNative"
 
 ICON_SRC="$ROOT/packages/shared/app/icons/icon.icns"
 PLIST_SRC="$ROOT/packaging/native/Info.plist"

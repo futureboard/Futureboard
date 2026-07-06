@@ -10,7 +10,7 @@ APP_NAME="Futureboard Studio"
 APP_EXE="FutureboardNative"
 APP_DIR="$OUT/$APP_NAME.app"
 
-PLIST_SRC="$ROOT/packaging/native/macos/Info.plist"
+PLIST_SRC="$ROOT/packaging/native/Info.plist"
 ICON_SRC="$ROOT/packages/shared/app/icons/icon.icns"
 
 CONTENTS="$APP_DIR/Contents"

@@ -1,0 +1,10 @@
+[Desktop Entry]
+Name=Futureboard Studio
+Comment=Digital Audio Workstation
+Exec=FutureboardNative %U
+Icon=futureboard-studio
+Type=Application
+Categories=AudioVideo;Audio;Music;
+MimeType=application/x-fbproj;
+StartupWMClass=FutureboardNative
+Terminal=false

@@ -1,29 +1,31 @@
 # Maintainer: Arizkami <arizkami@users.noreply.github.com>
+#
+# Futureboard Studio is a native Rust/GPUI application (no Electron/Chromium
+# runtime). The AppImage this package extracts is built by
+# packaging/linux/bundle-appimage.sh and published on every nightly release.
 pkgname=futureboard-studio-bin
-pkgver=2026.5.18
+pkgver=2026.7.2
 pkgrel=1
-pkgdesc="Futureboard Studio — Digital Audio Workstation"
+pkgdesc="Futureboard Studio — native Digital Audio Workstation"
 arch=('x86_64')
 url="https://github.com/arizkami/Futureboard"
 license=('LicenseRef-proprietary')
 depends=(
   'alsa-lib'
-  'at-spi2-core'
-  'gtk3'
-  'libnotify'
-  'libsecret'
-  'libxss'
-  'libxtst'
-  'nss'
-  'xdg-utils'
+  'gtk4'
+  'libgudev'
+  'libxkbcommon-x11'
+  'shared-mime-info'
 )
 optdepends=(
-  'pipewire-pulse: PipeWire audio support'
-  'pulseaudio: PulseAudio support'
+  'pipewire-pulse: PipeWire audio output'
+  'pulseaudio: PulseAudio audio output'
+  'nvidia-utils: Vulkan driver for NVIDIA GPUs (Mesa already covers Intel/AMD)'
 )
 provides=('futureboard-studio')
 conflicts=('futureboard-studio')
 options=('!strip' '!debug')
+install=futureboard-studio-bin.install
 
 _appimage="Futureboard.Studio-${pkgver}-x86_64.AppImage"
 source_x86_64=("${_appimage}::https://github.com/arizkami/Futureboard/releases/download/nightly/${_appimage}")
@@ -35,45 +37,31 @@ prepare() {
 }
 
 package() {
-  # App files
+  # App files (the native binary + squashed AppDir tree as-is).
   install -dm755 "${pkgdir}/opt/${pkgname}"
   cp -r "${srcdir}/squashfs-root/"* "${pkgdir}/opt/${pkgname}/"
+  rm -f "${pkgdir}/opt/${pkgname}/AppRun" "${pkgdir}/opt/${pkgname}/.DirIcon"
 
   # Launcher
   install -dm755 "${pkgdir}/usr/bin"
-  cat > "${pkgdir}/usr/bin/futureboard-studio" << 'EOF'
+  cat > "${pkgdir}/usr/bin/futureboard-studio" << EOF
 #!/usr/bin/env bash
-exec /opt/futureboard-studio-bin/futureboard-studio "$@"
+exec "/opt/${pkgname}/usr/bin/FutureboardNative" "\$@"
 EOF
   chmod +x "${pkgdir}/usr/bin/futureboard-studio"
 
-  # Desktop entry
-  install -dm755 "${pkgdir}/usr/share/applications"
-  cat > "${pkgdir}/usr/share/applications/futureboard-studio.desktop" << EOF
-[Desktop Entry]
-Name=Futureboard Studio
-Comment=Digital Audio Workstation
-Exec=futureboard-studio %U
-Icon=futureboard-studio
-Type=Application
-Categories=AudioVideo;Audio;Music;
-MimeType=application/x-mochiproj;
-StartupWMClass=futureboard-studio
-EOF
+  # Desktop entry (rewrite Exec= to the installed launcher, not the AppImage's
+  # own relative "FutureboardNative" invocation).
+  install -Dm644 "${srcdir}/squashfs-root/futureboard-studio.desktop" \
+    "${pkgdir}/usr/share/applications/futureboard-studio.desktop"
+  sed -i 's|^Exec=.*|Exec=futureboard-studio %U|' \
+    "${pkgdir}/usr/share/applications/futureboard-studio.desktop"
 
-  # Icons (extract from AppImage resources)
-  for size in 16 32 48 64 128 256 512; do
-    local icon_src="${srcdir}/squashfs-root/usr/share/icons/hicolor/${size}x${size}/apps/futureboard-studio.png"
-    if [[ -f "${icon_src}" ]]; then
-      install -Dm644 "${icon_src}" \
-        "${pkgdir}/usr/share/icons/hicolor/${size}x${size}/apps/futureboard-studio.png"
-    fi
-  done
+  # MIME type (.fbproj project files)
+  install -Dm644 "${srcdir}/squashfs-root/usr/share/mime/packages/futureboard-studio.xml" \
+    "${pkgdir}/usr/share/mime/packages/futureboard-studio.xml"
 
-  # Fallback: single-size icon from AppImage root
-  local root_icon="${srcdir}/squashfs-root/futureboard-studio.png"
-  if [[ -f "${root_icon}" ]]; then
-    install -Dm644 "${root_icon}" \
-      "${pkgdir}/usr/share/icons/hicolor/512x512/apps/futureboard-studio.png"
-  fi
+  # Icon
+  install -Dm644 "${srcdir}/squashfs-root/futureboard-studio.png" \
+    "${pkgdir}/usr/share/icons/hicolor/512x512/apps/futureboard-studio.png"
 }

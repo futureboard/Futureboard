@@ -23,6 +23,7 @@ pub mod inspector;
 pub mod key_recorder;
 pub mod keymap_window;
 pub mod knob;
+pub mod mdi;
 pub mod menu_bar;
 pub mod menu_dropdown;
 pub mod message_box_dialog;
@@ -59,6 +60,8 @@ pub mod settings_dialog;
 pub mod settings_layout;
 mod sidebar;
 pub mod slider;
+pub mod soundfont_player_mdi;
+pub mod soundfont_player_window;
 mod status_bar;
 mod status_bar_view;
 pub mod text_input;
@@ -112,6 +115,9 @@ pub use inspector::{
 pub use key_recorder::{key_recorder_field, KeyRecorderState};
 pub use keymap_window::{open_keymap_window, KeymapChangedCb, KeymapWindow};
 pub use knob::knob;
+pub use mdi::{
+    mdi_workspace, MdiDocumentKind, MdiDocumentState, MdiWorkspaceCallbacks, MdiWorkspaceState,
+};
 pub use menu_bar::{menu_bar, menu_label_button};
 pub use message_box_dialog::{
     open_message_box_window, unsaved_changes_options, MessageBoxKind, MessageBoxOptions,
@@ -148,6 +154,10 @@ pub use settings_dialog::{
 };
 pub use sidebar::sidebar;
 pub use slider::slider;
+pub use soundfont_player_mdi::{
+    ensure_soundfont_player_document, soundfont_player_mdi_workspace, SOUNDFONT_PLAYER_MDI_TITLE,
+};
+pub use soundfont_player_window::{open_soundfont_player_window, SoundfontPlayerWindow};
 pub use status_bar::{
     status_bar, status_bar_with_background_tasks, PerfMetricsToggleCb, StatusBarContent,
     StatusBarPerfMetrics,

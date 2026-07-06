@@ -1141,6 +1141,7 @@ impl TimelineState {
                     selected_automation_target: None,
                     inserts: Vec::new(),
                     instrument_plugin_instance_id: None,
+                    builtin_soundfont_player: false,
                     sends: Vec::new(),
                     routing: TrackRoutingState::for_track_type(TrackType::Bus),
                 },

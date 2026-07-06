@@ -244,13 +244,7 @@ pub fn timeline_ruler(
                 .cursor(custom_cursors::marquee())
                 .id("ruler-markings-area")
                 // Debug: outline the ruler content clip rect (FUTUREBOARD_UI_DEBUG_CLIPS=1).
-                .children(crate::perf::ui_debug_clips_enabled().then(|| {
-                    div()
-                        .absolute()
-                        .inset_0()
-                        .border(px(1.0))
-                        .border_color(gpui::rgb(0xff00ff))
-                }))
+                .children(crate::perf::debug_clip_outline())
                 // Seek timeline position on click
                 .on_mouse_down(
                     gpui::MouseButton::Left,

@@ -164,6 +164,11 @@ pub struct InspectorCallbacks {
     pub on_clip_warp_clear: StrCb,
     pub on_open_clip_bottom_editor: StrCb,
     pub on_open_clip_external_midi_editor: StrCb,
+    /// Opens (or focuses) the built-in Soundfont Player MDI window. Only
+    /// used by [`instrument_section`] when `track.builtin_soundfont_player`
+    /// is set — the built-in player has no plugin insert to route through
+    /// `on_open_insert_editor`.
+    pub on_open_soundfont_player: StrCb,
     pub open_routing_combo: Option<InspectorRoutingCombo>,
     pub on_toggle_routing_combo: RoutingComboToggleCb,
 }
@@ -1428,7 +1433,11 @@ fn plugin_slot_row(
 
 fn instrument_section(track: &TrackState, callbacks: &InspectorCallbacks) -> gpui::AnyElement {
     let slot = track.instrument_insert();
-    let slot_name = plugin_slot_name(slot, "No Instrument");
+    let slot_name = if slot.is_none() && track.builtin_soundfont_player {
+        "Built-in Soundfont Player".to_string()
+    } else {
+        plugin_slot_name(slot, "No Instrument")
+    };
     let mut section = div()
         .flex()
         .flex_col()
@@ -1464,6 +1473,15 @@ fn instrument_section(track: &TrackState, callbacks: &InspectorCallbacks) -> gpu
             .child(insert_action_row(
                 &track.id, slot, 0, callbacks, false, false, true,
             ));
+    } else if track.builtin_soundfont_player {
+        let track_id = track.id.clone();
+        let open = callbacks.on_open_soundfont_player.clone();
+        section = section.child(compact_action_button(
+            "soundfont-player-open",
+            "Open",
+            true,
+            move |_, w, cx| open(&track_id.clone(), w, cx),
+        ));
     } else {
         let track_id = track.id.clone();
         let picker = callbacks.on_open_insert_picker.clone();

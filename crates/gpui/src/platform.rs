@@ -1607,6 +1607,14 @@ pub enum WindowKind {
     /// A floating window that appears on top of its parent window
     Floating,
 
+    /// A Multiple Document Interface child surface.
+    ///
+    /// GPUI does not create an operating-system child window for this kind; app
+    /// code should render MDI children inside an owning window. Platform
+    /// backends treat this like [`WindowKind::Floating`] if it is passed to
+    /// native window creation.
+    MdiChild,
+
     /// A Wayland LayerShell window, used to draw overlays or backgrounds for applications such as
     /// docks, notifications or wallpapers.
     #[cfg(all(target_os = "linux", feature = "wayland"))]

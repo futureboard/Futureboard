@@ -574,7 +574,10 @@ impl X11WindowState {
                 )?;
             }
 
-            if params.kind == WindowKind::Floating || params.kind == WindowKind::Dialog {
+            if matches!(
+                params.kind,
+                WindowKind::Floating | WindowKind::MdiChild | WindowKind::Dialog
+            ) {
                 if let Some(parent_window) = parent_window.as_ref().map(|w| w.x_window) {
                     // WM_TRANSIENT_FOR hint indicating the main application window. For floating windows, we set
                     // a parent window (WM_TRANSIENT_FOR) such that the window manager knows where to

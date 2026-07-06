@@ -717,7 +717,7 @@ impl MacWindow {
                     style_mask |= NSWindowStyleMaskNonactivatingPanel;
                     msg_send![PANEL_CLASS, alloc]
                 }
-                WindowKind::Floating | WindowKind::Dialog => {
+                WindowKind::Floating | WindowKind::MdiChild | WindowKind::Dialog => {
                     msg_send![PANEL_CLASS, alloc]
                 }
             };
@@ -887,8 +887,8 @@ impl MacWindow {
             let mut sheet_parent = None;
 
             match kind {
-                WindowKind::Normal | WindowKind::Floating => {
-                    if kind == WindowKind::Floating {
+                WindowKind::Normal | WindowKind::Floating | WindowKind::MdiChild => {
+                    if matches!(kind, WindowKind::Floating | WindowKind::MdiChild) {
                         // Let the window float keep above normal windows.
                         native_window.setLevel_(NSFloatingWindowLevel);
                     } else {

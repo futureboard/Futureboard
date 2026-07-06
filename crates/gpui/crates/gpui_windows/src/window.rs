@@ -462,6 +462,8 @@ impl WindowsWindow {
             let dwexstyle = if params.kind == WindowKind::Dialog {
                 dwstyle |= WS_POPUP | WS_CAPTION;
                 WS_EX_DLGMODALFRAME
+            } else if params.kind == WindowKind::MdiChild {
+                WS_EX_TOOLWINDOW
             } else {
                 WS_EX_APPWINDOW
             };

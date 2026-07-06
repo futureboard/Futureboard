@@ -194,7 +194,10 @@ impl WaylandSurfaceState {
         let toplevel = xdg_surface.get_toplevel(&globals.qh, surface.id());
         let xdg_parent = parent.as_ref().and_then(|w| w.toplevel());
 
-        if params.kind == WindowKind::Floating || params.kind == WindowKind::Dialog {
+        if matches!(
+            params.kind,
+            WindowKind::Floating | WindowKind::MdiChild | WindowKind::Dialog
+        ) {
             toplevel.set_parent(xdg_parent.as_ref());
         }
 

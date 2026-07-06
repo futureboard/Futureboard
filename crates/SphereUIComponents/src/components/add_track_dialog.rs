@@ -13,7 +13,9 @@ use crate::components::color_picker::{
     color_picker_field, ColorChannel, ColorPickerCallbacks, ColorPickerPlacement, ColorPickerState,
     ColorPickerValue,
 };
-use crate::components::controls::{fb_button, fb_form_row, fb_stepper_button, FbButtonKind};
+use crate::components::controls::{
+    fb_button, fb_checkbox, fb_form_row, fb_stepper_button, FbButtonKind,
+};
 use crate::components::form::{
     select_dismiss_backdrop, select_with_placement, SelectMenuPlacement, SelectOption,
 };
@@ -35,6 +37,7 @@ const BODY_PAD_X: f32 = 14.0;
 
 type VoidCb = Arc<dyn Fn(&(), &mut Window, &mut App) + 'static>;
 type KindCb = Arc<dyn Fn(&AddTrackKind, &mut Window, &mut App) + 'static>;
+type InstrumentModeCb = Arc<dyn Fn(&InstrumentMode, &mut Window, &mut App) + 'static>;
 type U32Cb = Arc<dyn Fn(&u32, &mut Window, &mut App) + 'static>;
 type BoolCb = Arc<dyn Fn(&bool, &mut Window, &mut App) + 'static>;
 type StringCb = Arc<dyn Fn(&String, &mut Window, &mut App) + 'static>;
@@ -58,6 +61,21 @@ pub enum AddTrackKind {
 pub enum AudioFormat {
     Mono,
     Stereo,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InstrumentMode {
+    Vsti,
+    SoundfontPlayer,
+}
+
+impl InstrumentMode {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Vsti => "VSTi",
+            Self::SoundfontPlayer => "Soundfont Player",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -209,6 +227,7 @@ pub struct AddTrackDialogState {
     /// palette color at `color_index`. Persisted indirectly via track creation.
     pub custom_color: Option<gpui::Rgba>,
     pub audio_format: AudioFormat,
+    pub instrument_mode: InstrumentMode,
     pub instrument_plugin_id: Option<String>,
     pub instrument_plugin_name: Option<String>,
     pub fx_chain: Option<String>,
@@ -266,6 +285,7 @@ impl AddTrackDialogState {
             color_index: track_count % Colors::TRACK_COLORS.len(),
             custom_color: None,
             audio_format: AudioFormat::Stereo,
+            instrument_mode: InstrumentMode::Vsti,
             instrument_plugin_id: None,
             instrument_plugin_name: None,
             fx_chain: None,
@@ -325,6 +345,7 @@ pub struct AddTrackDialogCallbacks {
     pub on_arm: BoolCb,
     pub on_monitor: Arc<dyn Fn(&String, &mut Window, &mut App) + 'static>,
     pub on_toggle_select: Arc<dyn Fn(&AddTrackSelectId, &mut Window, &mut App) + 'static>,
+    pub on_instrument_mode: InstrumentModeCb,
     pub on_instrument_plugin: StringCb,
     pub on_input_label: StringCb,
     pub on_output_label: StringCb,
@@ -453,58 +474,6 @@ fn add_track_select(
     )
 }
 
-fn check_row(
-    id: &'static str,
-    label: impl Into<String>,
-    checked: bool,
-    enabled: bool,
-    on_toggle: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
-) -> impl IntoElement {
-    let label = label.into();
-    let mut row = div()
-        .id(id)
-        .flex()
-        .flex_row()
-        .items_center()
-        .gap(px(8.0))
-        .min_h(px(24.0))
-        .px(px(2.0))
-        .rounded_md()
-        .child(
-            div()
-                .w(px(12.0))
-                .h(px(12.0))
-                .rounded_sm()
-                .border(px(1.0))
-                .border_color(if checked {
-                    Colors::accent_primary()
-                } else {
-                    Colors::border_subtle()
-                })
-                .bg(if checked {
-                    Colors::accent_primary()
-                } else {
-                    Colors::surface_input()
-                })
-                .children(checked.then(|| icon(assets::ICON_CHECK_PATH, 9.0, Colors::on_accent()))),
-        )
-        .child(
-            div()
-                .text_size(px(11.0))
-                .text_color(Colors::text_secondary())
-                .child(label),
-        );
-    if enabled {
-        row = row
-            .cursor(gpui::CursorStyle::PointingHand)
-            .hover(|s| s.bg(Colors::surface_hover()))
-            .on_click(on_toggle);
-    } else {
-        row = row.opacity(0.45);
-    }
-    row
-}
-
 fn count_stepper(
     state: &AddTrackDialogState,
     count_input: &TextInputState,
@@ -541,6 +510,60 @@ fn count_stepper(
                 .text_color(Colors::text_faint())
                 .child(if state.count == 1 { "track" } else { "tracks" }),
         )
+}
+
+fn instrument_mode_selector(
+    selected: InstrumentMode,
+    callbacks: &AddTrackDialogCallbacks,
+) -> impl IntoElement {
+    let mut row = div().flex().flex_row().gap(px(4.0)).w_full().h(px(28.0));
+
+    for (index, mode) in [InstrumentMode::Vsti, InstrumentMode::SoundfontPlayer]
+        .into_iter()
+        .enumerate()
+    {
+        let active = selected == mode;
+        let cb = callbacks.on_instrument_mode.clone();
+        row = row.child(
+            div()
+                .id(("add-track-instrument-mode", index))
+                .flex()
+                .items_center()
+                .justify_center()
+                .h_full()
+                .flex_1()
+                .px(px(8.0))
+                .rounded_md()
+                .border(px(1.0))
+                .border_color(if active {
+                    Colors::border_accent()
+                } else {
+                    Colors::border_subtle()
+                })
+                .bg(if active {
+                    Colors::accent_muted()
+                } else {
+                    Colors::surface_input()
+                })
+                .text_size(px(11.0))
+                .font_weight(if active {
+                    gpui::FontWeight::SEMIBOLD
+                } else {
+                    gpui::FontWeight::NORMAL
+                })
+                .text_color(if active {
+                    Colors::text_primary()
+                } else {
+                    Colors::text_muted()
+                })
+                .cursor(gpui::CursorStyle::PointingHand)
+                .hover(|s| s.bg(Colors::surface_hover()))
+                .on_click(move |_, w, cx| cb(&mode, w, cx))
+                .child(mode.label()),
+        );
+    }
+
+    row
 }
 
 fn type_tabs(
@@ -702,7 +725,7 @@ fn color_row(
                 .items_center()
                 .gap(px(12.0))
                 .child(picker)
-                .child(check_row(
+                .child(fb_checkbox(
                     "add-track-auto-color",
                     i18n.tr("add-track.option.auto-color"),
                     auto_on,
@@ -907,14 +930,14 @@ fn type_fields(
                     ),
                 ))
                 .when(show_asc, |col| {
-                    col.child(check_row(
+                    col.child(fb_checkbox(
                         "add-track-asc-in",
                         "Ascending Input",
                         asc_in_on,
                         true,
                         move |_, w, cx| asc_in(&!asc_in_on, w, cx),
                     ))
-                    .child(check_row(
+                    .child(fb_checkbox(
                         "add-track-asc-out",
                         "Ascending Output",
                         asc_out_on,
@@ -922,7 +945,7 @@ fn type_fields(
                         move |_, w, cx| asc_out(&!asc_out_on, w, cx),
                     ))
                 })
-                .child(check_row(
+                .child(fb_checkbox(
                     "add-track-arm",
                     i18n.tr("add-track.arm"),
                     arm_on,
@@ -945,19 +968,29 @@ fn type_fields(
                 .flex_col()
                 .gap(px(6.0))
                 .child(fb_form_row(
+                    "Mode",
+                    instrument_mode_selector(state.instrument_mode, callbacks),
+                ))
+                .child(fb_form_row(
                     "Instrument",
-                    add_track_select(
-                        "add-track-instrument-plugin-select",
-                        state.instrument_plugin_id.as_deref().or(Some("")),
-                        "Select instrument...",
-                        instrument_plugin_options(instrument_plugins),
-                        add_track_select_open(open_select, AddTrackSelectId::InstrumentPlugin),
-                        SelectMenuPlacement::Below,
-                        Arc::new(move |_, w, cx| {
-                            toggle_instrument(&AddTrackSelectId::InstrumentPlugin, w, cx)
-                        }),
-                        Arc::new(move |value, w, cx| instrument_cb(value, w, cx)),
-                    ),
+                    if state.instrument_mode == InstrumentMode::Vsti {
+                        add_track_select(
+                            "add-track-instrument-plugin-select",
+                            state.instrument_plugin_id.as_deref().or(Some("")),
+                            "Select instrument...",
+                            instrument_plugin_options(instrument_plugins),
+                            add_track_select_open(open_select, AddTrackSelectId::InstrumentPlugin),
+                            SelectMenuPlacement::Below,
+                            Arc::new(move |_, w, cx| {
+                                toggle_instrument(&AddTrackSelectId::InstrumentPlugin, w, cx)
+                            }),
+                            Arc::new(move |value, w, cx| instrument_cb(value, w, cx)),
+                        )
+                        .into_any_element()
+                    } else {
+                        locked_select_box("Built-in Soundfont Player".to_string())
+                            .into_any_element()
+                    },
                 ))
                 .child(fb_form_row(
                     i18n.tr("add-track.routing.midi-in"),
@@ -992,7 +1025,7 @@ fn type_fields(
                 ))
                 .child(fb_form_row("FX Chain", select_box("No Preset".to_string())))
                 .when(show_asc, |col| {
-                    col.child(check_row(
+                    col.child(fb_checkbox(
                         "add-track-asc-in",
                         "Ascending MIDI Input",
                         asc_in_on,
@@ -1084,7 +1117,7 @@ fn type_fields(
                     ),
                 ))
                 .when(show_asc, |col| {
-                    col.child(check_row(
+                    col.child(fb_checkbox(
                         "add-track-asc-in",
                         "Ascending Input",
                         asc_in_on,
@@ -1110,7 +1143,7 @@ fn type_fields(
                 .flex()
                 .flex_col()
                 .gap(px(6.0))
-                .child(check_row(
+                .child(fb_checkbox(
                     "add-track-pack-folder",
                     "Pack Folder",
                     pack_on,
@@ -1341,6 +1374,7 @@ impl AddTrackWindow {
         dialog.input_label = kind.default_input().to_string();
         let i18n = I18n::new(&self.language);
         dialog.track_name = format!("{} {}", i18n.tr(kind.label_key()), dialog.next_number);
+        dialog.instrument_mode = InstrumentMode::Vsti;
         dialog.instrument_plugin_id = None;
         dialog.instrument_plugin_name = None;
         add_track_debug(&format!(
@@ -1751,6 +1785,22 @@ impl Render for AddTrackWindow {
                                 }
                             }
                         }
+                        cx.notify();
+                    });
+                }
+            }),
+            on_instrument_mode: Arc::new({
+                let target = target.clone();
+                move |mode: &InstrumentMode, _w, cx| {
+                    let mode = *mode;
+                    let _ = target.update(cx, |this, cx| {
+                        this.state.instrument_mode = mode;
+                        if mode == InstrumentMode::SoundfontPlayer {
+                            this.state.instrument_plugin_id = None;
+                            this.state.instrument_plugin_name = None;
+                        }
+                        this.open_select = None;
+                        add_track_debug(&format!("instrument mode={}", mode.label()));
                         cx.notify();
                     });
                 }

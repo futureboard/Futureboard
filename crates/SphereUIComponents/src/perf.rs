@@ -550,6 +550,21 @@ pub fn ui_debug_clips_enabled() -> bool {
     *FLAG.get_or_init(|| std::env::var_os("FUTUREBOARD_UI_DEBUG_CLIPS").is_some())
 }
 
+/// Shared `FUTUREBOARD_UI_DEBUG_CLIPS=1` outline overlay for a content rect.
+/// Deliberately an off-palette color (not a theme token) so it reads as a
+/// debug marker rather than real UI, and stands out against any theme.
+/// Callers `.children(perf::debug_clip_outline())`.
+pub fn debug_clip_outline() -> Option<gpui::Div> {
+    use gpui::Styled;
+    ui_debug_clips_enabled().then(|| {
+        gpui::div()
+            .absolute()
+            .inset_0()
+            .border(gpui::px(1.0))
+            .border_color(gpui::rgb(0xff00ff))
+    })
+}
+
 /// Returns whether perf instrumentation is active. Cheap — single TLS
 /// read. Callers can use this to skip building counter labels when
 /// disabled, though `count` is already a no-op when disabled.

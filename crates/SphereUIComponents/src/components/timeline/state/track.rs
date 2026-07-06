@@ -94,6 +94,12 @@ pub struct TrackState {
     /// `insert-track-1-1`). Set when a VSTi is assigned; used for piano
     /// preview, clip playback, and external-bridge routing.
     pub instrument_plugin_instance_id: Option<String>,
+    /// `true` when this Instrument track's sound source is the in-app built-in
+    /// Soundfont Player rather than a hosted VSTi. Not a plugin insert — the
+    /// built-in player never goes through the VST3/CLAP/AU/LV2 bridge or plugin
+    /// registry, so this is a plain marker, not `inserts`. Session-only: not
+    /// yet persisted to the project file (reopening a project loses it).
+    pub builtin_soundfont_player: bool,
     /// Aux sends to Bus/Return tracks (Phase 3). Empty for most tracks.
     pub sends: Vec<SendSlotState>,
     /// Persisted routing choices. Device discovery is not wired yet, so device
@@ -297,8 +303,27 @@ impl TimelineState {
             sends: Vec::new(),
             routing: TrackRoutingState::for_track_type(track_type),
             instrument_plugin_instance_id: None,
+            builtin_soundfont_player: false,
         });
         id
+    }
+
+    /// Mark/unmark a track's instrument as the built-in Soundfont Player.
+    /// No-op (and no dirty) for non-Instrument tracks. Returns `true` if the
+    /// flag actually changed.
+    pub fn set_track_builtin_soundfont_player(&mut self, track_id: &str, enabled: bool) -> bool {
+        let Some(track) = self
+            .tracks
+            .iter_mut()
+            .find(|t| t.id == track_id && t.track_type == TrackType::Instrument)
+        else {
+            return false;
+        };
+        if track.builtin_soundfont_player == enabled {
+            return false;
+        }
+        track.builtin_soundfont_player = enabled;
+        true
     }
 
     pub fn selected_audio_track_id(&self) -> Option<String> {

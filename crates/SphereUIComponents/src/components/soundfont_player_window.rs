@@ -1,10 +1,8 @@
 //! Floating "Soundfont Player" utility window.
 //!
-//! Hosts the [`crate::components::mdi`] workspace so the built-in Soundfont
-//! Player instrument (see `TrackState::builtin_soundfont_player`) has a real
-//! window to open from the Inspector. The MDI workspace state lives here,
-//! not in `StudioLayout` — this window is the only place that reads or
-//! mutates it, so there is no cross-entity update to worry about.
+//! Hosts the built-in Soundfont Player instrument (see
+//! `TrackState::builtin_soundfont_player`) in a simple floating utility window.
+//! The player panel fills the window directly — no nested MDI/document chrome.
 //!
 //! This window owns a real [`SoundfontPlayer`] instance (control/offline
 //! side only — see that crate's doc comment). Loading a `.sf2`, browsing its
@@ -22,10 +20,9 @@ use gpui::{
     WindowKind,
 };
 
-use crate::components::mdi::{MdiWorkspaceCallbacks, MdiWorkspaceState};
 use crate::components::soundfont_player_mdi::{
-    ensure_soundfont_player_document, soundfont_player_mdi_workspace, SoundfontPlayerCallbacks,
-    SoundfontPlayerPanelState, SOUNDFONT_PLAYER_MDI_TITLE,
+    soundfont_player_panel, SoundfontPlayerCallbacks, SoundfontPlayerPanelState,
+    SOUNDFONT_PLAYER_MDI_TITLE,
 };
 use crate::components::title_bar::external_window_titlebar;
 use crate::soundfont_player::{
@@ -41,9 +38,20 @@ pub const SOUNDFONT_PLAYER_WINDOW_MIN_HEIGHT: f32 = 360.0;
 
 const PREVIEW_MIDI_CHANNEL: u8 = 0;
 
+#[derive(Debug, Clone)]
+pub struct SoundfontPlayerTrackUpdate {
+    pub track_id: String,
+    pub path: Option<String>,
+    pub preset: Option<(i32, i32)>,
+    pub volume: f32,
+    pub reverb_chorus: bool,
+    pub polyphony: usize,
+}
+
 pub struct SoundfontPlayerWindow {
-    workspace: MdiWorkspaceState,
+    track_id: String,
     on_close: Arc<dyn Fn(&mut Window, &mut App) + Send + Sync>,
+    on_update_track: Arc<dyn Fn(SoundfontPlayerTrackUpdate, &mut App) + Send + Sync>,
     focus_handle: FocusHandle,
     player: Option<SoundfontPlayer>,
     loaded_path: Option<PathBuf>,
@@ -52,14 +60,15 @@ pub struct SoundfontPlayerWindow {
 
 impl SoundfontPlayerWindow {
     pub fn new(
+        track_id: String,
         on_close: Arc<dyn Fn(&mut Window, &mut App) + Send + Sync>,
+        on_update_track: Arc<dyn Fn(SoundfontPlayerTrackUpdate, &mut App) + Send + Sync>,
         cx: &mut Context<Self>,
     ) -> Self {
-        let mut workspace = MdiWorkspaceState::default();
-        ensure_soundfont_player_document(&mut workspace);
         Self {
-            workspace,
+            track_id,
             on_close,
+            on_update_track,
             focus_handle: cx.focus_handle(),
             player: None,
             loaded_path: None,
@@ -67,14 +76,33 @@ impl SoundfontPlayerWindow {
         }
     }
 
-    /// Focus (or re-open, if somehow closed) the Soundfont Player document.
-    /// Called whenever the Inspector's Open button is clicked while this
-    /// window is already up, so repeated clicks always bring it to front.
-    pub fn focus_soundfont_player(&mut self) {
-        ensure_soundfont_player_document(&mut self.workspace);
+    /// Kept for the existing Inspector open path. The window now contains one
+    /// direct panel, so focusing the OS window is handled by the caller.
+    pub fn focus_soundfont_player(&mut self, track_id: String) {
+        self.track_id = track_id;
+    }
+
+    fn notify_track_update(&self, app: &mut App) {
+        (self.on_update_track)(
+            SoundfontPlayerTrackUpdate {
+                track_id: self.track_id.clone(),
+                path: self
+                    .loaded_path
+                    .as_ref()
+                    .map(|path| path.to_string_lossy().into_owned()),
+                preset: self.panel.selected_preset,
+                volume: self.panel.master_volume,
+                reverb_chorus: self.panel.reverb_chorus,
+                polyphony: self.panel.polyphony,
+            },
+            app,
+        );
     }
 
     fn browse_soundfont(&mut self, cx: &mut Context<Self>) {
+        self.panel.loading = true;
+        self.panel.status = Some("Loading SoundFont…".into());
+        cx.notify();
         #[cfg(feature = "native-dialogs")]
         {
             let entity = cx.entity().clone();
@@ -84,12 +112,20 @@ impl SoundfontPlayerWindow {
                     .add_filter("SoundFont", &["sf2"])
                     .pick_file()
                     .await;
-                let Some(handle) = result else { return };
+                let Some(handle) = result else {
+                    let _ = entity.update(cx, |this, cx| {
+                        this.panel.loading = false;
+                        this.panel.status = None;
+                        cx.notify();
+                    });
+                    return;
+                };
                 let path = handle.path().to_path_buf();
                 let settings = default_soundfont_player_settings(44_100);
                 let load_result = SoundfontPlayer::from_path(&path, settings);
                 let _ = entity.update(cx, |this, cx| {
                     this.apply_loaded_player(path, load_result);
+                    this.notify_track_update(cx);
                     cx.notify();
                 });
             })
@@ -97,6 +133,7 @@ impl SoundfontPlayerWindow {
         }
         #[cfg(not(feature = "native-dialogs"))]
         {
+            self.panel.loading = false;
             self.panel.status = Some("Native file dialogs are unavailable in this build.".into());
             cx.notify();
         }
@@ -108,21 +145,31 @@ impl SoundfontPlayerWindow {
         result: Result<SoundfontPlayer, SoundfontPlayerError>,
     ) {
         match result {
-            Ok(player) => {
+            Ok(mut player) => {
+                self.panel.loading = false;
                 self.panel.bank_name = Some(player.bank_name().to_string());
                 self.panel.presets = player.list_presets();
                 self.panel.file_name = path
                     .file_name()
                     .map(|name| name.to_string_lossy().into_owned());
                 self.panel.selected_preset = None;
+                self.panel.status = None;
+                if let Some(first) = self.panel.presets.first() {
+                    match player.select_preset(PREVIEW_MIDI_CHANNEL, first.bank, first.patch) {
+                        Ok(()) => self.panel.selected_preset = Some((first.bank, first.patch)),
+                        Err(error) => {
+                            self.panel.status = Some(format!("Default preset select failed: {error}"));
+                        }
+                    }
+                }
                 self.panel.master_volume = player.master_volume();
                 self.panel.reverb_chorus = player.enable_reverb_and_chorus();
                 self.panel.polyphony = player.maximum_polyphony();
-                self.panel.status = None;
                 self.player = Some(player);
                 self.loaded_path = Some(path);
             }
             Err(error) => {
+                self.panel.loading = false;
                 self.panel.status = Some(format!("Load failed: {error}"));
             }
         }
@@ -210,49 +257,6 @@ impl Render for SoundfontPlayerWindow {
         let on_close = self.on_close.clone();
         let entity = cx.entity().clone();
 
-        let callbacks = {
-            let entity = entity.clone();
-            MdiWorkspaceCallbacks {
-                on_focus: Arc::new({
-                    let entity = entity.clone();
-                    move |id: &String, _window, app: &mut App| {
-                        let id = id.clone();
-                        let _ = entity.update(app, |this, cx| {
-                            this.workspace.focus_document(&id);
-                            cx.notify();
-                        });
-                    }
-                }),
-                on_close: Arc::new({
-                    let entity = entity.clone();
-                    move |id: &String, _window, app: &mut App| {
-                        let id = id.clone();
-                        let _ = entity.update(app, |this, cx| {
-                            this.workspace.close_document(&id);
-                            cx.notify();
-                        });
-                    }
-                }),
-                on_minimize: Arc::new({
-                    let entity = entity.clone();
-                    move |id: &String, _window, app: &mut App| {
-                        let id = id.clone();
-                        let _ = entity.update(app, |this, cx| {
-                            this.workspace.minimize_document(&id);
-                            cx.notify();
-                        });
-                    }
-                }),
-                on_restore: Arc::new(move |id: &String, _window, app: &mut App| {
-                    let id = id.clone();
-                    let _ = entity.update(app, |this, cx| {
-                        this.workspace.restore_document(&id);
-                        cx.notify();
-                    });
-                }),
-            }
-        };
-
         let panel_callbacks = SoundfontPlayerCallbacks {
             on_browse: Arc::new({
                 let entity = entity.clone();
@@ -277,6 +281,7 @@ impl Render for SoundfontPlayerWindow {
                     let (bank, patch) = (*bank, *patch);
                     let _ = entity.update(app, |this, cx| {
                         this.select_preset(bank, patch);
+                        this.notify_track_update(cx);
                         cx.notify();
                     });
                 }
@@ -287,6 +292,7 @@ impl Render for SoundfontPlayerWindow {
                     let value = *value;
                     let _ = entity.update(app, |this, cx| {
                         this.set_volume(value);
+                        this.notify_track_update(cx);
                         cx.notify();
                     });
                 }
@@ -296,6 +302,7 @@ impl Render for SoundfontPlayerWindow {
                 move |_window, app: &mut App| {
                     let _ = entity.update(app, |this, cx| {
                         this.toggle_reverb_chorus();
+                        this.notify_track_update(cx);
                         cx.notify();
                     });
                 }
@@ -304,6 +311,7 @@ impl Render for SoundfontPlayerWindow {
                 let value = *value;
                 let _ = entity.update(app, |this, cx| {
                     this.set_polyphony(value);
+                    this.notify_track_update(cx);
                     cx.notify();
                 });
             }),
@@ -331,19 +339,16 @@ impl Render for SoundfontPlayerWindow {
                     .flex_1()
                     .min_h(px(0.0))
                     .relative()
-                    .child(soundfont_player_mdi_workspace(
-                        &self.workspace,
-                        callbacks,
-                        &panel,
-                        panel_callbacks,
-                    )),
+                    .child(soundfont_player_panel(&panel, panel_callbacks)),
             )
     }
 }
 
 pub fn open_soundfont_player_window(
     owner_bounds: Option<Bounds<gpui::Pixels>>,
+    track_id: String,
     on_close: Arc<dyn Fn(&mut Window, &mut App) + Send + Sync>,
+    on_update_track: Arc<dyn Fn(SoundfontPlayerTrackUpdate, &mut App) + Send + Sync>,
     cx: &mut App,
 ) -> Result<WindowHandle<SoundfontPlayerWindow>, String> {
     let window_bounds = crate::window_position::centered_window_bounds(
@@ -367,7 +372,7 @@ pub fn open_soundfont_player_window(
     crate::window_position::apply_owner_display(&mut options, owner_bounds, cx);
 
     cx.open_window(options, move |_window, cx| {
-        cx.new(|cx| SoundfontPlayerWindow::new(on_close, cx))
+        cx.new(|cx| SoundfontPlayerWindow::new(track_id, on_close, on_update_track, cx))
     })
     .map_err(|error| error.to_string())
 }

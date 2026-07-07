@@ -6461,6 +6461,7 @@ dependencies = [
 name = "sphere_directaudioengine"
 version = "0.1.0"
 dependencies = [
+ "SphereSoundfontPlayer",
  "cc",
  "cpal",
  "crossbeam-channel",

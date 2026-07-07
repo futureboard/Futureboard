@@ -764,12 +764,13 @@ impl StudioLayout {
     pub(super) fn open_soundfont_player_window(
         &mut self,
         owner_bounds: Option<Bounds<gpui::Pixels>>,
+        track_id: String,
         cx: &mut Context<Self>,
     ) {
         if let Some(handle) = self.external_windows.soundfont_player.clone() {
             let activated = handle
                 .update(cx, |window, w, cx| {
-                    window.focus_soundfont_player();
+                    window.focus_soundfont_player(track_id.clone());
                     w.activate_window();
                     cx.notify();
                 })
@@ -781,16 +782,51 @@ impl StudioLayout {
         }
 
         let studio = cx.entity().clone();
-        let on_close: Arc<dyn Fn(&mut Window, &mut App) + Send + Sync> = Arc::new(move |_, app| {
+        let on_close: Arc<dyn Fn(&mut Window, &mut App) + Send + Sync> = Arc::new({
+            let studio = studio.clone();
+            move |_, app| {
+                let _ = studio.update(app, |layout, cx| {
+                    layout.external_windows.soundfont_player = None;
+                    cx.notify();
+                });
+            }
+        });
+        let on_update_track: Arc<
+            dyn Fn(
+                    crate::components::soundfont_player_window::SoundfontPlayerTrackUpdate,
+                    &mut App,
+                ) + Send
+                + Sync,
+        > = Arc::new(move |update, app| {
             let _ = studio.update(app, |layout, cx| {
-                layout.external_windows.soundfont_player = None;
+                let changed = layout.timeline.update(cx, |timeline, cx| {
+                    let changed = timeline.state.set_track_soundfont_player_state(
+                        &update.track_id,
+                        update.path.clone(),
+                        update.preset,
+                        update.volume,
+                        update.reverb_chorus,
+                        update.polyphony,
+                    );
+                    if changed {
+                        cx.notify();
+                    }
+                    changed
+                });
+                if changed {
+                    layout.mark_dirty();
+                    layout.audio_bridge.project_dirty = true;
+                    layout.schedule_audio_project_sync(cx, false, "soundfont_player_update");
+                }
                 cx.notify();
             });
         });
 
         match crate::components::soundfont_player_window::open_soundfont_player_window(
             owner_bounds,
+            track_id,
             on_close,
+            on_update_track,
             cx,
         ) {
             Ok(handle) => self.external_windows.soundfont_player = Some(handle),

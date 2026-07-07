@@ -7,6 +7,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::OnceLock;
+use std::thread::JoinHandle;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -291,6 +292,141 @@ pub fn upsert_midi_device(midi: &mut MidiHardwareSettings, device: MidiDeviceSet
         *existing = device;
     } else {
         midi.devices.push(device);
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct HardwareMidiEvent {
+    /// MIDI output device id or display name. The GPUI routing UI currently
+    /// stores the display name; matching accepts either for migration safety.
+    pub device_id: String,
+    /// Seconds after transport start at which this event should be sent.
+    pub delay_seconds: f64,
+    /// Raw MIDI bytes, e.g. [0x90 | channel, pitch, velocity].
+    pub message: Vec<u8>,
+}
+
+pub struct HardwareMidiPlayback {
+    cancel_tx: Option<std::sync::mpsc::Sender<()>>,
+    handle: Option<JoinHandle<()>>,
+}
+
+impl Default for HardwareMidiPlayback {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl HardwareMidiPlayback {
+    pub fn new() -> Self {
+        Self {
+            cancel_tx: None,
+            handle: None,
+        }
+    }
+
+    pub fn start(&mut self, mut events: Vec<HardwareMidiEvent>) {
+        self.stop();
+        if events.is_empty() {
+            return;
+        }
+        events.sort_by(|a, b| a.delay_seconds.total_cmp(&b.delay_seconds));
+        let (cancel_tx, cancel_rx) = std::sync::mpsc::channel();
+        self.cancel_tx = Some(cancel_tx);
+        self.handle = Some(spawn_hardware_midi_thread(events, cancel_rx));
+    }
+
+    pub fn stop(&mut self) {
+        if let Some(tx) = self.cancel_tx.take() {
+            let _ = tx.send(());
+        }
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+impl Drop for HardwareMidiPlayback {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn spawn_hardware_midi_thread(
+    events: Vec<HardwareMidiEvent>,
+    cancel_rx: std::sync::mpsc::Receiver<()>,
+) -> JoinHandle<()> {
+    std::thread::spawn(move || run_hardware_midi_thread(events, cancel_rx))
+}
+
+#[cfg(target_os = "macos")]
+fn spawn_hardware_midi_thread(
+    _events: Vec<HardwareMidiEvent>,
+    _cancel_rx: std::sync::mpsc::Receiver<()>,
+) -> JoinHandle<()> {
+    std::thread::spawn(|| {})
+}
+
+#[cfg(not(target_os = "macos"))]
+fn run_hardware_midi_thread(
+    events: Vec<HardwareMidiEvent>,
+    cancel_rx: std::sync::mpsc::Receiver<()>,
+) {
+    use midir::MidiOutputConnection;
+    use std::time::{Duration, Instant};
+
+    let mut connections: HashMap<String, MidiOutputConnection> = HashMap::new();
+    let start = Instant::now();
+
+    for event in events {
+        let deadline = start + Duration::from_secs_f64(event.delay_seconds.max(0.0));
+        let now = Instant::now();
+        if deadline > now {
+            if cancel_rx.recv_timeout(deadline - now).is_ok() {
+                send_all_notes_off(&mut connections);
+                return;
+            }
+        } else if cancel_rx.try_recv().is_ok() {
+            send_all_notes_off(&mut connections);
+            return;
+        }
+
+        if !connections.contains_key(&event.device_id) {
+            if let Some(conn) = open_midi_output(&event.device_id) {
+                connections.insert(event.device_id.clone(), conn);
+            }
+        }
+        if let Some(conn) = connections.get_mut(&event.device_id) {
+            let _ = conn.send(&event.message);
+        }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn open_midi_output(device_id_or_name: &str) -> Option<midir::MidiOutputConnection> {
+    let midi_out = midir::MidiOutput::new("Futureboard MIDI playback").ok()?;
+    for port in midi_out.ports() {
+        let Ok(name) = midi_out.port_name(&port) else {
+            continue;
+        };
+        let stable = stable_id(MidiDeviceDirection::Output, &name);
+        if name == device_id_or_name || stable == device_id_or_name {
+            return midi_out.connect(&port, "Futureboard MIDI Out").ok();
+        }
+    }
+    None
+}
+
+#[cfg(not(target_os = "macos"))]
+fn send_all_notes_off(connections: &mut HashMap<String, midir::MidiOutputConnection>) {
+    for conn in connections.values_mut() {
+        for channel in 0..16u8 {
+            let _ = conn.send(&[0x80 | channel, 0, 0]);
+            let _ = conn.send(&[0xb0 | channel, 64, 0]);
+            let _ = conn.send(&[0xb0 | channel, 123, 0]);
+            let _ = conn.send(&[0xb0 | channel, 120, 0]);
+        }
     }
 }
 

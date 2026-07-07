@@ -339,6 +339,28 @@ pub struct EngineTrackSnapshot {
     pub sends: Vec<EngineSendSnapshot>,
     #[serde(default)]
     pub automation_lanes: Vec<EngineAutomationLaneSnapshot>,
+    #[serde(default)]
+    pub builtin_soundfont_player: bool,
+    #[serde(default)]
+    pub soundfont_path: Option<String>,
+    #[serde(default)]
+    pub soundfont_preset_bank: Option<i32>,
+    #[serde(default)]
+    pub soundfont_preset_patch: Option<i32>,
+    #[serde(default = "default_soundfont_volume")]
+    pub soundfont_volume: f32,
+    #[serde(default = "default_true")]
+    pub soundfont_reverb_chorus: bool,
+    #[serde(default = "default_soundfont_polyphony")]
+    pub soundfont_polyphony: usize,
+}
+
+fn default_soundfont_volume() -> f32 {
+    1.0
+}
+
+fn default_soundfont_polyphony() -> usize {
+    64
 }
 
 fn default_preview_mode() -> String {

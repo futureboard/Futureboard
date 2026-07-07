@@ -76,6 +76,11 @@ impl TimelineState {
             routing: TrackRoutingState::for_track_type(TrackType::Audio),
             instrument_plugin_instance_id: None,
             builtin_soundfont_player: false,
+            soundfont_path: None,
+            soundfont_preset: None,
+            soundfont_volume: 1.0,
+            soundfont_reverb_chorus: true,
+            soundfont_polyphony: 64,
         };
 
         let track2 = TrackState {
@@ -120,6 +125,11 @@ impl TimelineState {
             routing: TrackRoutingState::for_track_type(TrackType::Audio),
             instrument_plugin_instance_id: None,
             builtin_soundfont_player: false,
+            soundfont_path: None,
+            soundfont_preset: None,
+            soundfont_volume: 1.0,
+            soundfont_reverb_chorus: true,
+            soundfont_polyphony: 64,
         };
 
         let track3 = TrackState {
@@ -173,6 +183,11 @@ impl TimelineState {
             routing: TrackRoutingState::for_track_type(TrackType::Midi),
             instrument_plugin_instance_id: None,
             builtin_soundfont_player: false,
+            soundfont_path: None,
+            soundfont_preset: None,
+            soundfont_volume: 1.0,
+            soundfont_reverb_chorus: true,
+            soundfont_polyphony: 64,
         };
 
         Self {

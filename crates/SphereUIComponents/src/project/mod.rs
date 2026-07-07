@@ -1247,6 +1247,11 @@ pub fn apply_to_timeline(project: &FutureboardProject, tl: &mut TimelineState) {
                 instrument_plugin_instance_id,
                 // Session-only marker, not part of the project file format yet.
                 builtin_soundfont_player: false,
+                soundfont_path: None,
+                soundfont_preset: None,
+                soundfont_volume: 1.0,
+                soundfont_reverb_chorus: true,
+                soundfont_polyphony: 64,
             }
         })
         .collect();

@@ -1,12 +1,14 @@
 use gpui::{App, Context, Window};
 use sphere_midi_service::{MidiInputEvent, MidiInputRouteStatus, MidiInputSource, MidiInputTarget};
 
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::components;
 use crate::components::mixer_panel::vsti_output_meter_key;
+use crate::components::timeline::timeline_state::{ClipType, TrackOutputRouting, TrackType};
 
 use super::engine_snapshot::{build_engine_project_snapshot, log_engine_sync_snapshot};
 use super::helpers::{smooth_meter_value, update_meter_clip, update_meter_hold};
@@ -1403,6 +1405,116 @@ impl StudioLayout {
         }
     }
 
+    fn start_hardware_midi_playback(&mut self, playhead_beats: f32, cx: &mut Context<Self>) {
+        let events = self.build_hardware_midi_events(playhead_beats, cx);
+        if std::env::var_os("FUTUREBOARD_MIDI_OUTPUT_DEBUG").is_some() {
+            eprintln!(
+                "[midi-output] start hardware playback events={} playhead_beats={:.3}",
+                events.len(),
+                playhead_beats
+            );
+        }
+        self.hardware_midi_playback.start(events);
+    }
+
+    fn stop_hardware_midi_playback(&mut self) {
+        self.hardware_midi_playback.stop();
+    }
+
+    fn build_hardware_midi_events(
+        &self,
+        playhead_beats: f32,
+        cx: &mut Context<Self>,
+    ) -> Vec<sphere_midi_service::HardwareMidiEvent> {
+        let enabled_outputs = {
+            let settings = self.settings.read(cx);
+            let detected = crate::device_registry::cached_midi_devices();
+            sphere_midi_service::resolve_midi_devices(&settings.current.hardware.midi.devices, &detected)
+                .into_iter()
+                .filter(|d| {
+                    d.enabled
+                        && d.connected
+                        && matches!(
+                            d.direction,
+                            crate::settings::MidiDeviceDirection::Output
+                                | crate::settings::MidiDeviceDirection::InputOutput
+                        )
+                })
+                .flat_map(|d| [d.id, d.name])
+                .collect::<HashSet<_>>()
+        };
+        if enabled_outputs.is_empty() {
+            return Vec::new();
+        }
+
+        let timeline = self.timeline.read(cx);
+        let state = &timeline.state;
+        let base_bpm = state.bpm as f64;
+        let playhead_seconds = state
+            .tempo_map
+            .seconds_at_beat(playhead_beats.max(0.0) as f64, base_bpm);
+        let has_solo = state.tracks.iter().any(|track| track.solo);
+        let mut events = Vec::new();
+
+        for track in &state.tracks {
+            if track.track_type != TrackType::Midi || track.muted || (has_solo && !track.solo) {
+                continue;
+            }
+            let TrackOutputRouting::HardwareOutput { device_id, .. } = &track.routing.output else {
+                continue;
+            };
+            if !enabled_outputs.contains(device_id) {
+                continue;
+            }
+            let output_mode = track.routing.output_channel_mode();
+            for clip in &track.clips {
+                if clip.muted || clip.start_beat + clip.duration_beats <= playhead_beats {
+                    continue;
+                }
+                let ClipType::Midi { notes, .. } = &clip.clip_type else {
+                    continue;
+                };
+                for note in notes.iter().filter(|note| !note.muted) {
+                    let note_start = clip.start_beat + note.start.max(0.0);
+                    let note_end = (note_start + note.duration.max(0.0))
+                        .min(clip.start_beat + clip.duration_beats);
+                    if note_end <= playhead_beats || note_end <= note_start {
+                        continue;
+                    }
+                    let channel = output_mode.resolve(note.channel).raw().min(15);
+                    let pitch = note.pitch.min(127);
+                    let velocity = note.velocity.clamp(1, 127);
+                    if note_start <= playhead_beats {
+                        events.push(sphere_midi_service::HardwareMidiEvent {
+                            device_id: device_id.clone(),
+                            delay_seconds: 0.0,
+                            message: vec![0x90 | channel, pitch, velocity],
+                        });
+                    } else {
+                        let start_seconds = state
+                            .tempo_map
+                            .seconds_at_beat(note_start.max(0.0) as f64, base_bpm);
+                        events.push(sphere_midi_service::HardwareMidiEvent {
+                            device_id: device_id.clone(),
+                            delay_seconds: (start_seconds - playhead_seconds).max(0.0),
+                            message: vec![0x90 | channel, pitch, velocity],
+                        });
+                    }
+                    let end_seconds = state
+                        .tempo_map
+                        .seconds_at_beat(note_end.max(0.0) as f64, base_bpm);
+                    events.push(sphere_midi_service::HardwareMidiEvent {
+                        device_id: device_id.clone(),
+                        delay_seconds: (end_seconds - playhead_seconds).max(0.0),
+                        message: vec![0x80 | channel, pitch, 0],
+                    });
+                }
+            }
+        }
+
+        events
+    }
+
     pub(super) fn current_audio_sample_rate(&self) -> u32 {
         self.audio_bridge
             .stats
@@ -1602,7 +1714,9 @@ impl StudioLayout {
         }
         transport_freeze_debug::log("after engine.play");
 
-        self.audio_bridge.stats = Some(engine.stats());
+        let stats = engine.stats();
+        self.audio_bridge.stats = Some(stats);
+        self.start_hardware_midi_playback(playhead_beats, cx);
         transport_freeze_debug::log("before timeline.update playing=true");
         let _ = self.timeline.update(cx, |timeline, cx| {
             timeline.state.transport.playing = true;
@@ -2512,6 +2626,7 @@ impl StudioLayout {
     }
 
     pub(super) fn stop_native_playback(&mut self, cx: &mut Context<Self>) {
+        self.stop_hardware_midi_playback();
         let Some(engine) = self.audio_bridge.engine.as_ref() else {
             return;
         };
@@ -2544,6 +2659,13 @@ impl StudioLayout {
         reason: SeekReason,
     ) {
         let beat = beat.max(0.0);
+        let was_playing = self
+            .audio_bridge
+            .stats
+            .as_ref()
+            .map(|stats| stats.transport_playing)
+            .unwrap_or(false);
+        self.stop_hardware_midi_playback();
         let bpm = {
             let timeline = self.timeline.read(cx);
             timeline.state.bpm
@@ -2575,6 +2697,9 @@ impl StudioLayout {
             timeline.state.recompute_effective_volumes(beat, "seek");
             cx.notify();
         });
+        if was_playing {
+            self.start_hardware_midi_playback(beat, cx);
+        }
     }
 }
 

@@ -102,13 +102,13 @@ pub fn soundfont_player_mdi_workspace(
 ) -> AnyElement {
     mdi_workspace(state, callbacks, |doc| match doc.kind {
         MdiDocumentKind::SoundfontPlayer => {
-            soundfont_player_document(panel, panel_callbacks.clone())
+            soundfont_player_panel(panel, panel_callbacks.clone())
         }
         MdiDocumentKind::Generic => empty_document(),
     })
 }
 
-fn soundfont_player_document(
+pub fn soundfont_player_panel(
     panel: &SoundfontPlayerPanelState,
     cb: SoundfontPlayerCallbacks,
 ) -> AnyElement {
@@ -129,8 +129,8 @@ fn soundfont_player_document(
         .flex()
         .flex_col()
         .size_full()
-        .bg(Colors::surface_panel())
-        .p(px(12.0))
+        .bg(Colors::surface_window())
+        .p(px(20.0))
         .gap(px(8.0))
         .child(header_row(&title, &subtitle))
         .child(soundfont_row(panel, &cb))

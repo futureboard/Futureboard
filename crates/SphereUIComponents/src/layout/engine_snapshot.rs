@@ -555,6 +555,13 @@ fn build_engine_project_snapshot_inner(
             },
             sends: build_engine_sends(track),
             automation_lanes: build_engine_automation_lanes(track),
+            builtin_soundfont_player: track.builtin_soundfont_player,
+            soundfont_path: track.soundfont_path.clone(),
+            soundfont_preset_bank: track.soundfont_preset.map(|(bank, _)| bank),
+            soundfont_preset_patch: track.soundfont_preset.map(|(_, patch)| patch),
+            soundfont_volume: track.soundfont_volume,
+            soundfont_reverb_chorus: track.soundfont_reverb_chorus,
+            soundfont_polyphony: track.soundfont_polyphony,
         })
         .collect();
 
@@ -584,6 +591,13 @@ fn build_engine_project_snapshot_inner(
         inserts: master_inserts,
         sends: Vec::new(),
         automation_lanes: Vec::new(),
+        builtin_soundfont_player: false,
+        soundfont_path: None,
+        soundfont_preset_bank: None,
+        soundfont_preset_patch: None,
+        soundfont_volume: 1.0,
+        soundfont_reverb_chorus: true,
+        soundfont_polyphony: 64,
     });
 
     let mut clips: Vec<EngineClipSnapshot> = state

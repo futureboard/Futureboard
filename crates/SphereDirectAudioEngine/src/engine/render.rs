@@ -1265,6 +1265,81 @@ fn apply_plugin_param_automation(track: &mut RuntimeTrack, beat: f64, bridge_ena
     }
 }
 
+fn render_soundfont_instrument_block(track: &mut RuntimeTrack, frames: usize) {
+    if frames == 0
+        || track
+            .soundfont_player
+            .as_ref()
+            .and_then(|soundfont| soundfont.player.as_ref())
+            .is_none()
+    {
+        return;
+    }
+
+    let mut cursor = 0usize;
+    for index in 0..track.midi_block_events.len() {
+        let event = track.midi_block_events[index];
+        let offset = (event.sample_offset as usize).min(frames);
+        if offset > cursor {
+            render_soundfont_segment(track, cursor, offset);
+            cursor = offset;
+        }
+        if let Some(player) = track
+            .soundfont_player
+            .as_mut()
+            .and_then(|soundfont| soundfont.player.as_mut())
+        {
+            match event.kind {
+                1 => {
+                    let velocity = (event.velocity.clamp(0.0, 1.0) * 127.0).round() as u8;
+                    let _ = player.note_on(event.channel.min(15), event.pitch.min(127), velocity.max(1));
+                }
+                0 => {
+                    let _ = player.note_off(event.channel.min(15), event.pitch.min(127));
+                }
+                2 => {
+                    let value = (event.velocity.clamp(0.0, 1.0) * 127.0).round() as u8;
+                    let _ = player.process_midi_message(
+                        event.channel.min(15),
+                        0xB0,
+                        event.pitch.min(127),
+                        value,
+                    );
+                }
+                _ => {}
+            }
+        }
+    }
+    if cursor < frames {
+        render_soundfont_segment(track, cursor, frames);
+    }
+}
+
+fn render_soundfont_segment(track: &mut RuntimeTrack, start: usize, end: usize) {
+    if end <= start {
+        return;
+    }
+    let Some(soundfont) = track.soundfont_player.as_mut() else {
+        return;
+    };
+    let Some(player) = soundfont.player.as_mut() else {
+        return;
+    };
+    let len = end - start;
+    track.soundfont_l[..len].fill(0.0);
+    track.soundfont_r[..len].fill(0.0);
+    if player
+        .render(&mut track.soundfont_l[..len], &mut track.soundfont_r[..len])
+        .is_err()
+    {
+        return;
+    }
+    for i in 0..len {
+        track.block_l[start + i] += track.soundfont_l[i];
+        track.block_r[start + i] += track.soundfont_r[i];
+    }
+}
+
 /// `bridge_enabled` — false on the master-bus chain, which has never routed
 /// external-bridge inserts (parity with the old empty sink-map call); true for
 /// regular track strips, where each bridge insert uses its build/command-time
@@ -1295,6 +1370,8 @@ pub fn apply_track_chain_block(
     if transport.playing {
         apply_plugin_param_automation(track, transport.ppq_position, bridge_enabled);
     }
+
+    render_soundfont_instrument_block(track, frames);
 
     let instrument_ix = track.midi_instrument_insert_ix;
     let midi_events = &track.midi_block_events;

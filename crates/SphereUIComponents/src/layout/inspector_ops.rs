@@ -697,7 +697,7 @@ impl StudioLayout {
                     cx.notify();
                 });
                 inspector_debug(&format!("open_soundfont_player track={track_id}"));
-                this.open_soundfont_player_window(Some(bounds), cx);
+                this.open_soundfont_player_window(Some(bounds), track_id, cx);
             });
         })
     }

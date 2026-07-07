@@ -100,6 +100,13 @@ pub struct TrackState {
     /// registry, so this is a plain marker, not `inserts`. Session-only: not
     /// yet persisted to the project file (reopening a project loses it).
     pub builtin_soundfont_player: bool,
+    /// Absolute `.sf2` path loaded into the built-in Soundfont Player.
+    pub soundfont_path: Option<String>,
+    /// Selected SoundFont preset `(bank, patch)` for channel 1 playback.
+    pub soundfont_preset: Option<(i32, i32)>,
+    pub soundfont_volume: f32,
+    pub soundfont_reverb_chorus: bool,
+    pub soundfont_polyphony: usize,
     /// Aux sends to Bus/Return tracks (Phase 3). Empty for most tracks.
     pub sends: Vec<SendSlotState>,
     /// Persisted routing choices. Device discovery is not wired yet, so device
@@ -304,6 +311,11 @@ impl TimelineState {
             routing: TrackRoutingState::for_track_type(track_type),
             instrument_plugin_instance_id: None,
             builtin_soundfont_player: false,
+            soundfont_path: None,
+            soundfont_preset: None,
+            soundfont_volume: 1.0,
+            soundfont_reverb_chorus: true,
+            soundfont_polyphony: 64,
         });
         id
     }
@@ -324,6 +336,40 @@ impl TimelineState {
         }
         track.builtin_soundfont_player = enabled;
         true
+    }
+
+    pub fn set_track_soundfont_player_state(
+        &mut self,
+        track_id: &str,
+        path: Option<String>,
+        preset: Option<(i32, i32)>,
+        volume: f32,
+        reverb_chorus: bool,
+        polyphony: usize,
+    ) -> bool {
+        let Some(track) = self
+            .tracks
+            .iter_mut()
+            .find(|t| t.id == track_id && t.track_type == TrackType::Instrument)
+        else {
+            return false;
+        };
+        let volume = volume.clamp(0.0, 1.0);
+        let polyphony = polyphony.clamp(1, 256);
+        let changed = track.soundfont_path != path
+            || track.soundfont_preset != preset
+            || (track.soundfont_volume - volume).abs() > f32::EPSILON
+            || track.soundfont_reverb_chorus != reverb_chorus
+            || track.soundfont_polyphony != polyphony;
+        if changed {
+            track.builtin_soundfont_player = true;
+            track.soundfont_path = path;
+            track.soundfont_preset = preset;
+            track.soundfont_volume = volume;
+            track.soundfont_reverb_chorus = reverb_chorus;
+            track.soundfont_polyphony = polyphony;
+        }
+        changed
     }
 
     pub fn selected_audio_track_id(&self) -> Option<String> {

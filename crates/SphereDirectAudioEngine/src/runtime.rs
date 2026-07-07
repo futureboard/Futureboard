@@ -6,6 +6,7 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::audio_graph::{plan_runtime_audio_graph, GraphValidationError, RuntimeAudioGraph};
@@ -13,6 +14,7 @@ use crate::audio_source::{open_clip_audio_source, ClipAudioSource};
 use crate::latency_graph::{plan_runtime_latency_graph, RuntimeLatencyGraph};
 use serde_json::Value;
 use sphere_audio_plugins::{canonical_plugin_id, should_rebuild_state, AudioPluginDspState};
+use sphere_soundfont_player::{SoundfontPlayer, SoundfontPlayerSettings};
 use SphereAudioProcessor::{
     create_stretch_processor, effective_pitch_ratio, effective_time_ratio, resolve_backend,
     source_read_rate_for_repitch, stretched_duration_samples, StretchAlgorithm, StretchBackend,
@@ -22,7 +24,7 @@ use SphereAudioProcessor::{
 use crate::tempo_map::{RuntimeTempoMapSnapshot, TempoMap, TempoPoint};
 use crate::types::{
     EngineAutomationLaneSnapshot, EngineClipAudioProcess, EngineClipSnapshot,
-    EngineMidiClipSnapshot, EngineProjectSnapshot,
+    EngineMidiClipSnapshot, EngineProjectSnapshot, EngineTrackSnapshot,
 };
 use crate::vst3_processor::{vst3_midi_debug_enabled, Vst3MidiEvent, Vst3RuntimeProcessor};
 
@@ -44,6 +46,95 @@ pub fn midi_verbose_enabled() -> bool {
         std::env::var_os("FUTUREBOARD_FORENSIC_TRACE").is_some()
             || std::env::var_os("FUTUREBOARD_MIDI_VERBOSE").is_some()
     })
+}
+
+pub struct RuntimeSoundfontPlayer {
+    pub path: PathBuf,
+    pub preset: Option<(i32, i32)>,
+    pub volume: f32,
+    pub reverb_chorus: bool,
+    pub polyphony: usize,
+    pub player: Option<SoundfontPlayer>,
+}
+
+impl RuntimeSoundfontPlayer {
+    fn from_snapshot(track: &EngineTrackSnapshot, sample_rate: u32) -> Option<Self> {
+        if !track.builtin_soundfont_player {
+            return None;
+        }
+        let path = track.soundfont_path.as_ref().filter(|p| !p.is_empty())?;
+        let preset = track
+            .soundfont_preset_bank
+            .zip(track.soundfont_preset_patch);
+        let mut state = Self {
+            path: PathBuf::from(path),
+            preset,
+            volume: track.soundfont_volume.clamp(0.0, 1.0),
+            reverb_chorus: track.soundfont_reverb_chorus,
+            polyphony: track.soundfont_polyphony.clamp(1, 256),
+            player: None,
+        };
+        state.reload(sample_rate);
+        Some(state)
+    }
+
+    fn reload(&mut self, sample_rate: u32) {
+        let settings = SoundfontPlayerSettings {
+            sample_rate: sample_rate.max(1) as i32,
+            block_size: 0,
+            maximum_polyphony: self.polyphony,
+            enable_reverb_and_chorus: self.reverb_chorus,
+        };
+        match SoundfontPlayer::from_path(&self.path, settings) {
+            Ok(mut player) => {
+                player.set_master_volume(self.volume);
+                if let Some((bank, patch)) = self.preset {
+                    let _ = player.select_preset(0, bank, patch);
+                }
+                self.player = Some(player);
+            }
+            Err(error) => {
+                eprintln!(
+                    "[soundfont-player] failed to load '{}': {error}",
+                    self.path.display()
+                );
+                self.player = None;
+            }
+        }
+    }
+}
+
+impl std::fmt::Debug for RuntimeSoundfontPlayer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RuntimeSoundfontPlayer")
+            .field("path", &self.path)
+            .field("preset", &self.preset)
+            .field("volume", &self.volume)
+            .field("reverb_chorus", &self.reverb_chorus)
+            .field("polyphony", &self.polyphony)
+            .field("loaded", &self.player.is_some())
+            .finish()
+    }
+}
+
+impl Clone for RuntimeSoundfontPlayer {
+    fn clone(&self) -> Self {
+        let sample_rate = self
+            .player
+            .as_ref()
+            .map(|player| player.sample_rate().max(1) as u32)
+            .unwrap_or(48_000);
+        let mut cloned = Self {
+            path: self.path.clone(),
+            preset: self.preset,
+            volume: self.volume,
+            reverb_chorus: self.reverb_chorus,
+            polyphony: self.polyphony,
+            player: None,
+        };
+        cloned.reload(sample_rate);
+        cloned
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -86,11 +177,17 @@ pub struct RuntimeTrack {
     /// allocates. Zeroed at the top of each render block.
     pub recv_l: Vec<f32>,
     pub recv_r: Vec<f32>,
+    /// Scratch buffers for built-in SoundFont rendering; preallocated for the
+    /// callback block size and mixed into `block_*`.
+    pub soundfont_l: Vec<f32>,
+    pub soundfont_r: Vec<f32>,
     /// Per-block MIDI events for the instrument VST3 insert (Phase 2B).
     /// Cleared at the start of `schedule_midi_block`; no steady-path allocation.
     pub midi_block_events: Vec<Vst3MidiEvent>,
     /// Index into `inserts` of the first instrument-capable native VST3 insert.
     pub midi_instrument_insert_ix: Option<usize>,
+    /// Built-in RustySynth SoundFont instrument for Instrument tracks.
+    pub soundfont_player: Option<RuntimeSoundfontPlayer>,
     /// Sum of enabled insert latencies at build time (Phase V/W reporting).
     pub plugin_latency_samples: u32,
     /// Ring buffers for PDC on post-fader output (preallocated at build).
@@ -979,6 +1076,9 @@ impl RuntimeProject {
         }
 
         for track in &mut self.tracks {
+            if let Some(soundfont) = track.soundfont_player.as_mut() {
+                soundfont.reload(sample_rate);
+            }
             track.plugin_latency_samples = 0;
             for insert in &mut track.inserts {
                 insert.dsp.rebuild(
@@ -1364,6 +1464,7 @@ impl RuntimeProject {
             }
 
             let midi_instrument_insert_ix = find_midi_instrument_insert_ix(&inserts, &t.track_type);
+            let soundfont_player = RuntimeSoundfontPlayer::from_snapshot(t, output_sample_rate);
 
             // Seed the fader smoother at the build-time target so the first
             // realtime block plays at the correct level (no startup ramp).
@@ -1418,8 +1519,11 @@ impl RuntimeProject {
                 block_r: vec![0.0; DEFAULT_AUDIO_BLOCK_CAPACITY],
                 recv_l: vec![0.0; DEFAULT_AUDIO_BLOCK_CAPACITY],
                 recv_r: vec![0.0; DEFAULT_AUDIO_BLOCK_CAPACITY],
+                soundfont_l: vec![0.0; DEFAULT_AUDIO_BLOCK_CAPACITY],
+                soundfont_r: vec![0.0; DEFAULT_AUDIO_BLOCK_CAPACITY],
                 midi_block_events: Vec::with_capacity(256),
                 midi_instrument_insert_ix,
+                soundfont_player,
                 plugin_latency_samples: 0,
                 pdc_delay_l: Vec::new(),
                 pdc_delay_r: Vec::new(),
@@ -1865,7 +1969,8 @@ impl RuntimeProject {
                 let offset = callback_offset.saturating_add((ev.sample - base_sample) as u32);
                 apply_active(&mut mt.active, &ev);
                 if let Some(ti) = track_ix {
-                    if let Some(ix) = instrument_ix {
+                    let has_soundfont = self.tracks[ti].soundfont_player.is_some();
+                    if instrument_ix.is_some() || has_soundfont {
                         let vel = ev.velocity as f32 / 127.0;
                         let midi_ev = match ev.kind {
                             RuntimeMidiEventKind::NoteOn => {
@@ -1881,7 +1986,7 @@ impl RuntimeProject {
                                 ev.cc_value,
                             ),
                         };
-                        if let Some(sink) = bridge_sink.as_deref() {
+                        if let Some((ix, sink)) = instrument_ix.zip(bridge_sink.as_deref()) {
                             push_vst3_midi_event_to_sink(
                                 sink,
                                 &midi_ev,
@@ -2667,18 +2772,24 @@ fn push_all_notes_off_for_track(
     let Some(ti) = track_index.filter(|&ti| ti < project.tracks.len()) else {
         return;
     };
-    let Some(ix) = project.tracks[ti].midi_instrument_insert_ix else {
+    let instrument_ix = project.tracks[ti].midi_instrument_insert_ix;
+    if instrument_ix.is_none() && project.tracks[ti].soundfont_player.is_none() {
         return;
-    };
-    let sink = project.tracks[ti]
-        .inserts
-        .get(ix)
-        .and_then(|insert| insert.bridge_sink.clone());
+    }
+    let sink = instrument_ix.and_then(|ix| {
+        project.tracks[ti]
+            .inserts
+            .get(ix)
+            .and_then(|insert| insert.bridge_sink.clone())
+    });
     if let Some(sink) = sink {
         if midi_engine_debug_enabled() {
             eprintln!(
                 "[midi-playback] transport_stop panic instance={} old_notes={}",
-                project.tracks[ti].inserts[ix].id,
+                instrument_ix
+                    .and_then(|ix| project.tracks[ti].inserts.get(ix))
+                    .map(|insert| insert.id.as_str())
+                    .unwrap_or("soundfont-player"),
                 active.len()
             );
         }
@@ -3236,6 +3347,13 @@ mod pdc_reset_tests {
             inserts: Vec::new(),
             sends: Vec::new(),
             automation_lanes: Vec::new(),
+            builtin_soundfont_player: false,
+            soundfont_path: None,
+            soundfont_preset_bank: None,
+            soundfont_preset_patch: None,
+            soundfont_volume: 1.0,
+            soundfont_reverb_chorus: true,
+            soundfont_polyphony: 64,
         }
     }
 
@@ -4171,8 +4289,11 @@ mod midi_tests {
             block_r: vec![0.0; 64],
             recv_l: vec![0.0; 64],
             recv_r: vec![0.0; 64],
+            soundfont_l: vec![0.0; 64],
+            soundfont_r: vec![0.0; 64],
             midi_block_events: Vec::new(),
             midi_instrument_insert_ix: Some(0),
+            soundfont_player: None,
             plugin_latency_samples: 0,
             pdc_delay_l: Vec::new(),
             pdc_delay_r: Vec::new(),

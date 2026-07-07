@@ -159,6 +159,9 @@ pub(crate) struct ExternalWindows {
     pub soundfont_player: Option<
         gpui::WindowHandle<crate::components::soundfont_player_window::SoundfontPlayerWindow>,
     >,
+    /// Audio Routing Matrix ("Audio Connections") window.
+    pub routing_matrix:
+        Option<gpui::WindowHandle<crate::components::routing_matrix_window::RoutingMatrixWindow>>,
 }
 
 impl StudioLayout {
@@ -657,6 +660,101 @@ impl StudioLayout {
         match open_keymap_window(owner_bounds, manager, on_changed, cx) {
             Ok(handle) => self.external_windows.keymap = Some(handle),
             Err(err) => eprintln!("[keymap] failed to open window: {err}"),
+        }
+    }
+
+    /// Builds the routing-matrix view-model from the current timeline tracks.
+    fn build_routing_matrix_snapshot(
+        &self,
+        cx: &gpui::App,
+    ) -> crate::components::RoutingMatrixSnapshot {
+        crate::components::RoutingMatrixSnapshot {
+            tracks: self.timeline.read(cx).state.tracks.clone(),
+        }
+    }
+
+    /// Pushes a refreshed snapshot to the routing-matrix window if it is open.
+    pub(crate) fn push_routing_matrix_snapshot_to_window(&mut self, cx: &mut Context<Self>) {
+        let Some(handle) = self.external_windows.routing_matrix.clone() else {
+            return;
+        };
+        let snapshot = self.build_routing_matrix_snapshot(cx);
+        let _ = handle.update(cx, |window, _w, cx| {
+            window.set_snapshot(snapshot);
+            cx.notify();
+        });
+    }
+
+    /// Opens the Audio Routing Matrix ("Audio Connections") window, or focuses
+    /// it if already open. Toggling a send cell routes back through the owner
+    /// (`defer_update`) to mutate track state and push a refreshed snapshot.
+    pub(super) fn open_routing_matrix_window(
+        &mut self,
+        owner_bounds: Option<Bounds<gpui::Pixels>>,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(handle) = self.external_windows.routing_matrix.clone() {
+            if handle
+                .update(cx, |_window, w, _cx| w.activate_window())
+                .is_ok()
+            {
+                return;
+            }
+            self.external_windows.routing_matrix = None;
+        }
+
+        let snapshot = self.build_routing_matrix_snapshot(cx);
+
+        let studio = cx.entity().clone();
+        let on_toggle_send: crate::components::routing_matrix_window::ToggleSendCb = {
+            let studio = studio.clone();
+            Arc::new(move |source_id: String, dest_id: String, _w, cx| {
+                StudioLayout::defer_update(&studio, cx, move |this, cx| {
+                    let changed = this.timeline.update(cx, |timeline, _cx| {
+                        let already = timeline
+                            .state
+                            .tracks
+                            .iter()
+                            .find(|t| t.id == source_id)
+                            .and_then(|t| {
+                                t.sends.iter().find(|s| s.target_track_id == dest_id).cloned()
+                            });
+                        if let Some(send) = already {
+                            timeline.state.remove_send(&source_id, &send.id);
+                            true
+                        } else {
+                            timeline
+                                .state
+                                .add_send_to_target(&source_id, &dest_id)
+                                .is_some()
+                        }
+                    });
+                    if changed {
+                        this.mark_dirty();
+                        this.audio_bridge.project_dirty = true;
+                    }
+                    this.push_routing_matrix_snapshot_to_window(cx);
+                    cx.notify();
+                });
+            })
+        };
+
+        let on_close: Arc<dyn Fn(&mut Window, &mut App) + Send + Sync> = Arc::new(move |_, app| {
+            let _ = studio.update(app, |layout, cx| {
+                layout.external_windows.routing_matrix = None;
+                cx.notify();
+            });
+        });
+
+        match crate::components::open_routing_matrix_window(
+            owner_bounds,
+            snapshot,
+            on_toggle_send,
+            on_close,
+            cx,
+        ) {
+            Ok(handle) => self.external_windows.routing_matrix = Some(handle),
+            Err(err) => eprintln!("[routing-matrix] failed to open window: {err}"),
         }
     }
 

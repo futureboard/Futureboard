@@ -204,13 +204,12 @@ fn render_tab_bar(
             active_tab,
             on_tab_click.clone(),
         ))
-        .child(tab_button(
-            "Effect Editor",
-            assets::ICON_SPARKLES_PATH,
-            BottomTab::EffectEditor,
-            active_tab,
-            on_tab_click,
-        ))
+    // TODO(effect-editor): The Effect Editor tab is temporarily hidden while the
+    // panel is unfinished. The `BottomTab::EffectEditor` variant, its
+    // `EffectEditorTabView`, and all FX-chain data/serialization are kept intact;
+    // only the entry point is removed. Restore the `tab_button("Effect Editor", …)`
+    // here (and the content arm in `render_active_tab`) when it is ready.
+    // `on_tab_click` is intentionally dropped after the last active tab above.
 }
 
 fn tab_button(
@@ -277,7 +276,9 @@ fn render_active_tab(
     active_tab: BottomTab,
     mixer_panel: &Entity<MixerPanelView>,
     clip_editor: &Entity<ClipEditorPanel>,
-    effect_editor: &Entity<EffectEditorTabView>,
+    // Retained so the view (and its FX-chain state) stays alive; its tab entry
+    // point is temporarily hidden. See TODO(effect-editor) in `render_tab_bar`.
+    _effect_editor: &Entity<EffectEditorTabView>,
 ) -> gpui::AnyElement {
     let _scope = crate::perf::PerfScope::enter("BottomPanelContent");
     crate::perf::count("bottom_panel_content_layout_count", 1);
@@ -285,7 +286,9 @@ fn render_active_tab(
 
     match active_tab {
         BottomTab::Mixer => docked_mixer_shell(mixer_panel.clone()).into_any_element(),
-        BottomTab::Editor => clip_editor.clone().into_any_element(),
-        BottomTab::EffectEditor => effect_editor.clone().into_any_element(),
+        // TODO(effect-editor): tab hidden while unfinished — a persisted
+        // `EffectEditor` active tab falls back to the Editor so the panel is
+        // never stuck on the hidden surface.
+        BottomTab::Editor | BottomTab::EffectEditor => clip_editor.clone().into_any_element(),
     }
 }

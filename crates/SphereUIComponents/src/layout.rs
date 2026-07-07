@@ -943,7 +943,19 @@ impl StudioLayout {
         layout.ensure_mixer_tree_defaults_once(cx);
         layout.ensure_mixer_tree_ui_hooks(cx.entity().clone(), cx);
         layout.refresh_mixer_tree_sidebar_entity(cx);
-        layout.spawn_audio_engine_warmup(cx);
+        // Audio-engine warm-up is preload, not mount work. The pre-studio
+        // Loading Session dialog already builds + warms the engine and hands it
+        // off during workspace install. Running the warm-up synchronously here
+        // built a *second* engine on the first studio frame — stalling the first
+        // paint (black screen at init) and then clobbering the pre-warmed handoff
+        // engine when the background build finished. Defer it past the current
+        // effect cycle (which includes the workspace install): the
+        // `engine.is_some()` guard then skips the redundant build for handoff
+        // mounts, while rollback / no-handoff mounts still get warmed.
+        let self_entity = cx.entity();
+        cx.defer(move |app| {
+            let _ = self_entity.update(app, |this, cx| this.spawn_audio_engine_warmup(cx));
+        });
         layout.sync_timeline_chrome_metrics(cx);
 
         layout
@@ -963,15 +975,24 @@ impl StudioLayout {
                 .await;
             let _ = this.update(cx, |this, cx| match result {
                 Ok((engine, stats)) => {
-                    this.install_audio_callbacks(&engine, cx);
-                    this.audio_bridge.running = stats.running;
-                    this.audio_bridge.stats = Some(stats);
-                    this.audio_bridge.last_error = None;
-                    this.audio_bridge.engine = Some(engine);
-                    this.sync_plugin_bridge_sinks_to_engine(cx, "studio_audio_ready");
-                    this.schedule_audio_project_sync(cx, true, "studio_audio_ready");
-                    crate::boot::log("audio engine handle ready");
-                    cx.notify();
+                    if this.audio_bridge.engine.is_some() {
+                        // A pre-studio handoff engine (already carrying the loaded
+                        // project) was installed while this warm-up ran. Keep it and
+                        // discard the redundant engine so the graph is not reset.
+                        crate::boot::log(
+                            "audio engine warm-up superseded by handoff engine",
+                        );
+                    } else {
+                        this.install_audio_callbacks(&engine, cx);
+                        this.audio_bridge.running = stats.running;
+                        this.audio_bridge.stats = Some(stats);
+                        this.audio_bridge.last_error = None;
+                        this.audio_bridge.engine = Some(engine);
+                        this.sync_plugin_bridge_sinks_to_engine(cx, "studio_audio_ready");
+                        this.schedule_audio_project_sync(cx, true, "studio_audio_ready");
+                        crate::boot::log("audio engine handle ready");
+                        cx.notify();
+                    }
                 }
                 Err(error) => {
                     eprintln!("[audio] failed to initialize engine: {error}");
@@ -1662,6 +1683,9 @@ impl StudioLayout {
             "view:toggle-perf-overlay" => self.toggle_performance_overlay(cx),
             "panel:mixer-float" | "floatingwindow:mixer" => {
                 self.open_mixer_external_window(owner_bounds, cx);
+            }
+            "floatingwindow:routing-matrix" | "window:audio-connections" => {
+                self.open_routing_matrix_window(owner_bounds, cx);
             }
 
             "track:add" | "track:show-add-dialog" | "project:add-track" => {

@@ -1473,7 +1473,10 @@ fn channel_strip(
         .h_full()
         .overflow_hidden()
         .when(!gpu_decor, |s| {
-            s.bg(strip_bg).border_r(px(1.0)).border_color(border_col)
+            s.bg(strip_bg)
+                .border_r(px(1.0))
+                .border_color(border_col)
+                .hover(|h| h.bg(Colors::surface_hover()))
         })
         .id(("mix-strip", id_num))
         .on_mouse_down(gpui::MouseButton::Left, on_select_strip)
@@ -1610,17 +1613,24 @@ fn vsti_output_sub_strip(
         .h_full()
         .overflow_hidden()
         .when(!gpu_decor, |s| {
+            // Multi-output sub-strips must read as grouped children of their
+            // instrument parent, not independent channels: a sunken/nested
+            // background plus left+right separators tinted in the parent track
+            // colour bracket the group, distinct from the neutral separators
+            // between top-level strips.
             s.bg(if is_selected {
                 Colors::surface_card_selected()
             } else {
-                Colors::surface_panel_alt()
+                Colors::surface_canvas()
             })
+            .border_l(px(1.0))
             .border_r(px(1.0))
             .border_color(if is_selected {
                 Colors::accent_primary()
             } else {
-                Colors::border_default()
+                Colors::with_alpha(parent_track.color, 0.45)
             })
+            .hover(|h| h.bg(Colors::surface_hover()))
         })
         .id(("mix-vsti-sub-strip", id_num))
         .on_mouse_down(gpui::MouseButton::Left, on_select_strip)

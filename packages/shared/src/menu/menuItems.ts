@@ -487,6 +487,17 @@ export const APP_MENUS: AppMenuGroup[] = [
         icon: "blocks",
         action: "plugins:manager",
       },
+      {
+        type: "separator",
+        id: "audio.sep.routing",
+      },
+      {
+        id: "audio.connections",
+        label: "Audio Connections...",
+        icon: "route",
+        action: "floatingwindow:routing-matrix",
+        description: "Open the audio routing matrix in a window",
+      },
     ],
   },
 

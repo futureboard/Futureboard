@@ -602,6 +602,15 @@ fn open_studio_workspace(init: WorkspaceInit, cx: &mut App) -> Result<(), String
         })
         .map_err(|e| e.to_string())?;
 
+    // The studio window is created hidden (see `platform_chrome::studio_window_options`,
+    // `show: false`) so the OS never displays its empty black client area while the
+    // heavy first layout / workspace install runs. Reveal it after the first frame
+    // has painted — `activate_window` applies the stored initial placement and shows
+    // the window with real content instead of a black flash.
+    let _ = studio.update(cx, |_layout, window, _cx| {
+        window.on_next_frame(|window, _cx| window.activate_window());
+    });
+
     boot::log("workspace entered");
     Ok(())
 }

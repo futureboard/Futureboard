@@ -7,9 +7,12 @@ use std::sync::Arc;
 
 use crate::components::title_bar::{external_window_titlebar_compact, TITLEBAR_HEIGHT};
 use crate::theme::{self, Colors};
+use std::time::Duration;
+
 use gpui::{
-    div, px, App, Bounds, Context, FocusHandle, InteractiveElement, IntoElement, KeyDownEvent,
-    ParentElement, Render, StatefulInteractiveElement, Styled, Window, WindowHandle,
+    div, ease_in_out, px, Animation, AnimationExt, App, Bounds, Context, FocusHandle,
+    InteractiveElement, IntoElement, KeyDownEvent, ParentElement, Render,
+    StatefulInteractiveElement, Styled, Window, WindowHandle,
 };
 // `AppContext` (for `cx.new`) is only used by the Windows window-open path below.
 #[cfg(target_os = "windows")]
@@ -386,8 +389,17 @@ pub fn progress_bar(value: ProgressBarValue) -> impl IntoElement {
     progress_bar_animated(value, 0.0)
 }
 
-/// Determinate bars ignore `phase`. Indeterminate bars sweep using `phase` in `0.0..1.0`.
-pub fn progress_bar_animated(value: ProgressBarValue, phase: f32) -> impl IntoElement {
+/// Primary indeterminate segment width, as a fraction of the rail.
+const INDETERMINATE_PRIMARY_W: f32 = 0.34;
+/// Trailing indeterminate segment width, as a fraction of the rail.
+const INDETERMINATE_SECONDARY_W: f32 = 0.20;
+
+/// Determinate bars fill to `value`. Indeterminate bars self-animate a sweeping
+/// segment via GPUI's frame-driven `with_animation` — the `phase` argument is
+/// retained for API compatibility but no longer needs to be advanced by the
+/// caller (previously callers passed a static/zero phase, so the bar never
+/// moved). Easing is `ease_in_out` so each sweep accelerates then decelerates.
+pub fn progress_bar_animated(value: ProgressBarValue, _phase: f32) -> impl IntoElement {
     let rail = div()
         .h(px(BAR_H))
         .w_full()
@@ -403,32 +415,49 @@ pub fn progress_bar_animated(value: ProgressBarValue, phase: f32) -> impl IntoEl
                 .w(gpui::relative(value.clamp(0.0, 1.0).max(0.015)))
                 .bg(Colors::accent_primary()),
         ),
-        ProgressBarValue::Indeterminate => {
-            let phase = phase.fract().abs();
-            let primary_left = 0.08 + phase * 0.58;
-            let secondary_left = (primary_left + 0.38).fract() * 0.72 + 0.08;
-            rail.child(
-                div()
-                    .absolute()
-                    .left(gpui::relative(primary_left.clamp(0.0, 0.92)))
-                    .top_0()
-                    .bottom_0()
-                    .w(gpui::relative(0.34))
-                    .rounded(px(BAR_RADIUS))
-                    .bg(Colors::accent_primary()),
-            )
-            .child(
-                div()
-                    .absolute()
-                    .left(gpui::relative(secondary_left.clamp(0.0, 0.92)))
-                    .top_0()
-                    .bottom_0()
-                    .w(gpui::relative(0.22))
-                    .rounded(px(BAR_RADIUS))
-                    .bg(Colors::with_alpha(Colors::accent_primary(), 0.45)),
-            )
-        }
+        ProgressBarValue::Indeterminate => rail
+            .child(indeterminate_segment(
+                "progress-indeterminate-primary",
+                INDETERMINATE_PRIMARY_W,
+                1300,
+                Colors::accent_primary(),
+            ))
+            .child(indeterminate_segment(
+                "progress-indeterminate-secondary",
+                INDETERMINATE_SECONDARY_W,
+                1000,
+                Colors::with_alpha(Colors::accent_primary(), 0.45),
+            )),
     }
+}
+
+/// One self-animating indeterminate segment that sweeps from just off the left
+/// edge to just off the right edge and repeats, eased in/out. Two segments with
+/// different periods desync over time for a lively, non-mechanical sweep. The
+/// rail clips (`overflow_hidden`) so the off-edge travel is hidden.
+fn indeterminate_segment(
+    id: &'static str,
+    seg_w: f32,
+    period_ms: u64,
+    color: gpui::Rgba,
+) -> impl IntoElement {
+    div()
+        .absolute()
+        .top_0()
+        .bottom_0()
+        .w(gpui::relative(seg_w))
+        .rounded(px(BAR_RADIUS))
+        .bg(color)
+        .with_animation(
+            id,
+            Animation::new(Duration::from_millis(period_ms))
+                .repeat()
+                .with_easing(ease_in_out),
+            move |el, delta| {
+                let left = -seg_w + delta * (1.0 + seg_w);
+                el.left(gpui::relative(left))
+            },
+        )
 }
 
 fn cancel_button(label: String, target: gpui::Entity<ProgressDialogWindow>) -> impl IntoElement {

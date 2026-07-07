@@ -178,7 +178,13 @@ pub fn studio_window_options() -> WindowOptions {
     WindowOptions {
         titlebar: Some(PlatformChromePolicy::studio_titlebar_options()),
         focus: true,
-        show: true,
+        // Open the studio window hidden. The OS otherwise shows an empty black
+        // client area while StudioLayout's heavy first layout / workspace install
+        // runs (black screen at init). The mount path reveals it after the first
+        // frame paints via `window.activate_window()` (which applies the stored
+        // initial placement and shows the window). The Welcome window opts back
+        // into `show: true` in `welcome_window_options`.
+        show: false,
         is_movable: true,
         is_resizable: true,
         is_minimizable: true,

@@ -48,6 +48,11 @@ jobs:
             platform: mac
             native-artifact-name: futureboard-native-mac
             native-bundle-glob: packaging/native/out/*.dmg
+          - os: macos-13
+            platform: mac
+            native-artifact-name: futureboard-native-mac-intel
+            native-bundle-glob: packaging/native/out/*.dmg
+            native-dmg-suffix: macos-intel
 
     steps:
       - name: Checkout
@@ -85,9 +90,9 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          key: cargo-${{ matrix.os }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: |
-            cargo-${{ runner.os }}-
+            cargo-${{ matrix.os }}-
 
       - name: Verify shared app assets
         shell: bash
@@ -107,10 +112,15 @@ jobs:
         run: cargo build --release --workspace
 
       - name: Bundle native app (macOS)
-        if: matrix.os == 'macos-latest'
+        if: matrix.platform == 'mac'
         run: |
+          set -euo pipefail
           bash packaging/native/bundle-macos.sh
           bash packaging/native/bundle-macos-dmg.sh "packaging/native/out/Futureboard Studio.app" packaging/native/out "${{ needs.version.outputs.app-version }}"
+          if [[ -n "${{ matrix.native-dmg-suffix }}" ]]; then
+            mv "packaging/native/out/Futureboard.Studio-${{ needs.version.outputs.app-version }}-macos.dmg" \
+              "packaging/native/out/Futureboard.Studio-${{ needs.version.outputs.app-version }}-${{ matrix.native-dmg-suffix }}.dmg"
+          fi
 
       - name: Install Inno Setup
         if: matrix.os == 'windows-latest'

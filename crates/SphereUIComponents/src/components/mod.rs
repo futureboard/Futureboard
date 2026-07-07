@@ -54,6 +54,7 @@ pub mod plugin_shell_text;
 pub mod progress_dialog;
 pub mod project_switcher;
 pub mod reorder;
+pub mod routing_matrix_window;
 pub mod scroll_thumb;
 pub mod settings_components;
 pub mod settings_dialog;
@@ -92,7 +93,7 @@ pub use box_list_view::{
     box_list_item_title, box_list_item_trailing, box_list_toggle, box_list_view, BoxListBadgeTone,
 };
 pub use color_picker::{
-    color_picker_field, color_picker_trigger, default_presets, ColorChannel, ColorPickerCallbacks,
+    color_picker_field, color_picker_trigger, default_presets, ColorPickerCallbacks,
     ColorPickerPlacement, ColorPickerState, ColorPickerValue,
 };
 pub use combo_box::{combo_box_menu, combo_box_trigger, dedupe_preserve_order, ComboBoxOption};
@@ -129,6 +130,9 @@ pub use mixer_panel::mixer_panel;
 pub use mixer_panel_view::{docked_mixer_shell, MixerPanelView};
 pub use mixer_window::{open_mixer_window, MixerSnapshot, MixerWindow};
 pub use panel::{inspector_debug, inspector_debug_enabled, right_panel};
+pub use routing_matrix_window::{
+    open_routing_matrix_window, RoutingMatrixSnapshot, RoutingMatrixWindow,
+};
 pub use performance_overlay::{performance_overlay, PerformanceOverlaySnapshot};
 pub use piano_roll::PianoRoll;
 pub use plugin_manager::{

@@ -21,20 +21,50 @@ use std::sync::Arc;
 
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    deferred, div, px, svg, App, InteractiveElement, IntoElement, ParentElement, Rgba,
-    StatefulInteractiveElement, Styled, Window,
+    anchored, deferred, div, point, px, svg, Anchor, App, AppContext, DragMoveEvent, Empty,
+    InteractiveElement, IntoElement, ParentElement, Render, Rgba, StatefulInteractiveElement,
+    Styled, Window,
 };
 
 use crate::assets;
 use crate::color::{
-    self, color_picker_debug, normalize_color, parse_hex_color, push_recent_color, rgba_to_hex,
+    self, color_picker_debug, hsv_to_rgba, normalize_color, parse_hex_color, push_recent_color,
+    rgba_to_hex, rgba_to_hsv,
 };
 use crate::components::controls::fb_checkbox;
-use crate::components::slider::slider;
 use crate::components::text_input::{
     text_field_with_callbacks, TextInputCallbacks, TextInputState,
 };
 use crate::theme::Colors;
+
+/// Height of the 2D saturation/value picking area.
+const SV_AREA_HEIGHT: f32 = 132.0;
+/// Height of the hue rainbow strip.
+const HUE_BAR_HEIGHT: f32 = 14.0;
+/// Opaque white / black / transparent stops for the SV gradients.
+const WHITE: Rgba = Rgba { r: 1.0, g: 1.0, b: 1.0, a: 1.0 };
+const OPAQUE_BLACK: Rgba = Rgba { r: 0.0, g: 0.0, b: 0.0, a: 1.0 };
+const CLEAR_BLACK: Rgba = Rgba { r: 0.0, g: 0.0, b: 0.0, a: 0.0 };
+
+/// Drag payload for the 2D saturation/value area.
+#[derive(Clone, Debug)]
+struct SvDrag;
+
+impl Render for SvDrag {
+    fn render(&mut self, _w: &mut Window, _cx: &mut gpui::Context<Self>) -> impl IntoElement {
+        Empty
+    }
+}
+
+/// Drag payload for the hue strip.
+#[derive(Clone, Debug)]
+struct HueDrag;
+
+impl Render for HueDrag {
+    fn render(&mut self, _w: &mut Window, _cx: &mut gpui::Context<Self>) -> impl IntoElement {
+        Empty
+    }
+}
 
 /// Paint priority so the popover sits above ordinary deferred content (0) and
 /// the select dropdowns (100) are unaffected — color pickers and selects are
@@ -49,14 +79,6 @@ const POPOVER_WIDTH: f32 = 264.0;
 pub enum ColorPickerPlacement {
     Below,
     Above,
-}
-
-/// One editable color channel.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ColorChannel {
-    R,
-    G,
-    B,
 }
 
 /// The value emitted by the picker. `auto` true means "Auto Color"; otherwise
@@ -95,6 +117,10 @@ pub struct ColorPickerState {
     pub hex_input: TextInputState,
     /// Inline parse error for the hex field, if any.
     pub hex_error: Option<String>,
+    /// Persisted hue (`0.0..=1.0`) for the HSV picker. Kept separately from
+    /// `draft` so dragging saturation/value to an edge (gray or black, where hue
+    /// is mathematically undefined) does not lose the chosen hue.
+    pub hue: f32,
     /// Recent custom colors (most-recent first), loaded from user prefs.
     pub recent: Vec<String>,
 }
@@ -118,6 +144,7 @@ impl ColorPickerState {
             auto: initial.auto,
             hex_input,
             hex_error: None,
+            hue: rgba_to_hsv(draft).0,
             recent,
         }
     }
@@ -129,6 +156,46 @@ impl ColorPickerState {
         self.auto = value.auto;
         self.hex_error = None;
         self.open = false;
+        self.adopt_hue_from_draft();
+        self.sync_hex_text();
+    }
+
+    /// Current picker color as `(hue, saturation, value)`, each `0.0..=1.0`.
+    /// Uses the persisted `hue` (stable at achromatic edges) with the draft's
+    /// saturation / value.
+    pub fn hsv(&self) -> (f32, f32, f32) {
+        let (_h, s, v) = rgba_to_hsv(self.draft);
+        (self.hue, s, v)
+    }
+
+    /// Refresh the stored hue from the draft, but only when the draft has enough
+    /// chroma for hue to be meaningful (avoids snapping hue to 0 on gray/black).
+    fn adopt_hue_from_draft(&mut self) {
+        let (h, s, v) = rgba_to_hsv(self.draft);
+        if s > 0.001 && v > 0.001 {
+            self.hue = h;
+        }
+    }
+
+    /// Set the hue from the hue strip, preserving the draft's saturation/value.
+    pub fn set_hue(&mut self, hue: f32) {
+        let (_h, s, v) = rgba_to_hsv(self.draft);
+        self.hue = hue.rem_euclid(1.0);
+        self.draft = normalize_color(hsv_to_rgba(self.hue, s, v));
+        self.auto = false;
+        self.hex_error = None;
+        self.sync_hex_text();
+    }
+
+    /// Set saturation/value from the 2D area, preserving the persisted hue.
+    pub fn set_saturation_value(&mut self, saturation: f32, value: f32) {
+        self.draft = normalize_color(hsv_to_rgba(
+            self.hue,
+            saturation.clamp(0.0, 1.0),
+            value.clamp(0.0, 1.0),
+        ));
+        self.auto = false;
+        self.hex_error = None;
         self.sync_hex_text();
     }
 
@@ -165,27 +232,15 @@ impl ColorPickerState {
         }
     }
 
-    /// Set the draft to a concrete color (preset / recent / slider commit).
-    /// Clears Auto and syncs the hex field.
+    /// Set the draft to a concrete color (preset / recent / hex commit).
+    /// Clears Auto, adopts the color's hue, and syncs the hex field.
     pub fn set_color(&mut self, color: Rgba) {
         self.draft = normalize_color(color);
+        self.adopt_hue_from_draft();
         self.auto = false;
         self.hex_error = None;
         self.sync_hex_text();
         color_picker_debug(&format!("set color={}", rgba_to_hex(self.draft)));
-    }
-
-    /// Update one RGB channel from a normalized slider value.
-    pub fn set_channel(&mut self, channel: ColorChannel, value: f32) {
-        let v = value.clamp(0.0, 1.0);
-        match channel {
-            ColorChannel::R => self.draft.r = v,
-            ColorChannel::G => self.draft.g = v,
-            ColorChannel::B => self.draft.b = v,
-        }
-        self.auto = false;
-        self.hex_error = None;
-        self.sync_hex_text();
     }
 
     /// Toggle Auto Color. Enabling it clears the inline error but preserves the
@@ -209,6 +264,7 @@ impl ColorPickerState {
         match parse_hex_color(&raw) {
             Ok(color) => {
                 self.draft = normalize_color(color);
+                self.adopt_hue_from_draft();
                 self.auto = false;
                 self.hex_error = None;
                 color_picker_debug(&format!(
@@ -260,8 +316,10 @@ pub struct ColorPickerCallbacks {
     pub on_close: Arc<dyn Fn(&mut Window, &mut App) + 'static>,
     /// Commit a concrete color (preset / recent swatch click).
     pub on_pick: Arc<dyn Fn(Rgba, &mut Window, &mut App) + 'static>,
-    /// A slider moved one channel.
-    pub on_channel: Arc<dyn Fn(ColorChannel, f32, &mut Window, &mut App) + 'static>,
+    /// Hue strip dragged — carries the normalized hue (`0.0..=1.0`).
+    pub on_hue: Arc<dyn Fn(f32, &mut Window, &mut App) + 'static>,
+    /// Saturation/value area dragged — carries `(saturation, value)`.
+    pub on_sv: Arc<dyn Fn(f32, f32, &mut Window, &mut App) + 'static>,
     /// Auto Color toggled.
     pub on_auto: Arc<dyn Fn(bool, &mut Window, &mut App) + 'static>,
 }
@@ -395,45 +453,124 @@ pub fn color_picker_trigger(
         )
 }
 
-fn channel_row(
-    channel: ColorChannel,
-    label: &'static str,
+/// The 2D saturation/value picking area: a white→hue horizontal gradient with a
+/// transparent→black vertical gradient on top, and a ring handle at the current
+/// (saturation, value). Dragging reports the new saturation/value.
+fn saturation_value_area(
+    hue: f32,
+    saturation: f32,
     value: f32,
-    accent: Rgba,
-    on_channel: Arc<dyn Fn(ColorChannel, f32, &mut Window, &mut App) + 'static>,
+    draft: Rgba,
+    on_sv: Arc<dyn Fn(f32, f32, &mut Window, &mut App) + 'static>,
 ) -> impl IntoElement {
-    let id = match channel {
-        ColorChannel::R => "color-picker-slider-r",
-        ColorChannel::G => "color-picker-slider-g",
-        ColorChannel::B => "color-picker-slider-b",
-    };
-    let byte = (value.clamp(0.0, 1.0) * 255.0).round() as u8;
+    let hue_color = hsv_to_rgba(hue, 1.0, 1.0);
     div()
+        .id("color-picker-sv-area")
+        .relative()
+        .w_full()
+        .h(px(SV_AREA_HEIGHT))
+        .rounded_md()
+        .overflow_hidden()
+        .border(px(1.0))
+        .border_color(Colors::border_default())
+        .cursor(gpui::CursorStyle::Crosshair)
+        // Base: white (left) → pure hue (right).
+        .child(
+            div().absolute().inset_0().bg(gpui::linear_gradient(
+                90.0,
+                gpui::linear_color_stop(WHITE, 0.0),
+                gpui::linear_color_stop(hue_color, 1.0),
+            )),
+        )
+        // Overlay: transparent (top) → black (bottom).
+        .child(
+            div().absolute().inset_0().bg(gpui::linear_gradient(
+                180.0,
+                gpui::linear_color_stop(CLEAR_BLACK, 0.0),
+                gpui::linear_color_stop(OPAQUE_BLACK, 1.0),
+            )),
+        )
+        // Ring handle centered on (saturation, value).
+        .child(
+            div()
+                .absolute()
+                .left(gpui::relative(saturation.clamp(0.0, 1.0)))
+                .top(gpui::relative((1.0 - value).clamp(0.0, 1.0)))
+                .ml(px(-7.0))
+                .mt(px(-7.0))
+                .w(px(14.0))
+                .h(px(14.0))
+                .rounded_full()
+                .border(px(2.0))
+                .border_color(WHITE)
+                .bg(draft),
+        )
+        .on_drag(SvDrag, |_, _, _, cx| cx.new(|_| SvDrag))
+        .on_drag_move::<SvDrag>(move |event: &DragMoveEvent<SvDrag>, window, cx| {
+            let bounds = event.bounds;
+            let px_x: f32 = event.event.position.x.into();
+            let px_y: f32 = event.event.position.y.into();
+            let ox: f32 = bounds.origin.x.into();
+            let oy: f32 = bounds.origin.y.into();
+            let ow: f32 = f32::from(bounds.size.width).max(1.0);
+            let oh: f32 = f32::from(bounds.size.height).max(1.0);
+            let sat = ((px_x - ox) / ow).clamp(0.0, 1.0);
+            let val = (1.0 - (px_y - oy) / oh).clamp(0.0, 1.0);
+            on_sv(sat, val, window, cx);
+        })
+}
+
+/// Hue rainbow strip. Rendered as six horizontal gradient segments (GPUI
+/// gradients take two stops) so red→yellow→green→cyan→blue→magenta→red reads as
+/// one continuous rainbow, with a ring handle at the current hue.
+fn hue_strip(
+    hue: f32,
+    on_hue: Arc<dyn Fn(f32, &mut Window, &mut App) + 'static>,
+) -> impl IntoElement {
+    let mut strip = div()
+        .id("color-picker-hue")
+        .relative()
+        .w_full()
+        .h(px(HUE_BAR_HEIGHT))
+        .rounded_full()
+        .overflow_hidden()
+        .border(px(1.0))
+        .border_color(Colors::border_default())
         .flex()
         .flex_row()
-        .items_center()
-        .gap(px(8.0))
-        .h(px(20.0))
+        .cursor(gpui::CursorStyle::ResizeLeftRight);
+    for i in 0..6 {
+        let from = hsv_to_rgba(i as f32 / 6.0, 1.0, 1.0);
+        let to = hsv_to_rgba((i + 1) as f32 / 6.0, 1.0, 1.0);
+        strip = strip.child(div().h_full().flex_1().bg(gpui::linear_gradient(
+            90.0,
+            gpui::linear_color_stop(from, 0.0),
+            gpui::linear_color_stop(to, 1.0),
+        )));
+    }
+    strip
         .child(
             div()
+                .absolute()
+                .top(px(-1.0))
+                .bottom(px(-1.0))
+                .left(gpui::relative(hue.clamp(0.0, 1.0)))
+                .ml(px(-6.0))
                 .w(px(12.0))
-                .flex_shrink_0()
-                .text_size(px(10.0))
-                .font_weight(gpui::FontWeight::SEMIBOLD)
-                .text_color(Colors::text_secondary())
-                .child(label),
+                .rounded_full()
+                .border(px(2.0))
+                .border_color(WHITE)
+                .bg(hsv_to_rgba(hue, 1.0, 1.0)),
         )
-        .child(slider(id, value, accent, move |v, window, cx| {
-            on_channel(channel, *v, window, cx)
-        }))
-        .child(
-            div()
-                .w(px(26.0))
-                .flex_shrink_0()
-                .text_size(px(10.0))
-                .text_color(Colors::text_faint())
-                .child(byte.to_string()),
-        )
+        .on_drag(HueDrag, |_, _, _, cx| cx.new(|_| HueDrag))
+        .on_drag_move::<HueDrag>(move |event: &DragMoveEvent<HueDrag>, window, cx| {
+            let bounds = event.bounds;
+            let px_x: f32 = event.event.position.x.into();
+            let ox: f32 = bounds.origin.x.into();
+            let ow: f32 = f32::from(bounds.size.width).max(1.0);
+            let hue = ((px_x - ox) / ow).clamp(0.0, 1.0);
+            on_hue(hue, window, cx);
+        })
 }
 
 /// The deferred popover body. Rendered as a child of the [`color_picker_field`]
@@ -581,40 +718,22 @@ fn color_picker_popover(
             .child(preset_grid),
     );
 
-    // Custom RGB sliders.
-    let mut red = Colors::status_error();
-    red.a = 0.9;
-    let mut green = Colors::status_success();
-    green.a = 0.9;
-    let mut blue = Colors::accent_primary();
-    blue.a = 0.9;
+    // Custom HSV picker — 2D saturation/value area + hue strip.
+    let (hue, saturation, value) = state.hsv();
     menu = menu.child(
         div()
             .flex()
             .flex_col()
-            .gap(px(4.0))
+            .gap(px(7.0))
             .child(section_label("CUSTOM"))
-            .child(channel_row(
-                ColorChannel::R,
-                "R",
-                draft.r,
-                red,
-                callbacks.on_channel.clone(),
+            .child(saturation_value_area(
+                hue,
+                saturation,
+                value,
+                draft,
+                callbacks.on_sv.clone(),
             ))
-            .child(channel_row(
-                ColorChannel::G,
-                "G",
-                draft.g,
-                green,
-                callbacks.on_channel.clone(),
-            ))
-            .child(channel_row(
-                ColorChannel::B,
-                "B",
-                draft.b,
-                blue,
-                callbacks.on_channel.clone(),
-            )),
+            .child(hue_strip(hue, callbacks.on_hue.clone())),
     );
 
     // Recent.
@@ -639,15 +758,21 @@ fn color_picker_popover(
         );
     }
 
-    // Anchor the popover's left edge to the trigger and grow rightward/down
-    // (Below) or up (Above). The host sizes its dialog so a left-anchored
-    // trigger keeps the 264px popover inside the window bounds.
-    let mut positioned = div().absolute().left_0().child(menu);
-    positioned = match placement {
-        ColorPickerPlacement::Below => positioned.top(px(30.0)),
-        ColorPickerPlacement::Above => positioned.bottom(px(30.0)),
+    // Render the popover as a window-fitting overlay: `anchored` snaps the
+    // 264px menu inside the window viewport instead of letting it clip at the
+    // dialog edge (the fixed-width popover would otherwise overflow when the
+    // trigger sits near the right side — see the color box in Add Track). It
+    // anchors to the trigger's top-left (grow down) or bottom-left (grow up),
+    // then shifts left/up as needed to stay on-screen with an 8px margin.
+    let (anchor, offset_y) = match placement {
+        ColorPickerPlacement::Below => (Anchor::TopLeft, px(30.0)),
+        ColorPickerPlacement::Above => (Anchor::BottomLeft, px(-6.0)),
     };
-    positioned
+    anchored()
+        .anchor(anchor)
+        .snap_to_window_with_margin(px(8.0))
+        .offset(point(px(0.0), offset_y))
+        .child(menu)
 }
 
 /// Render the trigger swatch plus (when open) the deferred popover, wrapped in a

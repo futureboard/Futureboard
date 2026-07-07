@@ -9,7 +9,8 @@ use crate::components::fader::db_value_pill;
 use crate::components::knob::format_pan_label;
 use crate::components::slider::slider_with_reset;
 use crate::components::timeline::timeline_state::{
-    volume, TimelineState, TrackDragItem, TrackLaneMode, TrackState, TrackType, HEADER_WIDTH,
+    volume, TimelineState, TrackDragItem, TrackLaneMode, TrackState, TrackType,
+    HEADER_WIDTH, TRACK_HEADER_CONTROLS_MIN_HEIGHT,
 };
 use crate::components::timeline::vu_meter::vu_meter_with_levels;
 use crate::theme::Colors;
@@ -165,6 +166,10 @@ pub fn track_header(
     let track_id = track.id.clone();
     let is_selected = state.selection.selected_track_id.as_ref() == Some(&track.id);
     let is_automation = track.lane_mode == TrackLaneMode::Automation;
+    // Adaptive header: the volume/pan/meter/dB control row only fits at the
+    // default row height or taller. Below that we show the compact single-row
+    // header so controls never overlap, clip, or float outside the row.
+    let show_controls = row_height >= TRACK_HEADER_CONTROLS_MIN_HEIGHT;
     let is_dragging = state.dragging_track_id.as_deref() == Some(track.id.as_str());
     let is_drop_target =
         state.drag_target_index == Some(index) || state.drag_target_index == Some(index + 1);
@@ -291,6 +296,9 @@ pub fn track_header(
         .flex_row()
         .w(px(HEADER_WIDTH))
         .h(px(row_height))
+        // Clip to the row so a mid-resize frame can never paint controls
+        // outside the row bounds; the adaptive layout keeps content within.
+        .overflow_hidden()
         .bg(header_bg)
         .opacity(if is_dragging { 0.62 } else { 1.0 })
         // Stronger right border so the header column reads as a distinct
@@ -314,8 +322,11 @@ pub fn track_header(
             div()
                 .flex()
                 .flex_col()
-                .justify_between()
+                // Two-row layout spreads; compact (single row) centers vertically.
+                .when(show_controls, |c| c.justify_between())
+                .when(!show_controls, |c| c.justify_center())
                 .flex_1()
+                .min_w_0()
                 .px(px(8.0))
                 .py(px(7.0))
                 // Row 1: name + type badge + per-track buttons
@@ -473,8 +484,10 @@ pub fn track_header(
                                 )),
                         ),
                 )
-                // Row 2: volume slider + pan pill + meter + dB pill
-                .child(
+                // Row 2: volume slider + pan pill + meter + dB pill.
+                // Only rendered when the row is tall enough to hold it; the
+                // compact header (short rows) shows just row 1.
+                .when(show_controls, |col| col.child(
                     div()
                         .flex()
                         .flex_row()
@@ -531,6 +544,6 @@ pub fn track_header(
                             volume::format_db(track.display_volume()),
                             is_selected,
                         )),
-                ),
+                )),
         )
 }

@@ -893,6 +893,27 @@
           "danger": false,
           "description": null,
           "children": []
+        },
+        {
+          "id": "audio.sep.routing",
+          "kind": "separator",
+          "enabled": true,
+          "visible": true
+        },
+        {
+          "id": "audio.connections",
+          "kind": "normal",
+          "label": "Audio Connections...",
+          "icon": "route",
+          "shortcut": null,
+          "command": "floatingwindow:routing-matrix",
+          "role": null,
+          "enabled": true,
+          "visible": true,
+          "checked": false,
+          "danger": false,
+          "description": "Open the audio routing matrix in a window",
+          "children": []
         }
       ]
     },

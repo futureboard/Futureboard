@@ -9,11 +9,22 @@ pub const DEFAULT_TRACK_HEIGHT: f32 = 72.0;
 pub const TRACK_HEIGHT: f32 = DEFAULT_TRACK_HEIGHT;
 
 pub const MAX_TRACK_HEIGHT: f32 = 320.0;
-pub const MIN_AUDIO_TRACK_HEIGHT: f32 = 36.0;
-pub const MIN_MIDI_TRACK_HEIGHT: f32 = 44.0;
-pub const MIN_BUS_TRACK_HEIGHT: f32 = 32.0;
 
-pub const TRACK_HEIGHT_SMALL: f32 = 44.0;
+/// Smallest row height any track type may take. Every track type renders the
+/// same header, so they share one minimum rather than three one-off values.
+/// It fits the compact single-row header (name + mute/solo/arm/input/automation)
+/// with no clipping or overlap; the full volume/pan/meter control row appears
+/// once the row is tall enough (see [`TRACK_HEADER_CONTROLS_MIN_HEIGHT`]).
+pub const MIN_TRACK_ROW_HEIGHT: f32 = 44.0;
+
+/// At or above this row height the track header shows its full two-row layout
+/// (name/buttons row + volume/pan/meter/dB row). Below it the header collapses
+/// to the compact single-row layout so controls never spill outside the row.
+/// The header's intrinsic two-row height equals [`DEFAULT_TRACK_HEIGHT`], so
+/// the control row only appears at the default size or larger.
+pub const TRACK_HEADER_CONTROLS_MIN_HEIGHT: f32 = 72.0;
+
+pub const TRACK_HEIGHT_SMALL: f32 = 48.0;
 pub const TRACK_HEIGHT_NORMAL: f32 = 72.0;
 pub const TRACK_HEIGHT_LARGE: f32 = 120.0;
 pub const TRACK_HEIGHT_HUGE: f32 = 180.0;
@@ -174,12 +185,11 @@ pub struct TrackHeightResizeSession {
     pub start_mouse_y: f32,
 }
 
-pub fn min_track_row_height(track_type: TrackType) -> f32 {
-    match track_type {
-        TrackType::Audio | TrackType::Master => MIN_AUDIO_TRACK_HEIGHT,
-        TrackType::Midi | TrackType::Instrument => MIN_MIDI_TRACK_HEIGHT,
-        TrackType::Bus | TrackType::Return => MIN_BUS_TRACK_HEIGHT,
-    }
+pub fn min_track_row_height(_track_type: TrackType) -> f32 {
+    // All track types share one header layout, so one minimum keeps every
+    // header (and its aligned timeline lane) from collapsing below a readable,
+    // non-overlapping size. Kept type-parameterized for call-site stability.
+    MIN_TRACK_ROW_HEIGHT
 }
 
 pub fn clamp_track_row_height(track_type: TrackType, height: f32) -> f32 {
@@ -538,15 +548,18 @@ mod tests {
     }
 
     #[test]
-    fn clamp_track_row_height_enforces_type_minimum() {
-        assert_eq!(
-            clamp_track_row_height(TrackType::Audio, 10.0),
-            MIN_AUDIO_TRACK_HEIGHT
-        );
-        assert_eq!(
-            clamp_track_row_height(TrackType::Midi, 10.0),
-            MIN_MIDI_TRACK_HEIGHT
-        );
+    fn clamp_track_row_height_enforces_shared_minimum() {
+        // Every track type clamps to the same shared minimum.
+        for ty in [
+            TrackType::Audio,
+            TrackType::Midi,
+            TrackType::Instrument,
+            TrackType::Bus,
+            TrackType::Return,
+            TrackType::Master,
+        ] {
+            assert_eq!(clamp_track_row_height(ty, 10.0), MIN_TRACK_ROW_HEIGHT);
+        }
         assert_eq!(
             clamp_track_row_height(TrackType::Audio, 500.0),
             MAX_TRACK_HEIGHT

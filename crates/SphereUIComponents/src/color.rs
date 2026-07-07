@@ -63,6 +63,56 @@ fn channel_to_u8(v: f32) -> u8 {
     (v.clamp(0.0, 1.0) * 255.0).round() as u8
 }
 
+/// Convert an opaque color to HSV. Returns `(hue, saturation, value)` each in
+/// `0.0..=1.0` (hue wraps). Alpha is ignored; achromatic colors return hue `0`.
+pub fn rgba_to_hsv(color: Rgba) -> (f32, f32, f32) {
+    let r = color.r.clamp(0.0, 1.0);
+    let g = color.g.clamp(0.0, 1.0);
+    let b = color.b.clamp(0.0, 1.0);
+    let max = r.max(g).max(b);
+    let min = r.min(g).min(b);
+    let delta = max - min;
+    let value = max;
+    let saturation = if max <= 0.0 { 0.0 } else { delta / max };
+    let mut h6 = if delta <= 0.0 {
+        0.0
+    } else if (max - r).abs() < f32::EPSILON {
+        (g - b) / delta
+    } else if (max - g).abs() < f32::EPSILON {
+        (b - r) / delta + 2.0
+    } else {
+        (r - g) / delta + 4.0
+    };
+    if h6 < 0.0 {
+        h6 += 6.0;
+    }
+    (h6 / 6.0, saturation, value)
+}
+
+/// Convert HSV (each `0.0..=1.0`, hue wraps) to an opaque [`Rgba`].
+pub fn hsv_to_rgba(hue: f32, saturation: f32, value: f32) -> Rgba {
+    let h = hue.rem_euclid(1.0) * 6.0;
+    let s = saturation.clamp(0.0, 1.0);
+    let v = value.clamp(0.0, 1.0);
+    let c = v * s;
+    let x = c * (1.0 - ((h % 2.0) - 1.0).abs());
+    let m = v - c;
+    let (r, g, b) = match h as u32 {
+        0 => (c, x, 0.0),
+        1 => (x, c, 0.0),
+        2 => (0.0, c, x),
+        3 => (0.0, x, c),
+        4 => (x, 0.0, c),
+        _ => (c, 0.0, x),
+    };
+    Rgba {
+        r: r + m,
+        g: g + m,
+        b: b + m,
+        a: 1.0,
+    }
+}
+
 /// Format a color as a stable `#RRGGBB` hex string. Alpha is dropped — the
 /// persisted project format stores 6-digit hex and resolves alpha to opaque.
 pub fn rgba_to_hex(color: Rgba) -> String {

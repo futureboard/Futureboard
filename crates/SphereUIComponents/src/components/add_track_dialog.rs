@@ -2,15 +2,15 @@ use std::{ops::Range, sync::Arc};
 
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    div, px, size, svg, App, AppContext, Bounds, Context, Entity, EntityInputHandler, FocusHandle,
-    InteractiveElement, IntoElement, KeyDownEvent, ParentElement, Pixels, Point, Render,
-    StatefulInteractiveElement, Styled, UTF16Selection, Window, WindowBackgroundAppearance,
-    WindowBounds, WindowHandle, WindowKind,
+    div, px, size, svg, App, AppContext, Bounds, Context, DragMoveEvent, Empty, Entity,
+    EntityInputHandler, FocusHandle, InteractiveElement, IntoElement, KeyDownEvent, ParentElement,
+    Pixels, Point, Render, StatefulInteractiveElement, Styled, UTF16Selection, Window,
+    WindowBackgroundAppearance, WindowBounds, WindowHandle, WindowKind,
 };
 
 use crate::assets;
 use crate::components::color_picker::{
-    color_picker_field, ColorChannel, ColorPickerCallbacks, ColorPickerPlacement, ColorPickerState,
+    color_picker_field, ColorPickerCallbacks, ColorPickerPlacement, ColorPickerState,
     ColorPickerValue,
 };
 use crate::components::controls::{
@@ -34,6 +34,48 @@ const MAX_TRACK_COUNT: u32 = 128;
 const FORM_LABEL_WIDTH: f32 = 86.0;
 const FORM_GAP: f32 = 10.0;
 const BODY_PAD_X: f32 = 14.0;
+
+/// Vertical drag sensitivity for the Count field: one track per this many
+/// pixels dragged. Dragging up increases, down decreases (DAW convention),
+/// mirroring the transport BPM scrubber.
+const COUNT_DRAG_PX_PER_STEP: f32 = 7.0;
+
+static COUNT_DRAG_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+fn next_count_drag_id() -> u64 {
+    COUNT_DRAG_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Marker payload for a Count scrub drag. Carries a unique `drag_id` so the
+/// receiver can tell a fresh drag from a continuation, plus the count captured
+/// when the drag began. Mirrors the transport `BpmDrag` pattern.
+#[derive(Clone, Debug)]
+pub struct CountDrag {
+    pub drag_id: u64,
+    pub start_count: u32,
+}
+
+impl Render for CountDrag {
+    fn render(&mut self, _w: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        Empty
+    }
+}
+
+/// One drag-move sample delivered to the host from the Count scrubber.
+#[derive(Clone, Copy, Debug)]
+pub struct CountDragSample {
+    pub drag_id: u64,
+    pub start_count: u32,
+    pub cur_y: f32,
+}
+
+/// Host-side anchor for an in-flight Count drag (first sample seeds `start_y`).
+#[derive(Clone, Copy, Debug)]
+struct CountDragState {
+    drag_id: u64,
+    start_count: u32,
+    start_y: f32,
+}
 
 type VoidCb = Arc<dyn Fn(&(), &mut Window, &mut App) + 'static>;
 type KindCb = Arc<dyn Fn(&AddTrackKind, &mut Window, &mut App) + 'static>;
@@ -336,6 +378,8 @@ pub struct AddTrackDialogCallbacks {
     pub on_confirm: VoidCb,
     pub on_select_kind: KindCb,
     pub on_count_delta: Arc<dyn Fn(&i32, &mut Window, &mut App) + 'static>,
+    pub on_count_drag: Arc<dyn Fn(&CountDragSample, &mut Window, &mut App) + 'static>,
+    pub on_count_begin_edit: VoidCb,
     pub on_audio_format: Arc<dyn Fn(&AudioFormat, &mut Window, &mut App) + 'static>,
     pub on_color_index: U32Cb,
     pub on_auto_color: BoolCb,
@@ -474,6 +518,76 @@ fn add_track_select(
     )
 }
 
+/// The number portion of the Count control. While editing it is a text field
+/// (click-to-type); otherwise it is a draggable scrubber — drag up/down to
+/// change the value, click to edit — reusing the transport BPM drag pattern.
+fn count_field(
+    state: &AddTrackDialogState,
+    count_input: &TextInputState,
+    count_focused: bool,
+    count_callbacks: TextInputCallbacks,
+    callbacks: &AddTrackDialogCallbacks,
+) -> gpui::AnyElement {
+    if count_focused {
+        return div()
+            .w(px(54.0))
+            .child(text_field_with_callbacks(
+                count_input,
+                count_focused,
+                count_callbacks,
+            ))
+            .into_any_element();
+    }
+
+    let count = state.count;
+    let on_begin_edit = callbacks.on_count_begin_edit.clone();
+    let on_drag_move = callbacks.on_count_drag.clone();
+    div()
+        .id("add-track-count-field")
+        .w(px(54.0))
+        .h(px(28.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded_md()
+        .border(px(1.0))
+        .border_color(Colors::border_subtle())
+        .bg(Colors::surface_input())
+        .text_size(px(12.0))
+        .font_weight(gpui::FontWeight::SEMIBOLD)
+        .text_color(Colors::text_primary())
+        .cursor(gpui::CursorStyle::ResizeUpDown)
+        .hover(|s| s.bg(Colors::surface_control_hover()))
+        .occlude()
+        .child(count.to_string())
+        // Click (no drag) enters inline edit; a drag scrubs the value instead.
+        .on_click(move |_event, w, cx| on_begin_edit(&(), w, cx))
+        .on_drag(
+            CountDrag {
+                drag_id: 0,
+                start_count: count,
+            },
+            move |drag, _offset, _window, cx| {
+                let id = next_count_drag_id();
+                let start_count = drag.start_count;
+                cx.new(|_| CountDrag {
+                    drag_id: id,
+                    start_count,
+                })
+            },
+        )
+        .on_drag_move::<CountDrag>(move |event: &DragMoveEvent<CountDrag>, w, cx| {
+            let drag = event.drag(cx);
+            let sample = CountDragSample {
+                drag_id: drag.drag_id,
+                start_count: drag.start_count,
+                cur_y: event.event.position.y.into(),
+            };
+            on_drag_move(&sample, w, cx);
+        })
+        .into_any_element()
+}
+
 fn count_stepper(
     state: &AddTrackDialogState,
     count_input: &TextInputState,
@@ -493,11 +607,13 @@ fn count_stepper(
             "-",
             move |_, w, cx| down(&-1, w, cx),
         ))
-        .child(div().w(px(54.0)).child(text_field_with_callbacks(
+        .child(count_field(
+            state,
             count_input,
             count_focused,
             count_callbacks,
-        )))
+            callbacks,
+        ))
         .child(fb_stepper_button(
             "add-track-count-plus",
             "+",
@@ -660,6 +776,10 @@ pub struct AddTrackColorUi<'a> {
     pub callbacks: ColorPickerCallbacks,
 }
 
+/// A single bordered color box: an integrated Auto option, the full DAW palette
+/// as a swatch grid, and a "Custom…" trigger for arbitrary hex/RGB colors.
+/// Selecting a manual swatch turns Auto off (via `on_pick`); selecting Auto
+/// re-enables automatic color assignment and previews the computed color.
 fn color_row(
     state: &AddTrackDialogState,
     callbacks: &AddTrackDialogCallbacks,
@@ -669,46 +789,97 @@ fn color_row(
     let auto_cb = callbacks.on_auto_color.clone();
     let auto_on = state.auto_color;
     let selected_hex = crate::color::rgba_to_hex(state.selected_color());
+    // Color previewed while Auto is on (index-derived, matches track creation).
+    let computed_auto = track_color(state.color_index);
 
-    // Quick preset swatches — kept as fast access to the DAW palette. Clicking
-    // one selects that color and turns Auto Color off (routes through the same
-    // picker callback so the trigger preview stays in sync). No duplicate
-    // picker logic: presets here and in the popover share `on_pick`.
-    let mut swatches = div()
+    // Auto option — integrated into the box, left of the palette. Clicking it
+    // enables automatic color assignment; the chip previews the computed color.
+    let auto_chip = div()
+        .id("add-track-auto-color")
         .flex()
         .flex_row()
         .items_center()
         .gap(px(5.0))
-        .flex_wrap();
+        .flex_shrink_0()
+        .h(px(22.0))
+        .px(px(7.0))
+        .rounded_md()
+        .border(px(1.0))
+        .border_color(if auto_on {
+            Colors::border_accent()
+        } else {
+            Colors::border_subtle()
+        })
+        .bg(if auto_on {
+            Colors::accent_muted()
+        } else {
+            Colors::surface_card()
+        })
+        .cursor(gpui::CursorStyle::PointingHand)
+        .hover(|s| s.bg(Colors::surface_control_hover()))
+        .on_click(move |_, w, cx| auto_cb(&true, w, cx))
+        .child(
+            div()
+                .w(px(11.0))
+                .h(px(11.0))
+                .rounded_sm()
+                .border(px(1.0))
+                .border_color(Colors::with_alpha(Colors::text_primary(), 0.22))
+                .bg(computed_auto),
+        )
+        .child(
+            div()
+                .text_size(px(10.0))
+                .font_weight(if auto_on {
+                    gpui::FontWeight::SEMIBOLD
+                } else {
+                    gpui::FontWeight::MEDIUM
+                })
+                .text_color(if auto_on {
+                    Colors::text_primary()
+                } else {
+                    Colors::text_secondary()
+                })
+                .child(i18n.tr("add-track.option.auto-color")),
+        );
+
+    // Palette grid — square swatches inside the box. Selecting one turns Auto
+    // off (shared `on_pick` keeps the custom-picker preview in sync).
+    let mut grid = div()
+        .flex()
+        .flex_row()
+        .flex_wrap()
+        .items_center()
+        .gap(px(5.0));
     for (i, preset) in color_ui.presets.iter().enumerate() {
         let preset = *preset;
         let on_pick = color_ui.callbacks.on_pick.clone();
         let active = !auto_on && crate::color::rgba_to_hex(preset) == selected_hex;
-        let sw = div()
-            .id(("add-track-color", i))
-            .w(px(16.0))
-            .h(px(16.0))
-            .rounded_full()
-            .border(px(2.0))
-            .border_color(preset)
-            .bg(if active {
-                preset
-            } else {
-                gpui::transparent_black().into()
-            })
-            .opacity(if active { 1.0 } else { 0.6 })
-            .cursor(gpui::CursorStyle::PointingHand)
-            .hover(|s| s.opacity(1.0))
-            .on_click(move |_, w, cx| on_pick(preset, w, cx));
-        swatches = swatches.child(sw);
+        grid = grid.child(
+            div()
+                .id(("add-track-color", i))
+                .w(px(16.0))
+                .h(px(16.0))
+                .rounded_md()
+                .border(px(if active { 2.0 } else { 1.0 }))
+                .border_color(if active {
+                    Colors::text_primary()
+                } else {
+                    Colors::with_alpha(Colors::text_primary(), 0.22)
+                })
+                .bg(preset)
+                .cursor(gpui::CursorStyle::PointingHand)
+                .hover(|s| s.border_color(Colors::border_strong()))
+                .on_click(move |_, w, cx| on_pick(preset, w, cx)),
+        );
     }
 
+    // Custom color popover (hex + RGB). Auto lives in the chip above, so the
+    // popover does not render its own Auto toggle (avoids a duplicate control).
     let picker = color_picker_field(
         "add-track-color-picker",
         color_ui.picker,
         &color_ui.presets,
-        // Auto Color lives in the sibling checkbox below, so the popover does
-        // not render its own Auto toggle (avoids a duplicate control).
         false,
         ColorPickerPlacement::Below,
         color_ui.hex_focused,
@@ -716,24 +887,52 @@ fn color_row(
         color_ui.callbacks,
     );
 
-    div().child(fb_form_row(
-        i18n.tr("add-track.field.color"),
-        div().flex().flex_col().gap(px(7.0)).child(swatches).child(
+    let color_box = div()
+        .flex()
+        .flex_col()
+        .gap(px(8.0))
+        .rounded_md()
+        .border(px(1.0))
+        .border_color(Colors::border_subtle())
+        .bg(Colors::surface_input())
+        .p(px(8.0))
+        .child(
             div()
                 .flex()
                 .flex_row()
                 .items_center()
-                .gap(px(12.0))
-                .child(picker)
-                .child(fb_checkbox(
-                    "add-track-auto-color",
-                    i18n.tr("add-track.option.auto-color"),
-                    auto_on,
-                    true,
-                    move |_, w, cx| auto_cb(&!auto_on, w, cx),
-                )),
-        ),
-    ))
+                .gap(px(8.0))
+                .child(auto_chip)
+                .child(
+                    div()
+                        .w(px(1.0))
+                        .h(px(18.0))
+                        .flex_shrink_0()
+                        .bg(Colors::divider()),
+                )
+                .child(div().flex_1().min_w_0().child(grid)),
+        )
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .justify_between()
+                .gap(px(8.0))
+                .pt(px(7.0))
+                .border_t(px(1.0))
+                .border_color(Colors::border_subtle())
+                .child(
+                    div()
+                        .text_size(px(9.0))
+                        .font_weight(gpui::FontWeight::BOLD)
+                        .text_color(Colors::text_faint())
+                        .child("CUSTOM"),
+                )
+                .child(picker),
+        );
+
+    div().child(fb_form_row(i18n.tr("add-track.field.color"), color_box))
 }
 
 fn dialog_intro(state: &AddTrackDialogState, i18n: I18n) -> impl IntoElement {
@@ -755,23 +954,6 @@ fn dialog_intro(state: &AddTrackDialogState, i18n: I18n) -> impl IntoElement {
                 .items_center()
                 .gap(px(9.0))
                 .min_w_0()
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .w(px(28.0))
-                        .h(px(28.0))
-                        .rounded_md()
-                        .border(px(1.0))
-                        .border_color(Colors::border_subtle())
-                        .bg(Colors::surface_input())
-                        .child(icon(
-                            state.selected_kind.icon(),
-                            16.0,
-                            Colors::accent_primary(),
-                        )),
-                )
                 .child(
                     div()
                         .flex()
@@ -1316,6 +1498,8 @@ pub struct AddTrackWindow {
     track_name_input: TextInputState,
     count_input: TextInputState,
     count_editing: bool,
+    /// Anchor for an in-flight Count scrub drag (`None` when not dragging).
+    count_drag: Option<CountDragState>,
     color_picker: ColorPickerState,
     open_select: Option<AddTrackSelectId>,
     instrument_plugins: Vec<RegistryPlugin>,
@@ -1350,6 +1534,7 @@ impl AddTrackWindow {
             track_name_input,
             count_input,
             count_editing: false,
+            count_drag: None,
             color_picker,
             open_select: None,
             instrument_plugins,
@@ -1673,6 +1858,48 @@ impl Render for AddTrackWindow {
                         let next = (current + delta).clamp(1, MAX_TRACK_COUNT as i32) as u32;
                         this.set_count(next);
                         this.count_editing = false;
+                        this.count_drag = None;
+                        cx.notify();
+                    });
+                }
+            }),
+            on_count_drag: Arc::new({
+                let target = target.clone();
+                move |sample: &CountDragSample, _w, cx| {
+                    let sample = *sample;
+                    let _ = target.update(cx, |this, cx| {
+                        // Seed the anchor on the first sample of a new drag so the
+                        // value is computed absolutely from the drag origin (no
+                        // accumulation drift); later samples reuse it.
+                        let anchor = match this.count_drag {
+                            Some(a) if a.drag_id == sample.drag_id => a,
+                            _ => {
+                                let a = CountDragState {
+                                    drag_id: sample.drag_id,
+                                    start_count: sample.start_count,
+                                    start_y: sample.cur_y,
+                                };
+                                this.count_drag = Some(a);
+                                a
+                            }
+                        };
+                        // Drag up increases, down decreases.
+                        let steps = ((anchor.start_y - sample.cur_y) / COUNT_DRAG_PX_PER_STEP)
+                            .round() as i32;
+                        let next = (anchor.start_count as i32 + steps)
+                            .clamp(1, MAX_TRACK_COUNT as i32) as u32;
+                        this.count_editing = false;
+                        this.set_count(next);
+                        cx.notify();
+                    });
+                }
+            }),
+            on_count_begin_edit: Arc::new({
+                let target = target.clone();
+                move |_: &(), _w, cx| {
+                    let _ = target.update(cx, |this, cx| {
+                        this.count_drag = None;
+                        this.begin_count_edit();
                         cx.notify();
                     });
                 }
@@ -1923,11 +2150,21 @@ impl Render for AddTrackWindow {
                     });
                 }
             }),
-            on_channel: Arc::new({
+            on_hue: Arc::new({
                 let target = target.clone();
-                move |channel: ColorChannel, value: f32, _w: &mut Window, cx: &mut App| {
+                move |hue: f32, _w: &mut Window, cx: &mut App| {
                     let _ = target.update(cx, |this, cx| {
-                        this.color_picker.set_channel(channel, value);
+                        this.color_picker.set_hue(hue);
+                        this.sync_color_from_picker();
+                        cx.notify();
+                    });
+                }
+            }),
+            on_sv: Arc::new({
+                let target = target.clone();
+                move |saturation: f32, value: f32, _w: &mut Window, cx: &mut App| {
+                    let _ = target.update(cx, |this, cx| {
+                        this.color_picker.set_saturation_value(saturation, value);
                         this.sync_color_from_picker();
                         cx.notify();
                     });

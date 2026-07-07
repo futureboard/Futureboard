@@ -45,11 +45,34 @@ done
 rm -rf "$APPDIR"
 mkdir -p \
   "$APPDIR/usr/bin" \
+  "$APPDIR/usr/lib" \
   "$APPDIR/usr/share/applications" \
   "$APPDIR/usr/share/icons/hicolor/512x512/apps" \
   "$APPDIR/usr/share/mime/packages"
 
 install -m755 "$BIN" "$APPDIR/usr/bin/FutureboardNative"
+
+# Include every workspace runtime binary produced in target/release so helper
+# processes keep working from the AppImage without a separate download.
+BIN_DIR="$(cd "$(dirname "$BIN")" && pwd)"
+while IFS= read -r helper; do
+  helper_name="$(basename "$helper")"
+  if [[ "$helper_name" == "$(basename "$BIN")" ]]; then
+    continue
+  fi
+  install -m755 "$helper" "$APPDIR/usr/bin/$helper_name"
+done < <(
+  find "$BIN_DIR" -maxdepth 1 -type f -perm -111 \
+    ! -name "*.*" \
+    -print
+)
+
+# Bundle workspace shared libraries next to the app and expose them through
+# AppRun's LD_LIBRARY_PATH.
+find "$BIN_DIR" -maxdepth 1 -type f -name "*.so" -print0 | while IFS= read -r -d '' lib; do
+  install -m755 "$lib" "$APPDIR/usr/lib/$(basename "$lib")"
+done
+
 install -m755 "$APPRUN_SRC" "$APPDIR/AppRun"
 
 install -m644 "$DESKTOP_SRC" "$APPDIR/${DESKTOP_SLUG}.desktop"
@@ -79,3 +102,9 @@ rm -f "$OUTPUT"
 ARCH=x86_64 "$APPIMAGETOOL" --appimage-extract-and-run "$APPDIR" "$OUTPUT"
 
 echo "Built AppImage: $OUTPUT"
+echo
+echo "AppImage runtime binaries:"
+ls -la "$APPDIR/usr/bin"
+echo
+echo "AppImage runtime libraries:"
+ls -la "$APPDIR/usr/lib"

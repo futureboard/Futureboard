@@ -48,7 +48,7 @@ jobs:
           - os: macos-latest
             platform: mac
             native-artifact-name: futureboard-native-macos
-            native-bundle-glob: packaging/native/out/*.app
+            native-bundle-glob: packaging/native/out/*.dmg
           - os: windows-latest
             platform: win
             native-artifact-name: futureboard-native-win
@@ -109,7 +109,9 @@ jobs:
 
       - name: Bundle native app (macOS)
         if: matrix.os == 'macos-latest'
-        run: bash packaging/native/bundle-macos.sh
+        run: |
+          bash packaging/native/bundle-macos.sh
+          bash packaging/native/bundle-macos-dmg.sh "packaging/native/out/Futureboard Studio.app" packaging/native/out "${{ needs.version.outputs.app-version }}"
 
       - name: Install Inno Setup
         if: matrix.os == 'windows-latest'
@@ -156,11 +158,23 @@ jobs:
           echo "Staged native binaries:"
           ls -la dist-native/
 
-      - name: Upload native app artifact
+      - name: Compress release binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist-native-archives
+          if [[ "${{ matrix.platform }}" == "win" ]]; then
+            pwsh -NoProfile -Command "Compress-Archive -Path 'dist-native/*' -DestinationPath 'dist-native-archives/${{ matrix.native-artifact-name }}-binaries.zip' -Force"
+          else
+            tar -czf "dist-native-archives/${{ matrix.native-artifact-name }}-binaries.tar.gz" -C dist-native .
+          fi
+          ls -lh dist-native-archives/
+
+      - name: Upload native binaries artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.native-artifact-name }}
-          path: dist-native/*
+          name: ${{ matrix.native-artifact-name }}-binaries
+          path: dist-native-archives/*
           if-no-files-found: error
           retention-days: 7
 

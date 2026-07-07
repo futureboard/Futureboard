@@ -47,7 +47,7 @@ jobs:
           - os: macos-latest
             platform: mac
             native-artifact-name: futureboard-native-mac
-            native-bundle-glob: packaging/native/out/*.app
+            native-bundle-glob: packaging/native/out/*.dmg
 
     steps:
       - name: Checkout
@@ -108,7 +108,9 @@ jobs:
 
       - name: Bundle native app (macOS)
         if: matrix.os == 'macos-latest'
-        run: bash packaging/native/bundle-macos.sh
+        run: |
+          bash packaging/native/bundle-macos.sh
+          bash packaging/native/bundle-macos-dmg.sh "packaging/native/out/Futureboard Studio.app" packaging/native/out "${{ needs.version.outputs.app-version }}"
 
       - name: Install Inno Setup
         if: matrix.os == 'windows-latest'
@@ -119,13 +121,9 @@ jobs:
         shell: pwsh
         run: ./packaging/windows/build-installer.ps1 -AppVersion "${{ needs.version.outputs.app-version }}"
 
-      # Uses the bare `version.json` version (not the nightly `-alpha+sha`
-      # suffix from the version job) because the AUR PKGBUILD's `pkgver`
-      # tracks that same bare version and derives the exact AppImage
-      # filename it downloads from this release.
       - name: Build AppImage (Linux)
         if: matrix.os == 'ubuntu-24.04'
-        run: bash packaging/linux/bundle-appimage.sh
+        run: bash packaging/linux/bundle-appimage.sh "$PWD/target/release/FutureboardNative" "$PWD/target/appimage" "${{ needs.version.outputs.app-version }}"
 
       # Every workspace member's binaries/libraries land directly in
       # `target/release/` (dependency artifacts stay under `deps/`), so a
@@ -156,11 +154,23 @@ jobs:
           echo "Staged native binaries:"
           ls -la dist-native/
 
-      - name: Upload native app artifact
+      - name: Compress release binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist-native-archives
+          if [[ "${{ matrix.platform }}" == "win" ]]; then
+            pwsh -NoProfile -Command "Compress-Archive -Path 'dist-native/*' -DestinationPath 'dist-native-archives/${{ matrix.native-artifact-name }}-binaries.zip' -Force"
+          else
+            tar -czf "dist-native-archives/${{ matrix.native-artifact-name }}-binaries.tar.gz" -C dist-native .
+          fi
+          ls -lh dist-native-archives/
+
+      - name: Upload native binaries artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.native-artifact-name }}
-          path: dist-native/*
+          name: ${{ matrix.native-artifact-name }}-binaries
+          path: dist-native-archives/*
           if-no-files-found: error
           retention-days: 3
 

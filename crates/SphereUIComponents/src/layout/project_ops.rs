@@ -753,6 +753,13 @@ impl StudioLayout {
     ) {
         self.refresh_bridge_plugin_states(cx);
         let mut project = self.project_snapshot(cx);
+        // Stamp the session this save belongs to. A plain background save sets no
+        // lifecycle-busy flag, so a project switch/reset can land while the write
+        // is in flight; without this guard the completion below would rebind
+        // `project_session` (name/path/recent, mark saved) — stamping the old
+        // project's identity onto the session that replaced it. See
+        // `advance_session_generation`.
+        let generation = self.session_generation();
         self.project_switcher.current_project.subtitle = "Saving...".to_string();
         self.start_background_task(
             "project-save",
@@ -769,22 +776,44 @@ impl StudioLayout {
                 .background_executor()
                 .spawn(async move { save_project(&mut project, &path_for_job).map(|_| project) })
                 .await;
-            let _ = this.update(cx, move |this, cx| match result {
-                Ok(project) => {
-                    this.finish_project_save(project, path, cx);
-                    this.complete_background_task(
-                        "project-save",
-                        Some("Project saved".to_string()),
-                    );
-                    project_lifecycle_log!("save complete");
-                    if let Some(after_save) = after_save {
-                        this.apply_save_then(after_save, cx);
+            let _ = this.update(cx, move |this, cx| {
+                // The file is already written to disk regardless of the outcome
+                // below. Only skip the *session-state* mutation when the session
+                // was replaced mid-save.
+                let superseded = this.session_generation() != generation;
+                match result {
+                    Ok(project) => {
+                        if superseded {
+                            this.complete_background_task(
+                                "project-save",
+                                Some("Project saved (session changed)".to_string()),
+                            );
+                            project_lifecycle_log!(
+                                "save completed for superseded session — skipping rebind/after-save"
+                            );
+                            return;
+                        }
+                        this.finish_project_save(project, path, cx);
+                        this.complete_background_task(
+                            "project-save",
+                            Some("Project saved".to_string()),
+                        );
+                        project_lifecycle_log!("save complete");
+                        if let Some(after_save) = after_save {
+                            this.apply_save_then(after_save, cx);
+                        }
                     }
-                }
-                Err(e) => {
-                    let error = e.to_string();
-                    this.fail_background_task("project-save", error.clone());
-                    this.handle_project_save_error(error, cx);
+                    Err(e) => {
+                        let error = e.to_string();
+                        this.fail_background_task("project-save", error.clone());
+                        if superseded {
+                            project_lifecycle_log!(
+                                "save failed for superseded session — not surfacing on new session"
+                            );
+                            return;
+                        }
+                        this.handle_project_save_error(error, cx);
+                    }
                 }
             });
         })

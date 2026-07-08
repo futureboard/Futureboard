@@ -7,8 +7,31 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+function Find-InnoSetupCompiler {
+    $candidates = @(
+        $Iscc,
+        $env:INNO_SETUP_PATH,
+        (Get-Command iscc -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source)
+    )
+
+    foreach ($version in 7, 6) {
+        $candidates += @(
+            (Join-Path $env:ProgramFiles "Inno Setup $version\ISCC.exe"),
+            (Join-Path ${env:ProgramFiles(x86)} "Inno Setup $version\ISCC.exe")
+        )
+    }
+
+    foreach ($candidate in $candidates) {
+        if ($candidate -and (Test-Path -LiteralPath $candidate)) {
+            return (Resolve-Path -LiteralPath $candidate).Path
+        }
+    }
+
+    return $null
+}
+
 if (-not $Iscc) {
-    $Iscc = Join-Path ${env:ProgramFiles(x86)} "Inno Setup 6\ISCC.exe"
+    $Iscc = Find-InnoSetupCompiler
 }
 
 if (-not $AppVersion) {
@@ -26,8 +49,8 @@ if (-not (Test-Path $exe)) {
     throw "Native binary not found: $exe (run: cargo build --release -p futureboard_native)"
 }
 
-if (-not (Test-Path $Iscc)) {
-    throw "Inno Setup compiler not found: $Iscc"
+if (-not $Iscc) {
+    throw "Inno Setup compiler not found. Install Inno Setup 6/7 or pass -Iscc."
 }
 
 Write-Host "Building installer version: $AppVersion"

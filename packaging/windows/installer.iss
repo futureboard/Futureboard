@@ -5,14 +5,16 @@
 ;   ..\..\target\release\*.dll
 ;
 ; Install targets:
-;   Per-user:  %LOCALAPPDATA%\Programs\Futureboard Studio
-;   All-users: %ProgramFiles%\Futureboard Studio
+;   Per-user:  %LOCALAPPDATA%\Programs\Futureboard Studio\Studio
+;   All-users: %ProgramFiles%\Futureboard Studio\Studio
 
 #define MyAppName "Futureboard Studio"
 #define MyAppPublisher "Futureboard"
 #define MyAppExeName "FutureboardNative.exe"
 #define MyAppIcon "..\..\packages\shared\app\icons\icon.ico"
 #define MySourceDir "..\..\target\release"
+#define MyAppUserDir "{localappdata}\Programs\Futureboard Studio\Studio"
+#define MyAppMachineDir "{commonpf64}\Futureboard Studio\Studio"
 
 #ifndef MyAppVersion
 #define MyAppVersion "2026.6.17"
@@ -25,7 +27,7 @@ AppVersion={#MyAppVersion}
 AppVerName={#MyAppName} {#MyAppVersion}
 AppPublisher={#MyAppPublisher}
 DefaultDirName={code:GetDefaultDir}
-DefaultGroupName={#MyAppName}
+DefaultGroupName=Futureboard Studio\Studio
 SetupIconFile={#MyAppIcon}
 UninstallDisplayIcon={app}\{#MyAppExeName}
 OutputDir=..\..\target\installer
@@ -87,9 +89,9 @@ Type: filesandordirs; Name: "{app}\logs"
 function GetDefaultDir(Param: string): string;
 begin
   if IsAdminInstallMode then
-    Result := ExpandConstant('{autopf}\Futureboard Studio')
+    Result := ExpandConstant('{#MyAppMachineDir}')
   else
-    Result := ExpandConstant('{localappdata}\Programs\Futureboard Studio');
+    Result := ExpandConstant('{#MyAppUserDir}');
 end;
 
 function InitializeSetup(): Boolean;

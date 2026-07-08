@@ -554,11 +554,9 @@ pub(crate) fn file_signature(path: &Path) -> (Option<String>, Option<i64>) {
 /// pair means the binary is unchanged; a moved file changes the lookup key, so
 /// a path change is covered too.
 ///
-/// The signature is captured into the catalog now (see the `From<&RegistryPlugin>`
-/// impl); the consuming per-bundle scan-skip in
-/// [`crate::registry::PluginRegistry::scan_with_progress`] is the documented
-/// follow-up, so this predicate is currently exercised only by its unit tests.
-#[allow(dead_code)]
+/// Consumed by the opt-in per-bundle scan-skip in
+/// [`crate::registry::PluginRegistry::scan_with_progress`]
+/// (`FUTUREBOARD_PLUGIN_SCAN_INCREMENTAL`).
 pub(crate) fn signature_is_fresh(
     cached_mtime: Option<&str>,
     cached_size: Option<i64>,

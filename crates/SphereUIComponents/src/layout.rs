@@ -549,6 +549,13 @@ pub struct StudioLayout {
     last_autosave_at: std::time::Instant,
     /// Guards the background autosave job so render/poll frames cannot enqueue duplicates.
     autosave_in_flight: bool,
+    /// Monotonic counter bumped every time the live session is torn down or
+    /// replaced (project reset / in-studio switch). Async project-load
+    /// completions capture the value at spawn time and self-reject if it has
+    /// advanced, so a completion from a superseded session can never install
+    /// over the session that replaced it. See
+    /// [`Self::advance_session_generation`].
+    session_generation: u64,
 }
 
 impl StudioLayout {
@@ -946,6 +953,7 @@ impl StudioLayout {
             session_install_warnings: Vec::new(),
             last_autosave_at: std::time::Instant::now(),
             autosave_in_flight: false,
+            session_generation: 0,
         };
 
         layout.ensure_mixer_tree_defaults_once(cx);

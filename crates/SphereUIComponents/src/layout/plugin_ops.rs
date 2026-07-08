@@ -207,6 +207,32 @@ fn bridge_editor_is_terminal(state: &BridgeEditorState) -> bool {
     )
 }
 
+/// What an Open-Editor request should do when a session already exists for the
+/// same plugin instance (spec A6 re-open semantics). Pure so the "a Failed /
+/// timed-out session is never treated as live" contract is unit-tested and
+/// cannot silently regress into focusing a dead loading shell.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EditorReopenAction {
+    /// Live or still-in-flight (attaching) — focus it; never spawn a duplicate.
+    FocusExisting,
+    /// Still `Loading` in the host — reuse the existing loading shell.
+    ReuseLoadingShell,
+    /// Terminal (`Failed` / `TimedOut`) — drop the stale session and open fresh.
+    DropAndRetry,
+}
+
+fn editor_reopen_action(state: &BridgeEditorState) -> EditorReopenAction {
+    if bridge_editor_is_terminal(state) {
+        // Terminal first: a Failed/TimedOut session must never be focused as if
+        // it were live — that was the "cannot open the editor again" bug.
+        EditorReopenAction::DropAndRetry
+    } else if matches!(state, BridgeEditorState::Loading) {
+        EditorReopenAction::ReuseLoadingShell
+    } else {
+        EditorReopenAction::FocusExisting
+    }
+}
+
 impl StudioLayout {
     pub(super) fn poll_plugin_bridge_runtime(&mut self, cx: &mut Context<Self>) {
         use crate::components::timeline::timeline_state::{
@@ -876,30 +902,34 @@ impl StudioLayout {
             .map(|s| (s.state.clone(), s.requested_at));
         let mut loading_session = None;
         if let Some((state, requested_at)) = existing {
-            if bridge_editor_is_terminal(&state) {
-                ped_log!(
-                    "Open Request track={track_id} slot={instance_id} prior={state:?} -> retry (dropping stale session)"
-                );
-                self.close_bridge_editor(cx, track_id, instance_id);
-                // fall through to a fresh open below
-            } else if state == BridgeEditorState::Loading {
-                ped_log!(
-                    "Open Request track={track_id} slot={instance_id} state=Loading -> attach existing shell (loading_ms={})",
-                    requested_at.elapsed().as_millis()
-                );
-                loading_session = self.plugin_editors.bridge.remove(&key);
-            } else {
-                if let Some(session) = self.plugin_editors.bridge.get(&key) {
-                    session.shell.focus();
+            match editor_reopen_action(&state) {
+                EditorReopenAction::DropAndRetry => {
+                    ped_log!(
+                        "Open Request track={track_id} slot={instance_id} prior={state:?} -> retry (dropping stale session)"
+                    );
+                    self.close_bridge_editor(cx, track_id, instance_id);
+                    // fall through to a fresh open below
                 }
-                ped_log!(
-                    "Open Request track={track_id} slot={instance_id} state={state:?} -> focus existing (in_flight_ms={})",
-                    requested_at.elapsed().as_millis()
-                );
-                eprintln!(
-                    "[plugin-editor-window] existing native editor focus instance={instance_id}"
-                );
-                return;
+                EditorReopenAction::ReuseLoadingShell => {
+                    ped_log!(
+                        "Open Request track={track_id} slot={instance_id} state=Loading -> attach existing shell (loading_ms={})",
+                        requested_at.elapsed().as_millis()
+                    );
+                    loading_session = self.plugin_editors.bridge.remove(&key);
+                }
+                EditorReopenAction::FocusExisting => {
+                    if let Some(session) = self.plugin_editors.bridge.get(&key) {
+                        session.shell.focus();
+                    }
+                    ped_log!(
+                        "Open Request track={track_id} slot={instance_id} state={state:?} -> focus existing (in_flight_ms={})",
+                        requested_at.elapsed().as_millis()
+                    );
+                    eprintln!(
+                        "[plugin-editor-window] existing native editor focus instance={instance_id}"
+                    );
+                    return;
+                }
             }
         }
         ped_log!(
@@ -3758,4 +3788,70 @@ fn log_bridge_paint_stats(session: &BridgeEditorSession) {
         stats.shell_paint_count,
         stats.size_count
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        bridge_editor_is_open, bridge_editor_is_terminal, editor_reopen_action, BridgeEditorState,
+        EditorReopenAction,
+    };
+
+    // Every non-terminal, non-Loading state. These are "live or in flight" and
+    // a re-open must focus the existing shell rather than spawn a duplicate.
+    const FOCUS_STATES: &[BridgeEditorState] = &[
+        BridgeEditorState::ParentWindowCreated,
+        BridgeEditorState::ViewCreated,
+        BridgeEditorState::Sized,
+        BridgeEditorState::AwaitingAttach,
+        BridgeEditorState::Attached,
+        BridgeEditorState::Visible,
+        BridgeEditorState::Ready,
+    ];
+
+    #[test]
+    fn terminal_states_drop_and_retry() {
+        // The core spec contract: a Failed / timed-out session is NEVER treated
+        // as live — re-open drops it and opens fresh (the "cannot open the
+        // editor again" regression guard).
+        for state in [
+            BridgeEditorState::Failed("boom".to_string()),
+            BridgeEditorState::TimedOut("slow".to_string()),
+        ] {
+            assert!(bridge_editor_is_terminal(&state));
+            assert!(!bridge_editor_is_open(&state));
+            assert_eq!(editor_reopen_action(&state), EditorReopenAction::DropAndRetry);
+        }
+    }
+
+    #[test]
+    fn loading_state_reuses_shell() {
+        let state = BridgeEditorState::Loading;
+        assert!(!bridge_editor_is_open(&state));
+        assert!(!bridge_editor_is_terminal(&state));
+        assert_eq!(
+            editor_reopen_action(&state),
+            EditorReopenAction::ReuseLoadingShell
+        );
+    }
+
+    #[test]
+    fn live_and_inflight_states_focus_existing() {
+        for state in FOCUS_STATES {
+            assert!(!bridge_editor_is_terminal(state));
+            assert_eq!(
+                editor_reopen_action(state),
+                EditorReopenAction::FocusExisting
+            );
+        }
+    }
+
+    #[test]
+    fn only_attached_visible_ready_count_as_open() {
+        assert!(bridge_editor_is_open(&BridgeEditorState::Attached));
+        assert!(bridge_editor_is_open(&BridgeEditorState::Visible));
+        assert!(bridge_editor_is_open(&BridgeEditorState::Ready));
+        // Intermediate in-flight states are focusable but not "open" yet.
+        assert!(!bridge_editor_is_open(&BridgeEditorState::AwaitingAttach));
+    }
 }

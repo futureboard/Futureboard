@@ -1419,6 +1419,46 @@ fn push_vst3_midi_to_sink(
     }
 }
 
+/// Apply a bridged insert's freshly-read output to the track block, honoring the
+/// realtime **bypass policy** when the host produced no fresh block (`got == 0`,
+/// e.g. its service thread is stalled behind a plugin load or editor open):
+///
+/// * an **effect** leaves `block_l`/`block_r` untouched — the dry input passes
+///   through (bypass), stale plugin output is never replayed;
+/// * an **instrument** adds only the `0..got` frames it actually received, so a
+///   not-ready instrument contributes silence.
+///
+/// Returns the `(L, R)` output peaks for diagnostics. Wait-free: only slice
+/// copies/adds over `got` frames, no allocation, no locks — safe to call from
+/// the audio callback. `got` must be `<=` every slice length (the caller sizes
+/// `scratch` to `frames` and reads at most `frames`).
+#[inline]
+pub(crate) fn apply_bridge_insert_output(
+    is_effect: bool,
+    got: usize,
+    block_l: &mut [f32],
+    block_r: &mut [f32],
+    scratch_l: &[f32],
+    scratch_r: &[f32],
+) -> (f32, f32) {
+    let mut peak_l = 0.0f32;
+    let mut peak_r = 0.0f32;
+    if is_effect && got > 0 {
+        block_l[..got].copy_from_slice(&scratch_l[..got]);
+        block_r[..got].copy_from_slice(&scratch_r[..got]);
+        peak_l = scratch_l[..got].iter().fold(0.0f32, |p, s| p.max(s.abs()));
+        peak_r = scratch_r[..got].iter().fold(0.0f32, |p, s| p.max(s.abs()));
+    } else if !is_effect {
+        for i in 0..got {
+            block_l[i] += scratch_l[i];
+            block_r[i] += scratch_r[i];
+            peak_l = peak_l.max(scratch_l[i].abs());
+            peak_r = peak_r.max(scratch_r[i].abs());
+        }
+    }
+    (peak_l, peak_r)
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn apply_external_bridge_insert_block(
     block_l: &mut [f32],
@@ -1592,25 +1632,14 @@ pub(crate) fn apply_external_bridge_insert_block(
         insert.bridge_missed_blocks = 0;
     }
 
-    let mut out_peak_l = 0.0f32;
-    let mut out_peak_r = 0.0f32;
-    if is_effect && got > 0 {
-        block_l[..got].copy_from_slice(&insert.scratch_l[..got]);
-        block_r[..got].copy_from_slice(&insert.scratch_r[..got]);
-        out_peak_l = insert.scratch_l[..got]
-            .iter()
-            .fold(0.0f32, |p, s| p.max(s.abs()));
-        out_peak_r = insert.scratch_r[..got]
-            .iter()
-            .fold(0.0f32, |p, s| p.max(s.abs()));
-    } else if !is_effect {
-        for i in 0..got {
-            block_l[i] += insert.scratch_l[i];
-            block_r[i] += insert.scratch_r[i];
-            out_peak_l = out_peak_l.max(insert.scratch_l[i].abs());
-            out_peak_r = out_peak_r.max(insert.scratch_r[i].abs());
-        }
-    }
+    let (out_peak_l, out_peak_r) = apply_bridge_insert_output(
+        is_effect,
+        got,
+        block_l,
+        block_r,
+        &insert.scratch_l,
+        &insert.scratch_r,
+    );
     if crate::forensic_trace::engine_midi_verbose_enabled()
         && (out_peak_l > 0.0001 || out_peak_r > 0.0001)
     {
@@ -2156,5 +2185,92 @@ pub fn pan_gains(pan: f32) -> (f32, f32) {
         (1.0, 1.0 + pan)
     } else {
         (1.0 - pan, 1.0)
+    }
+}
+
+#[cfg(test)]
+mod bridge_bypass_tests {
+    use super::apply_bridge_insert_output;
+
+    #[test]
+    fn effect_with_fresh_block_replaces_dry_signal() {
+        let mut block_l = vec![1.0, 1.0, 1.0, 1.0];
+        let mut block_r = vec![1.0, 1.0, 1.0, 1.0];
+        let scratch_l = vec![0.5, 0.25, 0.0, -0.75];
+        let scratch_r = vec![-0.5, 0.0, 0.25, 0.75];
+        let (pl, pr) =
+            apply_bridge_insert_output(true, 4, &mut block_l, &mut block_r, &scratch_l, &scratch_r);
+        assert_eq!(block_l, scratch_l, "effect output replaces the dry block");
+        assert_eq!(block_r, scratch_r);
+        assert_eq!(pl, 0.75);
+        assert_eq!(pr, 0.75);
+    }
+
+    #[test]
+    fn effect_not_ready_passes_dry_signal_through() {
+        // got == 0: the host produced no fresh block. An effect must BYPASS —
+        // the dry input is left untouched, never silenced, never a stale replay.
+        let mut block_l = vec![0.3, -0.4, 0.5, -0.6];
+        let mut block_r = vec![-0.3, 0.4, -0.5, 0.6];
+        let dry_l = block_l.clone();
+        let dry_r = block_r.clone();
+        let scratch_l = vec![9.0, 9.0, 9.0, 9.0]; // must be ignored
+        let scratch_r = vec![9.0, 9.0, 9.0, 9.0];
+        let (pl, pr) =
+            apply_bridge_insert_output(true, 0, &mut block_l, &mut block_r, &scratch_l, &scratch_r);
+        assert_eq!(block_l, dry_l, "effect keeps the dry signal when not ready");
+        assert_eq!(block_r, dry_r);
+        assert_eq!((pl, pr), (0.0, 0.0));
+    }
+
+    #[test]
+    fn instrument_not_ready_contributes_silence() {
+        // got == 0: an instrument must add nothing — the accumulator block is
+        // left as-is (whatever else summed into it), i.e. this insert is silent.
+        let mut block_l = vec![0.2, 0.2, 0.2, 0.2];
+        let mut block_r = vec![0.1, 0.1, 0.1, 0.1];
+        let before_l = block_l.clone();
+        let before_r = block_r.clone();
+        let scratch_l = vec![9.0, 9.0, 9.0, 9.0];
+        let scratch_r = vec![9.0, 9.0, 9.0, 9.0];
+        let (pl, pr) = apply_bridge_insert_output(
+            false, 0, &mut block_l, &mut block_r, &scratch_l, &scratch_r,
+        );
+        assert_eq!(block_l, before_l, "instrument adds silence when not ready");
+        assert_eq!(block_r, before_r);
+        assert_eq!((pl, pr), (0.0, 0.0));
+    }
+
+    #[test]
+    fn instrument_with_fresh_block_sums_into_accumulator() {
+        let mut block_l = vec![0.2, 0.2, 0.2];
+        let mut block_r = vec![0.1, 0.1, 0.1];
+        let scratch_l = vec![0.5, -0.3, 0.0];
+        let scratch_r = vec![0.0, 0.4, -0.6];
+        let (pl, pr) = apply_bridge_insert_output(
+            false, 3, &mut block_l, &mut block_r, &scratch_l, &scratch_r,
+        );
+        let approx = |a: &[f32], b: &[f32]| {
+            a.iter()
+                .zip(b)
+                .all(|(x, y)| (x - y).abs() < 1e-5)
+        };
+        assert!(approx(&block_l, &[0.7, -0.1, 0.2]), "got {block_l:?}");
+        assert!(approx(&block_r, &[0.1, 0.5, -0.5]), "got {block_r:?}");
+        assert_eq!(pl, 0.5);
+        assert_eq!(pr, 0.6);
+    }
+
+    #[test]
+    fn partial_block_only_touches_read_frames() {
+        // got < frames: only the frames the host actually produced are folded;
+        // the tail of the block is left untouched (dry for effect / accumulator).
+        let mut block_l = vec![1.0, 1.0, 1.0, 1.0];
+        let mut block_r = vec![1.0, 1.0, 1.0, 1.0];
+        let scratch_l = vec![0.5, 0.5, 0.0, 0.0];
+        let scratch_r = vec![0.5, 0.5, 0.0, 0.0];
+        apply_bridge_insert_output(true, 2, &mut block_l, &mut block_r, &scratch_l, &scratch_r);
+        assert_eq!(block_l, vec![0.5, 0.5, 1.0, 1.0], "tail beyond got is dry");
+        assert_eq!(block_r, vec![0.5, 0.5, 1.0, 1.0]);
     }
 }

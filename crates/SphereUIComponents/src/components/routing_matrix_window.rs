@@ -270,12 +270,17 @@ impl Render for RoutingMatrixWindow {
                     let source_id = track.id.clone();
                     let dest_id = dest.track_id.clone().expect("send target has a track id");
                     let on_toggle_send = on_toggle_send.clone();
-                    cell = cell.cursor(gpui::CursorStyle::PointingHand).on_mouse_down(
-                        MouseButton::Left,
-                        move |_, window, cx| {
+                    cell = cell
+                        .cursor(gpui::CursorStyle::PointingHand)
+                        // Hover feedback: highlight the cell the click would
+                        // toggle. Empty (addable) cells otherwise show only a
+                        // faint dot, so without this the interactive target is
+                        // ambiguous. Read-only output / unavailable cells are not
+                        // toggleable and get no hover, keeping the distinction.
+                        .hover(|style| style.bg(Colors::surface_hover()))
+                        .on_mouse_down(MouseButton::Left, move |_, window, cx| {
                             on_toggle_send(source_id.clone(), dest_id.clone(), window, cx);
-                        },
-                    );
+                        });
                 }
 
                 row = row.child(cell);

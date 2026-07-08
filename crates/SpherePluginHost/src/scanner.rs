@@ -105,11 +105,21 @@ fn scan_paths_for_format(
 }
 
 fn sort_and_dedup(plugins: &mut Vec<PluginInfo>) {
-    plugins.sort_by_key(|plugin| plugin.name.to_lowercase());
     // Deduplicate by stable id (path + classId hash) so multi-class modules
     // like WaveShell keep all their plugin entries — only true duplicates
     // (same classId from the same module scanned twice) are removed.
-    plugins.dedup_by(|a, b| a.id == b.id);
+    //
+    // Use a seen-set, NOT `sort_by(name)` + `Vec::dedup_by(id)`: dedup_by only
+    // collapses *consecutive* equal elements, so when two same-id entries are
+    // separated by a different-id plugin that happens to share a display name
+    // (common — many vendors ship "Compressor", "EQ", …), the sort-by-name
+    // order leaves them non-adjacent and the duplicate survives. `retain` with
+    // a seen-set is order-independent and keeps the first occurrence of each id.
+    let mut seen = std::collections::HashSet::new();
+    plugins.retain(|plugin| seen.insert(plugin.id.clone()));
+    // Display order is alphabetical by name; done after dedup so ordering can
+    // never affect which entries are removed.
+    plugins.sort_by_key(|plugin| plugin.name.to_lowercase());
 }
 
 fn scan_native_root(path: &str, format: PluginFormat) -> Result<Vec<PluginInfo>, String> {
@@ -286,4 +296,71 @@ fn stable_id(prefix: &str, input: &str) -> String {
 
 pub fn stable_id_for_au(input: &str) -> String {
     stable_id("au", input)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{sort_and_dedup, PluginInfo};
+
+    fn plugin(id: &str, name: &str) -> PluginInfo {
+        PluginInfo {
+            id: id.to_string(),
+            name: name.to_string(),
+            vendor: String::new(),
+            category: String::new(),
+            sub_categories: None,
+            format: "VST3".to_string(),
+            path: String::new(),
+            module_path: None,
+            class_id: None,
+            version: None,
+            sdk_version: None,
+            is_shell_child: false,
+            sdk_metadata_loaded: false,
+        }
+    }
+
+    fn ids(plugins: &[PluginInfo]) -> Vec<&str> {
+        plugins.iter().map(|p| p.id.as_str()).collect()
+    }
+
+    #[test]
+    fn dedup_removes_true_duplicates_and_sorts_by_name() {
+        let mut plugins = vec![
+            plugin("vst3:2", "Zebra"),
+            plugin("vst3:1", "Alpha"),
+            plugin("vst3:2", "Zebra"),
+        ];
+        sort_and_dedup(&mut plugins);
+        assert_eq!(ids(&plugins), vec!["vst3:1", "vst3:2"]);
+    }
+
+    #[test]
+    fn dedup_survives_same_name_different_id_separator() {
+        // Regression: the old sort-by-name + dedup_by(id) left same-id entries
+        // non-adjacent when a different-id plugin shared their display name, so
+        // the duplicate was never removed. All three share the name "Compressor".
+        let mut plugins = vec![
+            plugin("vst3:aaa", "Compressor"),
+            plugin("vst3:bbb", "Compressor"),
+            plugin("vst3:aaa", "Compressor"),
+        ];
+        sort_and_dedup(&mut plugins);
+        let mut got = ids(&plugins);
+        got.sort_unstable();
+        assert_eq!(got, vec!["vst3:aaa", "vst3:bbb"]);
+    }
+
+    #[test]
+    fn dedup_keeps_distinct_ids_from_multiclass_module() {
+        // WaveShell-style: one module path, many class ids -> all distinct ids
+        // must be preserved.
+        let mut plugins = vec![
+            plugin("vst3:shell#1", "WaveComp"),
+            plugin("vst3:shell#2", "WaveEQ"),
+            plugin("vst3:shell#3", "WaveGate"),
+        ];
+        sort_and_dedup(&mut plugins);
+        assert_eq!(plugins.len(), 3);
+    }
 }

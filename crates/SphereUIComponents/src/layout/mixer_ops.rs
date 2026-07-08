@@ -181,9 +181,14 @@ impl StudioLayout {
 
     pub(crate) fn build_mixer_snapshot(&self, cx: &gpui::App) -> MixerSnapshot {
         let timeline = self.timeline.read(cx);
+        let mut tracks = timeline.state.tracks.clone();
+        let mut master = timeline.state.master.clone();
+        timeline
+            .state
+            .apply_volume_previews_to_snapshot(&mut tracks, &mut master);
         MixerSnapshot {
-            tracks: timeline.state.tracks.clone(),
-            master: timeline.state.master.clone(),
+            tracks,
+            master,
             selected_track_id: timeline.state.selection.selected_track_id.clone(),
             mixer_scroll_x: self.mixer_view.scroll_x,
             mixer_insert_section_px: clamp_mixer_section_height_px(
@@ -866,34 +871,95 @@ impl StudioLayout {
 
         let timeline_vol = self.timeline.clone();
         let owner_dirty = owner.clone();
+        let audio_engine_volume_commit = audio_engine.clone();
         let on_volume_change: std::sync::Arc<
             dyn Fn(&(String, f32), &mut Window, &mut gpui::App) + 'static,
         > = std::sync::Arc::new(move |(id, v): &(String, f32), _w, cx| {
             let id = id.clone();
             let v = *v;
-            // Per fader-drag-stutter fix: track gain is a *dynamic mixer parameter*,
-            // not a structural graph change. It is applied to the engine runtime
-            // live via the `SetTrackVolume` command below, so the drag must NOT
-            // enqueue a native engine sync (load_project / route-graph rebuild) on
-            // every mouse-move. Use `mark_dirty_view_only` (session-dirty for save,
-            // no engine sync); a later real edit still carries the volume down
-            // through the snapshot. See [[engine-sync-single-flight]].
-            crate::perf::count("mixer_fader_drag_update_count", 1);
-            if external_mixer_debug_enabled() {
-                external_mixer_debug(&format!(
-                    "mixer command dispatched set_volume id={id} v={v:.3}"
-                ));
-            }
             timeline_vol.update(cx, |t, cx| {
                 t.state.set_track_volume(&id, v);
+                t.state.clear_track_volume_preview(&id);
                 cx.notify();
             });
             StudioLayout::defer_update(&owner_dirty, cx, |this, cx| {
                 this.mark_dirty_view_only();
                 this.push_mixer_snapshot_to_window(cx);
+                let _ = this.mixer_panel.update(cx, |_, cx| cx.notify());
             });
-            if let Some(engine) = audio_engine.as_ref() {
+            if let Some(engine) = audio_engine_volume_commit.as_ref() {
+                let _ = engine.update_track_param(&id, "volume", volume_norm_to_linear(v) as f64);
+            }
+        });
+
+        let timeline_vol_start = self.timeline.clone();
+        let on_volume_drag_start: std::sync::Arc<
+            dyn Fn(&(String, f32), &mut Window, &mut gpui::App) + 'static,
+        > = std::sync::Arc::new(move |(id, v): &(String, f32), _w, cx| {
+            let id = id.clone();
+            let v = *v;
+            timeline_vol_start.update(cx, |t, cx| {
+                t.state.begin_track_volume_preview(&id, v);
+                cx.notify();
+            });
+        });
+
+        let timeline_vol_preview = self.timeline.clone();
+        let owner_preview = owner.clone();
+        let audio_engine_volume_preview = audio_engine.clone();
+        let on_volume_drag_preview: std::sync::Arc<
+            dyn Fn(&(String, f32), &mut Window, &mut gpui::App) + 'static,
+        > = std::sync::Arc::new(move |(id, v): &(String, f32), _w, cx| {
+            let id = id.clone();
+            let v = *v;
+            let changed = timeline_vol_preview.update(cx, |t, cx| {
+                let changed = t.state.set_track_volume_preview(&id, v);
+                if changed {
+                    cx.notify();
+                }
+                changed
+            });
+            if !changed {
+                return;
+            }
+            crate::perf::count("fader_drag_preview_count", 1);
+            if crate::components::timeline::timeline_state::TimelineState::fader_debug_enabled() {
+                eprintln!("[fader] preview track={id} norm={v:.4}");
+            }
+            StudioLayout::defer_update(&owner_preview, cx, |this, cx| {
+                this.push_mixer_snapshot_to_window(cx);
+                let _ = this.mixer_panel.update(cx, |_, cx| cx.notify());
+            });
+            if let Some(engine) = audio_engine_volume_preview.as_ref() {
                 crate::perf::count("mixer_fader_audio_control_update_count", 1);
+                let _ = engine.update_track_param(&id, "volume", volume_norm_to_linear(v) as f64);
+            }
+        });
+
+        let timeline_vol_commit = self.timeline.clone();
+        let owner_commit = owner.clone();
+        let audio_engine_volume_final = audio_engine.clone();
+        let on_volume_drag_commit: std::sync::Arc<
+            dyn Fn(&String, &mut Window, &mut gpui::App) + 'static,
+        > = std::sync::Arc::new(move |id: &String, _w, cx| {
+            let id = id.clone();
+            let committed = timeline_vol_commit.update(cx, |t, cx| {
+                let committed = t.state.commit_track_volume_preview(&id);
+                if committed.is_some() {
+                    cx.notify();
+                }
+                committed
+            });
+            let Some(v) = committed else {
+                return;
+            };
+            crate::perf::count("fader_drag_commit_count", 1);
+            StudioLayout::defer_update(&owner_commit, cx, |this, cx| {
+                this.mark_dirty_view_only();
+                this.push_mixer_snapshot_to_window(cx);
+                let _ = this.mixer_panel.update(cx, |_, cx| cx.notify());
+            });
+            if let Some(engine) = audio_engine_volume_final.as_ref() {
                 let _ = engine.update_track_param(&id, "volume", volume_norm_to_linear(v) as f64);
             }
         });
@@ -1089,25 +1155,67 @@ impl StudioLayout {
         let audio_engine = self.audio_bridge.engine.clone();
         let timeline_master = self.timeline.clone();
         let owner_dirty = owner.clone();
+        let audio_engine_master_change = audio_engine.clone();
         let on_master_volume_change: std::sync::Arc<
             dyn Fn(&f32, &mut Window, &mut gpui::App) + 'static,
         > = std::sync::Arc::new(move |v: &f32, _w, cx| {
             let v = *v;
-            // Master gain is applied live via `set_master_volume` (atomic) — the
-            // fader drag must not enqueue an engine sync per mouse-move.
-            crate::perf::count("mixer_fader_drag_update_count", 1);
-            if external_mixer_debug_enabled() {
-                external_mixer_debug(&format!("mixer command dispatched master_volume v={v:.3}"));
-            }
             timeline_master.update(cx, |t, cx| {
                 t.state.set_master_volume(v);
+                t.state.master_volume_preview = None;
                 cx.notify();
             });
             StudioLayout::defer_update(&owner_dirty, cx, |this, cx| {
                 this.mark_dirty_view_only();
                 this.push_mixer_snapshot_to_window(cx);
+                let _ = this.mixer_panel.update(cx, |_, cx| cx.notify());
             });
-            if let Some(engine) = audio_engine.as_ref() {
+            if let Some(engine) = audio_engine_master_change.as_ref() {
+                let _ = engine.update_track_param(
+                    "__master__",
+                    "volume",
+                    volume_norm_to_linear(v) as f64,
+                );
+            }
+        });
+
+        let timeline_master_start = self.timeline.clone();
+        let on_master_volume_drag_start: std::sync::Arc<
+            dyn Fn(&f32, &mut Window, &mut gpui::App) + 'static,
+        > = std::sync::Arc::new(move |v: &f32, _w, cx| {
+            let v = *v;
+            timeline_master_start.update(cx, |t, cx| {
+                t.state.begin_master_volume_preview(v);
+                cx.notify();
+            });
+        });
+
+        let timeline_master_preview = self.timeline.clone();
+        let owner_master_preview = owner.clone();
+        let audio_engine_master_preview = audio_engine.clone();
+        let on_master_volume_drag_preview: std::sync::Arc<
+            dyn Fn(&f32, &mut Window, &mut gpui::App) + 'static,
+        > = std::sync::Arc::new(move |v: &f32, _w, cx| {
+            let v = *v;
+            let changed = timeline_master_preview.update(cx, |t, cx| {
+                let changed = t.state.set_master_volume_preview(v);
+                if changed {
+                    cx.notify();
+                }
+                changed
+            });
+            if !changed {
+                return;
+            }
+            crate::perf::count("fader_drag_preview_count", 1);
+            if crate::components::timeline::timeline_state::TimelineState::fader_debug_enabled() {
+                eprintln!("[fader] preview target=master norm={v:.4}");
+            }
+            StudioLayout::defer_update(&owner_master_preview, cx, |this, cx| {
+                this.push_mixer_snapshot_to_window(cx);
+                let _ = this.mixer_panel.update(cx, |_, cx| cx.notify());
+            });
+            if let Some(engine) = audio_engine_master_preview.as_ref() {
                 crate::perf::count("mixer_fader_audio_control_update_count", 1);
                 let _ = engine.update_track_param(
                     "__master__",
@@ -1116,6 +1224,36 @@ impl StudioLayout {
                 );
             }
         });
+
+        let timeline_master_commit = self.timeline.clone();
+        let owner_master_commit = owner.clone();
+        let audio_engine_master_final = audio_engine.clone();
+        let on_master_volume_drag_commit: std::sync::Arc<dyn Fn(&mut Window, &mut gpui::App) + 'static> =
+            std::sync::Arc::new(move |_w, cx| {
+                let committed = timeline_master_commit.update(cx, |t, cx| {
+                    let committed = t.state.commit_master_volume_preview();
+                    if committed.is_some() {
+                        cx.notify();
+                    }
+                    committed
+                });
+                let Some(v) = committed else {
+                    return;
+                };
+                crate::perf::count("fader_drag_commit_count", 1);
+                StudioLayout::defer_update(&owner_master_commit, cx, |this, cx| {
+                    this.mark_dirty_view_only();
+                    this.push_mixer_snapshot_to_window(cx);
+                    let _ = this.mixer_panel.update(cx, |_, cx| cx.notify());
+                });
+                if let Some(engine) = audio_engine_master_final.as_ref() {
+                    let _ = engine.update_track_param(
+                        "__master__",
+                        "volume",
+                        volume_norm_to_linear(v) as f64,
+                    );
+                }
+            });
         let on_context_menu: std::sync::Arc<
             dyn Fn(&(String, f32, f32), &mut Window, &mut gpui::App) + 'static,
         > = {
@@ -1388,12 +1526,18 @@ impl StudioLayout {
         MixerCallbacks {
             on_select_track,
             on_volume_change,
+            on_volume_drag_start,
+            on_volume_drag_preview,
+            on_volume_drag_commit,
             on_pan_change,
             on_toggle_mute,
             on_toggle_solo,
             on_toggle_arm,
             on_toggle_input,
             on_master_volume_change,
+            on_master_volume_drag_start,
+            on_master_volume_drag_preview,
+            on_master_volume_drag_commit,
             on_context_menu: Some(on_context_menu),
             on_add_insert,
             on_remove_insert,

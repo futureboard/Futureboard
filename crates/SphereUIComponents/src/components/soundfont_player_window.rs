@@ -158,7 +158,8 @@ impl SoundfontPlayerWindow {
                     match player.select_preset(PREVIEW_MIDI_CHANNEL, first.bank, first.patch) {
                         Ok(()) => self.panel.selected_preset = Some((first.bank, first.patch)),
                         Err(error) => {
-                            self.panel.status = Some(format!("Default preset select failed: {error}"));
+                            self.panel.status =
+                                Some(format!("Default preset select failed: {error}"));
                         }
                     }
                 }

@@ -16,5 +16,8 @@ serde.workspace = true
 [target.'cfg(not(target_os = "macos"))'.dependencies]
 midir.workspace = true
 
+[target.'cfg(target_os = "windows")'.dependencies]
+windows.workspace = true
+
 [lints]
 workspace = true

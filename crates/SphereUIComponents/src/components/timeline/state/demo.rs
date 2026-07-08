@@ -254,6 +254,8 @@ impl TimelineState {
             track_height_resize_arm: None,
             last_touched_plugin_param: None,
             mixer_tree: MixerTreeViewState::default(),
+            track_volume_previews: std::collections::HashMap::new(),
+            master_volume_preview: None,
         }
     }
 

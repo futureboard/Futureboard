@@ -11,6 +11,7 @@
 //! container height. Tick labels and rail ticks use `top(relative(pct))`,
 //! which lays out as a fraction of parent height.
 
+use gpui::prelude::FluentBuilder;
 use gpui::{
     div, px, relative, App, AppContext, DragMoveEvent, Empty, InteractiveElement, IntoElement,
     ParentElement, Render, StatefulInteractiveElement, Styled, Window,
@@ -224,6 +225,24 @@ pub fn fader(
     accent: gpui::Rgba,
     on_change: impl Fn(&f32, &mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
+    fader_with_drag_callbacks(
+        id,
+        value_norm,
+        accent,
+        None::<fn(&f32, &mut Window, &mut App)>,
+        Some(on_change),
+        None::<fn(&mut Window, &mut App)>,
+    )
+}
+
+pub fn fader_with_drag_callbacks(
+    id: impl Into<gpui::SharedString>,
+    value_norm: f32,
+    accent: gpui::Rgba,
+    on_drag_start: Option<impl Fn(&f32, &mut Window, &mut App) + 'static>,
+    on_drag_preview: Option<impl Fn(&f32, &mut Window, &mut App) + 'static>,
+    on_drag_commit: Option<impl Fn(&mut Window, &mut App) + 'static>,
+) -> impl IntoElement {
     let id_str: gpui::SharedString = id.into();
     let id_string = id_str.to_string();
     let value = value_norm.clamp(0.0, 1.0);
@@ -244,7 +263,10 @@ pub fn fader(
             FaderDrag {
                 id: id_string.clone(),
             },
-            move |drag, _offset, _window, cx| {
+            move |drag, _offset, window, cx| {
+                if let Some(start) = on_drag_start.as_ref() {
+                    start(&value, window, cx);
+                }
                 cx.new(|_| FaderDrag {
                     id: drag.id.clone(),
                 })
@@ -259,7 +281,18 @@ pub fn fader(
             let oy: f32 = bounds.origin.y.into();
             let oh: f32 = f32::from(bounds.size.height).max(FADER_THUMB_HEIGHT + 1.0);
             let new_value = pointer_y_to_norm(y, oy, oh);
-            on_change(&new_value, window, cx);
+            if let Some(preview) = on_drag_preview.as_ref() {
+                preview(&new_value, window, cx);
+            }
+        })
+        .when_some(on_drag_commit, |this, commit| {
+            use std::sync::Arc;
+            let commit: Arc<dyn Fn(&mut Window, &mut App) + 'static> = Arc::new(commit);
+            this.on_mouse_up(gpui::MouseButton::Left, {
+                let commit = commit.clone();
+                move |_event, window, cx| commit(window, cx)
+            })
+            .on_mouse_up_out(gpui::MouseButton::Left, move |_event, window, cx| commit(window, cx))
         })
 }
 

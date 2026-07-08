@@ -84,6 +84,12 @@ pub struct TimelineState {
     pub last_touched_plugin_param: Option<LastTouchedPluginParam>,
     /// Mixer tree sidebar — expanded nodes, pins, hidden channels (persisted).
     pub mixer_tree: MixerTreeViewState,
+    /// Transient fader values while the user drags. UI-only: these do not mark the
+    /// project dirty, enter undo history, or trigger engine graph sync. Both the
+    /// arrangement track headers and mixer strips render from this cache so they
+    /// stay visually locked during a drag.
+    pub track_volume_previews: std::collections::HashMap<TrackId, f32>,
+    pub master_volume_preview: Option<f32>,
 }
 
 impl Default for TimelineState {
@@ -155,6 +161,8 @@ impl Default for TimelineState {
             track_height_resize_arm: None,
             last_touched_plugin_param: None,
             mixer_tree: MixerTreeViewState::default(),
+            track_volume_previews: std::collections::HashMap::new(),
+            master_volume_preview: None,
         }
     }
 }

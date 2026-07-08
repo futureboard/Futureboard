@@ -138,6 +138,13 @@ enum GridLineKind {
     Subdivision,
 }
 
+/// `true` when the MIDI-editor zoom diagnostics are enabled via
+/// `FUTUREBOARD_MIDI_ZOOM_DEBUG`. Off by default — zoom logging must not be
+/// always-on (per project debug-flag conventions).
+fn midi_zoom_debug_enabled() -> bool {
+    std::env::var_os("FUTUREBOARD_MIDI_ZOOM_DEBUG").is_some()
+}
+
 /// `true` when `beat` is (within tolerance) an integer multiple of `m`.
 #[inline]
 fn is_multiple(beat: f32, m: f32) -> bool {
@@ -3014,11 +3021,49 @@ impl PianoRoll {
         });
     }
 
-    /// Scale horizontal zoom by `factor`, clamped to the same range as wheel
-    /// zoom. Used by the toolbar zoom buttons.
-    fn zoom_by(&mut self, factor: f32, cx: &mut Context<Self>) {
-        self.ppb = (self.ppb * factor).clamp(PIANO_ROLL_MIN_PPB, PIANO_ROLL_MAX_PPB);
+    /// Multiplicative horizontal zoom around a grid-local x anchor. Mirrors the
+    /// arrangement timeline's `TimelineState::zoom_by`: the beat under `anchor_x`
+    /// stays visually fixed while `ppb` changes, so zooming never jumps back to
+    /// bar 1 / beat 0. `anchor_x` is in note-grid content space (0 = left edge of
+    /// the visible grid, already net of the left piano-key lane).
+    fn zoom_ppb_around(&mut self, factor: f32, anchor_x: f32, cx: &mut Context<Self>) {
+        let factor = factor.max(0.0001);
+        let old_ppb = self.ppb.max(0.0001);
+        let new_ppb = (old_ppb * factor).clamp(PIANO_ROLL_MIN_PPB, PIANO_ROLL_MAX_PPB);
+        if (new_ppb - old_ppb).abs() < 0.0001 {
+            return;
+        }
+        // Clamp the anchor into the visible grid so a cursor over the key lane
+        // (negative local x) or past the right edge can't throw the anchor beat.
+        let (view_w, _) = self.grid_view_size();
+        let anchor_x = anchor_x.clamp(0.0, view_w.max(0.0));
+        // Beat under the anchor before the change (inverse of `beat_to_x`).
+        let anchor_beat = (anchor_x + self.scroll_x) / old_ppb;
+        let old_scroll_x = self.scroll_x;
+        self.ppb = new_ppb;
+        // Re-solve scroll_x so the same anchor_beat lands under anchor_x.
+        let new_scroll_x = (anchor_beat * new_ppb - anchor_x).max(0.0);
+        self.scroll_x = new_scroll_x;
+        if midi_zoom_debug_enabled() {
+            eprintln!(
+                "[MidiEditorZoom] old_px_per_beat={:.4} new_px_per_beat={:.4} old_scroll_x={:.2} anchor_x={:.2} anchor_beat={:.4} new_scroll_x={:.2} check_beat={:.4}",
+                old_ppb,
+                new_ppb,
+                old_scroll_x,
+                anchor_x,
+                anchor_beat,
+                new_scroll_x,
+                (anchor_x + new_scroll_x) / new_ppb,
+            );
+        }
         cx.notify();
+    }
+
+    /// Scale horizontal zoom by `factor`, anchored at the viewport center.
+    /// Used by the toolbar zoom buttons and keyboard zoom commands.
+    fn zoom_by(&mut self, factor: f32, cx: &mut Context<Self>) {
+        let (view_w, _) = self.grid_view_size();
+        self.zoom_ppb_around(factor, view_w * 0.5, cx);
     }
 
     fn on_wheel(&mut self, event: &ScrollWheelEvent, _window: &mut Window, cx: &mut Context<Self>) {
@@ -3027,10 +3072,18 @@ impl PianoRoll {
             gpui::ScrollDelta::Lines(p) => (p.x * 36.0, p.y * 36.0),
         };
         if event.modifiers.control || event.modifiers.platform {
-            // Zoom horizontal.
+            // Zoom horizontal, anchored at the cursor. Fall back to the viewport
+            // center if the grid hasn't been laid out yet (no captured bounds).
+            let (view_w, _) = self.grid_view_size();
+            let anchor_x = self
+                .grid_local(event.position)
+                .map(|(lx, _)| lx)
+                .unwrap_or(view_w * 0.5);
             let factor = (1.0022_f32).powf(-dy);
-            self.ppb = (self.ppb * factor).clamp(PIANO_ROLL_MIN_PPB, PIANO_ROLL_MAX_PPB);
-        } else if event.modifiers.shift {
+            self.zoom_ppb_around(factor, anchor_x, cx);
+            return;
+        }
+        if event.modifiers.shift {
             self.scroll_x = (self.scroll_x - dy - dx).max(0.0);
         } else {
             self.scroll_y = (self.scroll_y - dy).clamp(0.0, self.max_scroll_y());

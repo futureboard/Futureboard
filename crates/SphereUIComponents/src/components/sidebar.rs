@@ -102,6 +102,7 @@ pub fn sidebar(
     scroll: UniformListScrollHandle,
     search_input: &TextInputState,
     search_focused: bool,
+    active: bool,
     on_search_context_menu: TextInputContextCb,
     on_toggle: ToggleNodeCb,
     on_select: SelectEntryCb,
@@ -147,11 +148,19 @@ pub fn sidebar(
         .h(px(TOOLBAR_HEIGHT))
         .px(px(8.0))
         .border_b(px(1.0))
-        .border_color(Colors::border_subtle())
+        .border_color(if active {
+            Colors::panel_border_focused()
+        } else {
+            Colors::border_subtle()
+        })
         .bg(Colors::surface_panel())
         .child(
             div()
-                .text_color(Colors::text_primary())
+                .text_color(if active {
+                                    Colors::panel_header_active()
+                                } else {
+                                    Colors::tab_text()
+                                })
                 .text_size(px(10.0))
                 .font_weight(gpui::FontWeight::BOLD)
                 .child("BROWSER"),
@@ -358,7 +367,11 @@ pub fn sidebar(
         .h_full()
         .bg(Colors::surface_panel())
         .border_r(px(1.0))
-        .border_color(Colors::border_subtle())
+        .border_color(if active {
+            Colors::panel_border_focused()
+        } else {
+            Colors::border_subtle()
+        })
         .child(toolbar)
         .child(search_container)
         .child(listing)

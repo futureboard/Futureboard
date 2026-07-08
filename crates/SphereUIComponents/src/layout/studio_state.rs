@@ -16,6 +16,33 @@ pub struct MenuBarUiState {
 
 use super::context_menu_ops::ContextMenuRequest;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum WorkspaceActivePanel {
+    Arrangement,
+    Mixer,
+    Editor,
+    Browser,
+    Inspector,
+    PianoRoll,
+    Automation,
+    EffectEditor,
+}
+
+impl WorkspaceActivePanel {
+    pub fn label(self) -> &'static str {
+        match self {
+            WorkspaceActivePanel::Arrangement => "Arrangement",
+            WorkspaceActivePanel::Mixer => "Mixer",
+            WorkspaceActivePanel::Editor => "Editor",
+            WorkspaceActivePanel::Browser => "Browser",
+            WorkspaceActivePanel::Inspector => "Inspector",
+            WorkspaceActivePanel::PianoRoll => "Piano Roll",
+            WorkspaceActivePanel::Automation => "Automation",
+            WorkspaceActivePanel::EffectEditor => "Effect Editor",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum OpenPopover {
     Context {

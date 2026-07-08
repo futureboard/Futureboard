@@ -46,8 +46,101 @@ impl TimelineState {
     // timeline TrackHeader and the bottom-panel Mixer call into these, so the
     // two views can never drift apart.
 
+    pub fn fader_debug_enabled() -> bool {
+        std::env::var_os("FUTUREBOARD_FADER_DEBUG").is_some()
+    }
+
+    pub fn display_master_volume(&self) -> f32 {
+        self.master_volume_preview.unwrap_or(self.master.volume)
+    }
+
+    pub fn display_track_volume(&self, track: &TrackState) -> f32 {
+        self.track_volume_previews
+            .get(&track.id)
+            .copied()
+            .unwrap_or_else(|| track.display_volume())
+    }
+
     pub fn set_master_volume(&mut self, norm: f32) {
         self.master.volume = norm.clamp(0.0, 1.0);
+    }
+
+    pub fn begin_master_volume_preview(&mut self, norm: f32) {
+        self.master_volume_preview = Some(norm.clamp(0.0, 1.0));
+        if Self::fader_debug_enabled() {
+            eprintln!("[fader] drag start target=master norm={:.4}", norm.clamp(0.0, 1.0));
+        }
+    }
+
+    pub fn set_master_volume_preview(&mut self, norm: f32) -> bool {
+        let v = norm.clamp(0.0, 1.0);
+        let changed = self
+            .master_volume_preview
+            .map(|prev| (prev - v).abs() > 1.0e-5)
+            .unwrap_or(true);
+        if changed {
+            self.master_volume_preview = Some(v);
+        }
+        changed
+    }
+
+    pub fn commit_master_volume_preview(&mut self) -> Option<f32> {
+        let v = self.master_volume_preview.take()?;
+        self.set_master_volume(v);
+        if Self::fader_debug_enabled() {
+            eprintln!("[fader] commit target=master norm={v:.4}");
+        }
+        Some(v)
+    }
+
+    pub fn begin_track_volume_preview(&mut self, track_id: &str, norm: f32) {
+        let v = norm.clamp(0.0, 1.0);
+        self.track_volume_previews.insert(track_id.to_string(), v);
+        if Self::fader_debug_enabled() {
+            eprintln!("[fader] drag start track={track_id} norm={v:.4}");
+        }
+    }
+
+    pub fn set_track_volume_preview(&mut self, track_id: &str, norm: f32) -> bool {
+        let v = norm.clamp(0.0, 1.0);
+        let changed = self
+            .track_volume_previews
+            .get(track_id)
+            .map(|prev| (*prev - v).abs() > 1.0e-5)
+            .unwrap_or(true);
+        if changed {
+            self.track_volume_previews.insert(track_id.to_string(), v);
+        }
+        changed
+    }
+
+    pub fn commit_track_volume_preview(&mut self, track_id: &str) -> Option<f32> {
+        let v = self.track_volume_previews.remove(track_id)?;
+        self.set_track_volume(track_id, v);
+        if Self::fader_debug_enabled() {
+            eprintln!("[fader] commit track={track_id} norm={v:.4}");
+        }
+        Some(v)
+    }
+
+    pub fn clear_track_volume_preview(&mut self, track_id: &str) {
+        self.track_volume_previews.remove(track_id);
+    }
+
+    pub fn apply_volume_previews_to_snapshot(
+        &self,
+        tracks: &mut [TrackState],
+        master: &mut MasterBusState,
+    ) {
+        if let Some(v) = self.master_volume_preview {
+            master.volume = v;
+        }
+        for track in tracks {
+            if let Some(v) = self.track_volume_previews.get(&track.id).copied() {
+                track.volume = v;
+                track.volume_effective = v;
+            }
+        }
     }
 
     /// Set a track's manual/base fader volume (the `UserFader` path). When

@@ -298,7 +298,7 @@ fn track_type_color(t: TrackType) -> gpui::Rgba {
 /// Legacy entry point — kept so any existing call sites still compile. Returns
 /// an empty placeholder identical to the pre-state version.
 pub fn right_panel() -> impl IntoElement {
-    inspector_shell().child(no_selection(0))
+    inspector_shell(false).child(no_selection(0))
 }
 
 /// Inspector driven by the live selection. Renders one of:
@@ -315,6 +315,7 @@ pub fn inspector_panel<'a>(
     name_focused: bool,
     clip_name_input: &TextInputState,
     clip_name_focused: bool,
+    active: bool,
     callbacks: &InspectorCallbacks,
 ) -> impl IntoElement {
     let body: gpui::AnyElement = if let Some(clip) = clip_summary {
@@ -342,10 +343,10 @@ pub fn inspector_panel<'a>(
         no_selection(tracks.len()).into_any_element()
     };
 
-    inspector_shell().child(body)
+    inspector_shell(active).child(body)
 }
 
-fn inspector_shell() -> gpui::Div {
+fn inspector_shell(active: bool) -> gpui::Div {
     div()
         .flex()
         .flex_col()
@@ -353,17 +354,29 @@ fn inspector_shell() -> gpui::Div {
         .h_full()
         .bg(Colors::surface_panel())
         .border_l(px(1.0))
-        .border_color(Colors::border_subtle())
+        .border_color(if active {
+            Colors::panel_border_focused()
+        } else {
+            Colors::border_subtle()
+        })
         .child(
             div()
                 .flex_shrink_0()
                 .px(px(10.0))
                 .py(px(8.0))
                 .border_b(px(1.0))
-                .border_color(Colors::border_subtle())
+                .border_color(if active {
+                    Colors::panel_border_focused()
+                } else {
+                    Colors::border_subtle()
+                })
                 .child(
                     div()
-                        .text_color(Colors::text_primary())
+                        .text_color(if active {
+                                                    Colors::panel_header_active()
+                                                } else {
+                                                    Colors::tab_text()
+                                                })
                         .text_xs()
                         .font_weight(gpui::FontWeight::BOLD)
                         .child("Inspector"),

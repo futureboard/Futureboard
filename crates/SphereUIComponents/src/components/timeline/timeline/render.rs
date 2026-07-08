@@ -136,12 +136,39 @@ impl Render for Timeline {
         let on_volume_change =
             cx.listener(|this, (track_id, volume): &(String, f32), _window, cx| {
                 this.state.set_track_volume(track_id, *volume);
+                this.state.clear_track_volume_preview(track_id);
                 this.mark_project_changed(cx);
                 if let Some(cb) = this.on_track_param_change.as_ref() {
                     cb(track_id.clone(), "volume".to_string(), *volume);
                 }
                 cx.notify();
             });
+        let on_volume_drag_start =
+            cx.listener(|this, (track_id, volume): &(String, f32), _window, cx| {
+                this.state.begin_track_volume_preview(track_id, *volume);
+                cx.notify();
+            });
+        let on_volume_drag_preview =
+            cx.listener(|this, (track_id, volume): &(String, f32), _window, cx| {
+                let changed = this.state.set_track_volume_preview(track_id, *volume);
+                if changed {
+                    crate::perf::count("fader_drag_preview_count", 1);
+                    if let Some(cb) = this.on_track_param_change.as_ref() {
+                        cb(track_id.clone(), "volume".to_string(), *volume);
+                    }
+                    cx.notify();
+                }
+            });
+        let on_volume_drag_commit = cx.listener(|this, track_id: &String, _window, cx| {
+            if let Some(volume) = this.state.commit_track_volume_preview(track_id) {
+                crate::perf::count("fader_drag_commit_count", 1);
+                this.mark_project_changed(cx);
+                if let Some(cb) = this.on_track_param_change.as_ref() {
+                    cb(track_id.clone(), "volume".to_string(), volume);
+                }
+                cx.notify();
+            }
+        });
 
         let on_pan_change = cx.listener(|this, (track_id, pan): &(String, f32), _window, cx| {
             this.state.set_track_pan(track_id, *pan);
@@ -512,6 +539,15 @@ impl Render for Timeline {
         let on_volume_change: std::sync::Arc<
             dyn Fn(&(String, f32), &mut gpui::Window, &mut gpui::App) + 'static,
         > = std::sync::Arc::new(on_volume_change);
+        let on_volume_drag_start: std::sync::Arc<
+            dyn Fn(&(String, f32), &mut gpui::Window, &mut gpui::App) + 'static,
+        > = std::sync::Arc::new(on_volume_drag_start);
+        let on_volume_drag_preview: std::sync::Arc<
+            dyn Fn(&(String, f32), &mut gpui::Window, &mut gpui::App) + 'static,
+        > = std::sync::Arc::new(on_volume_drag_preview);
+        let on_volume_drag_commit: std::sync::Arc<
+            dyn Fn(&String, &mut gpui::Window, &mut gpui::App) + 'static,
+        > = std::sync::Arc::new(on_volume_drag_commit);
         let _on_pan_change: std::sync::Arc<
             dyn Fn(&(String, f32), &mut gpui::Window, &mut gpui::App) + 'static,
         > = std::sync::Arc::new(on_pan_change);
@@ -856,6 +892,9 @@ impl Render for Timeline {
             on_toggle_automation: on_toggle_automation.clone(),
             on_delete_track: on_delete_track.clone(),
             on_volume_change: on_volume_change.clone(),
+            on_volume_drag_start: on_volume_drag_start.clone(),
+            on_volume_drag_preview: on_volume_drag_preview.clone(),
+            on_volume_drag_commit: on_volume_drag_commit.clone(),
             on_context_menu: on_track_context_menu.clone(),
         };
 

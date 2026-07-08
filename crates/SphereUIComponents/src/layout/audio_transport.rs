@@ -1406,15 +1406,40 @@ impl StudioLayout {
     }
 
     fn start_hardware_midi_playback(&mut self, playhead_beats: f32, cx: &mut Context<Self>) {
-        let events = self.build_hardware_midi_events(playhead_beats, cx);
+        let (start_sample, sample_rate) = self
+            .audio_bridge
+            .stats
+            .as_ref()
+            .map(|stats| (stats.position_samples, stats.sample_rate.max(1)))
+            .unwrap_or_else(|| {
+                let sample_rate = self.current_audio_sample_rate().max(1);
+                let start_sample = {
+                    let timeline = self.timeline.read(cx);
+                    timeline.state.tempo_map.samples_at_beat(
+                        playhead_beats.max(0.0) as f64,
+                        timeline.state.bpm as f64,
+                        sample_rate as f64,
+                    )
+                };
+                (start_sample, sample_rate)
+            });
+        let mut events = self.build_hardware_midi_events(playhead_beats, sample_rate, cx);
+        for event in &mut events {
+            if event.delay_seconds <= 0.0 && event.absolute_sample < start_sample {
+                event.absolute_sample = start_sample;
+            }
+        }
         if std::env::var_os("FUTUREBOARD_MIDI_OUTPUT_DEBUG").is_some() {
             eprintln!(
-                "[midi-output] start hardware playback events={} playhead_beats={:.3}",
+                "[midi-output] start hardware playback events={} playhead_beats={:.3} start_sample={} sample_rate={}",
                 events.len(),
-                playhead_beats
+                playhead_beats,
+                start_sample,
+                sample_rate,
             );
         }
-        self.hardware_midi_playback.start(events);
+        self.hardware_midi_playback
+            .start_at_sample(events, start_sample, sample_rate);
     }
 
     fn stop_hardware_midi_playback(&mut self) {
@@ -1424,24 +1449,28 @@ impl StudioLayout {
     fn build_hardware_midi_events(
         &self,
         playhead_beats: f32,
+        sample_rate: u32,
         cx: &mut Context<Self>,
     ) -> Vec<sphere_midi_service::HardwareMidiEvent> {
         let enabled_outputs = {
             let settings = self.settings.read(cx);
             let detected = crate::device_registry::cached_midi_devices();
-            sphere_midi_service::resolve_midi_devices(&settings.current.hardware.midi.devices, &detected)
-                .into_iter()
-                .filter(|d| {
-                    d.enabled
-                        && d.connected
-                        && matches!(
-                            d.direction,
-                            crate::settings::MidiDeviceDirection::Output
-                                | crate::settings::MidiDeviceDirection::InputOutput
-                        )
-                })
-                .flat_map(|d| [d.id, d.name])
-                .collect::<HashSet<_>>()
+            sphere_midi_service::resolve_midi_devices(
+                &settings.current.hardware.midi.devices,
+                &detected,
+            )
+            .into_iter()
+            .filter(|d| {
+                d.enabled
+                    && d.connected
+                    && matches!(
+                        d.direction,
+                        crate::settings::MidiDeviceDirection::Output
+                            | crate::settings::MidiDeviceDirection::InputOutput
+                    )
+            })
+            .flat_map(|d| [d.id, d.name])
+            .collect::<HashSet<_>>()
         };
         if enabled_outputs.is_empty() {
             return Vec::new();
@@ -1488,6 +1517,12 @@ impl StudioLayout {
                         events.push(sphere_midi_service::HardwareMidiEvent {
                             device_id: device_id.clone(),
                             delay_seconds: 0.0,
+                            beat: playhead_beats.max(0.0) as f64,
+                            absolute_sample: state.tempo_map.samples_at_beat(
+                                playhead_beats.max(0.0) as f64,
+                                base_bpm,
+                                sample_rate as f64,
+                            ),
                             message: vec![0x90 | channel, pitch, velocity],
                         });
                     } else {
@@ -1497,6 +1532,12 @@ impl StudioLayout {
                         events.push(sphere_midi_service::HardwareMidiEvent {
                             device_id: device_id.clone(),
                             delay_seconds: (start_seconds - playhead_seconds).max(0.0),
+                            beat: note_start as f64,
+                            absolute_sample: state.tempo_map.samples_at_beat(
+                                note_start.max(0.0) as f64,
+                                base_bpm,
+                                sample_rate as f64,
+                            ),
                             message: vec![0x90 | channel, pitch, velocity],
                         });
                     }
@@ -1506,6 +1547,12 @@ impl StudioLayout {
                     events.push(sphere_midi_service::HardwareMidiEvent {
                         device_id: device_id.clone(),
                         delay_seconds: (end_seconds - playhead_seconds).max(0.0),
+                        beat: note_end as f64,
+                        absolute_sample: state.tempo_map.samples_at_beat(
+                            note_end.max(0.0) as f64,
+                            base_bpm,
+                            sample_rate as f64,
+                        ),
                         message: vec![0x80 | channel, pitch, 0],
                     });
                 }

@@ -943,6 +943,7 @@ impl StudioLayout {
             Err(err) => {
                 eprintln!("[mixer] failed to open external mixer window: {err}");
                 self.panels.mixer_docked = true;
+                self.set_active_panel(crate::layout::WorkspaceActivePanel::Mixer, cx);
                 cx.notify();
             }
         }

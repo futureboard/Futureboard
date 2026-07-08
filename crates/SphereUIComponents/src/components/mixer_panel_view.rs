@@ -98,9 +98,15 @@ impl MixerPanelView {
         let hidden = timeline.state.mixer_tree.hidden_channel_ids.clone();
         let strip_count = mixer_render_item_count(&timeline.state.tracks, &collapsed, &hidden);
 
+        let mut tracks = timeline.state.tracks.clone();
+        let mut master = timeline.state.master.clone();
+        timeline
+            .state
+            .apply_volume_previews_to_snapshot(&mut tracks, &mut master);
+
         MixerPanelViewState {
-            tracks: timeline.state.tracks.clone(),
-            master: timeline.state.master.clone(),
+            tracks,
+            master,
             selected_track_id: timeline.state.selection.selected_track_id.clone(),
             collapsed,
             hidden,

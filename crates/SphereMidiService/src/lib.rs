@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::OnceLock;
 use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -300,15 +301,44 @@ pub struct HardwareMidiEvent {
     /// MIDI output device id or display name. The GPUI routing UI currently
     /// stores the display name; matching accepts either for migration safety.
     pub device_id: String,
-    /// Seconds after transport start at which this event should be sent.
+    /// Legacy/diagnostic relative time. New playback scheduling uses
+    /// [`absolute_sample`] against the audio transport timeline.
     pub delay_seconds: f64,
+    /// Musical position used for diagnostics and rebuilds after tempo changes.
+    pub beat: f64,
+    /// Absolute sample position on the same timeline as audio playback.
+    pub absolute_sample: u64,
     /// Raw MIDI bytes, e.g. [0x90 | channel, pitch, velocity].
     pub message: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct HardwareMidiPlaybackConfig {
+    pub start_sample: u64,
+    pub sample_rate: u32,
+    pub lookahead: Duration,
+}
+
+impl HardwareMidiPlaybackConfig {
+    pub fn new(start_sample: u64, sample_rate: u32) -> Self {
+        Self {
+            start_sample,
+            sample_rate: sample_rate.max(1),
+            lookahead: Duration::from_millis(10),
+        }
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct HardwareMidiProfilerSnapshot {
+    pub events_per_second: u32,
+    pub max_jitter_us: u32,
 }
 
 pub struct HardwareMidiPlayback {
     cancel_tx: Option<std::sync::mpsc::Sender<()>>,
     handle: Option<JoinHandle<()>>,
+    profiler: std::sync::Arc<HardwareMidiProfiler>,
 }
 
 impl Default for HardwareMidiPlayback {
@@ -322,18 +352,50 @@ impl HardwareMidiPlayback {
         Self {
             cancel_tx: None,
             handle: None,
+            profiler: std::sync::Arc::new(HardwareMidiProfiler::default()),
         }
     }
 
+    /// Legacy entry point retained for callers that only know relative seconds.
+    /// New transport playback should call [`Self::start_at_sample`] so events are
+    /// aligned to the same sample timeline as audio.
     pub fn start(&mut self, mut events: Vec<HardwareMidiEvent>) {
+        for event in &mut events {
+            if event.absolute_sample == 0 && event.delay_seconds > 0.0 {
+                event.absolute_sample = seconds_to_samples(event.delay_seconds, 48_000);
+            }
+        }
+        self.start_with_config(events, HardwareMidiPlaybackConfig::new(0, 48_000));
+    }
+
+    pub fn start_at_sample(&mut self, events: Vec<HardwareMidiEvent>, start_sample: u64, sample_rate: u32) {
+        self.start_with_config(events, HardwareMidiPlaybackConfig::new(start_sample, sample_rate));
+    }
+
+    pub fn start_with_config(
+        &mut self,
+        mut events: Vec<HardwareMidiEvent>,
+        config: HardwareMidiPlaybackConfig,
+    ) {
         self.stop();
+        self.profiler.reset();
         if events.is_empty() {
             return;
         }
-        events.sort_by(|a, b| a.delay_seconds.total_cmp(&b.delay_seconds));
+        sort_hardware_midi_events(&mut events);
+        events = coalesce_hardware_midi_events(events, config.sample_rate);
         let (cancel_tx, cancel_rx) = std::sync::mpsc::channel();
         self.cancel_tx = Some(cancel_tx);
-        self.handle = Some(spawn_hardware_midi_thread(events, cancel_rx));
+        self.handle = Some(spawn_hardware_midi_thread(
+            events,
+            config,
+            cancel_rx,
+            self.profiler.clone(),
+        ));
+    }
+
+    pub fn profiler_snapshot(&self) -> HardwareMidiProfilerSnapshot {
+        self.profiler.snapshot()
     }
 
     pub fn stop(&mut self) {
@@ -355,15 +417,22 @@ impl Drop for HardwareMidiPlayback {
 #[cfg(not(target_os = "macos"))]
 fn spawn_hardware_midi_thread(
     events: Vec<HardwareMidiEvent>,
+    config: HardwareMidiPlaybackConfig,
     cancel_rx: std::sync::mpsc::Receiver<()>,
+    profiler: std::sync::Arc<HardwareMidiProfiler>,
 ) -> JoinHandle<()> {
-    std::thread::spawn(move || run_hardware_midi_thread(events, cancel_rx))
+    std::thread::Builder::new()
+        .name("Futureboard MIDI output".to_string())
+        .spawn(move || run_hardware_midi_thread(events, config, cancel_rx, profiler))
+        .expect("spawn Futureboard MIDI output thread")
 }
 
 #[cfg(target_os = "macos")]
 fn spawn_hardware_midi_thread(
     _events: Vec<HardwareMidiEvent>,
+    _config: HardwareMidiPlaybackConfig,
     _cancel_rx: std::sync::mpsc::Receiver<()>,
+    _profiler: std::sync::Arc<HardwareMidiProfiler>,
 ) -> JoinHandle<()> {
     std::thread::spawn(|| {})
 }
@@ -371,35 +440,69 @@ fn spawn_hardware_midi_thread(
 #[cfg(not(target_os = "macos"))]
 fn run_hardware_midi_thread(
     events: Vec<HardwareMidiEvent>,
+    config: HardwareMidiPlaybackConfig,
     cancel_rx: std::sync::mpsc::Receiver<()>,
+    profiler: std::sync::Arc<HardwareMidiProfiler>,
 ) {
     use midir::MidiOutputConnection;
-    use std::time::{Duration, Instant};
 
+    let _thread_scope = MidiThreadScope::enter();
+    let debug = midi_output_debug_enabled();
+    let lateness_warnings = midi_lateness_warnings_enabled();
+    let sample_rate = config.sample_rate.max(1) as f64;
+    let start_sample = config.start_sample;
+    let wall_start = Instant::now();
+    let lookahead_samples = seconds_to_samples(config.lookahead.as_secs_f64(), config.sample_rate);
     let mut connections: HashMap<String, MidiOutputConnection> = HashMap::new();
-    let start = Instant::now();
+    let mut cursor = events.partition_point(|ev| ev.absolute_sample < start_sample);
 
-    for event in events {
-        let deadline = start + Duration::from_secs_f64(event.delay_seconds.max(0.0));
-        let now = Instant::now();
-        if deadline > now {
-            if cancel_rx.recv_timeout(deadline - now).is_ok() {
-                send_all_notes_off(&mut connections);
-                return;
-            }
-        } else if cancel_rx.try_recv().is_ok() {
+    // Open enabled target devices once on the MIDI thread. Avoiding open/close
+    // during playback prevents WinMM/midir from introducing UI-sized stalls.
+    for device_id in unique_event_devices(&events[cursor..]) {
+        if let Some(conn) = open_midi_output(&device_id) {
+            connections.insert(device_id, conn);
+        }
+    }
+
+    while cursor < events.len() {
+        if cancel_rx.try_recv().is_ok() {
             send_all_notes_off(&mut connections);
             return;
         }
 
-        if !connections.contains_key(&event.device_id) {
-            if let Some(conn) = open_midi_output(&event.device_id) {
-                connections.insert(event.device_id.clone(), conn);
-            }
+        let timeline_sample = start_sample.saturating_add(seconds_to_samples(
+            wall_start.elapsed().as_secs_f64(),
+            config.sample_rate,
+        ));
+        let horizon = timeline_sample.saturating_add(lookahead_samples.max(1));
+
+        if events[cursor].absolute_sample > horizon {
+            wait_for_midi_tick(Duration::from_millis(1));
+            continue;
         }
+
+        let event = &events[cursor];
+        let scheduled_wall = wall_start + samples_to_duration(
+            event.absolute_sample.saturating_sub(start_sample),
+            sample_rate,
+        );
+        while Instant::now() < scheduled_wall {
+            if cancel_rx.try_recv().is_ok() {
+                send_all_notes_off(&mut connections);
+                return;
+            }
+            let remaining = scheduled_wall.saturating_duration_since(Instant::now());
+            wait_for_midi_tick(remaining.min(Duration::from_millis(1)));
+        }
+
+        let actual = Instant::now();
+        let lateness = actual.saturating_duration_since(scheduled_wall);
+        profiler.record(lateness);
         if let Some(conn) = connections.get_mut(&event.device_id) {
             let _ = conn.send(&event.message);
         }
+        log_midi_dispatch(event, scheduled_wall, actual, lateness, debug, lateness_warnings);
+        cursor += 1;
     }
 }
 
@@ -422,12 +525,336 @@ fn open_midi_output(device_id_or_name: &str) -> Option<midir::MidiOutputConnecti
 fn send_all_notes_off(connections: &mut HashMap<String, midir::MidiOutputConnection>) {
     for conn in connections.values_mut() {
         for channel in 0..16u8 {
-            let _ = conn.send(&[0x80 | channel, 0, 0]);
+            for note in 0..128u8 {
+                let _ = conn.send(&[0x80 | channel, note, 0]);
+            }
             let _ = conn.send(&[0xb0 | channel, 64, 0]);
             let _ = conn.send(&[0xb0 | channel, 123, 0]);
             let _ = conn.send(&[0xb0 | channel, 120, 0]);
         }
     }
+}
+
+fn seconds_to_samples(seconds: f64, sample_rate: u32) -> u64 {
+    (seconds.max(0.0) * sample_rate.max(1) as f64).round() as u64
+}
+
+fn samples_to_duration(samples: u64, sample_rate: f64) -> Duration {
+    Duration::from_secs_f64(samples as f64 / sample_rate.max(1.0))
+}
+
+fn midi_output_debug_enabled() -> bool {
+    static FLAG: OnceLock<bool> = OnceLock::new();
+    *FLAG.get_or_init(|| std::env::var_os("FUTUREBOARD_MIDI_OUTPUT_DEBUG").is_some())
+}
+
+fn midi_lateness_warnings_enabled() -> bool {
+    static FLAG: OnceLock<bool> = OnceLock::new();
+    *FLAG.get_or_init(|| std::env::var_os("FUTUREBOARD_MIDI_OUTPUT_LATENESS_WARN").is_some())
+}
+
+fn sort_hardware_midi_events(events: &mut [HardwareMidiEvent]) {
+    events.sort_by(|a, b| {
+        a.absolute_sample
+            .cmp(&b.absolute_sample)
+            .then_with(|| midi_order_key(a).cmp(&midi_order_key(b)))
+            .then_with(|| a.device_id.cmp(&b.device_id))
+            .then_with(|| a.message.cmp(&b.message))
+    });
+}
+
+fn midi_order_key(event: &HardwareMidiEvent) -> (u8, u8, u8, u8) {
+    let status = event.message.first().copied().unwrap_or(0);
+    let kind = status & 0xf0;
+    let channel = status & 0x0f;
+    let data1 = event.message.get(1).copied().unwrap_or(0);
+    let data2 = event.message.get(2).copied().unwrap_or(0);
+    let group = match kind {
+        0x80 => 0,
+        0x90 if data2 == 0 => 0,
+        0xb0 if data1 == 64 && data2 == 0 => 1,
+        0xb0 if data1 == 120 || data1 == 123 => 1,
+        0xc0 => 2,
+        0xb0 if data1 == 0 || data1 == 32 => 3,
+        0xb0 => 4,
+        0xe0 => 5,
+        0xa0 | 0xd0 => 6,
+        0x90 => 7,
+        0xf0 => 8,
+        _ => 9,
+    };
+    (group, channel, data1, data2)
+}
+
+fn coalesce_hardware_midi_events(
+    events: Vec<HardwareMidiEvent>,
+    sample_rate: u32,
+) -> Vec<HardwareMidiEvent> {
+    let close_window = seconds_to_samples(0.002, sample_rate).max(1);
+    let dense_window = seconds_to_samples(0.005, sample_rate).max(1);
+    let mut out: Vec<HardwareMidiEvent> = Vec::with_capacity(events.len());
+    let mut last_cc: HashMap<(String, u8, u8), (u8, u64)> = HashMap::new();
+    let mut last_pb: HashMap<(String, u8), (u16, u64)> = HashMap::new();
+
+    for event in events {
+        let Some(status) = event.message.first().copied() else {
+            out.push(event);
+            continue;
+        };
+        let kind = status & 0xf0;
+        let channel = status & 0x0f;
+        match kind {
+            0xb0 => {
+                let controller = event.message.get(1).copied().unwrap_or(0);
+                let value = event.message.get(2).copied().unwrap_or(0);
+                // Preserve bank select, sustain pedal transitions, and panic CCs.
+                if matches!(controller, 0 | 32 | 64 | 120 | 123) {
+                    out.push(event);
+                    continue;
+                }
+                let key = (event.device_id.clone(), channel, controller);
+                if let Some((prev_value, prev_sample)) = last_cc.get(&key).copied() {
+                    let delta = event.absolute_sample.saturating_sub(prev_sample);
+                    if prev_value == value && delta <= close_window {
+                        continue;
+                    }
+                    if delta <= dense_window {
+                        if let Some(last) = out.iter_mut().rev().find(|candidate| {
+                            candidate.device_id == event.device_id
+                                && candidate.message.first().copied().unwrap_or(0) & 0xf0 == 0xb0
+                                && candidate.message.first().copied().unwrap_or(0) & 0x0f == channel
+                                && candidate.message.get(1).copied().unwrap_or(255) == controller
+                        }) {
+                            *last = event.clone();
+                        } else {
+                            out.push(event.clone());
+                        }
+                        last_cc.insert(key, (value, event.absolute_sample));
+                        continue;
+                    }
+                }
+                last_cc.insert(key, (value, event.absolute_sample));
+                out.push(event);
+            }
+            0xe0 => {
+                let lsb = event.message.get(1).copied().unwrap_or(0) as u16;
+                let msb = event.message.get(2).copied().unwrap_or(0) as u16;
+                let value = (msb << 7) | lsb;
+                let key = (event.device_id.clone(), channel);
+                if let Some((prev_value, prev_sample)) = last_pb.get(&key).copied() {
+                    let delta = event.absolute_sample.saturating_sub(prev_sample);
+                    if prev_value == value && delta <= close_window {
+                        continue;
+                    }
+                    if delta <= dense_window {
+                        if let Some(last) = out.iter_mut().rev().find(|candidate| {
+                            candidate.device_id == event.device_id
+                                && candidate.message.first().copied().unwrap_or(0) & 0xf0 == 0xe0
+                                && candidate.message.first().copied().unwrap_or(0) & 0x0f == channel
+                        }) {
+                            *last = event.clone();
+                        } else {
+                            out.push(event.clone());
+                        }
+                        last_pb.insert(key, (value, event.absolute_sample));
+                        continue;
+                    }
+                }
+                last_pb.insert(key, (value, event.absolute_sample));
+                out.push(event);
+            }
+            _ => out.push(event),
+        }
+    }
+
+    sort_hardware_midi_events(&mut out);
+    out
+}
+
+fn unique_event_devices(events: &[HardwareMidiEvent]) -> Vec<String> {
+    let mut devices = Vec::new();
+    for event in events {
+        if !devices.iter().any(|device| device == &event.device_id) {
+            devices.push(event.device_id.clone());
+        }
+    }
+    devices
+}
+
+fn log_midi_dispatch(
+    event: &HardwareMidiEvent,
+    scheduled_wall: Instant,
+    actual: Instant,
+    lateness: Duration,
+    debug: bool,
+    warnings: bool,
+) {
+    let lateness_ms = lateness.as_secs_f64() * 1000.0;
+    if debug {
+        let (kind, ch, d1, d2) = describe_midi_message(&event.message);
+        eprintln!(
+            "[midi-output] send type={kind} ch={ch} data1={d1} data2={d2} beat={:.6} sample={} scheduled={scheduled_wall:?} actual={actual:?} late_ms={lateness_ms:.3}",
+            event.beat,
+            event.absolute_sample,
+        );
+    }
+    if warnings && lateness_ms >= 2.0 {
+        let threshold = if lateness_ms >= 20.0 {
+            20
+        } else if lateness_ms >= 10.0 {
+            10
+        } else if lateness_ms >= 5.0 {
+            5
+        } else {
+            2
+        };
+        eprintln!(
+            "[midi-output] WARNING lateness>{threshold}ms actual={lateness_ms:.3} sample={} beat={:.6}",
+            event.absolute_sample, event.beat
+        );
+    }
+}
+
+fn describe_midi_message(message: &[u8]) -> (&'static str, u8, u8, u8) {
+    let status = message.first().copied().unwrap_or(0);
+    let channel = status & 0x0f;
+    let d1 = message.get(1).copied().unwrap_or(0);
+    let d2 = message.get(2).copied().unwrap_or(0);
+    let kind = match status & 0xf0 {
+        0x80 => "note_off",
+        0x90 if d2 == 0 => "note_off",
+        0x90 => "note_on",
+        0xa0 => "poly_aftertouch",
+        0xb0 => "cc",
+        0xc0 => "program_change",
+        0xd0 => "channel_aftertouch",
+        0xe0 => "pitch_bend",
+        0xf0 => "sysex/system",
+        _ => "unknown",
+    };
+    (kind, channel, d1, d2)
+}
+
+#[derive(Default)]
+struct HardwareMidiProfiler {
+    events_total: std::sync::atomic::AtomicU64,
+    max_jitter_us: std::sync::atomic::AtomicU32,
+    started: OnceLock<Instant>,
+}
+
+impl HardwareMidiProfiler {
+    fn reset(&self) {
+        self.events_total.store(0, std::sync::atomic::Ordering::Relaxed);
+        self.max_jitter_us.store(0, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    fn record(&self, lateness: Duration) {
+        let _ = self.started.get_or_init(Instant::now);
+        self.events_total.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let us = lateness.as_micros().min(u32::MAX as u128) as u32;
+        let mut prev = self.max_jitter_us.load(std::sync::atomic::Ordering::Relaxed);
+        while us > prev {
+            match self.max_jitter_us.compare_exchange_weak(
+                prev,
+                us,
+                std::sync::atomic::Ordering::Relaxed,
+                std::sync::atomic::Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(next) => prev = next,
+            }
+        }
+    }
+
+    fn snapshot(&self) -> HardwareMidiProfilerSnapshot {
+        let elapsed = self
+            .started
+            .get()
+            .map(|started| started.elapsed().as_secs_f64())
+            .unwrap_or(0.0)
+            .max(0.001);
+        HardwareMidiProfilerSnapshot {
+            events_per_second: (self.events_total.load(std::sync::atomic::Ordering::Relaxed) as f64
+                / elapsed)
+                .round()
+                .min(u32::MAX as f64) as u32,
+            max_jitter_us: self.max_jitter_us.load(std::sync::atomic::Ordering::Relaxed),
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+struct MidiThreadScope;
+
+#[cfg(target_os = "windows")]
+impl MidiThreadScope {
+    fn enter() -> Self {
+        unsafe {
+            let _ = timeBeginPeriod(1);
+            set_current_thread_priority_high();
+        }
+        Self
+    }
+}
+
+#[cfg(target_os = "windows")]
+impl Drop for MidiThreadScope {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = timeEndPeriod(1);
+        }
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+struct MidiThreadScope;
+
+#[cfg(not(target_os = "windows"))]
+impl MidiThreadScope {
+    fn enter() -> Self {
+        Self
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn wait_for_midi_tick(duration: Duration) {
+    use windows::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0};
+    use windows::Win32::System::Threading::{CreateWaitableTimerW, SetWaitableTimer, WaitForSingleObject};
+
+    let due_100ns = -(duration.as_nanos().min(i64::MAX as u128 / 100) as i64 / 100).max(-1);
+    unsafe {
+        let Ok(timer) = CreateWaitableTimerW(None, true, None) else {
+            std::thread::sleep(duration);
+            return;
+        };
+        let mut due = due_100ns;
+        if SetWaitableTimer(timer, &mut due, 0, None, None, false).is_ok() {
+            let _ = WaitForSingleObject(timer, u32::MAX) == WAIT_OBJECT_0;
+        } else {
+            std::thread::sleep(duration);
+        }
+        let _ = CloseHandle(timer);
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn wait_for_midi_tick(duration: Duration) {
+    std::thread::sleep(duration);
+}
+
+#[cfg(target_os = "windows")]
+unsafe fn set_current_thread_priority_high() {
+    use windows::Win32::System::Threading::{GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_TIME_CRITICAL};
+    unsafe {
+        let _ = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
+    }
+}
+
+#[cfg(target_os = "windows")]
+#[link(name = "winmm")]
+unsafe extern "system" {
+    fn timeBeginPeriod(uperiod: u32) -> u32;
+    fn timeEndPeriod(uperiod: u32) -> u32;
 }
 
 pub fn migrate_legacy_midi_settings(midi: &mut MidiHardwareSettings) {
@@ -510,5 +937,58 @@ mod tests {
         assert_eq!(midi.devices.len(), 2);
         assert!(midi.enabled_inputs.is_empty());
         assert!(midi.enabled_outputs.is_empty());
+    }
+
+    fn hw_event(sample: u64, message: &[u8]) -> HardwareMidiEvent {
+        HardwareMidiEvent {
+            device_id: "midi-out-test".to_string(),
+            delay_seconds: sample as f64 / 48_000.0,
+            beat: sample as f64 / 24_000.0,
+            absolute_sample: sample,
+            message: message.to_vec(),
+        }
+    }
+
+    #[test]
+    fn hardware_sort_sends_note_off_before_note_on_at_same_sample() {
+        let mut events = vec![
+            hw_event(100, &[0x90, 60, 100]),
+            hw_event(100, &[0xb0, 1, 64]),
+            hw_event(100, &[0x80, 60, 0]),
+        ];
+        sort_hardware_midi_events(&mut events);
+        assert_eq!(events[0].message, vec![0x80, 60, 0]);
+        assert_eq!(events[1].message, vec![0xb0, 1, 64]);
+        assert_eq!(events[2].message, vec![0x90, 60, 100]);
+    }
+
+    #[test]
+    fn hardware_coalescing_drops_dense_cc_and_pitch_bend_but_keeps_notes() {
+        let events = vec![
+            hw_event(100, &[0x90, 60, 100]),
+            hw_event(101, &[0xb0, 1, 10]),
+            hw_event(102, &[0xb0, 1, 10]),
+            hw_event(103, &[0xb0, 1, 20]),
+            hw_event(104, &[0xe0, 0, 64]),
+            hw_event(105, &[0xe0, 0, 64]),
+            hw_event(106, &[0x80, 60, 0]),
+        ];
+        let coalesced = coalesce_hardware_midi_events(events, 48_000);
+        assert!(coalesced.iter().any(|event| event.message == vec![0x90, 60, 100]));
+        assert!(coalesced.iter().any(|event| event.message == vec![0x80, 60, 0]));
+        assert_eq!(
+            coalesced
+                .iter()
+                .filter(|event| event.message.first().copied().unwrap_or(0) & 0xf0 == 0xb0)
+                .count(),
+            1
+        );
+        assert_eq!(
+            coalesced
+                .iter()
+                .filter(|event| event.message.first().copied().unwrap_or(0) & 0xf0 == 0xe0)
+                .count(),
+            1
+        );
     }
 }

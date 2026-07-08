@@ -101,9 +101,7 @@ pub fn soundfont_player_mdi_workspace(
     panel_callbacks: SoundfontPlayerCallbacks,
 ) -> AnyElement {
     mdi_workspace(state, callbacks, |doc| match doc.kind {
-        MdiDocumentKind::SoundfontPlayer => {
-            soundfont_player_panel(panel, panel_callbacks.clone())
-        }
+        MdiDocumentKind::SoundfontPlayer => soundfont_player_panel(panel, panel_callbacks.clone()),
         MdiDocumentKind::Generic => empty_document(),
     })
 }

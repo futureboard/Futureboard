@@ -5,6 +5,7 @@ use gpui::{Context, DragMoveEvent, MouseDownEvent, Window};
 use crate::components::{
     status_content_signature, BottomPanelResizeDrag, BottomPanelState, BottomTab, StatusBarContent,
 };
+use crate::layout::WorkspaceActivePanel;
 
 use super::StudioLayout;
 
@@ -15,6 +16,29 @@ impl StudioLayout {
 
     pub(crate) fn active_bottom_tab(&self) -> BottomTab {
         self.active_bottom_tab
+    }
+
+    pub(crate) fn active_panel(&self) -> WorkspaceActivePanel {
+        self.active_panel
+    }
+
+    pub(crate) fn set_active_panel(&mut self, panel: WorkspaceActivePanel, cx: &mut Context<Self>) {
+        if self.active_panel == panel {
+            return;
+        }
+        self.active_panel = panel;
+        eprintln!("[Workspace] active_panel = {}", panel.label());
+        self.notify_bottom_panel_shell(cx);
+        self.notify_status_bar(cx);
+        cx.notify();
+    }
+
+    fn active_panel_for_bottom_tab(tab: BottomTab) -> WorkspaceActivePanel {
+        match tab {
+            BottomTab::Mixer => WorkspaceActivePanel::Mixer,
+            BottomTab::Editor => WorkspaceActivePanel::Editor,
+            BottomTab::EffectEditor => WorkspaceActivePanel::EffectEditor,
+        }
     }
 
     /// Whether the docked piano-roll MIDI editor is actually on screen — the
@@ -109,10 +133,12 @@ impl StudioLayout {
     }
 
     pub(crate) fn set_active_bottom_tab(&mut self, tab: BottomTab, cx: &mut Context<Self>) {
-        if self.active_bottom_tab == tab {
+        let tab_changed = self.active_bottom_tab != tab;
+        self.active_bottom_tab = tab;
+        self.set_active_panel(Self::active_panel_for_bottom_tab(tab), cx);
+        if !tab_changed {
             return;
         }
-        self.active_bottom_tab = tab;
         self.ensure_mixer_tree_defaults_once(cx);
         self.ensure_mixer_tree_ui_hooks(cx.entity().clone(), cx);
         self.notify_bottom_panel_shell(cx);

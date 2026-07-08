@@ -59,6 +59,26 @@ pub fn slider_with_reset(
     on_change: impl Fn(&f32, &mut Window, &mut App) + 'static,
     on_double_click_reset: Option<impl Fn(&mut Window, &mut App) + 'static>,
 ) -> impl IntoElement {
+    slider_with_drag_callbacks(
+        id,
+        value_norm,
+        accent,
+        None::<fn(&f32, &mut Window, &mut App)>,
+        Some(on_change),
+        None::<fn(&mut Window, &mut App)>,
+        on_double_click_reset,
+    )
+}
+
+pub fn slider_with_drag_callbacks(
+    id: impl Into<gpui::SharedString>,
+    value_norm: f32,
+    accent: gpui::Rgba,
+    on_drag_start: Option<impl Fn(&f32, &mut Window, &mut App) + 'static>,
+    on_drag_preview: Option<impl Fn(&f32, &mut Window, &mut App) + 'static>,
+    on_drag_commit: Option<impl Fn(&mut Window, &mut App) + 'static>,
+    on_double_click_reset: Option<impl Fn(&mut Window, &mut App) + 'static>,
+) -> impl IntoElement {
     let id_str: gpui::SharedString = id.into();
     let id_string = id_str.to_string();
     let value = value_norm.clamp(0.0, 1.0);
@@ -143,7 +163,10 @@ pub fn slider_with_reset(
             SliderDrag {
                 id: id_string.clone(),
             },
-            move |drag, _offset, _window, cx| {
+            move |drag, _offset, window, cx| {
+                if let Some(start) = on_drag_start.as_ref() {
+                    start(&value, window, cx);
+                }
                 cx.new(|_| SliderDrag {
                     id: drag.id.clone(),
                 })
@@ -158,7 +181,18 @@ pub fn slider_with_reset(
             let ox: f32 = bounds.origin.x.into();
             let ow: f32 = f32::from(bounds.size.width).max(1.0);
             let new_value = ((x - ox) / ow).clamp(0.0, 1.0);
-            on_change(&new_value, window, cx);
+            if let Some(preview) = on_drag_preview.as_ref() {
+                preview(&new_value, window, cx);
+            }
+        })
+        .when_some(on_drag_commit, |this, commit| {
+            use std::sync::Arc;
+            let commit: Arc<dyn Fn(&mut Window, &mut App) + 'static> = Arc::new(commit);
+            this.on_mouse_up(gpui::MouseButton::Left, {
+                let commit = commit.clone();
+                move |_event, window, cx| commit(window, cx)
+            })
+            .on_mouse_up_out(gpui::MouseButton::Left, move |_event, window, cx| commit(window, cx))
         })
         .when_some(on_double_click_reset, |this, reset| {
             this.on_click(move |event, window, cx| {

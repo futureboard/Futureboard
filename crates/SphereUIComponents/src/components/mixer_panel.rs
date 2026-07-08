@@ -31,7 +31,7 @@ use gpui::{
 use std::collections::HashSet;
 
 use crate::assets;
-use crate::components::fader::{db_scale_column, db_value_pill, fader as render_fader};
+use crate::components::fader::{db_scale_column, db_value_pill, fader_with_drag_callbacks};
 use crate::components::knob::knob_bipolar;
 use crate::components::mixer_render::{MixerRenderSnapshot, MixerRenderViewport, MixerStripGeom};
 use crate::components::mixer_surface::{mixer_gpu_primitives_active, render_mixer_primitives};
@@ -1228,9 +1228,20 @@ fn fader_area(
     let has_volume_automation = track.has_active_volume_automation();
     let automation_reading = has_volume_automation && track.volume_automation_read;
     let track_id = track.id.clone();
-    let vol_cb = callbacks.on_volume_change.clone();
-    let on_vol_change = move |new_norm: &f32, w: &mut gpui::Window, cx: &mut gpui::App| {
-        vol_cb(&(track_id.clone(), *new_norm), w, cx);
+    let start_cb = callbacks.on_volume_drag_start.clone();
+    let start_id = track_id.clone();
+    let on_vol_start = move |new_norm: &f32, w: &mut gpui::Window, cx: &mut gpui::App| {
+        start_cb(&(start_id.clone(), *new_norm), w, cx);
+    };
+    let preview_cb = callbacks.on_volume_drag_preview.clone();
+    let preview_id = track_id.clone();
+    let on_vol_preview = move |new_norm: &f32, w: &mut gpui::Window, cx: &mut gpui::App| {
+        preview_cb(&(preview_id.clone(), *new_norm), w, cx);
+    };
+    let commit_cb = callbacks.on_volume_drag_commit.clone();
+    let commit_id = track_id.clone();
+    let on_vol_commit = move |w: &mut gpui::Window, cx: &mut gpui::App| {
+        commit_cb(&commit_id, w, cx);
     };
 
     div()
@@ -1301,11 +1312,13 @@ fn fader_area(
                         .h_full()
                         .items_center()
                         .justify_center()
-                        .child(render_fader(
+                        .child(fader_with_drag_callbacks(
                             format!("mix-fader-{}", track.id),
                             display_vol,
                             Colors::accent_primary(),
-                            on_vol_change,
+                            Some(on_vol_start),
+                            Some(on_vol_preview),
+                            Some(on_vol_commit),
                         )),
                 )
                 .child(meter_surface(
@@ -1692,9 +1705,19 @@ pub(crate) fn master_strip(
     // collides with a hashed track id.
     let id_num = usize::MAX;
     let db_str = volume::format_db(master.volume);
-    let on_change = move |v: &f32, w: &mut gpui::Window, cx: &mut gpui::App| {
-        on_master_vol_change(v, w, cx);
+    let on_start_cb = callbacks.on_master_volume_drag_start.clone();
+    let on_master_start = move |v: &f32, w: &mut gpui::Window, cx: &mut gpui::App| {
+        on_start_cb(v, w, cx);
     };
+    let on_preview_cb = callbacks.on_master_volume_drag_preview.clone();
+    let on_master_preview = move |v: &f32, w: &mut gpui::Window, cx: &mut gpui::App| {
+        on_preview_cb(v, w, cx);
+    };
+    let on_commit_cb = callbacks.on_master_volume_drag_commit.clone();
+    let on_master_commit = move |w: &mut gpui::Window, cx: &mut gpui::App| {
+        on_commit_cb(w, cx);
+    };
+    let _ = on_master_vol_change;
     let (insert_h, send_h) = clamp_mixer_section_heights_for_strip(
         split.insert_px,
         split.send_px,
@@ -1850,11 +1873,13 @@ pub(crate) fn master_strip(
                                         .h_full()
                                         .items_center()
                                         .justify_center()
-                                        .child(render_fader(
+                                        .child(fader_with_drag_callbacks(
                                             "mix-fader-master",
                                             master.volume,
                                             accent,
-                                            on_change,
+                                            Some(on_master_start),
+                                            Some(on_master_preview),
+                                            Some(on_master_commit),
                                         )),
                                 )
                                 .child(meter_surface(

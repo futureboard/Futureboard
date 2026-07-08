@@ -92,9 +92,9 @@ fn tab_button(
     let active = tab == active_tab;
     let on_click_clone = on_click.clone();
     let text_color = if active {
-        Colors::text_primary()
+        Colors::tab_text_active()
     } else {
-        Colors::text_muted()
+        Colors::tab_text_muted()
     };
 
     let mut btn = div()
@@ -128,7 +128,7 @@ fn tab_button(
 
     if active {
         btn = btn
-            .bg(Colors::surface_hover())
+            .bg(Colors::tab_bg_active())
             // Accent indicator at the bottom
             .child(
                 div()
@@ -137,13 +137,13 @@ fn tab_button(
                     .left(px(6.0))
                     .right(px(6.0))
                     .h(px(2.0))
-                    .bg(Colors::accent_primary()),
+                    .bg(Colors::tab_indicator_active()),
             );
     } else {
         btn = btn.hover(|style| {
             style
-                .bg(Colors::surface_hover())
-                .text_color(Colors::text_secondary())
+                .bg(Colors::tab_bg_hover())
+                .text_color(Colors::tab_text())
         });
     }
 

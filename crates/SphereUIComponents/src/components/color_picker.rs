@@ -42,9 +42,24 @@ const SV_AREA_HEIGHT: f32 = 132.0;
 /// Height of the hue rainbow strip.
 const HUE_BAR_HEIGHT: f32 = 14.0;
 /// Opaque white / black / transparent stops for the SV gradients.
-const WHITE: Rgba = Rgba { r: 1.0, g: 1.0, b: 1.0, a: 1.0 };
-const OPAQUE_BLACK: Rgba = Rgba { r: 0.0, g: 0.0, b: 0.0, a: 1.0 };
-const CLEAR_BLACK: Rgba = Rgba { r: 0.0, g: 0.0, b: 0.0, a: 0.0 };
+const WHITE: Rgba = Rgba {
+    r: 1.0,
+    g: 1.0,
+    b: 1.0,
+    a: 1.0,
+};
+const OPAQUE_BLACK: Rgba = Rgba {
+    r: 0.0,
+    g: 0.0,
+    b: 0.0,
+    a: 1.0,
+};
+const CLEAR_BLACK: Rgba = Rgba {
+    r: 0.0,
+    g: 0.0,
+    b: 0.0,
+    a: 0.0,
+};
 
 /// Drag payload for the 2D saturation/value area.
 #[derive(Clone, Debug)]
@@ -475,21 +490,17 @@ fn saturation_value_area(
         .border_color(Colors::border_default())
         .cursor(gpui::CursorStyle::Crosshair)
         // Base: white (left) → pure hue (right).
-        .child(
-            div().absolute().inset_0().bg(gpui::linear_gradient(
-                90.0,
-                gpui::linear_color_stop(WHITE, 0.0),
-                gpui::linear_color_stop(hue_color, 1.0),
-            )),
-        )
+        .child(div().absolute().inset_0().bg(gpui::linear_gradient(
+            90.0,
+            gpui::linear_color_stop(WHITE, 0.0),
+            gpui::linear_color_stop(hue_color, 1.0),
+        )))
         // Overlay: transparent (top) → black (bottom).
-        .child(
-            div().absolute().inset_0().bg(gpui::linear_gradient(
-                180.0,
-                gpui::linear_color_stop(CLEAR_BLACK, 0.0),
-                gpui::linear_color_stop(OPAQUE_BLACK, 1.0),
-            )),
-        )
+        .child(div().absolute().inset_0().bg(gpui::linear_gradient(
+            180.0,
+            gpui::linear_color_stop(CLEAR_BLACK, 0.0),
+            gpui::linear_color_stop(OPAQUE_BLACK, 1.0),
+        )))
         // Ring handle centered on (saturation, value).
         .child(
             div()

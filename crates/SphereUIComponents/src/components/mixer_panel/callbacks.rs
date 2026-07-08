@@ -7,12 +7,18 @@ use gpui::{App, Window};
 pub struct MixerCallbacks {
     pub on_select_track: std::sync::Arc<dyn Fn(&String, &mut Window, &mut App) + 'static>,
     pub on_volume_change: std::sync::Arc<dyn Fn(&(String, f32), &mut Window, &mut App) + 'static>,
+    pub on_volume_drag_start: std::sync::Arc<dyn Fn(&(String, f32), &mut Window, &mut App) + 'static>,
+    pub on_volume_drag_preview: std::sync::Arc<dyn Fn(&(String, f32), &mut Window, &mut App) + 'static>,
+    pub on_volume_drag_commit: std::sync::Arc<dyn Fn(&String, &mut Window, &mut App) + 'static>,
     pub on_pan_change: std::sync::Arc<dyn Fn(&(String, f32), &mut Window, &mut App) + 'static>,
     pub on_toggle_mute: std::sync::Arc<dyn Fn(&String, &mut Window, &mut App) + 'static>,
     pub on_toggle_solo: std::sync::Arc<dyn Fn(&String, &mut Window, &mut App) + 'static>,
     pub on_toggle_arm: std::sync::Arc<dyn Fn(&String, &mut Window, &mut App) + 'static>,
     pub on_toggle_input: std::sync::Arc<dyn Fn(&String, &mut Window, &mut App) + 'static>,
     pub on_master_volume_change: std::sync::Arc<dyn Fn(&f32, &mut Window, &mut App) + 'static>,
+    pub on_master_volume_drag_start: std::sync::Arc<dyn Fn(&f32, &mut Window, &mut App) + 'static>,
+    pub on_master_volume_drag_preview: std::sync::Arc<dyn Fn(&f32, &mut Window, &mut App) + 'static>,
+    pub on_master_volume_drag_commit: std::sync::Arc<dyn Fn(&mut Window, &mut App) + 'static>,
     pub on_context_menu:
         Option<std::sync::Arc<dyn Fn(&(String, f32, f32), &mut Window, &mut App) + 'static>>,
     /// Open the insert plugin picker overlay for the track (Phase 2b). The
@@ -60,8 +66,10 @@ pub fn noop_mixer_callbacks() -> MixerCallbacks {
 
     let noop_track = Arc::new(|_: &String, _: &mut Window, _: &mut App| {});
     let noop_vol = Arc::new(|_: &(String, f32), _: &mut Window, _: &mut App| {});
+    let noop_vol_commit = Arc::new(|_: &String, _: &mut Window, _: &mut App| {});
     let noop_pan = Arc::new(|_: &(String, f32), _: &mut Window, _: &mut App| {});
     let noop_master = Arc::new(|_: &f32, _: &mut Window, _: &mut App| {});
+    let noop_master_commit = Arc::new(|_: &mut Window, _: &mut App| {});
     let noop_insert_pair = Arc::new(|_: &(String, String), _: &mut Window, _: &mut App| {});
     let noop_insert_open = Arc::new(|_: &(String, usize, String), _: &mut Window, _: &mut App| {});
     let noop_insert_reorder =
@@ -72,13 +80,19 @@ pub fn noop_mixer_callbacks() -> MixerCallbacks {
     let noop_send_reorder = Arc::new(|_: &(String, String, usize), _: &mut Window, _: &mut App| {});
     MixerCallbacks {
         on_select_track: noop_track.clone(),
-        on_volume_change: noop_vol,
+        on_volume_change: noop_vol.clone(),
+        on_volume_drag_start: noop_vol.clone(),
+        on_volume_drag_preview: noop_vol,
+        on_volume_drag_commit: noop_vol_commit,
         on_pan_change: noop_pan,
         on_toggle_mute: noop_track.clone(),
         on_toggle_solo: noop_track.clone(),
         on_toggle_arm: noop_track.clone(),
         on_toggle_input: noop_track.clone(),
-        on_master_volume_change: noop_master,
+        on_master_volume_change: noop_master.clone(),
+        on_master_volume_drag_start: noop_master.clone(),
+        on_master_volume_drag_preview: noop_master,
+        on_master_volume_drag_commit: noop_master_commit,
         on_context_menu: None,
         on_add_insert: noop_track.clone(),
         on_remove_insert: noop_insert_pair.clone(),

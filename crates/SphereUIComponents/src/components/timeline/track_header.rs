@@ -7,10 +7,10 @@ use gpui::{
 use crate::assets;
 use crate::components::fader::db_value_pill;
 use crate::components::knob::format_pan_label;
-use crate::components::slider::slider_with_reset;
+use crate::components::slider::slider_with_drag_callbacks;
 use crate::components::timeline::timeline_state::{
-    volume, TimelineState, TrackDragItem, TrackLaneMode, TrackState, TrackType,
-    HEADER_WIDTH, TRACK_HEADER_CONTROLS_MIN_HEIGHT,
+    volume, TimelineState, TrackDragItem, TrackLaneMode, TrackState, TrackType, HEADER_WIDTH,
+    TRACK_HEADER_CONTROLS_MIN_HEIGHT,
 };
 use crate::components::timeline::vu_meter::vu_meter_with_levels;
 use crate::theme::Colors;
@@ -18,6 +18,8 @@ use crate::theme::Colors;
 type TrackCallback = std::sync::Arc<dyn Fn(&String, &mut gpui::Window, &mut gpui::App) + 'static>;
 type VolumeCallback =
     std::sync::Arc<dyn Fn(&(String, f32), &mut gpui::Window, &mut gpui::App) + 'static>;
+type VolumeCommitCallback =
+    std::sync::Arc<dyn Fn(&String, &mut gpui::Window, &mut gpui::App) + 'static>;
 type TrackContextCallback =
     std::sync::Arc<dyn Fn(&(String, f32, f32), &mut gpui::Window, &mut gpui::App) + 'static>;
 
@@ -35,6 +37,9 @@ pub struct TrackHeaderCallbacks {
     pub on_toggle_automation: TrackCallback,
     pub on_delete_track: TrackCallback,
     pub on_volume_change: VolumeCallback,
+    pub on_volume_drag_start: VolumeCallback,
+    pub on_volume_drag_preview: VolumeCallback,
+    pub on_volume_drag_commit: VolumeCommitCallback,
     pub on_context_menu: Option<TrackContextCallback>,
 }
 
@@ -265,10 +270,25 @@ pub fn track_header(
     };
 
     let vol_id = track_id.clone();
-    let on_volume_norm = {
-        let cb = callbacks.on_volume_change.clone();
+    let on_volume_drag_start = {
+        let cb = callbacks.on_volume_drag_start.clone();
+        let vol_id = vol_id.clone();
         move |new_norm: &f32, window: &mut gpui::Window, cx: &mut gpui::App| {
             cb(&(vol_id.clone(), *new_norm), window, cx);
+        }
+    };
+    let on_volume_drag_preview = {
+        let cb = callbacks.on_volume_drag_preview.clone();
+        let vol_id = vol_id.clone();
+        move |new_norm: &f32, window: &mut gpui::Window, cx: &mut gpui::App| {
+            cb(&(vol_id.clone(), *new_norm), window, cx);
+        }
+    };
+    let on_volume_drag_commit = {
+        let cb = callbacks.on_volume_drag_commit.clone();
+        let vol_id = vol_id.clone();
+        move |window: &mut gpui::Window, cx: &mut gpui::App| {
+            cb(&vol_id, window, cx);
         }
     };
     let reset_vol_id = track_id.clone();
@@ -487,63 +507,67 @@ pub fn track_header(
                 // Row 2: volume slider + pan pill + meter + dB pill.
                 // Only rendered when the row is tall enough to hold it; the
                 // compact header (short rows) shows just row 1.
-                .when(show_controls, |col| col.child(
-                    div()
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap(px(8.0))
-                        .w_full()
-                        .px(px(8.0))
-                        .py(px(4.0))
-                        .rounded_md()
-                        .bg(Colors::with_alpha(Colors::surface_canvas(), 0.16))
-                        .border(px(1.0))
-                        .border_color(Colors::with_alpha(Colors::text_primary(), 0.03))
-                        // Real horizontal slider
-                        .child(slider_with_reset(
-                            format!("track-vol-{}", track.id),
-                            track.display_volume(),
-                            track.color,
-                            on_volume_norm,
-                            Some(on_volume_reset),
-                        ))
-                        // Pan readout — compact bordered label matching the
-                        // dB pill alongside it.
-                        .child({
-                            let border = if is_selected {
-                                let mut c = track.color;
-                                c.a = 0.55;
-                                c
-                            } else {
-                                Colors::border_default()
-                            };
-                            div()
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .min_w(px(28.0))
-                                .px(px(5.0))
-                                .h(px(14.0))
-                                .rounded_sm()
-                                .bg(Colors::with_alpha(Colors::surface_canvas(), 0.3))
-                                .border(px(1.0))
-                                .border_color(border)
-                                .text_size(px(9.0))
-                                .font_weight(gpui::FontWeight::SEMIBOLD)
-                                .text_color(Colors::text_secondary())
-                                .child(format_pan_label(track.pan))
-                        })
-                        // Compact meter
-                        .child(vu_meter_with_levels(
-                            track.meter_level_l,
-                            track.meter_level_r,
-                        ))
-                        // Bordered dB pill
-                        .child(db_value_pill(
-                            volume::format_db(track.display_volume()),
-                            is_selected,
-                        )),
-                )),
+                .when(show_controls, |col| {
+                    col.child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap(px(8.0))
+                            .w_full()
+                            .px(px(8.0))
+                            .py(px(4.0))
+                            .rounded_md()
+                            .bg(Colors::with_alpha(Colors::surface_canvas(), 0.16))
+                            .border(px(1.0))
+                            .border_color(Colors::with_alpha(Colors::text_primary(), 0.03))
+                            // Real horizontal slider
+                            .child(slider_with_drag_callbacks(
+                                format!("track-vol-{}", track.id),
+                                state.display_track_volume(track),
+                                track.color,
+                                Some(on_volume_drag_start),
+                                Some(on_volume_drag_preview),
+                                Some(on_volume_drag_commit),
+                                Some(on_volume_reset),
+                            ))
+                            // Pan readout — compact bordered label matching the
+                            // dB pill alongside it.
+                            .child({
+                                let border = if is_selected {
+                                    let mut c = track.color;
+                                    c.a = 0.55;
+                                    c
+                                } else {
+                                    Colors::border_default()
+                                };
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .min_w(px(28.0))
+                                    .px(px(5.0))
+                                    .h(px(14.0))
+                                    .rounded_sm()
+                                    .bg(Colors::with_alpha(Colors::surface_canvas(), 0.3))
+                                    .border(px(1.0))
+                                    .border_color(border)
+                                    .text_size(px(9.0))
+                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                    .text_color(Colors::text_secondary())
+                                    .child(format_pan_label(track.pan))
+                            })
+                            // Compact meter
+                            .child(vu_meter_with_levels(
+                                track.meter_level_l,
+                                track.meter_level_r,
+                            ))
+                            // Bordered dB pill
+                            .child(db_value_pill(
+                                volume::format_db(state.display_track_volume(track)),
+                                is_selected,
+                            )),
+                    )
+                }),
         )
 }

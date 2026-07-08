@@ -1198,6 +1198,7 @@ impl Render for StudioLayout {
         let show_browser = self.panels.browser;
         let show_inspector = self.panels.inspector;
         let show_mixer_docked = self.panels.mixer_docked;
+        let active_panel = self.active_panel;
 
         let project_chrome = components::ProjectChromeState {
             name: self.project_session.display_name().to_string(),
@@ -1562,11 +1563,19 @@ impl Render for StudioLayout {
                 if show_browser {
                     main_row = main_row.child({
                         let _s = crate::perf::PerfScope::enter("Sidebar");
-                        components::sidebar(
+                        let owner = cx.entity().clone();
+                        div()
+                            .on_mouse_down(gpui::MouseButton::Left, move |_event, _window, cx| {
+                                let _ = owner.update(cx, |layout, cx| {
+                                    layout.set_active_panel(WorkspaceActivePanel::Browser, cx);
+                                });
+                            })
+                            .child(components::sidebar(
                             &file_browser,
                             browser_scroll,
                             &self.browser_search_input,
                             self.browser_search_input.is_focused(window),
+                            active_panel == WorkspaceActivePanel::Browser,
                             on_browser_search_context,
                             on_browser_toggle,
                             on_browser_select,
@@ -1577,13 +1586,26 @@ impl Render for StudioLayout {
                             file_browser.preview_enabled,
                             on_browser_toggle_preview,
                             on_browser_preview_play,
-                        )
+                        ))
                     });
                 }
-                main_row = main_row.child(self.timeline.clone());
+                main_row = main_row.child({
+                    let owner = cx.entity().clone();
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .min_h_0()
+                        .on_mouse_down(gpui::MouseButton::Left, move |_event, _window, cx| {
+                            let _ = owner.update(cx, |layout, cx| {
+                                layout.set_active_panel(WorkspaceActivePanel::Arrangement, cx);
+                            });
+                        })
+                        .child(self.timeline.clone())
+                });
                 if show_inspector {
                     main_row = main_row.child({
                         let _s = crate::perf::PerfScope::enter("Inspector");
+                        let owner = cx.entity().clone();
                         let selection_duration_beats = self.timeline.read(cx).state.arrangement_range.as_ref().and_then(|range| {
                             let (start, end) = range.as_f32_range();
                             let duration = (end - start).abs();
@@ -1592,7 +1614,13 @@ impl Render for StudioLayout {
                         let stretch_tempo = selected_clip_id.as_deref().map(|clip_id| {
                             self.stretch_tempo_snapshot(clip_id)
                         });
-                        crate::components::panel::inspector_panel(
+                        div()
+                            .on_mouse_down(gpui::MouseButton::Left, move |_event, _window, cx| {
+                                let _ = owner.update(cx, |layout, cx| {
+                                    layout.set_active_panel(WorkspaceActivePanel::Inspector, cx);
+                                });
+                            })
+                            .child(crate::components::panel::inspector_panel(
                             &tracks,
                             selected_track_id.as_deref(),
                             selected_clip_id.as_deref(),
@@ -1607,8 +1635,9 @@ impl Render for StudioLayout {
                             inspector_name_focused,
                             &self.inspector_name_edit.clip_name_input,
                             inspector_clip_name_focused,
+                            active_panel == WorkspaceActivePanel::Inspector,
                             &inspector_callbacks,
-                        )
+                        ))
                     });
                 }
                 main_row
@@ -1633,6 +1662,29 @@ impl Render for StudioLayout {
             .children(plugin_picker_overlay_el)
             .children(text_context_overlay)
             .children(virtual_keyboard_overlay)
+            .children({
+                if std::env::var_os("FUTUREBOARD_DEBUG_ACTIVE_PANEL").is_some() {
+                    Some(
+                        div()
+                            .absolute()
+                            .right(px(12.0))
+                            .bottom(px(28.0))
+                            .px(px(8.0))
+                            .py(px(4.0))
+                            .rounded_md()
+                            .border(px(1.0))
+                            .border_color(Colors::panel_border_focused())
+                            .bg(Colors::surface_canvas())
+                            .text_size(px(10.0))
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_color(Colors::tab_text_active())
+                            .child(format!("active_panel = {}", active_panel.label()))
+                            .into_any_element(),
+                    )
+                } else {
+                    None
+                }
+            })
             .children({
                 let show_perf_overlay = self.settings.read(cx).current.performance.show_performance_overlay
                     || crate::perf::perf_hud_enabled();

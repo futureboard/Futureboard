@@ -130,9 +130,6 @@ pub use mixer_panel::mixer_panel;
 pub use mixer_panel_view::{docked_mixer_shell, MixerPanelView};
 pub use mixer_window::{open_mixer_window, MixerSnapshot, MixerWindow};
 pub use panel::{inspector_debug, inspector_debug_enabled, right_panel};
-pub use routing_matrix_window::{
-    open_routing_matrix_window, RoutingMatrixSnapshot, RoutingMatrixWindow,
-};
 pub use performance_overlay::{performance_overlay, PerformanceOverlaySnapshot};
 pub use piano_roll::PianoRoll;
 pub use plugin_manager::{
@@ -144,6 +141,9 @@ pub use progress_dialog::{
     open_progress_dialog_window, progress_bar, CopyingFileDialogOptions,
     LoadingSessionDialogOptions, ProgressBarValue, ProgressDialogCancelCb, ProgressDialogOptions,
     ProgressDialogWindow, PROGRESS_DIALOG_WIDTH,
+};
+pub use routing_matrix_window::{
+    open_routing_matrix_window, RoutingMatrixSnapshot, RoutingMatrixWindow,
 };
 pub use settings_components::{
     settings_box_list, settings_box_list_group, settings_combo_trigger, settings_control_slot,

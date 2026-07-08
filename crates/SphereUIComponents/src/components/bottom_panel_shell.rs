@@ -12,7 +12,7 @@ use crate::components::bottom_panel::{BottomPanelResizeDrag, BottomTab};
 use crate::components::editor_panel::ClipEditorPanel;
 use crate::components::effect_editor_tab_view::EffectEditorTabView;
 use crate::components::mixer_panel_view::{docked_mixer_shell, MixerPanelView};
-use crate::layout::StudioLayout;
+use crate::layout::{StudioLayout, WorkspaceActivePanel};
 use crate::theme::Colors;
 
 const TABBAR_H: f32 = 28.0;
@@ -46,6 +46,7 @@ impl BottomPanelShell {
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         let q = |v: f32| (v * 4.0).round() as i64;
         owner.active_bottom_tab().hash(&mut hasher);
+        owner.active_panel().hash(&mut hasher);
         q(owner.bottom_panel_state().height_px).hash(&mut hasher);
         owner.bottom_panel_docked().hash(&mut hasher);
         owner.mixer_tree_sidebar_enabled().hash(&mut hasher);
@@ -70,15 +71,18 @@ impl Render for BottomPanelShell {
         }
 
         let active_tab = owner.active_bottom_tab();
+        let active_panel = owner.active_panel();
         crate::perf::count("active_bottom_tab", tab_counter_id(active_tab));
 
         let panel_state = owner.bottom_panel_state();
         let owner_entity = self.owner.clone();
         let shell_entity = cx.entity();
+        let active_panel_for_click = active_panel_for_bottom_tab(active_tab);
 
+        let tab_click_owner = owner_entity.clone();
         let on_tab_click: Arc<dyn Fn(&BottomTab, &mut Window, &mut App) + 'static> =
             Arc::new(move |tab: &BottomTab, _w, cx| {
-                let _ = owner_entity.update(cx, |layout, cx| {
+                let _ = tab_click_owner.update(cx, |layout, cx| {
                     layout.set_active_bottom_tab(*tab, cx);
                 });
             });
@@ -113,9 +117,21 @@ impl Render for BottomPanelShell {
             .h(px(panel_state.height_px))
             .w_full()
             .border_t(px(1.0))
-            .border_color(Colors::panel_border())
+            .border_color(if bottom_panel_owns_active_panel(active_panel) {
+                Colors::panel_border_focused()
+            } else {
+                Colors::panel_border()
+            })
             .bg(Colors::bottom_panel_bg())
             .relative()
+            .on_mouse_down(gpui::MouseButton::Left, {
+                let owner = owner_entity.clone();
+                move |_event, _window, cx| {
+                    let _ = owner.update(cx, |layout, cx| {
+                        layout.set_active_panel(active_panel_for_click, cx);
+                    });
+                }
+            })
             .on_drag_move::<BottomPanelResizeDrag>({
                 let handler = on_resize_move.clone();
                 move |event, window, cx| handler(event, window, cx)
@@ -125,7 +141,7 @@ impl Render for BottomPanelShell {
                 move |event, window, cx| handler(event, window, cx)
             })
             .child(render_resize_handle(on_resize_start))
-            .child(render_tab_bar(active_tab, on_tab_click))
+            .child(render_tab_bar(active_tab, active_panel, on_tab_click))
             .child(
                 div()
                     .flex()
@@ -152,6 +168,34 @@ fn tab_counter_id(tab: BottomTab) -> u64 {
     }
 }
 
+fn active_panel_for_bottom_tab(tab: BottomTab) -> WorkspaceActivePanel {
+    match tab {
+        BottomTab::Mixer => WorkspaceActivePanel::Mixer,
+        BottomTab::Editor => WorkspaceActivePanel::Editor,
+        BottomTab::EffectEditor => WorkspaceActivePanel::EffectEditor,
+    }
+}
+
+fn active_panel_matches_tab(panel: WorkspaceActivePanel, tab: BottomTab) -> bool {
+    matches!(
+        (panel, tab),
+        (WorkspaceActivePanel::Mixer, BottomTab::Mixer)
+            | (WorkspaceActivePanel::Editor, BottomTab::Editor)
+            | (WorkspaceActivePanel::PianoRoll, BottomTab::Editor)
+            | (WorkspaceActivePanel::EffectEditor, BottomTab::EffectEditor)
+    )
+}
+
+fn bottom_panel_owns_active_panel(panel: WorkspaceActivePanel) -> bool {
+    matches!(
+        panel,
+        WorkspaceActivePanel::Mixer
+            | WorkspaceActivePanel::Editor
+            | WorkspaceActivePanel::PianoRoll
+            | WorkspaceActivePanel::EffectEditor
+    )
+}
+
 fn render_resize_handle(
     on_resize_start: Arc<dyn Fn(&gpui::MouseDownEvent, &mut Window, &mut App) + 'static>,
 ) -> impl IntoElement {
@@ -175,6 +219,7 @@ fn render_resize_handle(
 
 fn render_tab_bar(
     active_tab: BottomTab,
+    active_panel: WorkspaceActivePanel,
     on_tab_click: Arc<dyn Fn(&BottomTab, &mut Window, &mut App) + 'static>,
 ) -> impl IntoElement {
     let _scope = crate::perf::PerfScope::enter("BottomPanelTabBar");
@@ -188,13 +233,18 @@ fn render_tab_bar(
         .h(px(TABBAR_H))
         .px(px(8.0))
         .border_b(px(1.0))
-        .border_color(Colors::panel_border())
+        .border_color(if bottom_panel_owns_active_panel(active_panel) {
+            Colors::panel_border_focused()
+        } else {
+            Colors::panel_border()
+        })
         .bg(Colors::bottom_panel_header_bg())
         .child(tab_button(
             "Mixer",
             assets::ICON_SLIDERS_HORIZONTAL_PATH,
             BottomTab::Mixer,
             active_tab,
+            active_panel,
             on_tab_click.clone(),
         ))
         .child(tab_button(
@@ -202,6 +252,7 @@ fn render_tab_bar(
             assets::ICON_PENCIL_PATH,
             BottomTab::Editor,
             active_tab,
+            active_panel,
             on_tab_click.clone(),
         ))
     // TODO(effect-editor): The Effect Editor tab is temporarily hidden while the
@@ -217,14 +268,15 @@ fn tab_button(
     icon_path: &'static str,
     tab: BottomTab,
     active_tab: BottomTab,
+    active_panel: WorkspaceActivePanel,
     on_click: Arc<dyn Fn(&BottomTab, &mut Window, &mut App) + 'static>,
 ) -> impl IntoElement {
-    let active = tab == active_tab;
+    let active = tab == active_tab || active_panel_matches_tab(active_panel, tab);
     let on_click_clone = on_click.clone();
     let text_color = if active {
-        Colors::text_primary()
+        Colors::tab_text_active()
     } else {
-        Colors::text_muted()
+        Colors::tab_text_muted()
     };
 
     let mut btn = div()
@@ -253,20 +305,20 @@ fn tab_button(
         .child(label);
 
     if active {
-        btn = btn.bg(Colors::surface_hover()).child(
+        btn = btn.bg(Colors::tab_bg_active()).child(
             div()
                 .absolute()
                 .bottom(px(0.0))
                 .left(px(6.0))
                 .right(px(6.0))
                 .h(px(2.0))
-                .bg(Colors::accent_primary()),
+                .bg(Colors::tab_indicator_active()),
         );
     } else {
         btn = btn.hover(|style| {
             style
-                .bg(Colors::surface_hover())
-                .text_color(Colors::text_secondary())
+                .bg(Colors::tab_bg_hover())
+                .text_color(Colors::tab_text())
         });
     }
     btn

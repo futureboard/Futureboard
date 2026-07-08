@@ -70,15 +70,18 @@ impl Render for MixerMasterStripView {
         crate::perf::count("mixer_master_paint_count", 1);
 
         let timeline = self.timeline.read(cx);
-        let master = &timeline.state.master;
-        let meter_sig = master_meter_signature(master);
+        let mut master = timeline.state.master.clone();
+        if let Some(v) = timeline.state.master_volume_preview {
+            master.volume = v;
+        }
+        let meter_sig = master_meter_signature(&master);
         self.last_meter_sig = meter_sig;
 
         let accent = Colors::accent_primary();
         let on_master = self.callbacks.on_master_volume_change.clone();
         master_strip(
             accent,
-            master,
+            &master,
             on_master,
             &self.callbacks,
             &self.split,

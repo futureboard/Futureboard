@@ -76,7 +76,9 @@ use helpers::{
     should_handle_global_transport_shortcut, transport_command_from_id, FocusContext,
 };
 use project_ops::LifecycleAction;
-pub use studio_state::{ContextTarget, MenuBarUiState, OpenPopover, StudioPanelVisibility};
+pub use studio_state::{
+    ContextTarget, MenuBarUiState, OpenPopover, StudioPanelVisibility, WorkspaceActivePanel,
+};
 use studio_state::{TextContextMenu, TextMenuTarget, TransportCommand};
 
 /// Demo content is opt-in only. The real runtime starts empty and renders
@@ -371,6 +373,7 @@ pub(crate) struct RecordingPreviewUi {
 }
 
 pub struct StudioLayout {
+    active_panel: WorkspaceActivePanel,
     active_bottom_tab: components::BottomTab,
     bottom_panel_state: BottomPanelState,
     timeline: Entity<components::timeline::Timeline>,
@@ -797,8 +800,8 @@ impl StudioLayout {
             let _ = timeline.update(cx, |timeline, _cx| {
                 timeline.set_open_editor_callback(Some(Arc::new(move |_window, cx| {
                     let _ = target.update(cx, |this, cx| {
-                        this.active_bottom_tab = components::BottomTab::Editor;
                         this.panels.mixer_docked = true;
+                        this.set_active_bottom_tab(components::BottomTab::Editor, cx);
                         cx.notify();
                     });
                 })));
@@ -844,6 +847,7 @@ impl StudioLayout {
 
         let app_data = paths.app_data.clone();
         let mut layout = Self {
+            active_panel: WorkspaceActivePanel::Mixer,
             active_bottom_tab: components::BottomTab::Mixer,
             bottom_panel_state: BottomPanelState::default(),
             timeline,
@@ -983,9 +987,7 @@ impl StudioLayout {
                         // A pre-studio handoff engine (already carrying the loaded
                         // project) was installed while this warm-up ran. Keep it and
                         // discard the redundant engine so the graph is not reset.
-                        crate::boot::log(
-                            "audio engine warm-up superseded by handoff engine",
-                        );
+                        crate::boot::log("audio engine warm-up superseded by handoff engine");
                     } else {
                         this.install_audio_callbacks(&engine, cx);
                         this.audio_bridge.running = stats.running;
@@ -1743,6 +1745,7 @@ impl StudioLayout {
                         cx.notify();
                     });
                     self.overlay.pending_text_focus = Some(TextMenuTarget::InspectorName);
+                    self.set_active_panel(WorkspaceActivePanel::Inspector, cx);
                     cx.notify();
                 }
             }
@@ -1753,6 +1756,7 @@ impl StudioLayout {
                         timeline.state.select_track(&track_id);
                         cx.notify();
                     });
+                    self.set_active_panel(WorkspaceActivePanel::Inspector, cx);
                     cx.notify();
                 }
             }
@@ -1830,6 +1834,7 @@ impl StudioLayout {
                         cx.notify();
                     });
                     self.overlay.pending_text_focus = Some(TextMenuTarget::InspectorClipName);
+                    self.set_active_panel(WorkspaceActivePanel::Inspector, cx);
                     cx.notify();
                 }
             }
@@ -1840,6 +1845,7 @@ impl StudioLayout {
                         timeline.state.select_clip(&clip_id);
                         cx.notify();
                     });
+                    self.set_active_panel(WorkspaceActivePanel::Inspector, cx);
                     cx.notify();
                 }
             }
@@ -1871,6 +1877,14 @@ impl StudioLayout {
                         cx.notify();
                     }
                 });
+                self.set_active_panel(
+                    if matches!(tool, TimelineTool::Automation) {
+                        WorkspaceActivePanel::Automation
+                    } else {
+                        WorkspaceActivePanel::Arrangement
+                    },
+                    cx,
+                );
             }
 
             "editor:open-bottom" => self.open_midi_editor_bottom_panel(cx),
@@ -1899,12 +1913,18 @@ impl StudioLayout {
 
     pub(crate) fn toggle_browser_panel(&mut self, cx: &mut Context<Self>) {
         self.panels.browser = !self.panels.browser;
+        if self.panels.browser {
+            self.set_active_panel(WorkspaceActivePanel::Browser, cx);
+        }
         self.sync_timeline_chrome_metrics(cx);
         cx.notify();
     }
 
     pub(crate) fn toggle_inspector_panel(&mut self, cx: &mut Context<Self>) {
         self.panels.inspector = !self.panels.inspector;
+        if self.panels.inspector {
+            self.set_active_panel(WorkspaceActivePanel::Inspector, cx);
+        }
         self.sync_timeline_chrome_metrics(cx);
         cx.notify();
     }
@@ -1919,6 +1939,7 @@ impl StudioLayout {
         if self.panels.mixer_docked {
             self.ensure_mixer_tree_defaults_once(cx);
             self.ensure_mixer_tree_ui_hooks(cx.entity().clone(), cx);
+            self.set_active_panel(WorkspaceActivePanel::Mixer, cx);
         }
         self.sync_timeline_chrome_metrics(cx);
         self.notify_bottom_panel_shell(cx);

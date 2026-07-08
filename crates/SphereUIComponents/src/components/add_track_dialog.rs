@@ -1887,7 +1887,8 @@ impl Render for AddTrackWindow {
                         let steps = ((anchor.start_y - sample.cur_y) / COUNT_DRAG_PX_PER_STEP)
                             .round() as i32;
                         let next = (anchor.start_count as i32 + steps)
-                            .clamp(1, MAX_TRACK_COUNT as i32) as u32;
+                            .clamp(1, MAX_TRACK_COUNT as i32)
+                            as u32;
                         this.count_editing = false;
                         this.set_count(next);
                         cx.notify();

@@ -476,6 +476,16 @@ impl Colors {
     theme_color!(accent_danger, "accent.danger", "#FF6B68");
     theme_color!(accent_purple, "accent.purple", "#BB86FC");
 
+    // Workspace tab / focused panel tokens.
+    theme_color!(tab_text, "tab.text", "#C3C7D0");
+    theme_color!(tab_text_muted, "tab.text_muted", "#8E96A3");
+    theme_color!(tab_text_active, "tab.text_active", "#8D78FF");
+    theme_color!(tab_indicator_active, "tab.indicator_active", "#8D78FF");
+    theme_color!(tab_bg_active, "tab.backgroundActive", "#7B61FF20");
+    theme_color!(tab_bg_hover, "tab.backgroundHover", "#30323A");
+    theme_color!(panel_border_focused, "panel.border_focused", "#7B61FF80");
+    theme_color!(panel_header_active, "panel.header_active", "#7B61FF");
+
     // DAW-specific
     theme_color!(meter_bg, "meter.background", "#FFFFFF0D");
     theme_color!(meter_low, "meter.low", "#6FCF97");

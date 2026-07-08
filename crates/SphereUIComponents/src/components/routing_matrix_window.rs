@@ -195,13 +195,7 @@ impl Render for RoutingMatrixWindow {
                         .w(px(SOURCE_COL_W))
                         .h_full()
                         .px(px(10.0))
-                        .child(
-                            div()
-                                .w(px(9.0))
-                                .h(px(9.0))
-                                .rounded_full()
-                                .bg(track.color),
-                        )
+                        .child(div().w(px(9.0)).h(px(9.0)).rounded_full().bg(track.color))
                         .child(
                             div()
                                 .flex_1()
@@ -276,11 +270,12 @@ impl Render for RoutingMatrixWindow {
                     let source_id = track.id.clone();
                     let dest_id = dest.track_id.clone().expect("send target has a track id");
                     let on_toggle_send = on_toggle_send.clone();
-                    cell = cell
-                        .cursor(gpui::CursorStyle::PointingHand)
-                        .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                    cell = cell.cursor(gpui::CursorStyle::PointingHand).on_mouse_down(
+                        MouseButton::Left,
+                        move |_, window, cx| {
                             on_toggle_send(source_id.clone(), dest_id.clone(), window, cx);
-                        });
+                        },
+                    );
                 }
 
                 row = row.child(cell);
@@ -356,11 +351,13 @@ impl Render for RoutingMatrixWindow {
             .font(theme::ui_font())
             .overflow_hidden()
             .track_focus(&self.focus_handle)
-            .on_key_down(cx.listener(|_this, event: &gpui::KeyDownEvent, window, _cx| {
-                if event.keystroke.key.as_str() == "escape" {
-                    window.remove_window();
-                }
-            }))
+            .on_key_down(
+                cx.listener(|_this, event: &gpui::KeyDownEvent, window, _cx| {
+                    if event.keystroke.key.as_str() == "escape" {
+                        window.remove_window();
+                    }
+                }),
+            )
             .child(external_window_titlebar(
                 "Audio Connections",
                 "routing-matrix-window-close",

@@ -556,6 +556,13 @@ pub struct StudioLayout {
     /// over the session that replaced it. See
     /// [`Self::advance_session_generation`].
     session_generation: u64,
+    /// Last time a meter-driven snapshot was pushed to the detached mixer window.
+    /// The audio poll fires at display refresh (up to 120/144 Hz); rebuilding the
+    /// whole external-mixer element tree that often is the pop-out lag, so the
+    /// high-frequency meter push is capped here. Structural edits push
+    /// immediately via [`Self::push_mixer_snapshot_to_window`] and are never
+    /// throttled. See [`Self::push_mixer_meter_snapshot_throttled`].
+    last_external_mixer_meter_push: std::time::Instant,
 }
 
 impl StudioLayout {
@@ -954,6 +961,7 @@ impl StudioLayout {
             last_autosave_at: std::time::Instant::now(),
             autosave_in_flight: false,
             session_generation: 0,
+            last_external_mixer_meter_push: std::time::Instant::now(),
         };
 
         layout.ensure_mixer_tree_defaults_once(cx);

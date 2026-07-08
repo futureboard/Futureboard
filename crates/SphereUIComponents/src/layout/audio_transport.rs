@@ -589,7 +589,7 @@ impl StudioLayout {
                     let _ = cx.update(|app| app.notify(studio_id));
                     if mixer_handle.is_some() {
                         let _ = this.update(cx, |layout, cx| {
-                            layout.push_mixer_snapshot_to_window(cx);
+                            layout.push_mixer_meter_snapshot_throttled(cx);
                         });
                     }
                 }

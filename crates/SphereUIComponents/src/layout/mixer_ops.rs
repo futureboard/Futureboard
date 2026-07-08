@@ -181,7 +181,13 @@ impl StudioLayout {
 
     pub(crate) fn build_mixer_snapshot(&self, cx: &gpui::App) -> MixerSnapshot {
         let timeline = self.timeline.read(cx);
-        let mut tracks = timeline.state.tracks.clone();
+        // Clone tracks WITHOUT their `clips` (the heaviest field — MIDI note
+        // vectors / audio-clip refs), which the mixer never draws. The detached
+        // mixer rebuilds from this snapshot every meter frame, so skipping the
+        // clip clone is the per-frame cost reduction that complements the meter
+        // refresh cap. `automation_lanes` is kept (display_volume needs it).
+        let mut tracks: Vec<TrackState> =
+            timeline.state.tracks.iter().map(clone_track_for_mixer).collect();
         let mut master = timeline.state.master.clone();
         timeline
             .state
@@ -234,6 +240,38 @@ impl StudioLayout {
             mixer.set_snapshot(snapshot);
             cx.notify();
         });
+    }
+
+    /// Meter-driven push to the detached mixer from the audio poll, rate-capped
+    /// so a high-refresh display doesn't rebuild the whole external-mixer element
+    /// tree at full refresh (the pop-out lag). No-op when the window is closed.
+    /// Structural edits keep calling the immediate
+    /// [`Self::push_mixer_snapshot_to_window`] and are never throttled, so faders
+    /// / inserts / sends still update instantly; only the meter cadence is
+    /// capped. Resets the timer only when a push actually happens.
+    pub(crate) fn push_mixer_meter_snapshot_throttled(&mut self, cx: &mut Context<Self>) {
+        if self.external_windows.mixer.is_none() {
+            return;
+        }
+        let now = std::time::Instant::now();
+        if now.saturating_duration_since(self.last_external_mixer_meter_push)
+            < external_mixer_min_push_interval()
+        {
+            external_mixer_perf_record(false, 0);
+            return;
+        }
+        self.last_external_mixer_meter_push = now;
+        // Time the snapshot build + push only when the debug flag is on, so the
+        // measurement itself adds no cost in normal operation. This is what tells
+        // whether the pop-out cost is dominated by the clone (this path) or by
+        // the element-tree rebuild (the deferred mixer_render migration).
+        let timer = external_mixer_debug_enabled()
+            .then(std::time::Instant::now);
+        self.push_mixer_snapshot_to_window(cx);
+        let build_nanos = timer
+            .map(|t| t.elapsed().as_nanos() as u64)
+            .unwrap_or(0);
+        external_mixer_perf_record(true, build_nanos);
     }
 
     pub(crate) fn set_mixer_scroll_x(&mut self, scroll_x: f32, _cx: &mut Context<Self>) -> bool {
@@ -1564,4 +1602,257 @@ fn mixer_channel_meter_signature(
         q(track.meter_level_r).hash(&mut hasher);
     }
     hasher.finish()
+}
+
+/// Meter refresh cap (frames per second) for the detached mixer window. Default
+/// 60 — imperceptible for meters, a no-op on <=60 Hz displays, and a real saving
+/// on 120/144 Hz displays where the audio poll would otherwise rebuild the whole
+/// external mixer every refresh. Override with `FUTUREBOARD_EXTERNAL_MIXER_FPS`
+/// (clamped to 10..=240); lower it to trade meter smoothness for more headroom.
+const EXTERNAL_MIXER_DEFAULT_FPS: u32 = 60;
+
+fn external_mixer_target_fps() -> u32 {
+    std::env::var("FUTUREBOARD_EXTERNAL_MIXER_FPS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u32>().ok())
+        .map(external_mixer_clamp_fps)
+        .unwrap_or(EXTERNAL_MIXER_DEFAULT_FPS)
+}
+
+/// Clamp a requested meter FPS into a sane band. Pure/testable.
+fn external_mixer_clamp_fps(fps: u32) -> u32 {
+    fps.clamp(10, 240)
+}
+
+/// Convert a target FPS to the minimum interval between meter pushes. Pure so the
+/// cap maths is unit-testable without touching the clock. `0` FPS is treated as
+/// the default rather than dividing by zero.
+fn external_mixer_interval_for_fps(fps: u32) -> std::time::Duration {
+    let fps = if fps == 0 {
+        EXTERNAL_MIXER_DEFAULT_FPS
+    } else {
+        fps
+    };
+    std::time::Duration::from_nanos(1_000_000_000 / fps as u64)
+}
+
+fn external_mixer_min_push_interval() -> std::time::Duration {
+    external_mixer_interval_for_fps(external_mixer_target_fps())
+}
+
+/// How often the perf summary is emitted (one line per this many actual pushes).
+const EXTERNAL_MIXER_PERF_LOG_EVERY: u64 = 120;
+
+/// Average snapshot-build time in microseconds. Pure so the reporting maths is
+/// unit-testable; guards against divide-by-zero.
+fn avg_build_micros(total_nanos: u64, pushes: u64) -> f64 {
+    if pushes == 0 {
+        return 0.0;
+    }
+    total_nanos as f64 / pushes as f64 / 1000.0
+}
+
+/// Accumulate detached-mixer push/skip counts (and snapshot-build time when the
+/// debug flag is on) and emit a throttled summary under
+/// `FUTUREBOARD_EXTERNAL_MIXER_DEBUG`. Diagnostics only — no effect when the
+/// flag is off beyond three relaxed atomic adds. Tells whether the pop-out cost
+/// is the snapshot clone or the (unmeasured here) element rebuild, and how often
+/// the meter cap is skipping redundant pushes.
+fn external_mixer_perf_record(pushed: bool, build_nanos: u64) {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static PUSHES: AtomicU64 = AtomicU64::new(0);
+    static SKIPS: AtomicU64 = AtomicU64::new(0);
+    static BUILD_NANOS: AtomicU64 = AtomicU64::new(0);
+
+    if !pushed {
+        SKIPS.fetch_add(1, Ordering::Relaxed);
+        return;
+    }
+    BUILD_NANOS.fetch_add(build_nanos, Ordering::Relaxed);
+    let pushes = PUSHES.fetch_add(1, Ordering::Relaxed) + 1;
+    if pushes % EXTERNAL_MIXER_PERF_LOG_EVERY != 0 {
+        return;
+    }
+    let skips = SKIPS.swap(0, Ordering::Relaxed);
+    let total_nanos = BUILD_NANOS.swap(0, Ordering::Relaxed);
+    PUSHES.store(0, Ordering::Relaxed);
+    if external_mixer_debug_enabled() {
+        eprintln!(
+            "[external-mixer-perf] pushes={EXTERNAL_MIXER_PERF_LOG_EVERY} skipped_by_cap={skips} avg_build_us={:.1}",
+            avg_build_micros(total_nanos, EXTERNAL_MIXER_PERF_LOG_EVERY)
+        );
+    }
+}
+
+/// Clone a track for the detached mixer snapshot but WITHOUT its `clips` — the
+/// heaviest field (audio-clip refs and per-note MIDI vectors) and one the mixer
+/// never reads. Everything else is cloned verbatim, including `automation_lanes`
+/// (kept because [`TrackState::display_volume`] consults it via
+/// `has_active_volume_automation`, so an automated fader still shows its live
+/// position in the pop-out).
+///
+/// The source is fully destructured with **no `..`**, so adding a `TrackState`
+/// field is a COMPILE ERROR here — forcing an explicit decision about whether
+/// the mixer needs it, instead of silently shipping a stale/defaulted value to
+/// the detached window.
+fn clone_track_for_mixer(track: &TrackState) -> TrackState {
+    let TrackState {
+        id,
+        name,
+        track_type,
+        color,
+        volume,
+        volume_effective,
+        volume_automation_read,
+        pan,
+        muted,
+        solo,
+        armed,
+        input_monitor,
+        meter_level_l,
+        meter_level_r,
+        meter_peak_hold_l,
+        meter_peak_hold_r,
+        meter_clip,
+        clips: _, // intentionally dropped — mixer never draws clips
+        automation_lanes,
+        lane_mode,
+        selected_automation_target,
+        inserts,
+        instrument_plugin_instance_id,
+        builtin_soundfont_player,
+        soundfont_path,
+        soundfont_preset,
+        soundfont_volume,
+        soundfont_reverb_chorus,
+        soundfont_polyphony,
+        sends,
+        routing,
+    } = track;
+    TrackState {
+        id: id.clone(),
+        name: name.clone(),
+        track_type: *track_type,
+        color: *color,
+        volume: *volume,
+        volume_effective: *volume_effective,
+        volume_automation_read: *volume_automation_read,
+        pan: *pan,
+        muted: *muted,
+        solo: *solo,
+        armed: *armed,
+        input_monitor: *input_monitor,
+        meter_level_l: *meter_level_l,
+        meter_level_r: *meter_level_r,
+        meter_peak_hold_l: *meter_peak_hold_l,
+        meter_peak_hold_r: *meter_peak_hold_r,
+        meter_clip: *meter_clip,
+        clips: Vec::new(),
+        automation_lanes: automation_lanes.clone(),
+        lane_mode: *lane_mode,
+        selected_automation_target: selected_automation_target.clone(),
+        inserts: inserts.clone(),
+        instrument_plugin_instance_id: instrument_plugin_instance_id.clone(),
+        builtin_soundfont_player: *builtin_soundfont_player,
+        soundfont_path: soundfont_path.clone(),
+        soundfont_preset: *soundfont_preset,
+        soundfont_volume: *soundfont_volume,
+        soundfont_reverb_chorus: *soundfont_reverb_chorus,
+        soundfont_polyphony: *soundfont_polyphony,
+        sends: sends.clone(),
+        routing: routing.clone(),
+    }
+}
+
+#[cfg(test)]
+mod mixer_snapshot_clone_tests {
+    use super::clone_track_for_mixer;
+    use crate::components::timeline::timeline_state::{
+        CreateTrackOptions, InputMonitorMode, TimelineState, TrackType,
+    };
+
+    #[test]
+    fn clone_for_mixer_drops_clips_but_keeps_mixer_fields() {
+        let mut state = TimelineState::default();
+        state.tracks.clear();
+        let track_id = state.create_track(CreateTrackOptions {
+            track_type: TrackType::Audio,
+            name: "Drums".to_string(),
+            color: gpui::Rgba {
+                r: 0.1,
+                g: 0.2,
+                b: 0.3,
+                a: 1.0,
+            },
+            volume: 0.8,
+            pan: -0.25,
+            armed: false,
+            input_monitor: InputMonitorMode::Off,
+        });
+        state.insert_audio_clip_with_duration(
+            track_id.clone(),
+            "C:/a.wav".to_string(),
+            "a".to_string(),
+            0.0,
+            4.0,
+            Some(2.0),
+        );
+        let track = state.tracks.iter().find(|t| t.id == track_id).unwrap();
+        assert!(!track.clips.is_empty(), "source track has a clip");
+
+        let lite = clone_track_for_mixer(track);
+        assert!(lite.clips.is_empty(), "mixer clone drops the heavy clips vec");
+        // Clone, not move — the live track keeps its clips.
+        assert!(!track.clips.is_empty(), "source clips preserved");
+        // Mixer-relevant fields survive verbatim.
+        assert_eq!(lite.id, track.id);
+        assert_eq!(lite.name, "Drums");
+        assert_eq!(lite.volume, 0.8);
+        assert_eq!(lite.pan, -0.25);
+        assert_eq!(lite.color, track.color);
+        assert_eq!(lite.inserts.len(), track.inserts.len());
+        assert_eq!(lite.sends.len(), track.sends.len());
+        // automation_lanes are kept (display_volume depends on them).
+        assert_eq!(lite.automation_lanes.len(), track.automation_lanes.len());
+    }
+}
+
+#[cfg(test)]
+mod external_mixer_throttle_tests {
+    use super::{external_mixer_clamp_fps, external_mixer_interval_for_fps};
+    use std::time::Duration;
+
+    #[test]
+    fn interval_matches_fps() {
+        assert_eq!(external_mixer_interval_for_fps(60), Duration::from_nanos(16_666_666));
+        assert_eq!(external_mixer_interval_for_fps(30), Duration::from_nanos(33_333_333));
+        assert_eq!(external_mixer_interval_for_fps(120), Duration::from_nanos(8_333_333));
+    }
+
+    #[test]
+    fn zero_fps_falls_back_to_default_not_divide_by_zero() {
+        assert_eq!(external_mixer_interval_for_fps(0), Duration::from_nanos(16_666_666));
+    }
+
+    #[test]
+    fn fps_is_clamped_to_a_sane_band() {
+        assert_eq!(external_mixer_clamp_fps(0), 10);
+        assert_eq!(external_mixer_clamp_fps(5), 10);
+        assert_eq!(external_mixer_clamp_fps(1_000), 240);
+        assert_eq!(external_mixer_clamp_fps(60), 60);
+    }
+
+    #[test]
+    fn higher_fps_yields_shorter_interval() {
+        assert!(external_mixer_interval_for_fps(144) < external_mixer_interval_for_fps(60));
+    }
+
+    #[test]
+    fn avg_build_micros_reports_microseconds_and_guards_zero() {
+        use super::avg_build_micros;
+        // 120 pushes totalling 6 ms => 50 us average.
+        assert!((avg_build_micros(6_000_000, 120) - 50.0).abs() < 1e-9);
+        assert_eq!(avg_build_micros(0, 0), 0.0);
+        assert_eq!(avg_build_micros(1_000, 0), 0.0);
+    }
 }

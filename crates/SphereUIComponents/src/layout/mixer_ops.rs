@@ -181,7 +181,13 @@ impl StudioLayout {
 
     pub(crate) fn build_mixer_snapshot(&self, cx: &gpui::App) -> MixerSnapshot {
         let timeline = self.timeline.read(cx);
-        let mut tracks = timeline.state.tracks.clone();
+        // Clone tracks WITHOUT their `clips` (the heaviest field — MIDI note
+        // vectors / audio-clip refs), which the mixer never draws. The detached
+        // mixer rebuilds from this snapshot every meter frame, so skipping the
+        // clip clone is the per-frame cost reduction that complements the meter
+        // refresh cap. `automation_lanes` is kept (display_volume needs it).
+        let mut tracks: Vec<TrackState> =
+            timeline.state.tracks.iter().map(clone_track_for_mixer).collect();
         let mut master = timeline.state.master.clone();
         timeline
             .state
@@ -1621,6 +1627,139 @@ fn external_mixer_interval_for_fps(fps: u32) -> std::time::Duration {
 
 fn external_mixer_min_push_interval() -> std::time::Duration {
     external_mixer_interval_for_fps(external_mixer_target_fps())
+}
+
+/// Clone a track for the detached mixer snapshot but WITHOUT its `clips` — the
+/// heaviest field (audio-clip refs and per-note MIDI vectors) and one the mixer
+/// never reads. Everything else is cloned verbatim, including `automation_lanes`
+/// (kept because [`TrackState::display_volume`] consults it via
+/// `has_active_volume_automation`, so an automated fader still shows its live
+/// position in the pop-out).
+///
+/// The source is fully destructured with **no `..`**, so adding a `TrackState`
+/// field is a COMPILE ERROR here — forcing an explicit decision about whether
+/// the mixer needs it, instead of silently shipping a stale/defaulted value to
+/// the detached window.
+fn clone_track_for_mixer(track: &TrackState) -> TrackState {
+    let TrackState {
+        id,
+        name,
+        track_type,
+        color,
+        volume,
+        volume_effective,
+        volume_automation_read,
+        pan,
+        muted,
+        solo,
+        armed,
+        input_monitor,
+        meter_level_l,
+        meter_level_r,
+        meter_peak_hold_l,
+        meter_peak_hold_r,
+        meter_clip,
+        clips: _, // intentionally dropped — mixer never draws clips
+        automation_lanes,
+        lane_mode,
+        selected_automation_target,
+        inserts,
+        instrument_plugin_instance_id,
+        builtin_soundfont_player,
+        soundfont_path,
+        soundfont_preset,
+        soundfont_volume,
+        soundfont_reverb_chorus,
+        soundfont_polyphony,
+        sends,
+        routing,
+    } = track;
+    TrackState {
+        id: id.clone(),
+        name: name.clone(),
+        track_type: *track_type,
+        color: *color,
+        volume: *volume,
+        volume_effective: *volume_effective,
+        volume_automation_read: *volume_automation_read,
+        pan: *pan,
+        muted: *muted,
+        solo: *solo,
+        armed: *armed,
+        input_monitor: *input_monitor,
+        meter_level_l: *meter_level_l,
+        meter_level_r: *meter_level_r,
+        meter_peak_hold_l: *meter_peak_hold_l,
+        meter_peak_hold_r: *meter_peak_hold_r,
+        meter_clip: *meter_clip,
+        clips: Vec::new(),
+        automation_lanes: automation_lanes.clone(),
+        lane_mode: *lane_mode,
+        selected_automation_target: selected_automation_target.clone(),
+        inserts: inserts.clone(),
+        instrument_plugin_instance_id: instrument_plugin_instance_id.clone(),
+        builtin_soundfont_player: *builtin_soundfont_player,
+        soundfont_path: soundfont_path.clone(),
+        soundfont_preset: *soundfont_preset,
+        soundfont_volume: *soundfont_volume,
+        soundfont_reverb_chorus: *soundfont_reverb_chorus,
+        soundfont_polyphony: *soundfont_polyphony,
+        sends: sends.clone(),
+        routing: routing.clone(),
+    }
+}
+
+#[cfg(test)]
+mod mixer_snapshot_clone_tests {
+    use super::clone_track_for_mixer;
+    use crate::components::timeline::timeline_state::{
+        CreateTrackOptions, InputMonitorMode, TimelineState, TrackType,
+    };
+
+    #[test]
+    fn clone_for_mixer_drops_clips_but_keeps_mixer_fields() {
+        let mut state = TimelineState::default();
+        state.tracks.clear();
+        let track_id = state.create_track(CreateTrackOptions {
+            track_type: TrackType::Audio,
+            name: "Drums".to_string(),
+            color: gpui::Rgba {
+                r: 0.1,
+                g: 0.2,
+                b: 0.3,
+                a: 1.0,
+            },
+            volume: 0.8,
+            pan: -0.25,
+            armed: false,
+            input_monitor: InputMonitorMode::Off,
+        });
+        state.insert_audio_clip_with_duration(
+            track_id.clone(),
+            "C:/a.wav".to_string(),
+            "a".to_string(),
+            0.0,
+            4.0,
+            Some(2.0),
+        );
+        let track = state.tracks.iter().find(|t| t.id == track_id).unwrap();
+        assert!(!track.clips.is_empty(), "source track has a clip");
+
+        let lite = clone_track_for_mixer(track);
+        assert!(lite.clips.is_empty(), "mixer clone drops the heavy clips vec");
+        // Clone, not move — the live track keeps its clips.
+        assert!(!track.clips.is_empty(), "source clips preserved");
+        // Mixer-relevant fields survive verbatim.
+        assert_eq!(lite.id, track.id);
+        assert_eq!(lite.name, "Drums");
+        assert_eq!(lite.volume, 0.8);
+        assert_eq!(lite.pan, -0.25);
+        assert_eq!(lite.color, track.color);
+        assert_eq!(lite.inserts.len(), track.inserts.len());
+        assert_eq!(lite.sends.len(), track.sends.len());
+        // automation_lanes are kept (display_volume depends on them).
+        assert_eq!(lite.automation_lanes.len(), track.automation_lanes.len());
+    }
 }
 
 #[cfg(test)]

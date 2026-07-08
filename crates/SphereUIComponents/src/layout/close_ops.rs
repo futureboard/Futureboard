@@ -51,6 +51,20 @@ impl PendingCloseAction {
     }
 }
 
+/// Whether a guarded project-lifecycle action (New / Open / Close / Quit /
+/// Switch) may begin, given the two global gates every entry point must
+/// respect: app shutdown and an in-flight project-lifecycle transaction.
+///
+/// Kept pure so the re-entrancy contract can be unit-tested without a live
+/// GPUI layout. All lifecycle entry points share this predicate so New/Open
+/// cannot slip a second transaction on top of a half-torn-down session — the
+/// gap that previously existed because `guard_dirty_then_lifecycle` checked
+/// only `is_shutting_down()`, unlike its `request_close` /
+/// `request_switch_project` siblings.
+pub(crate) fn lifecycle_action_allowed(shutting_down: bool, lifecycle_busy: bool) -> bool {
+    !shutting_down && !lifecycle_busy
+}
+
 impl StudioLayout {
     /// Entry point for OS window close (X), mapped to app quit on the studio window.
     pub fn request_close(
@@ -91,7 +105,18 @@ impl StudioLayout {
         owner_bounds: Option<Bounds<Pixels>>,
         cx: &mut Context<Self>,
     ) {
-        if ShutdownState::global().is_shutting_down() {
+        // Mirror request_close / request_switch_project: never start a New/Open
+        // lifecycle action while shutting down or while another project
+        // load/switch/close transaction is already in flight. Without the busy
+        // guard, New/Open could stack a second transaction on top of a
+        // half-torn-down session during the loading-session window.
+        if !lifecycle_action_allowed(
+            ShutdownState::global().is_shutting_down(),
+            crate::loading_session::is_project_lifecycle_busy(),
+        ) {
+            shutdown::log(&format!(
+                "lifecycle guard ignored (shutdown/busy) action={action:?}"
+            ));
             return;
         }
         let dirty = self.project_session.is_dirty;
@@ -254,5 +279,36 @@ impl StudioLayout {
         self.shutdown_studio(cx);
         shutdown::log("phase: cx.quit");
         cx.quit();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::lifecycle_action_allowed;
+
+    #[test]
+    fn lifecycle_allowed_only_when_idle() {
+        // The only state that permits a New/Open/Close/Quit/Switch to begin is
+        // "not shutting down AND not already busy with a lifecycle transaction".
+        assert!(lifecycle_action_allowed(false, false));
+    }
+
+    #[test]
+    fn lifecycle_blocked_while_busy() {
+        // Regression: New/Open must be rejected while a project
+        // load/switch/close is in flight, matching request_close /
+        // request_switch_project. Previously guard_dirty_then_lifecycle ignored
+        // the busy flag, so New/Open could stack a second transaction.
+        assert!(!lifecycle_action_allowed(false, true));
+    }
+
+    #[test]
+    fn lifecycle_blocked_while_shutting_down() {
+        assert!(!lifecycle_action_allowed(true, false));
+    }
+
+    #[test]
+    fn lifecycle_blocked_while_shutting_down_and_busy() {
+        assert!(!lifecycle_action_allowed(true, true));
     }
 }

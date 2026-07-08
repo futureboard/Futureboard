@@ -48,6 +48,24 @@ fn persisted_track_count(
 }
 
 impl StudioLayout {
+    /// Bump the session generation and return the new value. Call this at every
+    /// point that tears down or replaces the live session (project reset,
+    /// in-studio switch). A background project-load completion captures the
+    /// value returned here at spawn time and rejects itself if
+    /// [`Self::session_generation`] has since advanced — see
+    /// [`Self::begin_in_studio_project_switch`]. Cheap (a `u64` increment); the
+    /// generation is purely a staleness token, never persisted.
+    pub(super) fn advance_session_generation(&mut self) -> u64 {
+        self.session_generation = self.session_generation.wrapping_add(1);
+        self.session_generation
+    }
+
+    /// Current session generation. Async work compares its captured value
+    /// against this to detect that the session was replaced mid-flight.
+    pub(super) fn session_generation(&self) -> u64 {
+        self.session_generation
+    }
+
     /// Capture the live session for rollback before an in-studio project swap.
     pub fn capture_session_rollback_snapshot(
         &self,
@@ -313,6 +331,11 @@ impl StudioLayout {
         eprintln!("[ProjectSwitch] closing transient windows count={transient_count}");
         eprintln!("[ProjectSwitch] old session quiesced");
 
+        // Stamp this switch. If another switch/reset replaces the session while
+        // the decode is in flight, the generation advances and the completion
+        // below rejects itself instead of installing a superseded project.
+        let generation = self.advance_session_generation();
+
         self.session_install_status = SessionInstallStatus::Loading;
         self.project_state = ProjectState::Loading;
         cx.update_global::<AppSessionGate, _>(|gate, _| {
@@ -339,7 +362,15 @@ impl StudioLayout {
                 })
                 .await;
 
-            let _ = entity.update(cx, |this, cx| match decoded {
+            let _ = entity.update(cx, |this, cx| {
+                if this.session_generation() != generation {
+                    eprintln!(
+                        "[ProjectSwitch] stale switch completion ignored (generation {generation} != {})",
+                        this.session_generation()
+                    );
+                    return;
+                }
+                match decoded {
                 Ok((project, path)) => {
                     eprintln!("[ProjectSwitch] loaded target project");
                     eprintln!("[ProjectSwitch] installing session");
@@ -404,6 +435,7 @@ impl StudioLayout {
                         open_options,
                         cx,
                     );
+                }
                 }
             });
         })

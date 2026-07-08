@@ -274,6 +274,9 @@ impl StudioLayout {
     }
 
     pub(super) fn reset_project(&mut self, cx: &mut Context<Self>) {
+        // Replacing the live session invalidates any in-flight project-load
+        // completion captured against the previous generation.
+        self.advance_session_generation();
         self.project_session = ProjectSession::untitled();
         self.project_path = None;
         self.project_folder = None;

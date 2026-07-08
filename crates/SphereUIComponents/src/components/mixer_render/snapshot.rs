@@ -288,4 +288,93 @@ mod tests {
             "size change must rebuild"
         );
     }
+
+    #[test]
+    fn static_key_changes_on_recolor() {
+        let base =
+            MixerRenderSnapshot::new(viewport(0.0), vec![strip(0.0, false, 0.1)], None, 2.0, 1.0);
+
+        // A track recolour changes bg / accent / separator; each must rebuild the
+        // static batch or the strip would keep painting its old colour.
+        for mutate in [
+            (|s: &mut MixerStripGeom| s.bg = rgba(0.9)) as fn(&mut MixerStripGeom),
+            (|s: &mut MixerStripGeom| s.accent = rgba(0.9)) as fn(&mut MixerStripGeom),
+            (|s: &mut MixerStripGeom| s.separator = rgba(0.9)) as fn(&mut MixerStripGeom),
+        ] {
+            let mut s = strip(0.0, false, 0.1);
+            mutate(&mut s);
+            let recolored = MixerRenderSnapshot::new(viewport(0.0), vec![s], None, 2.0, 1.0);
+            assert_ne!(
+                base.static_key, recolored.static_key,
+                "recolour must rebuild the static batch"
+            );
+        }
+    }
+
+    #[test]
+    fn static_key_stable_across_hover_only_changes() {
+        // Hover is a per-frame dynamic field (drawn in the dynamic batch like
+        // meters); toggling it must NOT invalidate the static geometry.
+        let a =
+            MixerRenderSnapshot::new(viewport(0.0), vec![strip(0.0, false, 0.1)], None, 2.0, 1.0);
+        let mut hovered = strip(0.0, false, 0.1);
+        hovered.hovered = true;
+        let b = MixerRenderSnapshot::new(viewport(0.0), vec![hovered], None, 2.0, 1.0);
+        assert_eq!(
+            a.static_key, b.static_key,
+            "hover is dynamic and must not rebuild the static batch"
+        );
+    }
+
+    #[test]
+    fn static_key_changes_on_accent_bar_and_separator_width() {
+        let base =
+            MixerRenderSnapshot::new(viewport(0.0), vec![strip(0.0, false, 0.1)], None, 2.0, 1.0);
+        let taller_accent =
+            MixerRenderSnapshot::new(viewport(0.0), vec![strip(0.0, false, 0.1)], None, 4.0, 1.0);
+        assert_ne!(
+            base.static_key, taller_accent.static_key,
+            "accent-bar height change must rebuild"
+        );
+        let wider_sep =
+            MixerRenderSnapshot::new(viewport(0.0), vec![strip(0.0, false, 0.1)], None, 2.0, 3.0);
+        assert_ne!(
+            base.static_key, wider_sep.static_key,
+            "separator width change must rebuild"
+        );
+    }
+
+    #[test]
+    fn static_key_changes_on_master_presence_and_geometry() {
+        let no_master =
+            MixerRenderSnapshot::new(viewport(0.0), vec![strip(0.0, false, 0.1)], None, 2.0, 1.0);
+
+        let mut master = strip(801.0, false, 0.1);
+        master.is_master = true;
+        let with_master = MixerRenderSnapshot::new(
+            viewport(0.0),
+            vec![strip(0.0, false, 0.1)],
+            Some(master),
+            2.0,
+            1.0,
+        );
+        assert_ne!(
+            no_master.static_key, with_master.static_key,
+            "showing the master strip must rebuild"
+        );
+
+        let mut moved_master = master;
+        moved_master.x = 900.0;
+        let with_moved_master = MixerRenderSnapshot::new(
+            viewport(0.0),
+            vec![strip(0.0, false, 0.1)],
+            Some(moved_master),
+            2.0,
+            1.0,
+        );
+        assert_ne!(
+            with_master.static_key, with_moved_master.static_key,
+            "master geometry change must rebuild"
+        );
+    }
 }

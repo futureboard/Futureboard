@@ -25,7 +25,8 @@ pub struct RuntimeLatencyGraph {
 
 #[inline]
 pub fn strip_plugin_latency_samples(track: &RuntimeTrack) -> u32 {
-    let from_inserts = track
+    // In-process VST3 insert latency, summed directly from the live processors.
+    let from_inserts: u32 = track
         .inserts
         .iter()
         .filter(|insert| insert.enabled)
@@ -38,11 +39,22 @@ pub fn strip_plugin_latency_samples(track: &RuntimeTrack) -> u32 {
                 .unwrap_or(0)
         })
         .sum();
-    if from_inserts > 0 {
-        from_inserts
-    } else {
-        track.plugin_latency_samples
-    }
+    // `from_inserts` only sees in-process VST3 inserts — it does NOT account for
+    // external-bridge inserts (their latency = reported + the one-block
+    // handshake, tracked in `plugin_latency_samples` by
+    // `RuntimeProject::track_insert_latency_samples`). Taking the max keeps both
+    // sources: a track with only VST3 inserts uses the direct sum, and a track
+    // that also has bridged inserts keeps the complete stored value instead of
+    // silently dropping the bridge latency.
+    //
+    // The previous `if from_inserts > 0 { from_inserts } else { field }` dropped
+    // the bridge component whenever a mixed track also had an in-process insert,
+    // which both under-compensated the PDC path AND made
+    // `refresh_runtime_latency_graph` see a permanent mismatch (perpetual graph
+    // rebuild, never converging). `build` seeds `plugin_latency_samples = 0`
+    // before its first `strip` call, so the max is a no-op there and only the
+    // refresh path — which stores the complete observed latency — benefits.
+    from_inserts.max(track.plugin_latency_samples)
 }
 
 fn is_master_output(id: &str) -> bool {
@@ -372,6 +384,22 @@ mod tests {
         let latency = plan_runtime_latency_graph(&tracks, &audio_graph, true);
         assert_eq!(latency.track_output_latency[1], 128 + 256);
         assert_eq!(latency.max_path_latency_samples, 128 + 256);
+    }
+
+    #[test]
+    fn strip_latency_uses_stored_value_as_a_floor() {
+        // A track carrying bridge latency in `plugin_latency_samples` (set by the
+        // refresh path) must never have it dropped by `strip`. With no in-process
+        // VST3 inserts the direct sum is 0, so the stored value is the result —
+        // and the max means a mixed VST3+bridge track keeps the complete value
+        // rather than collapsing to the VST3-only sum (the perpetual-rebuild /
+        // PDC-undercount bug). Insert-level mixing needs live VST3/bridge
+        // processors, so this locks the field-floor contract the fix relies on.
+        let t = track("bridged", "audio", 900, vec![]);
+        assert_eq!(strip_plugin_latency_samples(&t), 900);
+
+        let zero = track("empty", "audio", 0, vec![]);
+        assert_eq!(strip_plugin_latency_samples(&zero), 0);
     }
 
     #[test]

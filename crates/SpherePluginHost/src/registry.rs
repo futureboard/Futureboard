@@ -1,6 +1,6 @@
 //! Platform-neutral plugin registry types and VST3/CLAP scan for native GPUI.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -457,6 +457,35 @@ fn registry_display_key(plugin: &RegistryPlugin) -> String {
     .to_lowercase()
 }
 
+/// Opt-in incremental (per-bundle) rescan. Default OFF, so the scanner's
+/// behaviour is byte-identical to a full rescan unless the user sets
+/// `FUTUREBOARD_PLUGIN_SCAN_INCREMENTAL=1`. Gated because skipping the isolated
+/// bundle scan reuses cached rows, and that path is best validated against a
+/// real plug-in library before it becomes the default.
+fn incremental_scan_enabled() -> bool {
+    std::env::var("FUTUREBOARD_PLUGIN_SCAN_INCREMENTAL")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
+/// Whether every cached entry belonging to a bundle is still valid, so the
+/// bundle's isolated scan can be skipped and the cached rows reused. Reuse is
+/// allowed ONLY when the bundle has at least one cached entry and every entry is
+/// both usable (a prior failure/crash must be retried, never cached) and
+/// signature-fresh (its stored mtime+size still matches the file on disk). Pure
+/// over `(is_usable, is_fresh)` pairs so the eligibility rule is unit-testable
+/// without a live scan.
+fn bundle_is_reusable(per_entry: impl IntoIterator<Item = (bool, bool)>) -> bool {
+    let mut saw_entry = false;
+    for (usable, fresh) in per_entry {
+        saw_entry = true;
+        if !usable || !fresh {
+            return false;
+        }
+    }
+    saw_entry
+}
+
 /// Build a registry row from a native scan result (`PluginInfo`).
 pub fn registry_plugin_from_scan(info: &PluginInfo, scanned_at_ms: i64) -> RegistryPlugin {
     let format = PluginFormat::from_str_lossy(&info.format);
@@ -747,12 +776,74 @@ impl PluginRegistry {
             let mut seen = HashSet::new();
             let mut occupied_presets = HashSet::new();
 
+            // Opt-in incremental scan: a map of each cached row's stored file
+            // signature, keyed by plug-in path. Only loaded when the feature is
+            // enabled, so the default full-scan path is untouched.
+            let incremental = incremental_scan_enabled();
+            let signature_by_path: HashMap<PathBuf, (Option<String>, Option<i64>)> = if incremental
+            {
+                use crate::plugin_db::{database_exists, open_database_readonly, read_all};
+                if database_exists() {
+                    open_database_readonly()
+                        .ok()
+                        .and_then(|conn| read_all(&conn).ok())
+                        .map(|rows| {
+                            rows.into_iter()
+                                .map(|e| (e.path, (e.file_modified_at, e.file_size)))
+                                .collect()
+                        })
+                        .unwrap_or_default()
+                } else {
+                    HashMap::new()
+                }
+            } else {
+                HashMap::new()
+            };
+
             for (index, bundle) in bundles.iter().enumerate() {
                 on_progress(ScanProgress::ScanningBundle {
                     current: index + 1,
                     total: bundle_total.max(1),
                     path: bundle.clone(),
                 });
+
+                // Incremental reuse: if every cached row under this bundle is
+                // still usable and signature-fresh, reuse the cached rows and
+                // skip the (expensive, subprocess) isolated scan. Reused rows
+                // still flow through the same dedup / preset / register path
+                // below, so only the scanner launch is avoided.
+                if incremental {
+                    let reuse: Vec<RegistryPlugin> = cached_vst3_clap_plugins
+                        .iter()
+                        .filter(|p| p.path.starts_with(bundle))
+                        .cloned()
+                        .collect();
+                    let reusable = bundle_is_reusable(reuse.iter().map(|p| {
+                        let (cached_m, cached_s) =
+                            signature_by_path.get(&p.path).cloned().unwrap_or((None, None));
+                        let (current_m, current_s) = crate::plugin_db::file_signature(&p.path);
+                        (
+                            p.scan_status.is_usable(),
+                            crate::plugin_db::signature_is_fresh(
+                                cached_m.as_deref(),
+                                cached_s,
+                                current_m.as_deref(),
+                                current_s,
+                            ),
+                        )
+                    }));
+                    if reusable {
+                        for plugin in reuse {
+                            let key = registry_display_key(&plugin);
+                            if !seen.insert(key) {
+                                continue;
+                            }
+                            let plugin = resolve_unique_preset_path(plugin, &mut occupied_presets);
+                            pending.push(plugin);
+                        }
+                        continue;
+                    }
+                }
 
                 match run_isolated_bundle_scan(bundle) {
                     Ok(infos) => {
@@ -953,5 +1044,29 @@ mod tests {
             Some("Instrument|Synth"),
         );
         assert_eq!(cat, "Instrument");
+    }
+
+    #[test]
+    fn bundle_reuse_requires_all_entries_usable_and_fresh() {
+        // All usable + fresh -> reuse.
+        assert!(bundle_is_reusable([(true, true), (true, true)]));
+    }
+
+    #[test]
+    fn bundle_reuse_rejected_when_any_entry_stale() {
+        // One stale (changed binary) entry forces a full rescan of the bundle.
+        assert!(!bundle_is_reusable([(true, true), (true, false)]));
+    }
+
+    #[test]
+    fn bundle_reuse_rejected_when_any_entry_unusable() {
+        // A prior failure/crash must be retried, never cached.
+        assert!(!bundle_is_reusable([(true, true), (false, true)]));
+    }
+
+    #[test]
+    fn bundle_with_no_cached_entries_is_not_reusable() {
+        // A newly-appeared bundle (no cached rows) must be scanned.
+        assert!(!bundle_is_reusable(std::iter::empty()));
     }
 }

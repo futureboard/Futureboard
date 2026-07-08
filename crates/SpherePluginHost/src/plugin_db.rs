@@ -159,6 +159,11 @@ impl From<&RegistryPlugin> for PluginCatalogEntry {
         )
         .to_lowercase();
         let last_scanned_at = ms_to_iso8601(p.scanned_at_ms);
+        // Capture the on-disk file signature so a later scan can detect when the
+        // plug-in binary changed (mtime/size) and invalidate this cached row.
+        // Previously stored as `None`, leaving the columns permanently empty and
+        // making cache invalidation impossible.
+        let (file_modified_at, file_size) = file_signature(&p.path);
         Self {
             id: p.id.clone(),
             format: p.format,
@@ -179,8 +184,8 @@ impl From<&RegistryPlugin> for PluginCatalogEntry {
             validation_level: None,
             disabled: false,
             favorite: false,
-            file_modified_at: None,
-            file_size: None,
+            file_modified_at,
+            file_size,
             last_scanned_at,
             error: p.error_message.clone(),
             metadata_json: None,
@@ -522,6 +527,50 @@ fn now_iso8601() -> String {
     epoch_secs_to_iso8601(now)
 }
 
+/// File-change signature used to decide whether a cached catalog entry is still
+/// valid for the plug-in binary on disk: its last-modified time (ISO-8601, the
+/// same format as `last_scanned_at`) and byte size. Both are `None` when the
+/// path cannot be stat'd (missing / permission denied), which callers treat as
+/// "not fresh" so a missing file forces a re-scan rather than a silent reuse.
+pub(crate) fn file_signature(path: &Path) -> (Option<String>, Option<i64>) {
+    let Ok(meta) = std::fs::metadata(path) else {
+        return (None, None);
+    };
+    let size = i64::try_from(meta.len()).ok();
+    let mtime = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .map(|d| d.as_millis() as i64)
+        .and_then(ms_to_iso8601);
+    (mtime, size)
+}
+
+/// Whether a cached entry's stored file signature still matches what is on disk.
+/// Fresh only when BOTH the modified-time and size are present on each side and
+/// equal — any missing component (an unstamped legacy row, an un-stat'able
+/// file) is treated as stale so the scanner re-examines the bundle. This is the
+/// standard mtime+size freshness heuristic (make / cargo / rsync): a matching
+/// pair means the binary is unchanged; a moved file changes the lookup key, so
+/// a path change is covered too.
+///
+/// Consumed by the opt-in per-bundle scan-skip in
+/// [`crate::registry::PluginRegistry::scan_with_progress`]
+/// (`FUTUREBOARD_PLUGIN_SCAN_INCREMENTAL`).
+pub(crate) fn signature_is_fresh(
+    cached_mtime: Option<&str>,
+    cached_size: Option<i64>,
+    current_mtime: Option<&str>,
+    current_size: Option<i64>,
+) -> bool {
+    match (cached_mtime, cached_size, current_mtime, current_size) {
+        (Some(cached_m), Some(cached_s), Some(current_m), Some(current_s)) => {
+            cached_m == current_m && cached_s == current_s
+        }
+        _ => false,
+    }
+}
+
 fn ms_to_iso8601(ms: i64) -> Option<String> {
     if ms <= 0 {
         return None;
@@ -600,4 +649,61 @@ pub fn clear_with_run_record(conn: &mut Connection) -> rusqlite::Result<u32> {
 #[allow(dead_code)]
 pub(crate) fn classify_kind_compat(category: &str, name: &str) -> PluginKind {
     classify_kind(category, name, None)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{file_signature, signature_is_fresh};
+
+    #[test]
+    fn fresh_only_when_both_components_present_and_equal() {
+        let m = "2026-07-08T00:00:00Z";
+        assert!(signature_is_fresh(Some(m), Some(4096), Some(m), Some(4096)));
+    }
+
+    #[test]
+    fn changed_size_is_stale() {
+        let m = "2026-07-08T00:00:00Z";
+        assert!(!signature_is_fresh(Some(m), Some(4096), Some(m), Some(8192)));
+    }
+
+    #[test]
+    fn changed_mtime_is_stale() {
+        assert!(!signature_is_fresh(
+            Some("2026-07-08T00:00:00Z"),
+            Some(4096),
+            Some("2026-07-09T00:00:00Z"),
+            Some(4096),
+        ));
+    }
+
+    #[test]
+    fn missing_component_on_either_side_is_stale() {
+        let m = "2026-07-08T00:00:00Z";
+        // Unstamped legacy cache row (both None) → always re-scan.
+        assert!(!signature_is_fresh(None, None, Some(m), Some(4096)));
+        // Un-stat'able file on disk → never reuse the cached row.
+        assert!(!signature_is_fresh(Some(m), Some(4096), None, None));
+        // Partial signatures are stale, not accidentally fresh.
+        assert!(!signature_is_fresh(Some(m), None, Some(m), Some(4096)));
+    }
+
+    #[test]
+    fn file_signature_reports_size_and_mtime_for_real_file() {
+        let mut path = std::env::temp_dir();
+        path.push(format!("fb_sig_test_{}.bin", std::process::id()));
+        std::fs::write(&path, b"hello world").unwrap();
+
+        let (mtime, size) = file_signature(&path);
+        assert_eq!(size, Some(11));
+        assert!(mtime.is_some(), "a real file has a modified time");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn file_signature_missing_path_is_none() {
+        let path = std::path::Path::new("this/path/definitely/does/not/exist.vst3");
+        assert_eq!(file_signature(path), (None, None));
+    }
 }

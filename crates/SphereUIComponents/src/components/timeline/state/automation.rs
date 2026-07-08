@@ -1096,3 +1096,71 @@ pub fn parse_automation_target_menu_command(command: &str) -> Option<(String, Au
         _ => None,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{evaluate_automation, AutomationCurve, AutomationPoint};
+
+    const EPS: f32 = 1e-5;
+
+    fn approx(a: f32, b: f32) -> bool {
+        (a - b).abs() < EPS
+    }
+
+    #[test]
+    fn empty_lane_returns_default() {
+        assert!(approx(evaluate_automation(&[], 3.0, 0.42), 0.42));
+    }
+
+    #[test]
+    fn before_first_and_after_last_hold_endpoints() {
+        let pts = [
+            AutomationPoint::new(2.0, 0.2),
+            AutomationPoint::new(6.0, 0.8),
+        ];
+        // Before the first point: hold the first value (not the default).
+        assert!(approx(evaluate_automation(&pts, 0.0, 0.0), 0.2));
+        // Exactly on the first point.
+        assert!(approx(evaluate_automation(&pts, 2.0, 0.0), 0.2));
+        // Exactly on / after the last point: hold the last value.
+        assert!(approx(evaluate_automation(&pts, 6.0, 0.0), 0.8));
+        assert!(approx(evaluate_automation(&pts, 99.0, 0.0), 0.8));
+    }
+
+    #[test]
+    fn linear_segment_interpolates() {
+        // Linear/tension-0 factor is identity, so the midpoint is the average.
+        let pts = [
+            AutomationPoint::new(0.0, 0.2),
+            AutomationPoint::new(4.0, 0.6),
+        ];
+        assert!(approx(evaluate_automation(&pts, 2.0, 0.0), 0.4));
+        assert!(approx(evaluate_automation(&pts, 1.0, 0.0), 0.3));
+    }
+
+    #[test]
+    fn hold_curve_steps_at_the_next_point() {
+        // Hold keeps the left value across the whole segment; the step lands at
+        // the next point (here the last, so after-last holds the right value).
+        let pts = [
+            AutomationPoint::with_curve(0.0, 0.2, AutomationCurve::Hold),
+            AutomationPoint::new(4.0, 0.8),
+        ];
+        assert!(approx(evaluate_automation(&pts, 1.0, 0.0), 0.2));
+        assert!(approx(evaluate_automation(&pts, 3.999, 0.0), 0.2));
+        assert!(approx(evaluate_automation(&pts, 4.0, 0.0), 0.8));
+    }
+
+    #[test]
+    fn selects_the_correct_segment_of_three_points() {
+        let pts = [
+            AutomationPoint::new(0.0, 0.0),
+            AutomationPoint::new(4.0, 1.0),
+            AutomationPoint::new(8.0, 0.5),
+        ];
+        // First segment [0,4] midpoint.
+        assert!(approx(evaluate_automation(&pts, 2.0, 0.0), 0.5));
+        // Second segment [4,8] midpoint: 1.0 + (0.5-1.0)*0.5 = 0.75.
+        assert!(approx(evaluate_automation(&pts, 6.0, 0.0), 0.75));
+    }
+}

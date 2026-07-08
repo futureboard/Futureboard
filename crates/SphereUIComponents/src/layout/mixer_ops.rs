@@ -257,10 +257,21 @@ impl StudioLayout {
         if now.saturating_duration_since(self.last_external_mixer_meter_push)
             < external_mixer_min_push_interval()
         {
+            external_mixer_perf_record(false, 0);
             return;
         }
         self.last_external_mixer_meter_push = now;
+        // Time the snapshot build + push only when the debug flag is on, so the
+        // measurement itself adds no cost in normal operation. This is what tells
+        // whether the pop-out cost is dominated by the clone (this path) or by
+        // the element-tree rebuild (the deferred mixer_render migration).
+        let timer = external_mixer_debug_enabled()
+            .then(std::time::Instant::now);
         self.push_mixer_snapshot_to_window(cx);
+        let build_nanos = timer
+            .map(|t| t.elapsed().as_nanos() as u64)
+            .unwrap_or(0);
+        external_mixer_perf_record(true, build_nanos);
     }
 
     pub(crate) fn set_mixer_scroll_x(&mut self, scroll_x: f32, _cx: &mut Context<Self>) -> bool {
@@ -1629,6 +1640,50 @@ fn external_mixer_min_push_interval() -> std::time::Duration {
     external_mixer_interval_for_fps(external_mixer_target_fps())
 }
 
+/// How often the perf summary is emitted (one line per this many actual pushes).
+const EXTERNAL_MIXER_PERF_LOG_EVERY: u64 = 120;
+
+/// Average snapshot-build time in microseconds. Pure so the reporting maths is
+/// unit-testable; guards against divide-by-zero.
+fn avg_build_micros(total_nanos: u64, pushes: u64) -> f64 {
+    if pushes == 0 {
+        return 0.0;
+    }
+    total_nanos as f64 / pushes as f64 / 1000.0
+}
+
+/// Accumulate detached-mixer push/skip counts (and snapshot-build time when the
+/// debug flag is on) and emit a throttled summary under
+/// `FUTUREBOARD_EXTERNAL_MIXER_DEBUG`. Diagnostics only — no effect when the
+/// flag is off beyond three relaxed atomic adds. Tells whether the pop-out cost
+/// is the snapshot clone or the (unmeasured here) element rebuild, and how often
+/// the meter cap is skipping redundant pushes.
+fn external_mixer_perf_record(pushed: bool, build_nanos: u64) {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static PUSHES: AtomicU64 = AtomicU64::new(0);
+    static SKIPS: AtomicU64 = AtomicU64::new(0);
+    static BUILD_NANOS: AtomicU64 = AtomicU64::new(0);
+
+    if !pushed {
+        SKIPS.fetch_add(1, Ordering::Relaxed);
+        return;
+    }
+    BUILD_NANOS.fetch_add(build_nanos, Ordering::Relaxed);
+    let pushes = PUSHES.fetch_add(1, Ordering::Relaxed) + 1;
+    if pushes % EXTERNAL_MIXER_PERF_LOG_EVERY != 0 {
+        return;
+    }
+    let skips = SKIPS.swap(0, Ordering::Relaxed);
+    let total_nanos = BUILD_NANOS.swap(0, Ordering::Relaxed);
+    PUSHES.store(0, Ordering::Relaxed);
+    if external_mixer_debug_enabled() {
+        eprintln!(
+            "[external-mixer-perf] pushes={EXTERNAL_MIXER_PERF_LOG_EVERY} skipped_by_cap={skips} avg_build_us={:.1}",
+            avg_build_micros(total_nanos, EXTERNAL_MIXER_PERF_LOG_EVERY)
+        );
+    }
+}
+
 /// Clone a track for the detached mixer snapshot but WITHOUT its `clips` — the
 /// heaviest field (audio-clip refs and per-note MIDI vectors) and one the mixer
 /// never reads. Everything else is cloned verbatim, including `automation_lanes`
@@ -1790,5 +1845,14 @@ mod external_mixer_throttle_tests {
     #[test]
     fn higher_fps_yields_shorter_interval() {
         assert!(external_mixer_interval_for_fps(144) < external_mixer_interval_for_fps(60));
+    }
+
+    #[test]
+    fn avg_build_micros_reports_microseconds_and_guards_zero() {
+        use super::avg_build_micros;
+        // 120 pushes totalling 6 ms => 50 us average.
+        assert!((avg_build_micros(6_000_000, 120) - 50.0).abs() < 1e-9);
+        assert_eq!(avg_build_micros(0, 0), 0.0);
+        assert_eq!(avg_build_micros(1_000, 0), 0.0);
     }
 }

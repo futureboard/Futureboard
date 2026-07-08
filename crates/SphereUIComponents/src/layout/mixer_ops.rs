@@ -236,6 +236,27 @@ impl StudioLayout {
         });
     }
 
+    /// Meter-driven push to the detached mixer from the audio poll, rate-capped
+    /// so a high-refresh display doesn't rebuild the whole external-mixer element
+    /// tree at full refresh (the pop-out lag). No-op when the window is closed.
+    /// Structural edits keep calling the immediate
+    /// [`Self::push_mixer_snapshot_to_window`] and are never throttled, so faders
+    /// / inserts / sends still update instantly; only the meter cadence is
+    /// capped. Resets the timer only when a push actually happens.
+    pub(crate) fn push_mixer_meter_snapshot_throttled(&mut self, cx: &mut Context<Self>) {
+        if self.external_windows.mixer.is_none() {
+            return;
+        }
+        let now = std::time::Instant::now();
+        if now.saturating_duration_since(self.last_external_mixer_meter_push)
+            < external_mixer_min_push_interval()
+        {
+            return;
+        }
+        self.last_external_mixer_meter_push = now;
+        self.push_mixer_snapshot_to_window(cx);
+    }
+
     pub(crate) fn set_mixer_scroll_x(&mut self, scroll_x: f32, _cx: &mut Context<Self>) -> bool {
         if (self.mixer_view.scroll_x - scroll_x).abs() > 0.25 {
             self.mixer_view.scroll_x = scroll_x;
@@ -1564,4 +1585,71 @@ fn mixer_channel_meter_signature(
         q(track.meter_level_r).hash(&mut hasher);
     }
     hasher.finish()
+}
+
+/// Meter refresh cap (frames per second) for the detached mixer window. Default
+/// 60 — imperceptible for meters, a no-op on <=60 Hz displays, and a real saving
+/// on 120/144 Hz displays where the audio poll would otherwise rebuild the whole
+/// external mixer every refresh. Override with `FUTUREBOARD_EXTERNAL_MIXER_FPS`
+/// (clamped to 10..=240); lower it to trade meter smoothness for more headroom.
+const EXTERNAL_MIXER_DEFAULT_FPS: u32 = 60;
+
+fn external_mixer_target_fps() -> u32 {
+    std::env::var("FUTUREBOARD_EXTERNAL_MIXER_FPS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u32>().ok())
+        .map(external_mixer_clamp_fps)
+        .unwrap_or(EXTERNAL_MIXER_DEFAULT_FPS)
+}
+
+/// Clamp a requested meter FPS into a sane band. Pure/testable.
+fn external_mixer_clamp_fps(fps: u32) -> u32 {
+    fps.clamp(10, 240)
+}
+
+/// Convert a target FPS to the minimum interval between meter pushes. Pure so the
+/// cap maths is unit-testable without touching the clock. `0` FPS is treated as
+/// the default rather than dividing by zero.
+fn external_mixer_interval_for_fps(fps: u32) -> std::time::Duration {
+    let fps = if fps == 0 {
+        EXTERNAL_MIXER_DEFAULT_FPS
+    } else {
+        fps
+    };
+    std::time::Duration::from_nanos(1_000_000_000 / fps as u64)
+}
+
+fn external_mixer_min_push_interval() -> std::time::Duration {
+    external_mixer_interval_for_fps(external_mixer_target_fps())
+}
+
+#[cfg(test)]
+mod external_mixer_throttle_tests {
+    use super::{external_mixer_clamp_fps, external_mixer_interval_for_fps};
+    use std::time::Duration;
+
+    #[test]
+    fn interval_matches_fps() {
+        assert_eq!(external_mixer_interval_for_fps(60), Duration::from_nanos(16_666_666));
+        assert_eq!(external_mixer_interval_for_fps(30), Duration::from_nanos(33_333_333));
+        assert_eq!(external_mixer_interval_for_fps(120), Duration::from_nanos(8_333_333));
+    }
+
+    #[test]
+    fn zero_fps_falls_back_to_default_not_divide_by_zero() {
+        assert_eq!(external_mixer_interval_for_fps(0), Duration::from_nanos(16_666_666));
+    }
+
+    #[test]
+    fn fps_is_clamped_to_a_sane_band() {
+        assert_eq!(external_mixer_clamp_fps(0), 10);
+        assert_eq!(external_mixer_clamp_fps(5), 10);
+        assert_eq!(external_mixer_clamp_fps(1_000), 240);
+        assert_eq!(external_mixer_clamp_fps(60), 60);
+    }
+
+    #[test]
+    fn higher_fps_yields_shorter_interval() {
+        assert!(external_mixer_interval_for_fps(144) < external_mixer_interval_for_fps(60));
+    }
 }

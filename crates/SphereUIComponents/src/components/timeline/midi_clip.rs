@@ -134,12 +134,14 @@ pub fn midi_clip(
         edge: ClipEdge::Left,
         start_beat: clip.start_beat,
         duration_beats: clip.duration_beats,
+        original: clip.clone(),
     };
     let resize_right = ClipResizeDrag {
         clip_id: clip.id.clone(),
         edge: ClipEdge::Right,
         start_beat: clip.start_beat,
         duration_beats: clip.duration_beats,
+        original: clip.clone(),
     };
     const RESIZE_HANDLE_W: f32 = 6.0;
 

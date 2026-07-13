@@ -61,9 +61,16 @@ impl StudioLayout {
     /// Persist `updater` to settings and propagate it to live systems. The
     /// normal (non-sample-rate) settings path.
     fn apply_setting_update(&mut self, updater: UpdateSettingFn, cx: &mut Context<Self>) {
+        let before_theme = self.settings.read(cx).current.appearance.theme.clone();
+        let mut probe = self.settings.read(cx).current.clone();
+        updater(&mut probe);
+        let next_theme = probe.appearance.theme.clone();
         let _ = self.settings.update(cx, |settings, cx| {
             settings.update_setting(move |s| updater(s), cx);
         });
+        if next_theme != before_theme {
+            let _ = crate::theme::activate_theme_by_id(&next_theme);
+        }
         self.sync_settings_to_systems(cx);
         cx.notify();
     }

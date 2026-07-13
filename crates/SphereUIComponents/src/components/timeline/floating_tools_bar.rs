@@ -11,6 +11,7 @@ pub fn floating_tools_bar(
     on_select_tool: std::sync::Arc<
         dyn Fn(&TimelineTool, &mut gpui::Window, &mut gpui::App) + 'static,
     >,
+    on_drag_start: std::sync::Arc<dyn Fn(&(f32, f32), &mut gpui::Window, &mut gpui::App) + 'static>,
 ) -> impl IntoElement {
     let tools = [
         (
@@ -64,6 +65,32 @@ pub fn floating_tools_bar(
         .px(px(4.0))
         .py(px(4.0))
         .shadow_xl()
+        .child({
+            let on_drag_start = on_drag_start.clone();
+            div()
+                .id("timeline-tools-drag-grip")
+                .flex()
+                .items_center()
+                .justify_center()
+                .w(px(16.0))
+                .h(px(28.0))
+                .cursor(gpui::CursorStyle::PointingHand)
+                .text_color(Colors::text_faint())
+                .hover(|style| style.text_color(Colors::text_secondary()))
+                .on_mouse_down(gpui::MouseButton::Left, move |event, window, cx| {
+                    let point: (f32, f32) = (event.position.x.into(), event.position.y.into());
+                    on_drag_start(&point, window, cx);
+                    cx.stop_propagation();
+                })
+                .child(
+                    div()
+                        .w(px(3.0))
+                        .h(px(14.0))
+                        .border_l(px(1.0))
+                        .border_r(px(1.0))
+                        .border_color(Colors::text_faint()),
+                )
+        })
         .children(
             tools
                 .into_iter()

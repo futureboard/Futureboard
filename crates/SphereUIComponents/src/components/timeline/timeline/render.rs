@@ -265,6 +265,15 @@ impl Render for Timeline {
         });
 
         let on_edit_mouse_move = cx.listener(|this, event: &gpui::MouseMoveEvent, _window, cx| {
+            if event.pressed_button == Some(gpui::MouseButton::Left) {
+                if let Some((anchor, start)) = this.floating_toolbar_drag_anchor {
+                    let dx: f32 = (event.position.x - anchor.x).into();
+                    let dy: f32 = (event.position.y - anchor.y).into();
+                    this.floating_toolbar_position = Some(((start.0 + dx).max(0.0), (start.1 + dy).max(0.0)));
+                    cx.notify();
+                    return;
+                }
+            }
             if Self::input_debug_enabled() {
                 eprintln!(
                     "[timeline-input] mouse-move pressed={:?} range_drag={} ctrl={} platform={} shift={}",
@@ -393,6 +402,10 @@ impl Render for Timeline {
         });
 
         let on_pen_mouse_up = cx.listener(|this, event: &gpui::MouseUpEvent, _window, cx| {
+            if this.floating_toolbar_drag_anchor.take().is_some() {
+                cx.notify();
+                return;
+            }
             this.log_input_state("mouse-up-left");
             let finished_tempo = this.finish_tempo_track_interaction(cx);
             let finished_ts = this.finish_time_signature_track_interaction(cx);
@@ -414,6 +427,10 @@ impl Render for Timeline {
             cx.notify();
         });
         let on_pen_mouse_up_out = cx.listener(|this, event: &gpui::MouseUpEvent, _window, cx| {
+            if this.floating_toolbar_drag_anchor.take().is_some() {
+                cx.notify();
+                return;
+            }
             this.log_input_state("mouse-up-left-out");
             let finished_tempo = this.finish_tempo_track_interaction(cx);
             let finished_ts = this.finish_time_signature_track_interaction(cx);
@@ -930,6 +947,23 @@ impl Render for Timeline {
         let content_h = self.state.total_track_rows_height().max(1.0);
         let lane_view_h = viewport_h.max(DEFAULT_TRACK_HEIGHT);
         let lane_view_w = viewport_w.max(1.0);
+        let toolbar_default = (16.0, (content_top + lane_view_h - 48.0).max(16.0));
+        let toolbar_position = self.floating_toolbar_position.unwrap_or(toolbar_default);
+        let on_toolbar_drag_start: std::sync::Arc<
+            dyn Fn(&(f32, f32), &mut Window, &mut gpui::App) + 'static,
+        > = {
+            let target = cx.entity().clone();
+            std::sync::Arc::new(move |point, _window, cx| {
+                let point = *point;
+                let _ = target.update(cx, |this, cx| {
+                    this.floating_toolbar_drag_anchor = Some((
+                        gpui::point(gpui::px(point.0), gpui::px(point.1)),
+                        toolbar_position,
+                    ));
+                    cx.notify();
+                });
+            })
+        };
 
         // ── Drag/drop import wiring ─────────────────────────────────────
         // Track the mouse position throughout an external file drag so that
@@ -1103,8 +1137,17 @@ impl Render for Timeline {
                 cx.notify();
             },
         );
-        let on_clip_resize_drop = cx.listener(|this, _drag: &ClipResizeDrag, _window, cx| {
-            this.mark_project_changed(cx);
+        let on_clip_resize_drop = cx.listener(|this, drag: &ClipResizeDrag, _window, cx| {
+            if let Some(next) = ClipSnapshot::capture(&this.state, &drag.clip_id) {
+                let previous = ClipSnapshot {
+                    track_id: next.track_id.clone(),
+                    clip: drag.original.clone(),
+                };
+                if previous.clip != next.clip {
+                    this.record_executed_command(EditCommand::UpdateClip { previous, next }, cx);
+                    this.mark_project_changed(cx);
+                }
+            }
             cx.notify();
         });
 
@@ -1243,8 +1286,12 @@ impl Render for Timeline {
                 } else {
                     (delta.0, delta.1)
                 };
-                let next_x = this.state.viewport.scroll_x + scroll_x;
-                let next_y = this.state.viewport.scroll_y + scroll_y;
+                // GPUI wheel deltas describe finger/wheel movement, whereas
+                // the timeline offsets describe the content origin. Invert at
+                // this boundary so wheel/trackpad motion follows the direction
+                // users see, matching the middle-button grab-pan behavior.
+                let next_x = this.state.viewport.scroll_x - scroll_x;
+                let next_y = this.state.viewport.scroll_y - scroll_y;
                 this.state
                     .set_scroll_immediate(next_x, next_y, max_x, max_y);
                 if scroll_x.abs() > 0.5 || scroll_y.abs() > 0.5 {
@@ -1519,11 +1566,12 @@ impl Render for Timeline {
             .child(
                 div()
                     .absolute()
-                    .bottom(px(16.0))
-                    .left(px(16.0))
+                    .left(px(toolbar_position.0))
+                    .top(px(toolbar_position.1))
                     .child(floating_tools_bar(
                         state.active_tool,
                         on_select_tool.clone(),
+                        on_toolbar_drag_start,
                     )),
             )
             // 5. Vertical scrollbar (right edge, over the lane area)

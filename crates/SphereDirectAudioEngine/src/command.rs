@@ -108,6 +108,12 @@ pub enum EngineCommand {
         insert_id: String,
         sink: Option<std::sync::Arc<dyn crate::plugin_bridge::PluginBridgeSink>>,
     },
+    /// Play a pre-decoded standalone browser sample through the master output.
+    StartAudition {
+        source: Box<crate::audio_file::AudioFileBuffer>,
+    },
+    /// Stop the current standalone browser sample audition.
+    StopAudition,
     /// Keep rendering a bridged track while its plugin editor is open (VSTi
     /// internal keyboard / groove preview needs a live DSP loop).
     SetBridgeEditorActive { track_id: String, active: bool },

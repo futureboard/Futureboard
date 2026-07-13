@@ -7,12 +7,12 @@ use gpui::{
 
 use crate::theme::Colors;
 
-pub const SETTINGS_WINDOW_WIDTH: f32 = 780.0;
-pub const SETTINGS_WINDOW_HEIGHT: f32 = 560.0;
-pub const SETTINGS_SIDEBAR_WIDTH: f32 = 176.0;
-pub const SETTINGS_CONTENT_PAD: f32 = 12.0;
-pub const SETTINGS_LABEL_WIDTH: f32 = 112.0;
-pub const SETTINGS_ROW_GAP: f32 = 10.0;
+pub const SETTINGS_WINDOW_WIDTH: f32 = 880.0;
+pub const SETTINGS_WINDOW_HEIGHT: f32 = 600.0;
+pub const SETTINGS_SIDEBAR_WIDTH: f32 = 196.0;
+pub const SETTINGS_CONTENT_PAD: f32 = 14.0;
+pub const SETTINGS_LABEL_WIDTH: f32 = 132.0;
+pub const SETTINGS_ROW_GAP: f32 = 12.0;
 pub const SETTINGS_SECTION_GAP: f32 = 10.0;
 
 fn settings_icon(path: &'static str, size: f32, color: gpui::Rgba) -> impl IntoElement {
@@ -23,10 +23,10 @@ fn settings_icon(path: &'static str, size: f32, color: gpui::Rgba) -> impl IntoE
 pub fn settings_nav_group_header(title: impl Into<String>) -> impl IntoElement {
     let title = title.into();
     div()
-        .pt(px(10.0))
-        .pb(px(4.0))
-        .px(px(10.0))
-        .text_size(px(9.0))
+        .pt(px(12.0))
+        .pb(px(5.0))
+        .px(px(12.0))
+        .text_size(px(8.5))
         .font_weight(gpui::FontWeight::SEMIBOLD)
         .text_color(Colors::text_faint())
         .child(title.to_uppercase())
@@ -47,17 +47,11 @@ pub fn settings_nav_item(
         .flex()
         .flex_row()
         .items_center()
-        .gap(px(7.0))
-        .h(px(28.0))
-        .px(px(8.0))
-        .mx(px(6.0))
+        .gap(px(8.0))
+        .h(px(30.0))
+        .px(px(10.0))
+        .mx(px(8.0))
         .rounded_md()
-        .border(px(1.0))
-        .border_color(if active {
-            Colors::border_strong()
-        } else {
-            gpui::transparent_black().into()
-        })
         .bg(if active {
             Colors::accent_muted()
         } else {
@@ -107,13 +101,11 @@ pub fn settings_page_header(
     div()
         .flex()
         .flex_col()
-        .gap(px(2.0))
-        .pb(px(10.0))
-        .border_b(px(1.0))
-        .border_color(Colors::divider())
+        .gap(px(3.0))
+        .pb(px(2.0))
         .child(
             div()
-                .text_size(px(13.0))
+                .text_size(px(14.0))
                 .font_weight(gpui::FontWeight::SEMIBOLD)
                 .text_color(Colors::text_primary())
                 .child(title),
@@ -133,7 +125,7 @@ pub fn settings_section_card() -> Div {
         .border(px(1.0))
         .border_color(Colors::border_subtle())
         .bg(Colors::surface_card())
-        .p(px(10.0))
+        .p(px(12.0))
         .flex()
         .flex_col()
         .gap(px(6.0))
@@ -146,7 +138,7 @@ pub fn settings_section_title(title: impl Into<String>) -> impl IntoElement {
         .pb(px(4.0))
         .border_b(px(1.0))
         .border_color(Colors::divider())
-        .text_size(px(10.0))
+        .text_size(px(10.5))
         .font_weight(gpui::FontWeight::SEMIBOLD)
         .text_color(Colors::text_primary())
         .child(title)

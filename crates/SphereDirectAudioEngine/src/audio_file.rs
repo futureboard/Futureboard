@@ -32,6 +32,67 @@ pub struct AudioFileBuffer {
     pub samples: Vec<f32>,
 }
 
+/// A pre-decoded, one-shot browser audition voice. It owns immutable PCM data
+/// prepared off the audio thread; rendering only advances a cursor and mixes
+/// samples, so no callback allocation, locks, or I/O are required.
+#[derive(Debug)]
+pub struct AudioFileAudition {
+    source: Box<AudioFileBuffer>,
+    source_frame: f64,
+}
+
+impl AudioFileAudition {
+    pub fn new(source: Box<AudioFileBuffer>) -> Self {
+        Self {
+            source,
+            source_frame: 0.0,
+        }
+    }
+
+    pub fn into_source(self) -> Box<AudioFileBuffer> {
+        self.source
+    }
+
+    /// Mix this source into an interleaved output block. Returns `true` once
+    /// playback reaches EOF. Mono sources are duplicated; source channels
+    /// beyond stereo are downmixed by taking their first stereo pair.
+    #[inline]
+    pub fn mix_into(
+        &mut self,
+        output: &mut [f32],
+        output_channels: usize,
+        output_rate: u32,
+    ) -> bool {
+        if output_channels == 0 || self.source.channels == 0 || self.source.frames == 0 {
+            return true;
+        }
+        let step = self.source.sample_rate.max(1) as f64 / output_rate.max(1) as f64;
+        for frame in output.chunks_mut(output_channels) {
+            let source_index = self.source_frame as usize;
+            if source_index >= self.source.frames {
+                return true;
+            }
+            let next_index = (source_index + 1).min(self.source.frames - 1);
+            let fraction = (self.source_frame - source_index as f64) as f32;
+            let sample_at = |frame_index: usize, channel: usize| {
+                self.source.samples[frame_index * self.source.channels + channel]
+            };
+            let left = sample_at(source_index, 0)
+                + (sample_at(next_index, 0) - sample_at(source_index, 0)) * fraction;
+            let right_channel = if self.source.channels > 1 { 1 } else { 0 };
+            let right = sample_at(source_index, right_channel)
+                + (sample_at(next_index, right_channel) - sample_at(source_index, right_channel))
+                    * fraction;
+            frame[0] = (frame[0] + left).clamp(-1.0, 1.0);
+            if output_channels > 1 {
+                frame[1] = (frame[1] + right).clamp(-1.0, 1.0);
+            }
+            self.source_frame += step;
+        }
+        self.source_frame >= self.source.frames as f64
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AudioFileFormat {
     Wav,

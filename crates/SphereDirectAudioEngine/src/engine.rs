@@ -21,6 +21,7 @@ use crossbeam_channel::{bounded, Receiver, Sender};
 use parking_lot::Mutex;
 use sphere_audio_plugins::{canonical_plugin_id, process_stereo_sample};
 
+use crate::audio_file::AudioFileAudition;
 use crate::audio_graph::is_routing_track_type;
 use crate::audio_source::{sample_source_stereo, ClipAudioSource};
 #[cfg(target_os = "windows")]
@@ -2838,12 +2839,40 @@ impl EngineInner {
                 EngineCommand::SetLoop { .. } => "SetLoop",
                 EngineCommand::SetPluginBridgeSink { .. } => "SetPluginBridgeSink",
                 EngineCommand::SetBridgeEditorActive { .. } => "SetBridgeEditorActive",
+                EngineCommand::StartAudition { .. } => "StartAudition",
+                EngineCommand::StopAudition => "StopAudition",
             };
             eprintln!("[play-debug engine] send_command {label}");
         }
         let tx = self.cmd_sender().ok_or(SphereAudioError::EngineNotOpen)?;
         tx.try_send(cmd)
             .map_err(|e| SphereAudioError::NativeError(e.to_string()))
+    }
+
+    pub(crate) fn audition_file_async(
+        self: &Arc<Self>,
+        path: String,
+    ) -> Result<(), SphereAudioError> {
+        self.cmd_sender().ok_or(SphereAudioError::EngineNotOpen)?;
+        let engine = Arc::clone(self);
+        std::thread::Builder::new()
+            .name("browser-audition-decode".to_string())
+            .spawn(move || match crate::audio_file::load_audio_file(&path) {
+                Ok(source) => {
+                    if let Err(error) = engine.send_command(EngineCommand::StartAudition {
+                        source: Box::new(source),
+                    }) {
+                        eprintln!("[audition] could not start preview for {path}: {error}");
+                    }
+                }
+                Err(error) => eprintln!("[audition] could not decode {path}: {error}"),
+            })
+            .map_err(|error| SphereAudioError::NativeError(error.to_string()))?;
+        Ok(())
+    }
+
+    pub(crate) fn stop_audition(&self) -> Result<(), SphereAudioError> {
+        self.send_command(EngineCommand::StopAudition)
     }
 }
 
@@ -3021,6 +3050,7 @@ where
     let mut render_path_logged = false;
     let mut block_scratch: Vec<f32> = Vec::new();
     let mut metronome = crate::backend::render::LocalAudioState::new(sr);
+    let mut audition: Option<AudioFileAudition> = None;
 
     // Meter state with peak hold.
     let mut prev_peak_l = 0.0f32;
@@ -3109,6 +3139,16 @@ where
                             osc_freq = frequency;
                             osc_l.set_frequency(frequency as f64);
                             osc_r.set_frequency(frequency as f64);
+                        }
+                        EngineCommand::StartAudition { source } => {
+                            if let Some(old) = audition.replace(AudioFileAudition::new(source)) {
+                                crate::graveyard::retire_audio_file(old.into_source());
+                            }
+                        }
+                        EngineCommand::StopAudition => {
+                            if let Some(old) = audition.take() {
+                                crate::graveyard::retire_audio_file(old.into_source());
+                            }
                         }
                         EngineCommand::StartTransport => {
                             let pos = shared.position_samples.load(Ordering::Relaxed);
@@ -3441,13 +3481,15 @@ where
                         .saturating_sub(frames_in_block);
                 }
                 let bridge_editor_wakeup = runtime.has_bridge_editor_active();
+                let audition_active = audition.is_some();
                 let preview_render_active = has_preview
                     || pending_midi
                     || panic_flush
                     || bridge_preview_tail
                     || metronome.preview_tail_samples > 0
                     || metronome.stop_tail_samples > 0
-                    || bridge_editor_wakeup;
+                    || bridge_editor_wakeup
+                    || audition_active;
                 if preview_render_active
                     && !playing_local
                     && (has_preview || pending_midi || metronome.preview_tail_samples > 0)
@@ -3513,6 +3555,15 @@ where
                         shared.time_sig_den.load(Ordering::Relaxed),
                         loop_bounds,
                     );
+                    let audition_finished = audition
+                        .as_mut()
+                        .map(|audition| audition.mix_into(scratch, ch, runtime.sample_rate))
+                        .unwrap_or(false);
+                    if audition_finished {
+                        if let Some(audition) = audition.take() {
+                            crate::graveyard::retire_audio_file(audition.into_source());
+                        }
+                    }
                     if !render_path_logged {
                         render_path_logged = true;
                         if callback_debug_enabled() {

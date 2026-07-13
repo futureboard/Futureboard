@@ -160,6 +160,63 @@ pub fn active_theme_summary() -> (String, String, Option<PathBuf>) {
     (theme.id.clone(), theme.name.clone(), theme.path.clone())
 }
 
+/// Themes available to the UI, including the bundled fallback. This is a
+/// control-path query used by Preferences and the command palette, never by a
+/// render hot path.
+pub fn available_theme_summaries() -> Vec<(String, String)> {
+    let paths = crate::paths::FutureboardPaths::resolve();
+    let _ = fs::create_dir_all(&paths.themes);
+    install_builtin_theme_templates(&paths.themes);
+
+    let default = load_default_theme();
+    let mut themes = vec![(default.id.clone(), default.name.clone())];
+    let mut discovered = discover_theme_files(&paths.themes);
+    discovered.sort();
+    for path in discovered {
+        if let Ok(theme) = load_theme_file(&path, &default) {
+            if theme.id != "publisher.theme-id" && !themes.iter().any(|(id, _)| id == &theme.id) {
+                themes.push((theme.id, theme.name));
+            }
+        }
+    }
+    themes
+}
+
+/// Activate one installed theme by its stable id. The active store is shared
+/// by all token lookups, so the next GPUI render picks up the new colors.
+pub fn activate_theme_by_id(id: &str) -> bool {
+    let paths = crate::paths::FutureboardPaths::resolve();
+    let _ = fs::create_dir_all(&paths.themes);
+    install_builtin_theme_templates(&paths.themes);
+    let default = load_default_theme();
+    // Pre-selector builds persisted display labels rather than ids. Keep those
+    // settings files valid by resolving the old dark presets to the bundled
+    // fallback instead of leaving the process on an unrelated auto-selected
+    // theme.
+    let id = match id {
+        "Fleet Dark" | "Ableton Dark" => default.id.as_str(),
+        other => other,
+    };
+    let selected = if id == default.id {
+        Some(default.clone())
+    } else {
+        let mut files = discover_theme_files(&paths.themes);
+        files.sort();
+        files.into_iter().find_map(|path| {
+            load_theme_file(&path, &default)
+                .ok()
+                .filter(|theme| theme.id == id)
+        })
+    };
+    let Some(theme) = selected else {
+        return false;
+    };
+    *active_theme_store()
+        .write()
+        .unwrap_or_else(|e| e.into_inner()) = theme;
+    true
+}
+
 pub fn last_theme_load_report() -> Option<ThemeLoadReport> {
     report_store()
         .read()

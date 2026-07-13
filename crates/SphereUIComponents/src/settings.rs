@@ -123,6 +123,21 @@ fn default_true() -> bool {
     true
 }
 
+fn default_audio_driver_type() -> String {
+    #[cfg(target_os = "windows")]
+    {
+        "WASAPI Shared".to_string()
+    }
+    #[cfg(target_os = "macos")]
+    {
+        "CoreAudio".to_string()
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        "ALSA".to_string()
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AudioHardwareSettings {
     pub driver_type: String,
@@ -135,9 +150,9 @@ pub struct AudioHardwareSettings {
 impl Default for AudioHardwareSettings {
     fn default() -> Self {
         Self {
-            driver_type: "WASAPI Shared".to_string(),
-            device_in: "Built-in Microphone".to_string(),
-            device_out: "Speakers (Realtek)".to_string(),
+            driver_type: default_audio_driver_type(),
+            device_in: "System Default Input".to_string(),
+            device_out: "System Default Output".to_string(),
             active_inputs: vec![0, 1],
             active_outputs: vec![0, 1],
         }
@@ -241,7 +256,7 @@ impl Default for AppearanceSettings {
 }
 
 fn default_theme() -> String {
-    "Fleet Dark".to_string()
+    "futureboard.default".to_string()
 }
 
 fn default_ui_scale() -> f32 {

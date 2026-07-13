@@ -40,6 +40,10 @@ pub fn setup(cx: &mut App) {
     cx.set_global(NativeShellWindows::default());
 
     let theme_report = sphere_ui_components::theme::initialize_theme_system();
+    let saved_theme = sphere_ui_components::settings::SettingsSchema::load_from_disk()
+        .appearance
+        .theme;
+    let _ = sphere_ui_components::theme::activate_theme_by_id(&saved_theme);
     boot::log(&format!(
         "theme initialized: {} ({})",
         theme_report.active_id, theme_report.active_name

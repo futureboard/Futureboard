@@ -52,6 +52,67 @@ impl TimelineState {
         }
     }
 
+    /// Create an in-memory MIDI take that is visible while recording. Like the
+    /// audio recording preview, this is never persisted or sent to the engine;
+    /// it is replaced by the committed take when recording stops.
+    pub fn begin_midi_recording_preview_clip(
+        &mut self,
+        clip_id: &str,
+        track_id: &str,
+        start_beat: f32,
+    ) {
+        self.remove_recording_preview_clip(clip_id);
+        let clip = ClipState {
+            id: clip_id.to_string(),
+            name: "MIDI Recording…".to_string(),
+            start_beat: start_beat.max(0.0),
+            duration_beats: MIN_NOTE_BEATS,
+            source_duration_seconds: None,
+            offset_beats: 0.0,
+            gain: 1.0,
+            clip_type: ClipType::Midi {
+                notes: Vec::new(),
+                controller_lanes: Vec::new(),
+                sysex_events: Vec::new(),
+            },
+            muted: false,
+            audio_import: AudioImportState::default(),
+            stretch: AudioClipStretchState::default(),
+        };
+        if let Some(track) = self.tracks.iter_mut().find(|track| track.id == track_id) {
+            track.clips.push(clip);
+        }
+    }
+
+    /// Replace the visible MIDI take snapshot as notes arrive. The caller owns
+    /// the mutable recording take; this method only mirrors it for rendering.
+    pub fn update_midi_recording_preview_clip(
+        &mut self,
+        clip_id: &str,
+        duration_beats: f32,
+        notes: Vec<MidiNoteState>,
+    ) -> bool {
+        for track in &mut self.tracks {
+            if let Some(clip) = track.clips.iter_mut().find(|clip| clip.id == clip_id) {
+                let next_duration = duration_beats.max(MIN_NOTE_BEATS);
+                let mut changed = (clip.duration_beats - next_duration).abs() > f32::EPSILON;
+                clip.duration_beats = next_duration;
+                if let ClipType::Midi {
+                    notes: preview_notes,
+                    ..
+                } = &mut clip.clip_type
+                {
+                    if *preview_notes != notes {
+                        *preview_notes = notes;
+                        changed = true;
+                    }
+                }
+                return changed;
+            }
+        }
+        false
+    }
+
     /// Grow the preview clip as recording proceeds. Returns `true` if changed.
     pub fn set_recording_preview_clip_length(
         &mut self,

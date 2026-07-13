@@ -570,24 +570,18 @@ impl AudioEngine {
     /// Audition (preview-play) a standalone audio file through the engine,
     /// independent of the timeline — the browser's "preview" affordance.
     ///
-    /// **Not implemented yet (honest stub).** Returns `Ok(false)` to mean
-    /// "request accepted but nothing is audible" so the browser preview UI can
-    /// be wired now without faking sound. The real implementation is a separate
-    /// slice: decode the file off the realtime thread, publish an immutable
-    /// one-shot voice snapshot, and mix it into the master block in
-    /// `engine::render` (realtime-safe — no alloc/IO in the callback). Until
-    /// then the UI surfaces an honest "coming soon" state.
+    /// Decodes off the realtime path, then starts a one-shot master audition.
+    /// `Ok(true)` means the browser preview request was accepted without blocking UI.
+    /// The source is decoded on a worker before it reaches the callback.
+    /// The callback only mixes prepared PCM data; it never reads from disk.
     pub fn audition_file(&self, path: String) -> Result<bool, SphereAudioError> {
-        eprintln!(
-            "[audition] preview requested path={path} — engine audition voice not implemented yet (no audio output)"
-        );
-        Ok(false)
+        self.inner.audition_file_async(path)?;
+        Ok(true)
     }
 
-    /// Stop any in-progress file audition. No-op until [`Self::audition_file`]
-    /// is implemented; wired now so toggling preview off has a real call site.
+    /// Stop any in-progress file audition.
     pub fn stop_audition(&self) -> Result<(), SphereAudioError> {
-        Ok(())
+        self.inner.stop_audition()
     }
 
     /// Enumerate output devices for the engine's configured backend.

@@ -16,6 +16,8 @@ pub struct ClipResizeDrag {
     pub edge: ClipEdge,
     pub start_beat: f32,
     pub duration_beats: f32,
+    /// Complete pre-gesture snapshot so trim can create one exact undo step.
+    pub original: ClipState,
 }
 
 #[derive(Debug, Clone)]

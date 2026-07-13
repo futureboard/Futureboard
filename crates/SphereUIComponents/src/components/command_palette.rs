@@ -54,11 +54,36 @@ impl CommandPaletteState {
 
 pub fn command_palette_entries(query: &str) -> Vec<CommandPaletteEntry> {
     let query = query.trim().to_lowercase();
+    if query.starts_with("overlay:theme") {
+        let mut themes = crate::theme::available_theme_summaries()
+            .into_iter()
+            .map(|(id, name)| CommandPaletteEntry {
+                label: name,
+                command: format!("theme:select:{id}"),
+                shortcut: None,
+                path: "Theme".to_string(),
+            })
+            .collect::<Vec<_>>();
+        themes.truncate(MAX_RESULTS);
+        return themes;
+    }
     let mut entries = Vec::new();
     for menu in &MenuManifest::load().menus {
         collect_menu_items(&menu.items, &menu.label, &query, &mut entries);
     }
     entries.truncate(MAX_RESULTS);
+    if query.is_empty() || "overlay:theme".contains(&query) {
+        entries.insert(
+            0,
+            CommandPaletteEntry {
+                label: "Select Theme".to_string(),
+                command: "overlay:theme".to_string(),
+                shortcut: None,
+                path: "Theme".to_string(),
+            },
+        );
+        entries.truncate(MAX_RESULTS);
+    }
     entries
 }
 

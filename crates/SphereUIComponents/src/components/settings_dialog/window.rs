@@ -509,8 +509,10 @@ impl Render for SettingsWindow {
                         div()
                             .flex_1()
                             .min_w_0()
+                            .min_h_0()
                             .flex()
                             .flex_col()
+                            .overflow_hidden()
                             .bg(Colors::surface_panel())
                             .child(
                                 div()
@@ -524,7 +526,7 @@ impl Render for SettingsWindow {
                                         div()
                                             .flex()
                                             .flex_row()
-                                            .items_start()
+                                            .items_center()
                                             .justify_between()
                                             .gap(px(12.0))
                                             .child(settings_page_header(
@@ -550,7 +552,7 @@ impl Render for SettingsWindow {
                                     .p(px(SETTINGS_CONTENT_PAD))
                                     .flex()
                                     .flex_col()
-                                    .gap(px(10.0))
+                                    .gap(px(SETTINGS_SECTION_GAP))
                                     .on_scroll_wheel(move |_, _window, cx| {
                                         let _ = scroll_close.update(cx, |this, cx| {
                                             if this.open_hardware_combo.take().is_some() {

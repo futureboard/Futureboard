@@ -186,8 +186,8 @@ pub struct FileBrowserState {
     pub project_folder: Option<PathBuf>,
     /// Current search filter query.
     pub filter: String,
-    /// Reserved session state for engine-backed audio audition. The Browser
-    /// keeps audition controls hidden until the engine can produce sound.
+    /// Whether selecting an audio file immediately auditions it through the
+    /// engine. This is session-only and defaults on for DAW-style browsing.
     pub preview_enabled: bool,
     /// Audio files whose waveform peaks are being decoded in the background for
     /// the mini preview pane — guards against re-spawning a decode while one is
@@ -213,7 +213,7 @@ impl Default for FileBrowserState {
             index: IndexCache::default(),
             project_folder: None,
             filter: String::new(),
-            preview_enabled: false,
+            preview_enabled: true,
             waveform_inflight: HashSet::new(),
             collapsed_groups: {
                 // "Filesystem" (raw drives / `/` / mounted volumes) is advanced,

@@ -1,7 +1,7 @@
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    div, px, App, InteractiveElement, IntoElement, ParentElement, StatefulInteractiveElement,
-    Styled, Window,
+    div, px, App, AppContext, DragMoveEvent, Empty, InteractiveElement, IntoElement, ParentElement,
+    Render, StatefulInteractiveElement, Styled, Window,
 };
 
 use crate::components::combo_box::combo_box_trigger;
@@ -12,6 +12,19 @@ use crate::theme::Colors;
 pub struct InspectorSelectOption<T: Copy + PartialEq + 'static> {
     pub label: &'static str,
     pub value: T,
+}
+
+/// Short-lived payload for an Inspector value scrub. The display owns the
+/// gesture; the parent still owns the actual setting and undo transaction.
+#[derive(Clone, Debug)]
+struct InspectorNumericDrag {
+    start_value: f64,
+}
+
+impl Render for InspectorNumericDrag {
+    fn render(&mut self, _window: &mut Window, _cx: &mut gpui::Context<Self>) -> impl IntoElement {
+        Empty
+    }
 }
 
 pub fn inspector_section(
@@ -148,19 +161,21 @@ pub fn inspector_numeric_stepper(
     disabled: bool,
     on_change: impl Fn(f64, &mut Window, &mut App) + Clone + 'static,
 ) -> impl IntoElement {
-    let down_enabled = !disabled && value > min + f64::EPSILON;
-    let up_enabled = !disabled && value < max - f64::EPSILON;
-    let on_down = on_change.clone();
+    const SCRUB_PIXELS_PER_STEP: f32 = 5.0;
+    let drag_start_y = std::sync::Arc::new(std::sync::Mutex::new(None::<f32>));
+    let drag_start_y_move = drag_start_y.clone();
+    let drag_change = on_change.clone();
     div()
         .flex()
         .flex_row()
         .items_center()
         .justify_end()
-        .gap(px(4.0))
         .opacity(if disabled { 0.48 } else { 1.0 })
-        .child(
-            div()
-                .w(px(84.0))
+        .child({
+            let display = display.into();
+            let field = div()
+                .id((id, 0usize))
+                .w(px(108.0))
                 .h(px(24.0))
                 .flex()
                 .items_center()
@@ -173,20 +188,44 @@ pub fn inspector_numeric_stepper(
                 .text_size(px(11.0))
                 .font_weight(gpui::FontWeight::MEDIUM)
                 .text_color(Colors::text_primary())
-                .child(display.into()),
-        )
-        .child(inspector_mini_button(
-            (id, 0usize),
-            "-",
-            down_enabled,
-            move |_, window, cx| on_down((value - step).clamp(min, max), window, cx),
-        ))
-        .child(inspector_mini_button(
-            (id, 1usize),
-            "+",
-            up_enabled,
-            move |_, window, cx| on_change((value + step).clamp(min, max), window, cx),
-        ))
+                .child(display);
+            if disabled {
+                field.into_any_element()
+            } else {
+                let start_y = drag_start_y.clone();
+                field
+                    .cursor(gpui::CursorStyle::ResizeUpDown)
+                    .hover(|style| {
+                        style
+                            .bg(Colors::surface_control_hover())
+                            .border_color(Colors::border_strong())
+                    })
+                    .on_drag(
+                        InspectorNumericDrag { start_value: value },
+                        move |drag, _offset, _window, cx| {
+                            *start_y.lock().expect("inspector scrub mutex poisoned") = None;
+                            cx.new(|_| InspectorNumericDrag {
+                                start_value: drag.start_value,
+                            })
+                        },
+                    )
+                    .on_drag_move::<InspectorNumericDrag>(
+                        move |event: &DragMoveEvent<InspectorNumericDrag>, window, cx| {
+                            let current_y: f32 = event.event.position.y.into();
+                            let mut anchor = drag_start_y_move
+                                .lock()
+                                .expect("inspector scrub mutex poisoned");
+                            let start_y = *anchor.get_or_insert(current_y);
+                            let steps =
+                                ((start_y - current_y) / SCRUB_PIXELS_PER_STEP).round() as f64;
+                            let next = (event.drag(cx).start_value + steps * step).clamp(min, max);
+                            drop(anchor);
+                            drag_change(next, window, cx);
+                        },
+                    )
+                    .into_any_element()
+            }
+        })
 }
 
 pub fn inspector_mini_button(

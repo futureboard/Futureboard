@@ -59,6 +59,12 @@ pub enum EditCommand {
     DeleteClip {
         snapshot: ClipSnapshot,
     },
+    /// Replaces one existing clip with an exact post-gesture snapshot. Used by
+    /// trim so every mouse gesture is one reversible history entry.
+    UpdateClip {
+        previous: ClipSnapshot,
+        next: ClipSnapshot,
+    },
     BatchDeleteClips {
         snapshots: Vec<ClipSnapshot>,
     },
@@ -156,6 +162,7 @@ impl EditCommand {
             EditCommand::CreateClip { .. } => "Create Clip",
             EditCommand::BatchCreateClips { .. } => "Create Clips",
             EditCommand::DeleteClip { .. } => "Delete Clip",
+            EditCommand::UpdateClip { .. } => "Trim Clip",
             EditCommand::BatchDeleteClips { .. } => "Delete Clips",
             EditCommand::ReplaceClipWithClips { .. } => "Split Clip",
             EditCommand::DeleteTrack { .. } => "Delete Track",
@@ -205,6 +212,10 @@ impl EditCommand {
             }
             EditCommand::DeleteClip { snapshot } => {
                 state.delete_clip(&snapshot.clip.id);
+            }
+            EditCommand::UpdateClip { previous, next } => {
+                state.delete_clip(&previous.clip.id);
+                restore_clip_snapshot(state, next);
             }
             EditCommand::BatchDeleteClips { snapshots } => {
                 for snap in snapshots {
@@ -326,6 +337,10 @@ impl EditCommand {
             }
             EditCommand::DeleteClip { snapshot } => {
                 restore_clip_snapshot(state, snapshot);
+            }
+            EditCommand::UpdateClip { previous, next } => {
+                state.delete_clip(&next.clip.id);
+                restore_clip_snapshot(state, previous);
             }
             EditCommand::BatchDeleteClips { snapshots } => {
                 for snap in snapshots {

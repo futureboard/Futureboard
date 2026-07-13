@@ -32,7 +32,7 @@ use crate::components::settings_layout::{
     settings_daw_row, settings_daw_row_with_description, settings_nav_group_header,
     settings_nav_item, settings_page_header, settings_section_card, settings_section_hint,
     settings_section_title, settings_status_badge, settings_value_readout, SETTINGS_CONTENT_PAD,
-    SETTINGS_SIDEBAR_WIDTH, SETTINGS_WINDOW_HEIGHT, SETTINGS_WINDOW_WIDTH,
+    SETTINGS_SECTION_GAP, SETTINGS_SIDEBAR_WIDTH, SETTINGS_WINDOW_HEIGHT, SETTINGS_WINDOW_WIDTH,
 };
 use crate::components::slider::slider;
 use crate::components::text_input::{
@@ -351,6 +351,7 @@ pub struct InputTestMeterState {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HardwareCombo {
+    Theme,
     AudioDriver,
     InputDevice,
     OutputDevice,
@@ -885,44 +886,17 @@ fn build_settings_content(
                 ))
                 .child(settings_daw_row(
                     "Theme Preset",
-                    div()
-                        .flex()
-                        .flex_row()
-                        .gap(px(4.0))
-                        .child({
-                            let val = schema.appearance.theme.clone();
-                            let up = on_update.clone();
-                            fb_segmented_button(
-                                "theme-fleet",
-                                "Fleet Dark",
-                                val == "Fleet Dark",
-                                move |_, w, cx| {
-                                    up(
-                                        Arc::new(|s| s.appearance.theme = "Fleet Dark".to_string()),
-                                        w,
-                                        cx,
-                                    );
-                                },
-                            )
-                        })
-                        .child({
-                            let val = schema.appearance.theme.clone();
-                            let up = on_update.clone();
-                            fb_segmented_button(
-                                "theme-ableton",
-                                "Ableton Dark",
-                                val == "Ableton Dark",
-                                move |_, w, cx| {
-                                    up(
-                                        Arc::new(|s| {
-                                            s.appearance.theme = "Ableton Dark".to_string()
-                                        }),
-                                        w,
-                                        cx,
-                                    );
-                                },
-                            )
-                        }),
+                    hardware_select(
+                        HardwareCombo::Theme,
+                        "settings-theme",
+                        &theme::available_theme_summaries()
+                            .into_iter()
+                            .find(|(id, _)| id == &schema.appearance.theme)
+                            .map(|(_, name)| name)
+                            .unwrap_or_else(|| schema.appearance.theme.clone()),
+                        callbacks.open_hardware_combo,
+                        callbacks.on_toggle_hardware_combo.clone(),
+                    ),
                 ))
                 .child(settings_daw_row(
                     "UI Scale",

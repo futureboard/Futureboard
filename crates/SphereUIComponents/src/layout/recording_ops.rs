@@ -55,6 +55,10 @@ pub(crate) struct MidiRecordingTrack {
     pub active_notes: HashMap<(u8, u8), ActiveMidiNote>,
 }
 
+fn midi_recording_preview_clip_id(track_id: &str) -> String {
+    format!("__recording_midi_preview__:{track_id}")
+}
+
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct ActiveMidiNote {
     pub pitch: u8,
@@ -280,6 +284,29 @@ impl StudioLayout {
         }
 
         self.recording.start_beat = start_beat.max(0.0);
+        if let Some(take) = self.recording.midi.as_ref() {
+            let preview_tracks: Vec<(String, String)> = take
+                .tracks
+                .values()
+                .map(|track| {
+                    (
+                        midi_recording_preview_clip_id(&track.track_id),
+                        track.track_id.clone(),
+                    )
+                })
+                .collect();
+            let start_beat = self.recording.start_beat;
+            let _ = self.timeline.update(cx, |timeline, cx| {
+                for (clip_id, track_id) in &preview_tracks {
+                    timeline
+                        .state
+                        .begin_midi_recording_preview_clip(clip_id, track_id, start_beat);
+                }
+                if !preview_tracks.is_empty() {
+                    cx.notify();
+                }
+            });
+        }
         self.audio_bridge.last_error = None;
         self.recording.ui_state = RecordingUiState::Recording;
         let _ = self.timeline.update(cx, |timeline, cx| {
@@ -303,6 +330,7 @@ impl StudioLayout {
         self.recording.ui_state = RecordingUiState::Finalizing;
         cx.notify();
 
+        self.clear_midi_recording_previews(cx);
         let midi_results = self.finish_midi_recording_take(cx);
         let midi_committed = !midi_results.is_empty();
 
@@ -576,6 +604,7 @@ impl StudioLayout {
     /// Poll the engine's recording preview ring and keep the temporary preview
     /// clip + its streamed waveform in sync (Part 1). Called every audio tick.
     pub(super) fn update_recording_preview(&mut self, cx: &mut Context<Self>) {
+        self.update_midi_recording_previews(cx);
         if !self.timeline.read(cx).state.transport.recording {
             if self.recording.preview.is_some()
                 && std::env::var_os("FUTUREBOARD_RECORDING_DEBUG").is_some()
@@ -701,6 +730,78 @@ impl StudioLayout {
         let clip_id = preview.clip_id;
         self.timeline.update(cx, |timeline, cx| {
             if timeline.state.remove_recording_preview_clip(&clip_id) {
+                cx.notify();
+            }
+        });
+    }
+
+    /// Mirror captured MIDI notes into temporary arrangement clips. This runs
+    /// on the UI/control tick, never in the audio callback, and includes held
+    /// notes with a growing duration so the user sees a note immediately on
+    /// NoteOn rather than only after NoteOff/stop.
+    fn update_midi_recording_previews(&mut self, cx: &mut Context<Self>) {
+        let now = self.timeline.read(cx).state.transport.playhead_beats;
+        let previews = self.recording.midi.as_ref().map(|take| {
+            let relative_beat = (now - take.start_beat).max(0.0);
+            take.tracks
+                .values()
+                .map(|track| {
+                    let mut notes = track.notes.clone();
+                    notes.extend(track.active_notes.values().map(|active| {
+                        MidiNoteState::new(
+                            active.pitch,
+                            active.start_beat.max(0.0),
+                            (relative_beat - active.start_beat).max(MIN_NOTE_BEATS),
+                            active.velocity,
+                        )
+                    }));
+                    (
+                        midi_recording_preview_clip_id(&track.track_id),
+                        relative_beat.max(MIN_NOTE_BEATS),
+                        notes,
+                    )
+                })
+                .collect::<Vec<_>>()
+        });
+        let Some(previews) = previews else {
+            return;
+        };
+        let _ = self.timeline.update(cx, |timeline, cx| {
+            let mut changed = false;
+            for (clip_id, duration_beats, notes) in previews {
+                changed |= timeline.state.update_midi_recording_preview_clip(
+                    &clip_id,
+                    duration_beats,
+                    notes,
+                );
+            }
+            if changed {
+                cx.notify();
+            }
+        });
+    }
+
+    fn clear_midi_recording_previews(&mut self, cx: &mut Context<Self>) {
+        let preview_ids = self
+            .recording
+            .midi
+            .as_ref()
+            .map(|take| {
+                take.tracks
+                    .keys()
+                    .map(|track_id| midi_recording_preview_clip_id(track_id))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        if preview_ids.is_empty() {
+            return;
+        }
+        let _ = self.timeline.update(cx, |timeline, cx| {
+            let mut changed = false;
+            for clip_id in &preview_ids {
+                changed |= timeline.state.remove_recording_preview_clip(clip_id);
+            }
+            if changed {
                 cx.notify();
             }
         });

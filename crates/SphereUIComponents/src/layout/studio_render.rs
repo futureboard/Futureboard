@@ -314,6 +314,12 @@ impl Render for StudioLayout {
                     if crate::components::file_browser::is_audio_path(&path) {
                         // Visual mini-waveform preview always decodes on select.
                         this.ensure_browser_waveform(path.clone(), cx);
+                        // Browser selection is also a real audible audition;
+                        // decode happens off-thread in the engine, so this UI
+                        // event only queues work and never blocks rendering.
+                        if this.file_browser.preview_enabled {
+                            let _ = this.audition_browser_file(&path);
+                        }
                     }
                     cx.notify();
                 });

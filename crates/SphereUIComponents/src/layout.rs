@@ -1316,6 +1316,25 @@ impl StudioLayout {
             eprintln!("[SessionLoad] command blocked during install: {command_id}");
             return;
         }
+        if command_id == "overlay:theme" {
+            self.command_palette.open();
+            self.command_palette_input.set_value("overlay:theme");
+            self.command_palette.query = "overlay:theme".to_string();
+            self.overlay.open_popover = None;
+            cx.notify();
+            return;
+        }
+        if let Some(theme_id) = command_id.strip_prefix("theme:select:") {
+            if crate::theme::activate_theme_by_id(theme_id) {
+                let theme_id = theme_id.to_string();
+                let _ = self.settings.update(cx, |settings, cx| {
+                    settings.update_setting(move |schema| schema.appearance.theme = theme_id, cx);
+                });
+                self.command_palette.close();
+                cx.notify();
+            }
+            return;
+        }
         if edit_command_debug() && is_midi_routable_edit_command(command_id) {
             eprintln!("[edit-command] command={command_id} target=Timeline");
         }

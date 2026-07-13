@@ -1701,9 +1701,6 @@ pub(crate) fn master_strip(
     split: &MixerSplit,
     strip_available_px: f32,
 ) -> impl IntoElement {
-    // Fixed element-id namespace so the master rack scroll/splitter state never
-    // collides with a hashed track id.
-    let id_num = usize::MAX;
     let db_str = volume::format_db(master.volume);
     let on_start_cb = callbacks.on_master_volume_drag_start.clone();
     let on_master_start = move |v: &f32, w: &mut gpui::Window, cx: &mut gpui::App| {
@@ -1718,7 +1715,7 @@ pub(crate) fn master_strip(
         on_commit_cb(w, cx);
     };
     let _ = on_master_vol_change;
-    let (insert_h, send_h) = clamp_mixer_section_heights_for_strip(
+    let (insert_h, _send_h) = clamp_mixer_section_heights_for_strip(
         split.insert_px,
         split.send_px,
         strip_available_px.max(STRIP_MIN_HEIGHT),
@@ -1769,35 +1766,6 @@ pub(crate) fn master_strip(
                 ),
         )
         .child(master_inserts_section(accent, master, callbacks, insert_h))
-        .child(vertical_split_handle(
-            id_num,
-            MixerSplitTarget::InsertSend,
-            split,
-        ))
-        .child(
-            div()
-                .flex()
-                .flex_col()
-                .flex_none()
-                .h(px(send_h))
-                .overflow_hidden()
-                .border_b(px(1.0))
-                .border_color(Colors::border_default())
-                .child(section_header("SENDS", accent, None))
-                .child(
-                    div()
-                        .id("send-slot-scroll-master")
-                        .flex_1()
-                        .min_h_0()
-                        .overflow_y_scroll()
-                        .child(empty_slot()),
-                ),
-        )
-        .child(vertical_split_handle(
-            id_num,
-            MixerSplitTarget::SendFader,
-            split,
-        ))
         // ── Lower Control — STEREO/OUT row, fader cluster, OUT button.
         .child(
             div()

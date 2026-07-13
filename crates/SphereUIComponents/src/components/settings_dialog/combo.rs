@@ -51,6 +51,40 @@ pub(crate) fn hardware_combo_overlay(
         .unwrap_or(false);
 
     let menu = match open_combo {
+        HardwareCombo::Theme => {
+            let themes = crate::theme::available_theme_summaries();
+            let selected = schema.appearance.theme.clone();
+            let labels = themes
+                .iter()
+                .map(|(_, name)| name.clone())
+                .collect::<Vec<_>>();
+            let selected_label = themes
+                .iter()
+                .find(|(id, _)| id == &selected)
+                .map(|(_, name)| name.clone())
+                .unwrap_or(selected);
+            let themes_for_selection = themes.clone();
+            let up = on_update.clone();
+            combo_box_string_menu(
+                "settings-theme-menu",
+                position,
+                &selected_label,
+                &labels,
+                Arc::new(move |name, window, cx| {
+                    let id = themes_for_selection
+                        .iter()
+                        .find(|(_, theme_name)| theme_name == &name)
+                        .map(|(id, _)| id.clone())
+                        .unwrap_or(name);
+                    up(
+                        Arc::new(move |s| s.appearance.theme = id.clone()),
+                        window,
+                        cx,
+                    );
+                }),
+            )
+            .into_any_element()
+        }
         HardwareCombo::AudioDriver => {
             let selected =
                 sanitized_backend_label(&schema.hardware.audio.driver_type, available_backends);

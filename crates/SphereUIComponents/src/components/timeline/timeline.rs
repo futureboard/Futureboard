@@ -170,6 +170,10 @@ pub struct Timeline {
     /// In-flight time-signature marker drag on the global Time Signature lane.
     ts_drag: Option<TimeSignaturePointDrag>,
     pan_last_position: Option<gpui::Point<gpui::Pixels>>,
+    /// View-only floating-toolbar placement. It deliberately never enters the
+    /// project snapshot: moving tools must not make a session dirty.
+    floating_toolbar_position: Option<(f32, f32)>,
+    floating_toolbar_drag_anchor: Option<(gpui::Point<gpui::Pixels>, (f32, f32))>,
     on_context_menu: Option<TimelineContextMenuCb>,
     on_playhead_scrub_begin:
         Option<std::sync::Arc<dyn Fn(&mut gpui::Window, &mut gpui::App) + Send + Sync + 'static>>,

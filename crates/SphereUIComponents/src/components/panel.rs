@@ -1939,25 +1939,6 @@ fn compact_property_row(label: impl Into<String>, child: impl IntoElement) -> im
         .child(div().flex_1().min_w_0().child(child))
 }
 
-fn value_box(text: impl Into<String>, width: f32) -> impl IntoElement {
-    div()
-        .w(px(width))
-        .h(px(26.0))
-        .flex_shrink_0()
-        .flex()
-        .items_center()
-        .justify_end()
-        .rounded_md()
-        .border(px(1.0))
-        .border_color(Colors::border_subtle())
-        .bg(Colors::surface_input())
-        .px(px(8.0))
-        .text_size(px(11.0))
-        .font_weight(gpui::FontWeight::MEDIUM)
-        .text_color(Colors::text_primary())
-        .child(text.into())
-}
-
 fn readonly_value(text: impl Into<String>) -> impl IntoElement {
     div()
         .h(px(26.0))
@@ -1971,41 +1952,6 @@ fn readonly_value(text: impl Into<String>) -> impl IntoElement {
         .child(text.into())
 }
 
-fn small_step_button(
-    id: impl Into<gpui::ElementId>,
-    label: &'static str,
-    enabled: bool,
-    on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
-) -> impl IntoElement {
-    let mut button = div()
-        .id(id)
-        .flex()
-        .items_center()
-        .justify_center()
-        .w(px(28.0))
-        .min_w(px(28.0))
-        .h(px(26.0))
-        .rounded_md()
-        .border(px(1.0))
-        .border_color(Colors::border_subtle())
-        .bg(Colors::surface_input())
-        .text_size(px(12.0))
-        .font_weight(gpui::FontWeight::SEMIBOLD)
-        .text_color(Colors::text_secondary())
-        .opacity(if enabled { 1.0 } else { 0.45 })
-        .child(label);
-    if enabled {
-        button = button
-            .cursor(gpui::CursorStyle::PointingHand)
-            .hover(|s| {
-                s.bg(Colors::surface_control_hover())
-                    .border_color(Colors::border_strong())
-            })
-            .on_click(on_click);
-    }
-    button
-}
-
 fn beat_stepper(
     id: &'static str,
     clip_id: &str,
@@ -2013,28 +1959,17 @@ fn beat_stepper(
     callback: ClipF32Cb,
     min_value: f32,
 ) -> impl IntoElement {
-    let down_id = clip_id.to_string();
-    let up_id = clip_id.to_string();
-    let down = callback.clone();
-    let up = callback;
-    div()
-        .flex()
-        .flex_row()
-        .items_center()
-        .gap(px(4.0))
-        .child(value_box(format!("{value:.2} bt"), 92.0))
-        .child(small_step_button(
-            (id, 0usize),
-            "-",
-            value > min_value + 0.0001,
-            move |_, w, cx| down(&(down_id.clone(), (value - 0.25).max(min_value)), w, cx),
-        ))
-        .child(small_step_button(
-            (id, 1usize),
-            "+",
-            true,
-            move |_, w, cx| up(&(up_id.clone(), value + 0.25), w, cx),
-        ))
+    let clip_id = clip_id.to_string();
+    inspector_numeric_stepper(
+        id,
+        value as f64,
+        format!("{value:.2} bt"),
+        min_value as f64,
+        99_999.0,
+        0.25,
+        false,
+        move |next, w, cx| callback(&(clip_id.clone(), next as f32), w, cx),
+    )
 }
 
 fn linear_gain_to_db(gain: f32) -> f32 {
@@ -2051,40 +1986,17 @@ fn db_to_linear_gain(db: f32) -> f32 {
 
 fn gain_stepper(clip_id: &str, gain: f32, callback: ClipF32Cb) -> impl IntoElement {
     let db = linear_gain_to_db(gain);
-    let down_id = clip_id.to_string();
-    let up_id = clip_id.to_string();
-    let down = callback.clone();
-    let up = callback;
-    div()
-        .flex()
-        .flex_row()
-        .items_center()
-        .gap(px(4.0))
-        .child(value_box(format!("{db:.1} dB"), 92.0))
-        .child(small_step_button(
-            "clip-gain-down",
-            "-",
-            db > -59.9,
-            move |_, w, cx| {
-                down(
-                    &(down_id.clone(), db_to_linear_gain((db - 1.0).max(-60.0))),
-                    w,
-                    cx,
-                )
-            },
-        ))
-        .child(small_step_button(
-            "clip-gain-up",
-            "+",
-            db < 12.0,
-            move |_, w, cx| {
-                up(
-                    &(up_id.clone(), db_to_linear_gain((db + 1.0).min(12.0))),
-                    w,
-                    cx,
-                )
-            },
-        ))
+    let clip_id = clip_id.to_string();
+    inspector_numeric_stepper(
+        "clip-gain",
+        db as f64,
+        format!("{db:.1} dB"),
+        -60.0,
+        12.0,
+        1.0,
+        false,
+        move |next, w, cx| callback(&(clip_id.clone(), db_to_linear_gain(next as f32)), w, cx),
+    )
 }
 
 fn truncate_value(text: impl Into<String>) -> impl IntoElement {

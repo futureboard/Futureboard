@@ -16,6 +16,7 @@ use std::sync::OnceLock;
 
 use crossbeam_channel::{bounded, Sender};
 
+use crate::audio_file::AudioFileBuffer;
 use crate::runtime::RuntimeProject;
 
 /// Bounded so a pathological load storm cannot grow memory without limit. This
@@ -42,6 +43,21 @@ fn sender() -> &'static Sender<RuntimeProject> {
     })
 }
 
+fn audio_file_sender() -> &'static Sender<Box<AudioFileBuffer>> {
+    static GY: OnceLock<Sender<Box<AudioFileBuffer>>> = OnceLock::new();
+    GY.get_or_init(|| {
+        let (tx, rx) = bounded::<Box<AudioFileBuffer>>(GRAVEYARD_CAPACITY);
+        let _ = std::thread::Builder::new()
+            .name("daux-audition-graveyard".to_string())
+            .spawn(move || {
+                while let Ok(old) = rx.recv() {
+                    drop(old);
+                }
+            });
+        tx
+    })
+}
+
 /// Initialise the graveyard channel and drop-thread from a non-realtime
 /// thread.
 ///
@@ -51,6 +67,7 @@ fn sender() -> &'static Sender<RuntimeProject> {
 /// thread spawn.
 pub fn prime() {
     let _ = sender();
+    let _ = audio_file_sender();
 }
 
 /// Hand a retired runtime graph to the background dropper.
@@ -61,6 +78,14 @@ pub fn prime() {
 #[inline]
 pub fn retire(old: RuntimeProject) {
     if let Err(err) = sender().try_send(old) {
+        drop(err.into_inner());
+    }
+}
+
+/// Dispose a decoded audition source away from the realtime callback.
+#[inline]
+pub fn retire_audio_file(old: Box<AudioFileBuffer>) {
+    if let Err(err) = audio_file_sender().try_send(old) {
         drop(err.into_inner());
     }
 }

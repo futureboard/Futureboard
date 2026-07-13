@@ -89,9 +89,25 @@ pub fn audio_clip(
     let pixels_per_second = state.viewport.pixels_per_second;
     let seconds_per_beat = state.seconds_per_beat();
     let stretch_badge = stretch_badge_label(clip, state);
-    let left = state.beats_to_x(clip.start_beat);
-    let width = (clip.duration_beats * seconds_per_beat * pixels_per_second).max(10.0);
-    let clip_duration_seconds = (clip.duration_beats * seconds_per_beat).max(0.001);
+    // An ordinary recorded/imported audio file is time-based material. Keep it
+    // positioned and sized in source seconds until the user explicitly enables
+    // Tempo Sync/Warp; otherwise changing project BPM makes a fixed waveform
+    // look glued to musical grid lines and falsely implies it was stretched.
+    let time_locked = clip.stretch.mode == StretchMode::Off;
+    let clip_duration_seconds = if time_locked {
+        clip.source_duration_seconds
+            .map(|seconds| seconds as f32)
+            .unwrap_or(clip.duration_beats * seconds_per_beat)
+            .max(0.001)
+    } else {
+        (clip.duration_beats * seconds_per_beat).max(0.001)
+    };
+    let left = if time_locked {
+        state.time_to_content_x(state.beats_to_seconds(clip.start_beat))
+    } else {
+        state.beats_to_x(clip.start_beat)
+    };
+    let width = (clip_duration_seconds * pixels_per_second).max(10.0);
     let fade_in_seconds = (clip.stretch.fade_in_ms.max(0.0) / 1000.0)
         .max(auto_crossfade_in_beats.max(0.0) * seconds_per_beat)
         .min(clip_duration_seconds);
@@ -121,12 +137,14 @@ pub fn audio_clip(
         edge: ClipEdge::Left,
         start_beat: clip.start_beat,
         duration_beats: clip.duration_beats,
+        original: clip.clone(),
     };
     let resize_right = ClipResizeDrag {
         clip_id: clip.id.clone(),
         edge: ClipEdge::Right,
         start_beat: clip.start_beat,
         duration_beats: clip.duration_beats,
+        original: clip.clone(),
     };
     const RESIZE_HANDLE_W: f32 = 6.0;
 

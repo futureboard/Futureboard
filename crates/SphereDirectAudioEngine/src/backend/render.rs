@@ -9,6 +9,7 @@
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, OnceLock};
 
+use crate::audio_file::AudioFileAudition;
 use crate::command::EngineCommand;
 use crate::dsp::{meter::smooth_peak, oscillator::SineOscillator};
 use crate::engine::{SharedState, PEAK_DECAY, TEST_TONE_AMPLITUDE};
@@ -118,6 +119,8 @@ pub struct LocalAudioState {
     pub metronome_click_gain: f32,
     /// When true, metronome scheduling and output are suppressed (playhead scrub).
     pub metronome_suspended: bool,
+    /// Standalone File Browser audition, owned by this stream/callback.
+    pub audition: Option<AudioFileAudition>,
 }
 
 impl LocalAudioState {
@@ -151,6 +154,7 @@ impl LocalAudioState {
             metronome_click_phase_inc: 0.0,
             metronome_click_gain: 0.0,
             metronome_suspended: false,
+            audition: None,
         }
     }
 
@@ -442,6 +446,16 @@ pub fn drain_commands(
                 local.osc_freq = frequency;
                 local.osc_l.set_frequency(frequency as f64);
                 local.osc_r.set_frequency(frequency as f64);
+            }
+            EngineCommand::StartAudition { source } => {
+                if let Some(old) = local.audition.replace(AudioFileAudition::new(source)) {
+                    crate::graveyard::retire_audio_file(old.into_source());
+                }
+            }
+            EngineCommand::StopAudition => {
+                if let Some(old) = local.audition.take() {
+                    crate::graveyard::retire_audio_file(old.into_source());
+                }
             }
             EngineCommand::StartTransport => {
                 let pos = shared.position_samples.load(Ordering::Relaxed);
@@ -936,13 +950,15 @@ fn fill_output_f32_inner(
     // so the plugin's own UI keyboard stays audible (parity with the legacy
     // callback path).
     let bridge_editor_wakeup = runtime.has_bridge_editor_active();
+    let audition_active = local.audition.is_some();
     let preview_render_active = has_preview
         || pending_midi
         || panic_flush
         || bridge_preview_tail
         || bridge_editor_wakeup
         || local.preview_tail_samples > 0
-        || local.stop_tail_samples > 0;
+        || local.stop_tail_samples > 0
+        || audition_active;
     if preview_render_active
         && !transport_playing
         && (has_preview || pending_midi || local.preview_tail_samples > 0)
@@ -1000,6 +1016,16 @@ fn fill_output_f32_inner(
             shared.time_sig_den.load(Ordering::Relaxed),
             loop_bounds,
         );
+        let audition_finished = local
+            .audition
+            .as_mut()
+            .map(|audition| audition.mix_into(data, channels, runtime.sample_rate))
+            .unwrap_or(false);
+        if audition_finished {
+            if let Some(audition) = local.audition.take() {
+                crate::graveyard::retire_audio_file(audition.into_source());
+            }
+        }
         if !local.render_path_logged {
             local.render_path_logged = true;
             if callback_debug_enabled() {

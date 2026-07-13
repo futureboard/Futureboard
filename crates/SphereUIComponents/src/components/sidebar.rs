@@ -317,8 +317,7 @@ pub fn sidebar(
 
 /// Mini waveform details for the selected audio file. Peaks come from the shared
 /// waveform cache (decoded off-thread on select); while decoding it shows an
-/// honest pending baseline. Audition controls stay hidden until the engine can
-/// produce audible previews.
+/// honest pending baseline. Selecting a file queues its audible audition.
 fn browser_waveform_pane(path: &std::path::Path) -> impl IntoElement {
     let name = path
         .file_name()

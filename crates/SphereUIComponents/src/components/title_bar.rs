@@ -10,10 +10,50 @@ use crate::theme::{self, Colors};
 pub const TITLEBAR_HEIGHT: f32 = TITLEBAR_HEIGHT_PX;
 pub const STATUSBAR_HEIGHT: f32 = 22.0;
 pub const CHROME_ICON_BUTTON_SIZE: f32 = 26.0;
+/// Windows caption controls are deliberately glyph-centric: no visible button
+/// padding or boxed treatment. Other platforms retain their safer hit area.
+#[cfg(target_os = "windows")]
+pub const WINDOW_CONTROL_WIDTH: f32 = 40.0;
+#[cfg(not(target_os = "windows"))]
 pub const WINDOW_CONTROL_WIDTH: f32 = 34.0;
 pub const CHROME_PAD_X: f32 = 6.0;
 pub const CHROME_TEXT_SIZE: f32 = crate::theme::typography::UI_XS;
 pub const CHROME_TITLE_SIZE: f32 = crate::theme::typography::UI_XS;
+/// Native Windows window-control glyph family. It ships with Windows 10+ and
+/// matches the OS caption-button metrics more closely than our generic SVGs.
+pub const WINDOWS_FLUENT_ICON_FONT: &str = "Segoe Fluent Icons";
+
+/// Caption glyph for the current platform. Windows deliberately uses the
+/// system Fluent font; other platforms retain the shared SVG icon set.
+pub fn window_control_icon(
+    area: WindowControlArea,
+    icon_path: &'static str,
+    fallback_text: &'static str,
+) -> Div {
+    #[cfg(target_os = "windows")]
+    {
+        let _ = fallback_text;
+        let glyph = match area {
+            WindowControlArea::Min => "\u{E921}",
+            WindowControlArea::Max if icon_path == crate::assets::ICON_RESTORE_PATH => "\u{E923}",
+            WindowControlArea::Max => "\u{E922}",
+            WindowControlArea::Close => "\u{E8BB}",
+            WindowControlArea::Drag => "",
+        };
+        div()
+            .flex()
+            .items_center()
+            .justify_center()
+            .font(gpui::font(WINDOWS_FLUENT_ICON_FONT))
+            .text_size(px(10.0))
+            .text_color(Colors::text_muted())
+            .child(glyph)
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        chrome_button(Some(icon_path), fallback_text, false, Colors::text_muted())
+    }
+}
 
 pub fn section_separator() -> impl gpui::IntoElement {
     div()
@@ -54,7 +94,7 @@ pub fn window_control_button(
     icon_path: &'static str,
     fallback_text: &'static str,
 ) -> Div {
-    let button = chrome_button(Some(icon_path), fallback_text, false, Colors::text_muted())
+    let button = window_control_icon(area, icon_path, fallback_text)
         .w(px(WINDOW_CONTROL_WIDTH))
         .h(px(TITLEBAR_HEIGHT))
         .rounded_none()
@@ -175,7 +215,7 @@ pub fn external_window_titlebar_with_icon(
                 .flex()
                 .items_center()
                 .justify_center()
-                .w(px(TITLEBAR_HEIGHT))
+                .w(px(WINDOW_CONTROL_WIDTH))
                 .h(px(TITLEBAR_HEIGHT))
                 .cursor(gpui::CursorStyle::PointingHand)
                 .hover(|s| s.bg(Colors::surface_control_hover()))
@@ -233,7 +273,7 @@ pub fn external_window_titlebar_compact(
                 .flex()
                 .items_center()
                 .justify_center()
-                .w(px(TITLEBAR_HEIGHT))
+                .w(px(WINDOW_CONTROL_WIDTH))
                 .h(px(TITLEBAR_HEIGHT))
                 .cursor(gpui::CursorStyle::PointingHand)
                 .hover(|s| s.bg(Colors::surface_control_hover()))
@@ -261,19 +301,13 @@ fn external_window_control_button(
         .flex()
         .items_center()
         .justify_center()
-        .w(px(TITLEBAR_HEIGHT))
+        .w(px(WINDOW_CONTROL_WIDTH))
         .h(px(TITLEBAR_HEIGHT))
         .cursor(gpui::CursorStyle::PointingHand)
         .hover(|s| s.bg(Colors::surface_control_hover()))
         .occlude()
         .on_click(move |_, window, cx| on_click(window, cx))
-        .child(
-            svg()
-                .path(icon_path)
-                .w(px(12.0))
-                .h(px(12.0))
-                .text_color(Colors::text_faint()),
-        )
+        .child(window_control_icon(area, icon_path, "").text_color(Colors::text_faint()))
 }
 
 pub fn status_item(text: impl Into<String>, strong: bool) -> impl gpui::IntoElement {

@@ -850,12 +850,13 @@ fn window_controls(window: &gpui::Window, on_close: Option<ChromeActionCb>) -> i
                           icon_path: &'static str,
                           fallback_text: &'static str,
                           on_linux: Option<ChromeActionCb>| {
-        let button = chrome_button(Some(icon_path), fallback_text, false, Colors::text_muted())
-            .w(px(WINDOW_CONTROL_WIDTH))
-            .h(px(crate::components::title_bar::TITLEBAR_HEIGHT))
-            .rounded_none()
-            .window_control_area(area)
-            .occlude();
+        let button =
+            crate::components::title_bar::window_control_icon(area, icon_path, fallback_text)
+                .w(px(WINDOW_CONTROL_WIDTH))
+                .h(px(crate::components::title_bar::TITLEBAR_HEIGHT))
+                .rounded_none()
+                .window_control_area(area)
+                .occlude();
 
         #[cfg(target_os = "linux")]
         let button = {

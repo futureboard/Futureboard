@@ -186,6 +186,9 @@ pub(crate) struct AudioBridgeState {
     pub sync_failed_count: u64,
     pub sync_coalesced_count: u64,
     pub sync_timeout_count: u64,
+    /// Snapshot construction serializes the whole project. Coalesce rapid UI
+    /// gestures (numeric scrubs, sliders) before doing that control-thread work.
+    pub last_sync_snapshot_at: Option<Instant>,
     /// Reason string of the most recent sync request (diagnostics only).
     pub last_sync_reason: &'static str,
     /// Start transport once the current background sync completes.
@@ -241,6 +244,7 @@ impl Default for AudioBridgeState {
             sync_failed_count: 0,
             sync_coalesced_count: 0,
             sync_timeout_count: 0,
+            last_sync_snapshot_at: None,
             last_sync_reason: "init",
             play_after_sync: false,
             last_dropout_count: 0,
@@ -988,6 +992,21 @@ impl StudioLayout {
         if !force && !self.audio_bridge.project_dirty && !self.audio_bridge.media_dirty {
             return;
         }
+
+        // A scrub can emit dozens of UI updates per second. Building a full
+        // serialized engine snapshot for each one blocks the UI and provides no
+        // audible benefit; retain dirty state and let the poll publish the most
+        // recent value on the next short control-rate slot.
+        const UI_GESTURE_SYNC_INTERVAL: Duration = Duration::from_millis(75);
+        if !force
+            && self
+                .audio_bridge
+                .last_sync_snapshot_at
+                .is_some_and(|last| last.elapsed() < UI_GESTURE_SYNC_INTERVAL)
+        {
+            return;
+        }
+        self.audio_bridge.last_sync_snapshot_at = Some(Instant::now());
 
         let sample_rate = self.current_audio_sample_rate();
         let graph_version_before = self.audio_bridge.route_graph_version;

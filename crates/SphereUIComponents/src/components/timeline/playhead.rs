@@ -1,6 +1,14 @@
 use crate::theme::Colors;
 use gpui::{canvas, div, fill, px, size, svg, Bounds, IntoElement, ParentElement, Pixels, Styled};
 
+/// `FUTUREBOARD_PLAYHEAD_LAYER_DEBUG=1` — trace the playhead body layer.
+/// Cached: this is read inside the per-frame paint closure, which runs on
+/// every repaint while the transport is playing.
+fn playhead_layer_debug_enabled() -> bool {
+    static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *FLAG.get_or_init(|| std::env::var_os("FUTUREBOARD_PLAYHEAD_LAYER_DEBUG").is_some())
+}
+
 /// Content-viewport playhead line (no head/marker) at a precomputed x.
 pub fn playhead_line_at(x: f32) -> impl IntoElement {
     let _s = crate::perf::PerfScope::enter("PlayheadLine");
@@ -41,7 +49,7 @@ pub fn playhead_body_overlay_at(x: f32) -> impl IntoElement {
                 return;
             }
 
-            if std::env::var_os("FUTUREBOARD_PLAYHEAD_LAYER_DEBUG").is_some() {
+            if playhead_layer_debug_enabled() {
                 eprintln!("[playhead body] x={x:.1} w={w:.1} h={h:.1}");
             }
 

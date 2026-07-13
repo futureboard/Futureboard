@@ -59,11 +59,10 @@ impl Render for StudioLayout {
         // Pull the live track list and current selection out of the Timeline so
         // the Mixer and Inspector render against the same data the TrackHeader
         // sees. Cloning the Vec is cheap relative to a full render.
-        let (tracks, _master, selected_track_id, selected_clip_id, project_bpm) = {
+        let (tracks, selected_track_id, selected_clip_id, project_bpm) = {
             let t = self.timeline.read(cx);
             (
                 t.state.tracks.clone(),
-                t.state.master.clone(),
                 t.state.selection.selected_track_id.clone(),
                 t.state.selection.selected_clip_ids.first().cloned(),
                 t.state.bpm as f64,
@@ -1631,7 +1630,7 @@ impl Render for StudioLayout {
             .children(text_context_overlay)
             .children(virtual_keyboard_overlay)
             .children({
-                if std::env::var_os("FUTUREBOARD_DEBUG_ACTIVE_PANEL").is_some() {
+                if debug_active_panel_enabled() {
                     Some(
                         div()
                             .absolute()
@@ -1678,3 +1677,11 @@ fn publish_studio_main_hwnd(window: &Window) {
 
 #[cfg(not(target_os = "windows"))]
 fn publish_studio_main_hwnd(_window: &Window) {}
+
+/// `FUTUREBOARD_DEBUG_ACTIVE_PANEL=1` — draw the active-panel debug pill.
+/// Cached so the root render doesn't hit the OS env store every frame
+/// (matches the `OnceLock` idiom used for every other debug flag).
+fn debug_active_panel_enabled() -> bool {
+    static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *FLAG.get_or_init(|| std::env::var_os("FUTUREBOARD_DEBUG_ACTIVE_PANEL").is_some())
+}

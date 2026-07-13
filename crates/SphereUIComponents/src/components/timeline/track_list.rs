@@ -23,6 +23,14 @@ use crate::theme::Colors;
 /// pop-in during fast scrolling. Measured in track rows.
 const OVERSCAN: usize = 2;
 
+/// `FUTUREBOARD_TIMELINE_BG_DEBUG=1` — trace the timeline background metrics.
+/// Cached: `track_list` runs on every timeline repaint, so re-reading the OS
+/// env store here would cost a syscall per frame.
+fn timeline_bg_debug_enabled() -> bool {
+    static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *FLAG.get_or_init(|| std::env::var_os("FUTUREBOARD_TIMELINE_BG_DEBUG").is_some())
+}
+
 pub fn track_list(
     state: &TimelineState,
     header_callbacks: TrackHeaderCallbacks,
@@ -66,7 +74,7 @@ pub fn track_list(
     let total_tracks_height = row_layout.total_height;
     let tail_start_y = (total_tracks_height - state.viewport.scroll_y).max(0.0);
 
-    if std::env::var_os("FUTUREBOARD_TIMELINE_BG_DEBUG").is_some() {
+    if timeline_bg_debug_enabled() {
         eprintln!(
             "[timeline bg] tracks={} total_h={:.1} scroll_y={:.1} viewport_h={:.1} tail_start_y={:.1}",
             row_layout.rows.len(),

@@ -42,6 +42,10 @@ pub(crate) struct MixerViewState {
     /// Active splitter-drag target, if a drag is in progress.
     pub split_active_target: Option<MixerSplitTarget>,
     pub vsti_output_meters: HashMap<String, VstiOutputMeterState>,
+    /// Reused scratch set of the plugin-output meter keys seen on the current
+    /// meter tick. Kept on the struct (drained via `mem::take`) so the playback
+    /// meter path does not allocate a fresh `HashSet` every tick.
+    pub vsti_meter_live_keys: std::collections::HashSet<String>,
     /// Mixer tree sidebar enabled (session-only).
     pub tree_sidebar_enabled: bool,
     /// Collapsed to icon rail.
@@ -84,6 +88,7 @@ impl Default for MixerViewState {
             split_resize_start_send_px: 0.0,
             split_active_target: None,
             vsti_output_meters: HashMap::new(),
+            vsti_meter_live_keys: std::collections::HashSet::new(),
             tree_sidebar_enabled: true,
             tree_sidebar_collapsed: false,
             tree_sidebar_width_px: MIXER_TREE_SIDEBAR_DEFAULT_WIDTH,

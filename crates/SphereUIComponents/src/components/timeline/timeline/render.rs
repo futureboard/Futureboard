@@ -2,6 +2,14 @@
 
 use super::*;
 
+/// `FUTUREBOARD_PLAYHEAD_DEBUG=1` — trace the ruler playhead x-position each
+/// frame. Cached so the per-frame render doesn't hit the OS env store while
+/// the transport is running.
+fn playhead_debug_enabled() -> bool {
+    static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *FLAG.get_or_init(|| std::env::var_os("FUTUREBOARD_PLAYHEAD_DEBUG").is_some())
+}
+
 impl Render for Timeline {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let _tl_scope = crate::perf::PerfScope::enter("Timeline");
@@ -1537,7 +1545,7 @@ impl Render for Timeline {
                     .overflow_hidden()
                     .child({
                         let playhead_x = state.beats_to_x(state.transport.playhead_beats);
-                        if std::env::var_os("FUTUREBOARD_PLAYHEAD_DEBUG").is_some() {
+                        if playhead_debug_enabled() {
                             eprintln!(
                                 "[playhead x] beat={:.3} scroll_x={:.1} px_per_beat={:.3} x={:.1}",
                                 state.transport.playhead_beats,

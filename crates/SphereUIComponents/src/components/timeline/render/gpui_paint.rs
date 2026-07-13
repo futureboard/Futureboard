@@ -9,6 +9,14 @@ use super::snapshot::TimelineRenderSnapshot;
 use crate::components::timeline::timeline_state::GridLineLevel;
 use crate::theme::Colors;
 
+/// `FUTUREBOARD_TIMELINE_LAYER_DEBUG=1` — trace grid paint ordering. Cached:
+/// this is read inside the `paint_grid` canvas closure, which runs on every
+/// timeline repaint.
+fn timeline_layer_debug_enabled() -> bool {
+    static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *FLAG.get_or_init(|| std::env::var_os("FUTUREBOARD_TIMELINE_LAYER_DEBUG").is_some())
+}
+
 /// Renders the arrangement grid via GPUI `canvas` + `paint_quad`.
 pub struct GpuiPaintTimelineRenderer;
 
@@ -29,7 +37,7 @@ impl GpuiPaintTimelineRenderer {
         // `paint_layer` is promoted into a separate compositor layer which can
         // appear above later GPUI elements (clips/playhead/selection). We want
         // strict DOM child ordering: grid/regions must stay behind content.
-        if std::env::var_os("FUTUREBOARD_TIMELINE_LAYER_DEBUG").is_some() {
+        if timeline_layer_debug_enabled() {
             eprintln!("[timeline paint] base->regions->grid (gpui_paint) w={grid_width:.1} h={grid_height:.1}");
         }
 

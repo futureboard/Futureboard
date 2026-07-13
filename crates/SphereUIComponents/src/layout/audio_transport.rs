@@ -832,23 +832,31 @@ impl StudioLayout {
         }
         self.engine_sync.meter_applied_at = now;
         let meter_dt = elapsed.as_secs_f32().clamp(1.0 / 240.0, 0.1);
+        // Split the owned meter snapshot into its fields so the timeline closure
+        // can take `tracks` by value without cloning `plugin_outputs` (consumed
+        // afterwards). Moving fields is cheaper than the previous per-tick
+        // `plugin_outputs.clone()` on this playback hot path. `master_peak_*` are
+        // `f64` (Copy), so the forensic trace and the closure can both read them.
         let meters = engine.meters();
-        let plugin_output_meters = meters.plugin_outputs.clone();
+        let meter_tracks = meters.tracks;
+        let plugin_output_meters = meters.plugin_outputs;
+        let master_peak_l = meters.master_peak_l;
+        let master_peak_r = meters.master_peak_r;
         if crate::forensic_trace::forensic_trace_enabled() {
-            for track_meter in &meters.tracks {
+            for track_meter in &meter_tracks {
                 let peak = track_meter.peak_l.max(track_meter.peak_r);
                 if peak > 0.0001 {
                     eprintln!("[Meter] track={} peak={peak:.6}", track_meter.track_id);
                 }
             }
-            let master_peak = meters.master_peak_l.max(meters.master_peak_r);
+            let master_peak = master_peak_l.max(master_peak_r);
             if master_peak > 0.0001 {
                 eprintln!("[Meter] master peak={master_peak:.6}");
             }
         }
         let mut changed = self.timeline.update(cx, |timeline, _cx| {
             let mut changed = false;
-            for track_meter in meters.tracks {
+            for track_meter in meter_tracks {
                 if let Some(track) = timeline
                     .state
                     .tracks
@@ -903,25 +911,28 @@ impl StudioLayout {
             let master = &mut timeline.state.master;
             changed |= smooth_meter_value(
                 &mut master.meter_level_l,
-                meters.master_peak_l.clamp(0.0, 1.0) as f32,
+                master_peak_l.clamp(0.0, 1.0) as f32,
                 meter_dt,
             );
             changed |= smooth_meter_value(
                 &mut master.meter_level_r,
-                meters.master_peak_r.clamp(0.0, 1.0) as f32,
+                master_peak_r.clamp(0.0, 1.0) as f32,
                 meter_dt,
             );
             update_meter_hold(&mut master.meter_peak_hold_l, master.meter_level_l, meter_dt);
             update_meter_hold(&mut master.meter_peak_hold_r, master.meter_level_r, meter_dt);
             update_meter_clip(
                 &mut master.meter_clip,
-                meters.master_peak_l,
-                meters.master_peak_r,
+                master_peak_l,
+                master_peak_r,
                 master.meter_peak_hold_l.max(master.meter_peak_hold_r),
             );
             changed
         });
-        let mut live_keys = std::collections::HashSet::new();
+        // Reuse the persistent scratch set (retains its capacity across ticks)
+        // rather than allocating a fresh `HashSet` every meter update.
+        let mut live_keys = std::mem::take(&mut self.mixer_view.vsti_meter_live_keys);
+        live_keys.clear();
         for meter in plugin_output_meters {
             let channel = meter.channel.clamp(1, 32) as u8;
             let key = vsti_output_meter_key(&meter.track_id, &meter.insert_id, channel);
@@ -961,6 +972,8 @@ impl StudioLayout {
             }
             keep
         });
+        // Hand the scratch set back so its allocation is reused next tick.
+        self.mixer_view.vsti_meter_live_keys = live_keys;
         changed
     }
 

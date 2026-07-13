@@ -1,5 +1,34 @@
 #include <winuser.h>
 
+// Friendly product information shown by Windows Explorer and Task Manager.
+1 VERSIONINFO
+ FILEVERSION 2026,7,2,0
+ PRODUCTVERSION 2026,7,2,0
+ FILEFLAGSMASK 0x3fL
+ FILEFLAGS 0x0L
+ FILEOS 0x40004L
+ FILETYPE 0x1L
+ FILESUBTYPE 0x0L
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904B0"
+        BEGIN
+            VALUE "CompanyName", "Futureboard\0"
+            VALUE "FileDescription", "Futureboard Studio\0"
+            VALUE "FileVersion", "2026.7.2\0"
+            VALUE "InternalName", "Futureboard Studio\0"
+            VALUE "OriginalFilename", "FutureboardNative.exe\0"
+            VALUE "ProductName", "Futureboard Studio\0"
+            VALUE "ProductVersion", "2026.7.2\0"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x0409, 1200
+    END
+END
+
 // Application icon (../icons/icon.ico)
 1 ICON "../icons/icon.ico"
 

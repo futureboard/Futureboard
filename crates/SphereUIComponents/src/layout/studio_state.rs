@@ -26,6 +26,9 @@ pub enum WorkspaceActivePanel {
     PianoRoll,
     Automation,
     EffectEditor,
+    ChordDisplay,
+    LyricDisplay,
+    LyricEditor,
 }
 
 impl WorkspaceActivePanel {
@@ -39,6 +42,37 @@ impl WorkspaceActivePanel {
             WorkspaceActivePanel::PianoRoll => "Piano Roll",
             WorkspaceActivePanel::Automation => "Automation",
             WorkspaceActivePanel::EffectEditor => "Effect Editor",
+            WorkspaceActivePanel::ChordDisplay => "Chord Display",
+            WorkspaceActivePanel::LyricDisplay => "Lyric Display",
+            WorkspaceActivePanel::LyricEditor => "Lyric Editor",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum RightDockTab {
+    Inspector,
+    ChordDisplay,
+    LyricDisplay,
+    LyricEditor,
+}
+
+impl RightDockTab {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Inspector => "Inspector",
+            Self::ChordDisplay => "Chords",
+            Self::LyricDisplay => "Lyrics",
+            Self::LyricEditor => "Lyric Editor",
+        }
+    }
+
+    pub fn active_panel(self) -> WorkspaceActivePanel {
+        match self {
+            Self::Inspector => WorkspaceActivePanel::Inspector,
+            Self::ChordDisplay => WorkspaceActivePanel::ChordDisplay,
+            Self::LyricDisplay => WorkspaceActivePanel::LyricDisplay,
+            Self::LyricEditor => WorkspaceActivePanel::LyricEditor,
         }
     }
 }

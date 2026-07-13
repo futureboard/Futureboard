@@ -147,19 +147,22 @@ impl ProjectState {
         }
     }
 
-    /// OS window title for the current state, e.g. `"Untitled Project — Unsaved"`
-    /// or `"My Song — Saved"`.
+    /// Branded OS window title for the current state, e.g.
+    /// `"Untitled Project — Unsaved — Futureboard Studio"`.
     pub fn window_title(&self, name: &str, dirty: bool) -> String {
+        let project_title = |status: &str| {
+            crate::platform_chrome::branded_window_title(&format!("{name} — {status}"))
+        };
         match self {
-            ProjectState::NoProject => "Futureboard Studio".to_string(),
-            ProjectState::Loading => format!("{name} — Loading…"),
-            ProjectState::Error(msg) => format!("{name} — Error: {msg}"),
-            ProjectState::UnsavedWorkspace => format!("{name} — Unsaved"),
+            ProjectState::NoProject => crate::platform_chrome::APP_WINDOW_TITLE.to_string(),
+            ProjectState::Loading => project_title("Loading…"),
+            ProjectState::Error(msg) => project_title(&format!("Error: {msg}")),
+            ProjectState::UnsavedWorkspace => project_title("Unsaved"),
             ProjectState::SavedProject { .. } => {
                 if dirty {
-                    format!("{name} — Unsaved")
+                    project_title("Unsaved")
                 } else {
-                    format!("{name} — Saved")
+                    project_title("Saved")
                 }
             }
         }

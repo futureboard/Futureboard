@@ -2,10 +2,10 @@ use super::{
     AutomationLane, AutomationPoint, AutomationTargetDesc, ClipSource, FutureboardProject,
     InputMonitorMode, MidiControllerKind, MidiControllerLane, MidiControllerPoint, MidiNote,
     MidiSysExEvent, MidiSysExKind, PluginFormat, PluginStateBlob, ProjectAsset, ProjectClip,
-    ProjectInsert, ProjectMixer, ProjectPluginInstance, ProjectSend, ProjectTempoPoint,
-    ProjectTimelineMarker, ProjectTimelineRegion, ProjectTrack, ProjectTrackAudioFormat,
-    ProjectTrackInputRouting, ProjectTrackMidiInputRouting, ProjectTrackOutputRouting,
-    ProjectTrackType, TrackRouting,
+    ProjectInsert, ProjectMixer, ProjectPluginInstance, ProjectSend, ProjectSongTextCue,
+    ProjectTempoPoint, ProjectTimelineMarker, ProjectTimelineRegion, ProjectTrack,
+    ProjectTrackAudioFormat, ProjectTrackInputRouting, ProjectTrackMidiInputRouting,
+    ProjectTrackOutputRouting, ProjectTrackType, TrackRouting,
 };
 use crate::components::timeline::timeline_state::{
     AudioClipStretchState, StretchAlgorithm, StretchMode, WarpMarker,
@@ -39,7 +39,8 @@ pub const PROJECT_MAGIC: &[u8; 8] = b"FBSTUD1\0";
 /// a per-track "play each note on its own channel" toggle (pre-v22 tracks
 /// default to `false`, matching the pre-existing fixed-channel behavior).
 /// v23 preserves imported MIDI SysEx events on MIDI clips.
-pub const PROJECT_VERSION: u32 = 23;
+/// v24 adds project-owned chord and lyric cues.
+pub const PROJECT_VERSION: u32 = 24;
 
 /// Minimum on-disk header size: magic (8) + version (4) + reserved (4) + body_len (4).
 pub const PROJECT_HEADER_SIZE: usize = 20;
@@ -867,6 +868,15 @@ fn encode_body(project: &FutureboardProject) -> Vec<u8> {
         w.write_str(id);
     }
 
+    // Chord / lyric cues (v24+). Kept at the body tail for backwards loading.
+    w.write_u32(project.settings.song_text_cues.len() as u32);
+    for cue in &project.settings.song_text_cues {
+        w.write_str(&cue.id);
+        w.write_f64(cue.beat);
+        w.write_str(&cue.chord);
+        w.write_str(&cue.lyric);
+    }
+
     w.into_bytes()
 }
 
@@ -1625,6 +1635,22 @@ fn decode_body(body: &[u8], version: u32) -> Result<FutureboardProject, ProjectE
             (Vec::new(), Vec::new(), Vec::new())
         };
 
+    let song_text_cues = if version >= 24 {
+        let count = r.read_u32()? as usize;
+        let mut cues = Vec::with_capacity(count);
+        for _ in 0..count {
+            cues.push(ProjectSongTextCue {
+                id: r.read_str()?,
+                beat: r.read_f64()?,
+                chord: r.read_str()?,
+                lyric: r.read_str()?,
+            });
+        }
+        cues
+    } else {
+        Vec::new()
+    };
+
     Ok(FutureboardProject {
         id,
         name,
@@ -1636,6 +1662,7 @@ fn decode_body(body: &[u8], version: u32) -> Result<FutureboardProject, ProjectE
             time_signature_points,
             timeline_markers,
             timeline_regions,
+            song_text_cues,
             time_sig_num,
             time_sig_den,
             sample_rate,
@@ -1936,6 +1963,23 @@ mod tests {
         let bytes = encode_project(&project);
         let decoded = decode_project(&bytes).expect("decode");
         assert_eq!(decoded.settings.tempo_points, project.settings.tempo_points);
+    }
+
+    #[test]
+    fn song_text_cues_roundtrip_v24() {
+        let mut project = FutureboardProject::new("Song Text");
+        project.settings.song_text_cues = vec![ProjectSongTextCue {
+            id: "verse-1".to_string(),
+            beat: 16.0,
+            chord: "Am7".to_string(),
+            lyric: "คืนที่ดาวเต็มฟ้า".to_string(),
+        }];
+        let bytes = encode_project(&project);
+        let decoded = decode_project(&bytes).expect("decode song text");
+        assert_eq!(
+            decoded.settings.song_text_cues,
+            project.settings.song_text_cues
+        );
     }
 
     #[test]

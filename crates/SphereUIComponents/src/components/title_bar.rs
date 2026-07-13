@@ -145,7 +145,7 @@ pub fn external_window_titlebar_with_icon(
 ) -> impl IntoElement {
     let policy = PlatformChromePolicy::external_dialog();
     let on_close = on_close.clone();
-    let title_text = title.into();
+    let title_text = crate::platform_chrome::branded_window_title(&title.into());
 
     let mut title_row = div()
         .flex()
@@ -242,7 +242,7 @@ pub fn external_window_titlebar_compact(
 ) -> impl IntoElement {
     let policy = PlatformChromePolicy::external_dialog();
     let on_close = on_close.clone();
-    let title_text = title.into();
+    let title_text = crate::platform_chrome::branded_window_title(&title.into());
 
     div()
         .flex()

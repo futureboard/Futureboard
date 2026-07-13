@@ -25,6 +25,47 @@ pub const MIXER_WINDOW_WIDTH: f32 = 1180.0;
 pub const MIXER_WINDOW_HEIGHT: f32 = 420.0;
 pub const MIXER_WINDOW_MIN_WIDTH: f32 = 760.0;
 pub const MIXER_WINDOW_MIN_HEIGHT: f32 = 320.0;
+const MIXER_MENU_BAR_HEIGHT: f32 = 24.0;
+const MIXER_MENU_FONT_SIZE: f32 = 11.0;
+const MIXER_MENU_LABELS: [&str; 5] = ["File", "Edit", "Scene", "Tools", "Help"];
+
+fn mixer_menu_bar() -> impl IntoElement {
+    div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .flex_none()
+        .h(px(MIXER_MENU_BAR_HEIGHT))
+        .px(px(4.0))
+        .gap(px(1.0))
+        .bg(Colors::surface_titlebar())
+        .border_b(px(1.0))
+        .border_color(Colors::border_subtle())
+        .children(
+            MIXER_MENU_LABELS
+                .into_iter()
+                .enumerate()
+                .map(|(index, label)| {
+                    div()
+                        .id(("mixer-menu-label", index))
+                        .h_full()
+                        .px(px(8.0))
+                        .flex()
+                        .items_center()
+                        .rounded_sm()
+                        .text_size(px(MIXER_MENU_FONT_SIZE))
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .text_color(Colors::text_secondary())
+                        .hover(|style| {
+                            style
+                                .bg(Colors::surface_control_hover())
+                                .text_color(Colors::text_primary())
+                        })
+                        .cursor(gpui::CursorStyle::PointingHand)
+                        .child(label)
+                }),
+        )
+}
 
 /// View-model for the external mixer — cloned from the studio timeline.
 #[derive(Clone)]
@@ -134,7 +175,8 @@ impl Render for MixerWindow {
             0.0
         };
         let mixer_viewport_width = (viewport_width - tree_width - 90.0).max(100.0);
-        let mixer_viewport_height = (viewport_height - TITLEBAR_HEIGHT).max(0.0);
+        let mixer_viewport_height =
+            (viewport_height - TITLEBAR_HEIGHT - MIXER_MENU_BAR_HEIGHT).max(0.0);
         let mixer_split = MixerSplit {
             insert_px: clamp_mixer_section_height_px(mixer_insert_section_px),
             send_px: clamp_mixer_section_height_px(mixer_send_section_px),
@@ -171,6 +213,7 @@ impl Render for MixerWindow {
                     window.remove_window();
                 },
             ))
+            .child(mixer_menu_bar())
             .child(
                 div()
                     .flex()

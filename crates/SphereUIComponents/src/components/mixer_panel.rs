@@ -2482,7 +2482,20 @@ pub(crate) fn mixer_strip_scroller(
         .overflow_hidden()
         .on_scroll_wheel(on_scroll_wheel)
         .when(spare_channel_w > 0.0, |d| {
-            d.child(mixer_empty_bay(spare_channel_w, strip_available_px))
+            // Keep the empty bay confined to the unused right-hand region.
+            // A normal flex child expands across the entire scroller and, in
+            // GPU-decoration mode, paints over every strip when the window is
+            // wide enough to show all channels.
+            d.child(
+                div()
+                    .absolute()
+                    .right_0()
+                    .top_0()
+                    .bottom_0()
+                    .w(px(spare_channel_w))
+                    .overflow_hidden()
+                    .child(mixer_empty_bay(spare_channel_w, strip_available_px)),
+            )
         })
         .child(
             div()

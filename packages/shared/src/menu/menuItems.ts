@@ -581,6 +581,46 @@ export const APP_MENUS: AppMenuGroup[] = [
       },
       {
         type: "separator",
+        id: "window.sep.song_text",
+      },
+      {
+        id: "window.chord_display_panel",
+        label: "Chord Display in Right Dock",
+        icon: "music",
+        action: "panel:show-chord-display",
+      },
+      {
+        id: "window.lyric_display_panel",
+        label: "Lyric Display in Right Dock",
+        icon: "music",
+        action: "panel:show-lyric-display",
+      },
+      {
+        id: "window.lyric_editor_panel",
+        label: "Lyric Editor in Right Dock",
+        icon: "pencil",
+        action: "panel:show-lyric-editor",
+      },
+      {
+        id: "window.chord_display",
+        label: "Open Chord Display Window",
+        icon: "external-link",
+        action: "window:chord-display",
+      },
+      {
+        id: "window.lyric_display",
+        label: "Open Lyric Display Window",
+        icon: "external-link",
+        action: "window:lyric-display",
+      },
+      {
+        id: "window.lyric_editor",
+        label: "Open Lyric Editor Window",
+        icon: "external-link",
+        action: "window:lyric-editor",
+      },
+      {
+        type: "separator",
         id: "window.sep.zoom",
       },
       {

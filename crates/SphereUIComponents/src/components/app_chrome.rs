@@ -315,6 +315,7 @@ fn project_title(state: ProjectChromeState, anchor_x: f32) -> impl IntoElement {
     } else {
         Colors::status_success()
     };
+    let title = crate::platform_chrome::branded_window_title(&state.name);
     div()
         .flex()
         .flex_row()
@@ -343,7 +344,7 @@ fn project_title(state: ProjectChromeState, anchor_x: f32) -> impl IntoElement {
                 .text_size(px(CHROME_TITLE_SIZE))
                 .font_weight(gpui::FontWeight::SEMIBOLD)
                 .truncate()
-                .child(state.name),
+                .child(title),
         )
         .child(
             div()

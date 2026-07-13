@@ -502,6 +502,14 @@ pub struct ProjectTimelineRegion {
     pub color_hex: String,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProjectSongTextCue {
+    pub id: String,
+    pub beat: f64,
+    pub chord: String,
+    pub lyric: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct ProjectSettings {
     pub bpm: f64,
@@ -511,6 +519,7 @@ pub struct ProjectSettings {
     pub time_signature_points: Vec<ProjectTimeSignaturePoint>,
     pub timeline_markers: Vec<ProjectTimelineMarker>,
     pub timeline_regions: Vec<ProjectTimelineRegion>,
+    pub song_text_cues: Vec<ProjectSongTextCue>,
     pub time_sig_num: u32,
     pub time_sig_den: u32,
     pub sample_rate: u32,
@@ -525,6 +534,7 @@ impl Default for ProjectSettings {
             time_signature_points: Vec::new(),
             timeline_markers: Vec::new(),
             timeline_regions: Vec::new(),
+            song_text_cues: Vec::new(),
             time_sig_num: 4,
             time_sig_den: 4,
             sample_rate: 48000,
@@ -934,6 +944,16 @@ impl From<&TimelineState> for FutureboardProject {
                 color_hex: region.color_hex.clone(),
             })
             .collect();
+        project.settings.song_text_cues = tl
+            .song_text_cues
+            .iter()
+            .map(|cue| ProjectSongTextCue {
+                id: cue.id.clone(),
+                beat: cue.beat,
+                chord: cue.chord.clone(),
+                lyric: cue.lyric.clone(),
+            })
+            .collect();
         project.settings.time_sig_num = tl.time_signature_num;
         project.settings.time_sig_den = tl.time_signature_den;
         project.tracks = tracks;
@@ -1011,6 +1031,20 @@ pub fn apply_to_timeline(project: &FutureboardProject, tl: &mut TimelineState) {
             .total_cmp(&b.start_beat)
             .then_with(|| a.id.cmp(&b.id))
     });
+    tl.song_text_cues = project
+        .settings
+        .song_text_cues
+        .iter()
+        .map(
+            |cue| crate::components::timeline::timeline_state::SongTextCue {
+                id: cue.id.clone(),
+                beat: cue.beat,
+                chord: cue.chord.clone(),
+                lyric: cue.lyric.clone(),
+            },
+        )
+        .collect();
+    tl.song_text_cues.sort_by(|a, b| a.beat.total_cmp(&b.beat));
     if project.settings.time_signature_points.is_empty() {
         tl.time_signature_map =
             crate::components::timeline::timeline_state::TimeSignatureMap::with_default_4_4();

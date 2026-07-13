@@ -196,6 +196,7 @@ impl TimelineState {
             time_signature_map: TimeSignatureMap::with_default_4_4(),
             markers: Vec::new(),
             regions: Vec::new(),
+            song_text_cues: Vec::new(),
             time_signature_num: 4,
             time_signature_den: 4,
             viewport: TimelineViewport {

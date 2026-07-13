@@ -1,6 +1,7 @@
 use gpui::{
     div, px, AppContext, Bounds, Context, Entity, FocusHandle, InteractiveElement, IntoElement,
-    KeyDownEvent, ParentElement, Render, Styled, UniformListScrollHandle, Window, WindowHandle,
+    KeyDownEvent, ParentElement, Render, StatefulInteractiveElement, Styled,
+    UniformListScrollHandle, Window, WindowHandle,
 };
 
 pub use crate::shutdown::ShutdownState;
@@ -77,7 +78,8 @@ use helpers::{
 };
 use project_ops::LifecycleAction;
 pub use studio_state::{
-    ContextTarget, MenuBarUiState, OpenPopover, StudioPanelVisibility, WorkspaceActivePanel,
+    ContextTarget, MenuBarUiState, OpenPopover, RightDockTab, StudioPanelVisibility,
+    WorkspaceActivePanel,
 };
 use studio_state::{TextContextMenu, TextMenuTarget, TransportCommand};
 
@@ -374,6 +376,7 @@ pub(crate) struct RecordingPreviewUi {
 
 pub struct StudioLayout {
     active_panel: WorkspaceActivePanel,
+    right_dock_tab: RightDockTab,
     active_bottom_tab: components::BottomTab,
     bottom_panel_state: BottomPanelState,
     timeline: Entity<components::timeline::Timeline>,
@@ -506,6 +509,9 @@ pub struct StudioLayout {
     mixer_master_strip: gpui::Entity<components::MixerMasterStripView>,
     mixer_panel: gpui::Entity<components::MixerPanelView>,
     bottom_panel_shell: gpui::Entity<components::BottomPanelShell>,
+    chord_display_panel: gpui::Entity<components::SongTextPanelView>,
+    lyric_display_panel: gpui::Entity<components::SongTextPanelView>,
+    lyric_editor_panel: gpui::Entity<components::SongTextPanelView>,
     status_bar: gpui::Entity<components::StatusBarView>,
     effect_editor_tab: gpui::Entity<components::EffectEditorTabView>,
 
@@ -669,6 +675,27 @@ impl StudioLayout {
         let effect_editor_tab = cx
             .new(|_| components::EffectEditorTabView::new(studio_entity.clone(), timeline.clone()));
         let status_bar = cx.new(|_| components::StatusBarView::new(studio_entity.clone()));
+        let chord_display_panel = cx.new(|cx| {
+            components::SongTextPanelView::new(
+                timeline.clone(),
+                components::SongTextPanelKind::ChordDisplay,
+                cx,
+            )
+        });
+        let lyric_display_panel = cx.new(|cx| {
+            components::SongTextPanelView::new(
+                timeline.clone(),
+                components::SongTextPanelKind::LyricDisplay,
+                cx,
+            )
+        });
+        let lyric_editor_panel = cx.new(|cx| {
+            components::SongTextPanelView::new(
+                timeline.clone(),
+                components::SongTextPanelKind::LyricEditor,
+                cx,
+            )
+        });
         let bottom_panel_shell = cx.new(|_| {
             components::BottomPanelShell::new(
                 studio_entity.clone(),
@@ -862,6 +889,7 @@ impl StudioLayout {
         let app_data = paths.app_data.clone();
         let mut layout = Self {
             active_panel: WorkspaceActivePanel::Mixer,
+            right_dock_tab: RightDockTab::Inspector,
             active_bottom_tab: components::BottomTab::Mixer,
             bottom_panel_state: BottomPanelState::default(),
             timeline,
@@ -938,6 +966,9 @@ impl StudioLayout {
             mixer_tree_ui_hooks: None,
             mixer_tree_sidebar,
             mixer_master_strip,
+            chord_display_panel,
+            lyric_display_panel,
+            lyric_editor_panel,
             mixer_panel,
             bottom_panel_shell,
             status_bar,
@@ -1720,6 +1751,36 @@ impl StudioLayout {
             "panel:toggle-mixer" | "view:toggle-mixer" | "window.show_mixer" => {
                 self.toggle_mixer_panel(cx)
             }
+            "panel:show-chord-display" => {
+                self.panels.inspector = true;
+                self.right_dock_tab = RightDockTab::ChordDisplay;
+                self.set_active_panel(WorkspaceActivePanel::ChordDisplay, cx);
+            }
+            "panel:show-lyric-display" => {
+                self.panels.inspector = true;
+                self.right_dock_tab = RightDockTab::LyricDisplay;
+                self.set_active_panel(WorkspaceActivePanel::LyricDisplay, cx);
+            }
+            "panel:show-lyric-editor" => {
+                self.panels.inspector = true;
+                self.right_dock_tab = RightDockTab::LyricEditor;
+                self.set_active_panel(WorkspaceActivePanel::LyricEditor, cx);
+            }
+            "window:chord-display" => self.open_song_text_external_window(
+                components::SongTextPanelKind::ChordDisplay,
+                owner_bounds,
+                cx,
+            ),
+            "window:lyric-display" => self.open_song_text_external_window(
+                components::SongTextPanelKind::LyricDisplay,
+                owner_bounds,
+                cx,
+            ),
+            "window:lyric-editor" => self.open_song_text_external_window(
+                components::SongTextPanelKind::LyricEditor,
+                owner_bounds,
+                cx,
+            ),
             "view:toggle-perf-metrics" => self.toggle_status_performance_metrics(cx),
             "view:toggle-perf-overlay" => self.toggle_performance_overlay(cx),
             "panel:mixer-float" | "floatingwindow:mixer" => {
@@ -1958,6 +2019,7 @@ impl StudioLayout {
     pub(crate) fn toggle_inspector_panel(&mut self, cx: &mut Context<Self>) {
         self.panels.inspector = !self.panels.inspector;
         if self.panels.inspector {
+            self.right_dock_tab = RightDockTab::Inspector;
             self.set_active_panel(WorkspaceActivePanel::Inspector, cx);
         }
         self.sync_timeline_chrome_metrics(cx);

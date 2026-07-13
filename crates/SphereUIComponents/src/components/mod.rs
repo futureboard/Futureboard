@@ -61,6 +61,7 @@ pub mod settings_dialog;
 pub mod settings_layout;
 mod sidebar;
 pub mod slider;
+pub mod song_text_panel;
 pub mod soundfont_player_mdi;
 pub mod soundfont_player_window;
 mod status_bar;
@@ -158,6 +159,9 @@ pub use settings_dialog::{
 };
 pub use sidebar::sidebar;
 pub use slider::slider;
+pub use song_text_panel::{
+    open_song_text_window, SongTextPanelKind, SongTextPanelView, SongTextWindow,
+};
 pub use soundfont_player_mdi::{
     ensure_soundfont_player_document, soundfont_player_mdi_workspace, SOUNDFONT_PLAYER_MDI_TITLE,
 };

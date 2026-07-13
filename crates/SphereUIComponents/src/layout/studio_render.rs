@@ -1571,40 +1571,53 @@ impl Render for StudioLayout {
                 });
                 if show_inspector {
                     main_row = main_row.child({
-                        let _s = crate::perf::PerfScope::enter("Inspector");
+                        let _s = crate::perf::PerfScope::enter("RightDock");
+                        let right_tab = self.right_dock_tab;
                         let owner = cx.entity().clone();
-                        let selection_duration_beats = self.timeline.read(cx).state.arrangement_range.as_ref().and_then(|range| {
-                            let (start, end) = range.as_f32_range();
-                            let duration = (end - start).abs();
-                            (duration > 0.0001).then_some(duration)
-                        });
-                        let stretch_tempo = selected_clip_id.as_deref().map(|clip_id| {
-                            self.stretch_tempo_snapshot(clip_id)
-                        });
-                        div()
-                            .on_mouse_down(gpui::MouseButton::Left, move |_event, _window, cx| {
-                                let _ = owner.update(cx, |layout, cx| {
-                                    layout.set_active_panel(WorkspaceActivePanel::Inspector, cx);
+                        let content = match right_tab {
+                            RightDockTab::Inspector => {
+                                let selection_duration_beats = self.timeline.read(cx).state.arrangement_range.as_ref().and_then(|range| {
+                                    let (start, end) = range.as_f32_range();
+                                    let duration = (end - start).abs();
+                                    (duration > 0.0001).then_some(duration)
                                 });
-                            })
-                            .child(crate::components::panel::inspector_panel(
-                            &tracks,
-                            selected_track_id.as_deref(),
-                            selected_clip_id.as_deref(),
-                            find_clip_summary(
-                                &tracks,
-                                selected_clip_id.as_deref(),
-                                project_bpm,
-                                selection_duration_beats,
-                            ),
-                            stretch_tempo,
-                            &self.inspector_name_edit.name_input,
-                            inspector_name_focused,
-                            &self.inspector_name_edit.clip_name_input,
-                            inspector_clip_name_focused,
-                            active_panel == WorkspaceActivePanel::Inspector,
-                            &inspector_callbacks,
-                        ))
+                                let stretch_tempo = selected_clip_id.as_deref().map(|clip_id| {
+                                    self.stretch_tempo_snapshot(clip_id)
+                                });
+                                crate::components::panel::inspector_panel(
+                                    &tracks,
+                                    selected_track_id.as_deref(),
+                                    selected_clip_id.as_deref(),
+                                    find_clip_summary(
+                                        &tracks,
+                                        selected_clip_id.as_deref(),
+                                        project_bpm,
+                                        selection_duration_beats,
+                                    ),
+                                    stretch_tempo,
+                                    &self.inspector_name_edit.name_input,
+                                    inspector_name_focused,
+                                    &self.inspector_name_edit.clip_name_input,
+                                    inspector_clip_name_focused,
+                                    active_panel == WorkspaceActivePanel::Inspector,
+                                    &inspector_callbacks,
+                                ).into_any_element()
+                            }
+                            RightDockTab::ChordDisplay => self.chord_display_panel.clone().into_any_element(),
+                            RightDockTab::LyricDisplay => self.lyric_display_panel.clone().into_any_element(),
+                            RightDockTab::LyricEditor => self.lyric_editor_panel.clone().into_any_element(),
+                        };
+                        div()
+                            .w(px(crate::components::panel::INSPECTOR_WIDTH))
+                            .h_full()
+                            .flex_shrink_0()
+                            .flex()
+                            .flex_col()
+                            .min_h_0()
+                            .border_l(px(1.0))
+                            .border_color(Colors::border_subtle())
+                            .child(right_dock_tab_bar(right_tab, owner))
+                            .child(div().flex_1().min_h_0().overflow_hidden().child(content))
                     });
                 }
                 main_row
@@ -1663,6 +1676,98 @@ impl Render for StudioLayout {
                 }
             })
     }
+}
+
+fn right_dock_tab_bar(active: RightDockTab, owner: Entity<StudioLayout>) -> impl IntoElement {
+    let popout_kind = match active {
+        RightDockTab::Inspector => None,
+        RightDockTab::ChordDisplay => Some(components::SongTextPanelKind::ChordDisplay),
+        RightDockTab::LyricDisplay => Some(components::SongTextPanelKind::LyricDisplay),
+        RightDockTab::LyricEditor => Some(components::SongTextPanelKind::LyricEditor),
+    };
+    let mut row = div()
+        .h(px(28.0))
+        .flex_shrink_0()
+        .flex()
+        .items_center()
+        .px(px(4.0))
+        .gap(px(2.0))
+        .border_b(px(1.0))
+        .border_color(Colors::border_subtle())
+        .bg(Colors::surface_panel());
+    for tab in [
+        RightDockTab::Inspector,
+        RightDockTab::ChordDisplay,
+        RightDockTab::LyricDisplay,
+        RightDockTab::LyricEditor,
+    ] {
+        row = row.child(right_dock_tab_button(tab, active, owner.clone()));
+    }
+    row.child(div().flex_1()).children(popout_kind.map(|kind| {
+        let target = owner.clone();
+        components::icon_button(
+            Some(crate::assets::ICON_MAXIMIZE_PATH),
+            "Open in a separate window",
+            px(20.0),
+            px(20.0),
+            px(11.0),
+            Colors::text_muted(),
+        )
+        .id("right-dock-popout")
+        .cursor(gpui::CursorStyle::PointingHand)
+        .on_click(move |_, window, cx| {
+            let bounds = Some(window.bounds());
+            let _ = target.update(cx, |layout, cx| {
+                layout.open_song_text_external_window(kind, bounds, cx);
+            });
+        })
+    }))
+}
+
+fn right_dock_tab_button(
+    tab: RightDockTab,
+    active: RightDockTab,
+    owner: Entity<StudioLayout>,
+) -> impl IntoElement {
+    let selected = tab == active;
+    let label = match tab {
+        RightDockTab::Inspector => "Inspect",
+        RightDockTab::ChordDisplay => "Chords",
+        RightDockTab::LyricDisplay => "Lyrics",
+        RightDockTab::LyricEditor => "Edit",
+    };
+    div()
+        .id(("right-dock-tab", tab as u32))
+        .h(px(22.0))
+        .px(px(6.0))
+        .flex()
+        .items_center()
+        .rounded_sm()
+        .bg(if selected {
+            Colors::tab_bg_active()
+        } else {
+            Colors::surface_panel()
+        })
+        .text_size(px(10.0))
+        .font_weight(if selected {
+            gpui::FontWeight::SEMIBOLD
+        } else {
+            gpui::FontWeight::NORMAL
+        })
+        .text_color(if selected {
+            Colors::tab_text_active()
+        } else {
+            Colors::tab_text_muted()
+        })
+        .cursor(gpui::CursorStyle::PointingHand)
+        .on_click(move |_, _, cx| {
+            let _ = owner.update(cx, |layout, cx| {
+                layout.panels.inspector = true;
+                layout.right_dock_tab = tab;
+                layout.set_active_panel(tab.active_panel(), cx);
+            });
+        })
+        .child(label)
 }
 
 #[cfg(target_os = "windows")]

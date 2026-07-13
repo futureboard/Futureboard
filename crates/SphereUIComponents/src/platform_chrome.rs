@@ -8,6 +8,18 @@ use gpui::{
     point, px, Pixels, Point, TitlebarOptions, WindowDecorations, WindowKind, WindowOptions,
 };
 
+/// Product name shared by native window chrome and OS-level window metadata.
+pub const APP_WINDOW_TITLE: &str = "Futureboard Studio";
+
+/// Add the product name to a tool or project window title without duplicating it.
+pub fn branded_window_title(title: &str) -> String {
+    if title == APP_WINDOW_TITLE || title.contains(APP_WINDOW_TITLE) {
+        title.to_string()
+    } else {
+        format!("{title} — {APP_WINDOW_TITLE}")
+    }
+}
+
 /// Shared titlebar height across platforms (matches GPUI chrome layout).
 pub const TITLEBAR_HEIGHT_PX: f32 = 32.0;
 
@@ -81,7 +93,7 @@ impl PlatformChromePolicy {
     pub fn studio_titlebar_options() -> TitlebarOptions {
         let policy = Self::current();
         TitlebarOptions {
-            title: None,
+            title: Some(APP_WINDOW_TITLE.into()),
             // Windows: transparent titlebar + GPUI `WindowControlArea` hit-testing.
             // macOS: blend custom chrome with native traffic lights.
             // Linux: same client chrome path as Windows.
@@ -94,7 +106,7 @@ impl PlatformChromePolicy {
     pub fn external_dialog_titlebar_options() -> TitlebarOptions {
         let policy = Self::external_dialog();
         TitlebarOptions {
-            title: None,
+            title: Some(APP_WINDOW_TITLE.into()),
             appears_transparent: true,
             traffic_light_position: policy.native_traffic_light_position(),
         }
@@ -230,6 +242,25 @@ pub fn external_dialog_window_options_partial() -> WindowOptions {
         is_movable: true,
         is_resizable: false,
         is_minimizable: false,
+        window_decorations: PlatformChromePolicy::external_dialog_window_decorations(),
+        ..Default::default()
+    }
+}
+
+/// Top-level external tool window. Unlike [`external_dialog_window_options_partial`],
+/// this is an independent application window: it is not modal/owned by the
+/// Studio HWND and receives normal taskbar, minimize, maximize, and resize
+/// behavior from the platform.
+pub fn external_window_options_partial() -> WindowOptions {
+    WindowOptions {
+        titlebar: Some(PlatformChromePolicy::external_dialog_titlebar_options()),
+        focus: true,
+        show: true,
+        kind: WindowKind::Normal,
+        dialog_parenting: false,
+        is_movable: true,
+        is_resizable: true,
+        is_minimizable: true,
         window_decorations: PlatformChromePolicy::external_dialog_window_decorations(),
         ..Default::default()
     }

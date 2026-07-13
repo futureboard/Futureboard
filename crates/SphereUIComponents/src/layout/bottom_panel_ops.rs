@@ -5,7 +5,7 @@ use gpui::{Context, DragMoveEvent, MouseDownEvent, Window};
 use crate::components::{
     status_content_signature, BottomPanelResizeDrag, BottomPanelState, BottomTab, StatusBarContent,
 };
-use crate::layout::WorkspaceActivePanel;
+use crate::layout::{RightDockTab, WorkspaceActivePanel};
 
 use super::StudioLayout;
 
@@ -23,6 +23,13 @@ impl StudioLayout {
     }
 
     pub(crate) fn set_active_panel(&mut self, panel: WorkspaceActivePanel, cx: &mut Context<Self>) {
+        self.right_dock_tab = match panel {
+            WorkspaceActivePanel::Inspector => RightDockTab::Inspector,
+            WorkspaceActivePanel::ChordDisplay => RightDockTab::ChordDisplay,
+            WorkspaceActivePanel::LyricDisplay => RightDockTab::LyricDisplay,
+            WorkspaceActivePanel::LyricEditor => RightDockTab::LyricEditor,
+            _ => self.right_dock_tab,
+        };
         if self.active_panel == panel {
             return;
         }

@@ -162,9 +162,72 @@ pub(crate) struct ExternalWindows {
     /// Audio Routing Matrix ("Audio Connections") window.
     pub routing_matrix:
         Option<gpui::WindowHandle<crate::components::routing_matrix_window::RoutingMatrixWindow>>,
+    pub chord_display:
+        Option<gpui::WindowHandle<crate::components::song_text_panel::SongTextWindow>>,
+    pub lyric_display:
+        Option<gpui::WindowHandle<crate::components::song_text_panel::SongTextWindow>>,
+    pub lyric_editor:
+        Option<gpui::WindowHandle<crate::components::song_text_panel::SongTextWindow>>,
 }
 
 impl StudioLayout {
+    pub(crate) fn open_song_text_external_window(
+        &mut self,
+        kind: crate::components::SongTextPanelKind,
+        owner_bounds: Option<Bounds<gpui::Pixels>>,
+        cx: &mut Context<Self>,
+    ) {
+        let slot = match kind {
+            crate::components::SongTextPanelKind::ChordDisplay => {
+                &mut self.external_windows.chord_display
+            }
+            crate::components::SongTextPanelKind::LyricDisplay => {
+                &mut self.external_windows.lyric_display
+            }
+            crate::components::SongTextPanelKind::LyricEditor => {
+                &mut self.external_windows.lyric_editor
+            }
+        };
+        if let Some(handle) = slot.clone() {
+            if handle
+                .update(cx, |_view, window, _cx| window.activate_window())
+                .is_ok()
+            {
+                return;
+            }
+            *slot = None;
+        }
+        let owner = cx.entity().clone();
+        let on_close: Arc<dyn Fn(crate::components::SongTextPanelKind, &mut App) + Send + Sync> =
+            Arc::new(move |closed_kind, app| {
+                let _ = owner.update(app, |layout, cx| {
+                    match closed_kind {
+                        crate::components::SongTextPanelKind::ChordDisplay => {
+                            layout.external_windows.chord_display = None
+                        }
+                        crate::components::SongTextPanelKind::LyricDisplay => {
+                            layout.external_windows.lyric_display = None
+                        }
+                        crate::components::SongTextPanelKind::LyricEditor => {
+                            layout.external_windows.lyric_editor = None
+                        }
+                    }
+                    cx.notify();
+                });
+            });
+        match crate::components::open_song_text_window(
+            owner_bounds,
+            self.timeline.clone(),
+            kind,
+            on_close,
+            cx,
+        ) {
+            Ok(handle) => *slot = Some(handle),
+            Err(error) => eprintln!("[song-text] failed to open {}: {error}", kind.title()),
+        }
+        cx.notify();
+    }
+
     pub(super) fn update_add_track_instrument_plugins(&mut self, cx: &mut Context<Self>) {
         let Some(handle) = self.external_windows.add_track.clone() else {
             return;

@@ -40,6 +40,8 @@ pub struct TimelineState {
     pub markers: Vec<TimelineMarkerState>,
     /// Named timeline regions spanning a beat range.
     pub regions: Vec<TimelineRegionState>,
+    /// Project-owned chord and lyric cues used by the display/editor panels.
+    pub song_text_cues: Vec<SongTextCue>,
     /// Legacy single signature — kept in sync with the marker at beat 0 for
     /// templates and engine fallbacks.
     pub time_signature_num: u32,
@@ -103,6 +105,7 @@ impl Default for TimelineState {
             time_signature_map: TimeSignatureMap::with_default_4_4(),
             markers: Vec::new(),
             regions: Vec::new(),
+            song_text_cues: Vec::new(),
             time_signature_num: 4,
             time_signature_den: 4,
             viewport: TimelineViewport {

@@ -310,11 +310,16 @@ fn menu_area(
 fn project_title(state: ProjectChromeState, anchor_x: f32) -> impl IntoElement {
     let on_open = state.on_open_project_menu.clone();
     let status = if state.is_dirty { "Unsaved" } else { "Saved" };
+    let status_color = if state.is_dirty {
+        Colors::status_warning()
+    } else {
+        Colors::status_success()
+    };
     div()
         .flex()
         .flex_row()
         .items_center()
-        .gap(px(6.0))
+        .gap(px(7.0))
         .h(px(24.0))
         .px(px(8.0))
         .rounded_md()
@@ -325,7 +330,15 @@ fn project_title(state: ProjectChromeState, anchor_x: f32) -> impl IntoElement {
         })
         .occlude()
         .child(
+            svg()
+                .path(assets::ICON_FILE_PATH)
+                .w(px(12.0))
+                .h(px(12.0))
+                .text_color(Colors::text_muted()),
+        )
+        .child(
             div()
+                .min_w(px(0.0))
                 .text_color(Colors::text_secondary())
                 .text_size(px(CHROME_TITLE_SIZE))
                 .font_weight(gpui::FontWeight::SEMIBOLD)
@@ -335,14 +348,24 @@ fn project_title(state: ProjectChromeState, anchor_x: f32) -> impl IntoElement {
         .child(
             div()
                 .flex_none()
-                .text_color(if state.is_dirty {
-                    Colors::status_warning()
-                } else {
-                    Colors::text_faint()
-                })
-                .text_size(px(9.0))
-                .font_weight(gpui::FontWeight::MEDIUM)
-                .child(status),
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(4.0))
+                .px(px(5.0))
+                .py(px(2.0))
+                .rounded_sm()
+                .bg(Colors::surface_input())
+                .border(px(1.0))
+                .border_color(Colors::border_subtle())
+                .child(div().w(px(4.0)).h(px(4.0)).rounded_full().bg(status_color))
+                .child(
+                    div()
+                        .text_color(Colors::text_muted())
+                        .text_size(px(8.0))
+                        .font_weight(gpui::FontWeight::BOLD)
+                        .child(status.to_uppercase()),
+                ),
         )
 }
 
@@ -521,6 +544,10 @@ fn transport_controls(state: TransportChromeState) -> impl IntoElement {
                 .flex()
                 .items_center()
                 .justify_center()
+                .rounded_sm()
+                .bg(Colors::surface_base())
+                .border(px(1.0))
+                .border_color(Colors::border_subtle())
                 .text_color(Colors::text_primary())
                 .text_size(px(12.0))
                 .font_weight(gpui::FontWeight::SEMIBOLD)
@@ -724,7 +751,6 @@ fn panel_toggles(state: PanelChromeState) -> impl IntoElement {
         .flex_row()
         .items_center()
         .gap(px(2.0))
-        .px(px(2.0))
         .child(panel_toggle_button(
             assets::ICON_FOLDER_OPEN_PATH,
             "BROWSER",

@@ -4,7 +4,9 @@
 //! here. UI code should call [`PlatformChromePolicy::current()`] instead of
 //! scattering platform conditionals.
 
-use gpui::{point, px, Pixels, Point, TitlebarOptions, WindowDecorations, WindowOptions};
+use gpui::{
+    point, px, Pixels, Point, TitlebarOptions, WindowDecorations, WindowKind, WindowOptions,
+};
 
 /// Shared titlebar height across platforms (matches GPUI chrome layout).
 pub const TITLEBAR_HEIGHT_PX: f32 = 32.0;
@@ -40,7 +42,7 @@ impl PlatformChromePolicy {
         platform_policy()
     }
 
-    /// Chrome for floating external dialogs (wizard, preferences).
+    /// Chrome for external dialogs (wizard, preferences).
     pub fn external_dialog() -> Self {
         let main = Self::current();
         let traffic_light_left_padding_px = match main.kind {
@@ -88,7 +90,7 @@ impl PlatformChromePolicy {
         }
     }
 
-    /// `TitlebarOptions` for wizard / settings floating windows.
+    /// `TitlebarOptions` for wizard / settings dialogs.
     pub fn external_dialog_titlebar_options() -> TitlebarOptions {
         let policy = Self::external_dialog();
         TitlebarOptions {
@@ -98,7 +100,7 @@ impl PlatformChromePolicy {
         }
     }
 
-    /// Window decorations for external floating dialogs.
+    /// Window decorations for external dialogs.
     pub fn external_dialog_window_decorations() -> Option<WindowDecorations> {
         match Self::current().kind {
             PlatformChromeKind::MacOS => None,
@@ -216,13 +218,18 @@ pub fn register_studio_menu_dispatcher(
     crate::native_macos_menu::install_native_macos_menu(cx);
 }
 
-/// Partial options shared by settings / project wizard windows.
+/// Partial options shared by GPUI-backed native dialogs. On Windows,
+/// [`WindowKind::Dialog`] is hosted by a real Win32 dialog while GPUI continues
+/// to render the complete client surface.
 pub fn external_dialog_window_options_partial() -> WindowOptions {
     WindowOptions {
         titlebar: Some(PlatformChromePolicy::external_dialog_titlebar_options()),
         focus: true,
         show: true,
+        kind: WindowKind::Dialog,
         is_movable: true,
+        is_resizable: false,
+        is_minimizable: false,
         window_decorations: PlatformChromePolicy::external_dialog_window_decorations(),
         ..Default::default()
     }

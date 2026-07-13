@@ -7,8 +7,10 @@ use gpui::{App, Window};
 pub struct MixerCallbacks {
     pub on_select_track: std::sync::Arc<dyn Fn(&String, &mut Window, &mut App) + 'static>,
     pub on_volume_change: std::sync::Arc<dyn Fn(&(String, f32), &mut Window, &mut App) + 'static>,
-    pub on_volume_drag_start: std::sync::Arc<dyn Fn(&(String, f32), &mut Window, &mut App) + 'static>,
-    pub on_volume_drag_preview: std::sync::Arc<dyn Fn(&(String, f32), &mut Window, &mut App) + 'static>,
+    pub on_volume_drag_start:
+        std::sync::Arc<dyn Fn(&(String, f32), &mut Window, &mut App) + 'static>,
+    pub on_volume_drag_preview:
+        std::sync::Arc<dyn Fn(&(String, f32), &mut Window, &mut App) + 'static>,
     pub on_volume_drag_commit: std::sync::Arc<dyn Fn(&String, &mut Window, &mut App) + 'static>,
     pub on_pan_change: std::sync::Arc<dyn Fn(&(String, f32), &mut Window, &mut App) + 'static>,
     pub on_toggle_mute: std::sync::Arc<dyn Fn(&String, &mut Window, &mut App) + 'static>,
@@ -17,7 +19,8 @@ pub struct MixerCallbacks {
     pub on_toggle_input: std::sync::Arc<dyn Fn(&String, &mut Window, &mut App) + 'static>,
     pub on_master_volume_change: std::sync::Arc<dyn Fn(&f32, &mut Window, &mut App) + 'static>,
     pub on_master_volume_drag_start: std::sync::Arc<dyn Fn(&f32, &mut Window, &mut App) + 'static>,
-    pub on_master_volume_drag_preview: std::sync::Arc<dyn Fn(&f32, &mut Window, &mut App) + 'static>,
+    pub on_master_volume_drag_preview:
+        std::sync::Arc<dyn Fn(&f32, &mut Window, &mut App) + 'static>,
     pub on_master_volume_drag_commit: std::sync::Arc<dyn Fn(&mut Window, &mut App) + 'static>,
     pub on_context_menu:
         Option<std::sync::Arc<dyn Fn(&(String, f32, f32), &mut Window, &mut App) + 'static>>,

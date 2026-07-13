@@ -2,8 +2,8 @@
 //!
 //! Mirrors the Electron / web [`MessageBoxOptions`] surface: title, message,
 //! optional detail, custom button labels, default/cancel indices, and kind
-//! (info / warning / error / question). Opens as a compact floating GPUI window
-//! using the same chrome as Add Track / Settings dialogs.
+//! (info / warning / error / question). Opens as a compact GPUI-rendered native
+//! dialog using the same chrome as Add Track / Settings dialogs.
 
 use std::sync::Arc;
 
@@ -459,7 +459,7 @@ pub fn open_message_box_window(
 
     let mut window_options = crate::platform_chrome::external_dialog_window_options_partial();
     window_options.window_bounds = Some(WindowBounds::Windowed(window_bounds));
-    window_options.kind = WindowKind::Floating;
+    window_options.kind = WindowKind::Dialog;
     window_options.is_resizable = false;
     window_options.is_minimizable = false;
     window_options.window_background = WindowBackgroundAppearance::Transparent;

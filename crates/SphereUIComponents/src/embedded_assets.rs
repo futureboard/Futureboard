@@ -67,6 +67,7 @@ impl AssetSource for EmbeddedAssets {
             assets::ICON_X_PATH => Some(assets::icons::GENERIC_CLOSE.as_bytes()),
             assets::ICON_MINUS_PATH => Some(assets::icons::MINUS.as_bytes()),
             assets::ICON_MENU_PATH => Some(assets::icons::MENU.as_bytes()),
+            assets::ICON_SEARCH_PATH => Some(assets::icons::SEARCH.as_bytes()),
 
             // New ones
             assets::ICON_MOUSE_POINTER_PATH => Some(assets::icons::MOUSE_POINTER.as_bytes()),
@@ -137,6 +138,7 @@ impl AssetSource for EmbeddedAssets {
             assets::ICON_X_PATH,
             assets::ICON_MINUS_PATH,
             assets::ICON_MENU_PATH,
+            assets::ICON_SEARCH_PATH,
             assets::ICON_MOUSE_POINTER_PATH,
             assets::ICON_PENCIL_PATH,
             assets::ICON_SCISSORS_PATH,

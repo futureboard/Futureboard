@@ -292,7 +292,9 @@ pub fn fader_with_drag_callbacks(
                 let commit = commit.clone();
                 move |_event, window, cx| commit(window, cx)
             })
-            .on_mouse_up_out(gpui::MouseButton::Left, move |_event, window, cx| commit(window, cx))
+            .on_mouse_up_out(gpui::MouseButton::Left, move |_event, window, cx| {
+                commit(window, cx)
+            })
         })
 }
 

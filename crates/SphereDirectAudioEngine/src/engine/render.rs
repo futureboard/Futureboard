@@ -1292,7 +1292,11 @@ fn render_soundfont_instrument_block(track: &mut RuntimeTrack, frames: usize) {
             match event.kind {
                 1 => {
                     let velocity = (event.velocity.clamp(0.0, 1.0) * 127.0).round() as u8;
-                    let _ = player.note_on(event.channel.min(15), event.pitch.min(127), velocity.max(1));
+                    let _ = player.note_on(
+                        event.channel.min(15),
+                        event.pitch.min(127),
+                        velocity.max(1),
+                    );
                 }
                 0 => {
                     let _ = player.note_off(event.channel.min(15), event.pitch.min(127));
@@ -2234,7 +2238,12 @@ mod bridge_bypass_tests {
         let scratch_l = vec![9.0, 9.0, 9.0, 9.0];
         let scratch_r = vec![9.0, 9.0, 9.0, 9.0];
         let (pl, pr) = apply_bridge_insert_output(
-            false, 0, &mut block_l, &mut block_r, &scratch_l, &scratch_r,
+            false,
+            0,
+            &mut block_l,
+            &mut block_r,
+            &scratch_l,
+            &scratch_r,
         );
         assert_eq!(block_l, before_l, "instrument adds silence when not ready");
         assert_eq!(block_r, before_r);
@@ -2248,13 +2257,14 @@ mod bridge_bypass_tests {
         let scratch_l = vec![0.5, -0.3, 0.0];
         let scratch_r = vec![0.0, 0.4, -0.6];
         let (pl, pr) = apply_bridge_insert_output(
-            false, 3, &mut block_l, &mut block_r, &scratch_l, &scratch_r,
+            false,
+            3,
+            &mut block_l,
+            &mut block_r,
+            &scratch_l,
+            &scratch_r,
         );
-        let approx = |a: &[f32], b: &[f32]| {
-            a.iter()
-                .zip(b)
-                .all(|(x, y)| (x - y).abs() < 1e-5)
-        };
+        let approx = |a: &[f32], b: &[f32]| a.iter().zip(b).all(|(x, y)| (x - y).abs() < 1e-5);
         assert!(approx(&block_l, &[0.7, -0.1, 0.2]), "got {block_l:?}");
         assert!(approx(&block_r, &[0.1, 0.5, -0.5]), "got {block_r:?}");
         assert_eq!(pl, 0.5);

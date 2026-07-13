@@ -186,10 +186,8 @@ pub struct FileBrowserState {
     pub project_folder: Option<PathBuf>,
     /// Current search filter query.
     pub filter: String,
-    /// Auto-preview ("audition on select") toggle. When on, single-clicking an
-    /// audio file asks the engine to audition it. The engine audition voice is
-    /// not implemented yet, so the browser shows an honest "coming soon" hint
-    /// instead of pretending to play.
+    /// Reserved session state for engine-backed audio audition. The Browser
+    /// keeps audition controls hidden until the engine can produce sound.
     pub preview_enabled: bool,
     /// Audio files whose waveform peaks are being decoded in the background for
     /// the mini preview pane — guards against re-spawning a decode while one is

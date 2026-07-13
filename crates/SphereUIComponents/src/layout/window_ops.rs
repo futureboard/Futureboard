@@ -717,7 +717,10 @@ impl StudioLayout {
                             .iter()
                             .find(|t| t.id == source_id)
                             .and_then(|t| {
-                                t.sends.iter().find(|s| s.target_track_id == dest_id).cloned()
+                                t.sends
+                                    .iter()
+                                    .find(|s| s.target_track_id == dest_id)
+                                    .cloned()
                             });
                         if let Some(send) = already {
                             timeline.state.remove_send(&source_id, &send.id);
@@ -792,10 +795,8 @@ impl StudioLayout {
             }
         });
         let on_update_track: Arc<
-            dyn Fn(
-                    crate::components::soundfont_player_window::SoundfontPlayerTrackUpdate,
-                    &mut App,
-                ) + Send
+            dyn Fn(crate::components::soundfont_player_window::SoundfontPlayerTrackUpdate, &mut App)
+                + Send
                 + Sync,
         > = Arc::new(move |update, app| {
             let _ = studio.update(app, |layout, cx| {

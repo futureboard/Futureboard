@@ -11,6 +11,7 @@ use crate::assets;
 use crate::components::bottom_panel::{BottomPanelResizeDrag, BottomTab};
 use crate::components::editor_panel::ClipEditorPanel;
 use crate::components::effect_editor_tab_view::EffectEditorTabView;
+use crate::components::icon_button::icon_button;
 use crate::components::mixer_panel_view::{docked_mixer_shell, MixerPanelView};
 use crate::layout::{StudioLayout, WorkspaceActivePanel};
 use crate::theme::Colors;
@@ -86,6 +87,13 @@ impl Render for BottomPanelShell {
                     layout.set_active_bottom_tab(*tab, cx);
                 });
             });
+        let close_owner = self.owner.clone();
+        let on_close_panel: Arc<dyn Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static> =
+            Arc::new(move |_event, _window, cx| {
+                let _ = close_owner.update(cx, |layout, cx| {
+                    layout.close_bottom_panel(cx);
+                });
+            });
 
         let owner_resize = self.owner.clone();
         let on_resize_start: Arc<dyn Fn(&gpui::MouseDownEvent, &mut Window, &mut App) + 'static> =
@@ -141,7 +149,12 @@ impl Render for BottomPanelShell {
                 move |event, window, cx| handler(event, window, cx)
             })
             .child(render_resize_handle(on_resize_start))
-            .child(render_tab_bar(active_tab, active_panel, on_tab_click))
+            .child(render_tab_bar(
+                active_tab,
+                active_panel,
+                on_tab_click,
+                on_close_panel,
+            ))
             .child(
                 div()
                     .flex()
@@ -221,6 +234,7 @@ fn render_tab_bar(
     active_tab: BottomTab,
     active_panel: WorkspaceActivePanel,
     on_tab_click: Arc<dyn Fn(&BottomTab, &mut Window, &mut App) + 'static>,
+    on_close_panel: Arc<dyn Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static>,
 ) -> impl IntoElement {
     let _scope = crate::perf::PerfScope::enter("BottomPanelTabBar");
     crate::perf::count("bottom_panel_tabbar_layout_count", 1);
@@ -255,6 +269,20 @@ fn render_tab_bar(
             active_panel,
             on_tab_click.clone(),
         ))
+        .child(div().flex_1())
+        .child(
+            icon_button(
+                Some(assets::ICON_MINUS_PATH),
+                "Hide bottom panel",
+                px(20.0),
+                px(20.0),
+                px(12.0),
+                Colors::text_muted(),
+            )
+            .id("bottom-panel-hide")
+            .cursor(gpui::CursorStyle::PointingHand)
+            .on_click(move |event, window, cx| on_close_panel(event, window, cx)),
+        )
     // TODO(effect-editor): The Effect Editor tab is temporarily hidden while the
     // panel is unfinished. The `BottomTab::EffectEditor` variant, its
     // `EffectEditorTabView`, and all FX-chain data/serialization are kept intact;

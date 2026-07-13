@@ -1335,7 +1335,11 @@ fn open_loading_session_window(
 
     let mut window_options = crate::platform_chrome::external_dialog_window_options_partial();
     window_options.window_bounds = Some(WindowBounds::Windowed(window_bounds));
-    window_options.kind = WindowKind::Floating;
+    window_options.kind = WindowKind::Dialog;
+    // This dialog bridges a window handoff (Welcome -> Studio or
+    // Studio -> Welcome). It must not be owned by the source window, because
+    // Windows destroys owned dialogs when that source window is retired.
+    window_options.dialog_parenting = false;
     window_options.is_resizable = false;
     window_options.is_minimizable = false;
     window_options.window_background = WindowBackgroundAppearance::Transparent;

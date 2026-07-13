@@ -1432,6 +1432,14 @@ pub struct WindowOptions {
     /// The kind of window to create
     pub kind: WindowKind,
 
+    /// Whether a dialog should attach itself to the active native window.
+    ///
+    /// This is normally `true` so [`WindowKind::Dialog`] behaves as a modal
+    /// child of the active application window. Set it to `false` for a
+    /// top-level transition surface that must outlive the window it was opened
+    /// from.
+    pub dialog_parenting: bool,
+
     /// Whether the window should be movable by the user
     pub is_movable: bool,
 
@@ -1485,6 +1493,10 @@ pub struct WindowParams {
     /// The kind of window to create
     #[cfg_attr(any(target_os = "linux", target_os = "freebsd"), allow(dead_code))]
     pub kind: WindowKind,
+
+    /// Whether a dialog should attach itself to the active native window.
+    #[cfg_attr(any(target_os = "linux", target_os = "freebsd"), allow(dead_code))]
+    pub dialog_parenting: bool,
 
     /// Whether the window should be movable by the user
     #[cfg_attr(any(target_os = "linux", target_os = "freebsd"), allow(dead_code))]
@@ -1566,6 +1578,7 @@ impl Default for WindowOptions {
             focus: true,
             show: true,
             kind: WindowKind::Normal,
+            dialog_parenting: true,
             is_movable: true,
             is_resizable: true,
             is_minimizable: true,

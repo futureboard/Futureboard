@@ -126,6 +126,7 @@ impl Timeline {
     pub fn reset_input_state(&mut self) {
         self.log_input_state("reset-before");
         self.file_drop_hint = None;
+        self.clip_clone_hint = None;
         self.clip_drag_origin = None;
         self.clip_drag_target_track_index = None;
         self.clip_clone_drag_id = None;
@@ -169,6 +170,7 @@ impl Timeline {
             on_plugin_preset_drop: None,
             last_drag_position: None,
             file_drop_hint: None,
+            clip_clone_hint: None,
             clip_drag_origin: None,
             clip_drag_target_track_index: None,
             clip_clone_drag_id: None,
@@ -211,6 +213,7 @@ impl Timeline {
             on_plugin_preset_drop: None,
             last_drag_position: None,
             file_drop_hint: None,
+            clip_clone_hint: None,
             clip_drag_origin: None,
             clip_drag_target_track_index: None,
             clip_clone_drag_id: None,

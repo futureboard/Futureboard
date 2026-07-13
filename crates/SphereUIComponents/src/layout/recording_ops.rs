@@ -814,11 +814,12 @@ fn recording_input_channels_checked(
     selected_device: Option<&RecordingInputDevice>,
 ) -> Result<RecordingInputRoute, String> {
     match &track.routing.input {
-        TrackInputRouting::None => Err(format!(
-            "{} has no input selected. Choose an input channel before recording.",
-            track.name
-        )),
-        TrackInputRouting::AllInputs => {
+        // A fresh audio track intentionally starts with no *explicit* input
+        // route. The live-input engine already resolves that state to the
+        // selected/default device while a track is armed; recording must use
+        // the same effective route or the normal Arm -> Record workflow fails
+        // before the input stream is ever opened.
+        TrackInputRouting::None | TrackInputRouting::AllInputs => {
             let Some(device) = selected_device else {
                 return Err("no input device selected or available".to_string());
             };
@@ -939,4 +940,33 @@ fn resolve_input_device_id(engine: &DirectAudio::AudioEngine, device_name: &str)
         .find(|d| d.name == device_name || d.id == device_name)
         .map(|d| d.id)
         .or_else(|| Some(device_name.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::components::timeline::timeline_state::TimelineState;
+
+    #[test]
+    fn fresh_armed_stereo_track_records_from_the_default_input() {
+        let mut timeline = TimelineState::default();
+        let track_id = timeline.create_audio_track();
+        let track = timeline
+            .find_track(&track_id)
+            .expect("new audio track should exist");
+        assert_eq!(track.routing.input, TrackInputRouting::None);
+        assert_eq!(track.routing.audio_format, TrackAudioFormat::Stereo);
+
+        let device = RecordingInputDevice {
+            id: "default-input".to_string(),
+            name: "Default Input".to_string(),
+            channels: 2,
+            is_default: true,
+        };
+        let route = recording_input_channels_checked(track, &[device.clone()], Some(&device))
+            .expect("fresh armed-track route should resolve to the default input");
+
+        assert_eq!(route.device_id.as_deref(), Some("default-input"));
+        assert_eq!(route.channels, vec![0, 1]);
+    }
 }

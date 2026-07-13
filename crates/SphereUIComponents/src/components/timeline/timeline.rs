@@ -74,6 +74,16 @@ struct FileDropHint {
     label: &'static str,
 }
 
+/// UI-only ghost for Alt-drag clip cloning. The real duplicate is still
+/// created only on drop; this state exists solely to show its exact target
+/// track and snapped start before committing the edit command.
+#[derive(Clone, Debug)]
+struct ClipCloneHint {
+    clip_id: String,
+    target_track_index: usize,
+    start_beat: f32,
+}
+
 fn is_supported_audio_ext(path: &std::path::Path) -> bool {
     matches!(
         path.extension()
@@ -125,6 +135,7 @@ pub struct Timeline {
     /// observed during the drag.
     last_drag_position: Option<gpui::Point<gpui::Pixels>>,
     file_drop_hint: Option<FileDropHint>,
+    clip_clone_hint: Option<ClipCloneHint>,
     clip_drag_origin: Option<gpui::Point<gpui::Pixels>>,
     clip_drag_target_track_index: Option<usize>,
     clip_clone_drag_id: Option<String>,

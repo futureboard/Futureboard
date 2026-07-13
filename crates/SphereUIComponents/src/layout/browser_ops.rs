@@ -8,10 +8,8 @@ use super::StudioLayout;
 impl StudioLayout {
     /// Ask the engine to audition (preview-play) a browser audio file.
     ///
-    /// The engine audition voice is a stub today (no audio output yet), so this
-    /// is real wiring against a real call site — the browser surfaces an honest
-    /// "coming soon" hint rather than faking playback. Returns whether audio is
-    /// actually audible (currently always `false`).
+    /// The Browser keeps audition controls hidden until this path can produce
+    /// audible output. Returns whether audio is actually audible.
     pub(crate) fn audition_browser_file(&mut self, path: &Path) -> bool {
         let Some(engine) = self.audio_bridge.engine.as_ref() else {
             eprintln!("[browser-preview] no engine; cannot audition");

@@ -339,7 +339,7 @@ pub(crate) fn open_insert_picker_window(
 
     let mut options = crate::platform_chrome::external_dialog_window_options_partial();
     options.window_bounds = Some(WindowBounds::Windowed(window_bounds));
-    options.kind = WindowKind::Floating;
+    options.kind = WindowKind::Dialog;
     options.is_resizable = true;
     options.is_minimizable = false;
     options.window_background = WindowBackgroundAppearance::Transparent;

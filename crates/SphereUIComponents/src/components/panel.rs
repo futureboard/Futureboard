@@ -14,10 +14,11 @@ use std::sync::Arc;
 
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    div, px, App, AppContext, InteractiveElement, IntoElement, MouseButton, ParentElement,
+    div, px, svg, App, AppContext, InteractiveElement, IntoElement, MouseButton, ParentElement,
     StatefulInteractiveElement, Styled, Window,
 };
 
+use crate::assets;
 use crate::components::combo_box::{combo_box_string_menu, combo_box_trigger};
 use crate::components::controls::{
     fb_button, fb_checkbox, fb_form_row, fb_section_header, FbButtonKind,
@@ -362,8 +363,12 @@ fn inspector_shell(active: bool) -> gpui::Div {
         .child(
             div()
                 .flex_shrink_0()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(7.0))
+                .h(px(32.0))
                 .px(px(10.0))
-                .py(px(8.0))
                 .border_b(px(1.0))
                 .border_color(if active {
                     Colors::panel_border_focused()
@@ -371,15 +376,26 @@ fn inspector_shell(active: bool) -> gpui::Div {
                     Colors::border_subtle()
                 })
                 .child(
+                    svg()
+                        .path(assets::ICON_SLIDERS_HORIZONTAL_PATH)
+                        .w(px(13.0))
+                        .h(px(13.0))
+                        .text_color(if active {
+                            Colors::panel_header_active()
+                        } else {
+                            Colors::text_muted()
+                        }),
+                )
+                .child(
                     div()
                         .text_color(if active {
-                                                    Colors::panel_header_active()
-                                                } else {
-                                                    Colors::tab_text()
-                                                })
-                        .text_xs()
+                            Colors::panel_header_active()
+                        } else {
+                            Colors::tab_text()
+                        })
+                        .text_size(px(10.0))
                         .font_weight(gpui::FontWeight::BOLD)
-                        .child("Inspector"),
+                        .child("INSPECTOR"),
                 ),
         )
 }
@@ -410,12 +426,31 @@ fn no_selection(track_count: usize) -> impl IntoElement {
                 .flex_col()
                 .items_center()
                 .justify_center()
-                .gap(px(4.0))
+                .gap(px(7.0))
                 .px(px(16.0))
                 .child(
                     div()
-                        .text_color(Colors::text_muted())
-                        .text_xs()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .w(px(30.0))
+                        .h(px(30.0))
+                        .rounded_md()
+                        .bg(Colors::surface_input())
+                        .border(px(1.0))
+                        .border_color(Colors::border_subtle())
+                        .child(
+                            svg()
+                                .path(assets::ICON_SLIDERS_HORIZONTAL_PATH)
+                                .w(px(15.0))
+                                .h(px(15.0))
+                                .text_color(Colors::text_faint()),
+                        ),
+                )
+                .child(
+                    div()
+                        .text_color(Colors::text_secondary())
+                        .text_size(px(11.0))
                         .font_weight(gpui::FontWeight::SEMIBOLD)
                         .child("No Selection"),
                 )
@@ -1512,7 +1547,6 @@ fn plugin_slot_row(
                 .child(format_chip(plugin_format_label(slot))),
         )
         .child(kv_row("State", plugin_state_label(slot)))
-        .child(kv_row("Latency", "TODO"))
         .child(insert_action_row(
             &track.id,
             slot,

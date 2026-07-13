@@ -57,6 +57,27 @@ impl StudioLayout {
         self.bottom_panel_state
     }
 
+    /// Hide the dock from its own header. This mirrors the top-chrome Mixer
+    /// toggle, but keeps the action discoverable in the current workspace.
+    pub(crate) fn close_bottom_panel(&mut self, cx: &mut Context<Self>) {
+        if !self.panels.mixer_docked {
+            return;
+        }
+        self.panels.mixer_docked = false;
+        if matches!(
+            self.active_panel,
+            WorkspaceActivePanel::Mixer
+                | WorkspaceActivePanel::Editor
+                | WorkspaceActivePanel::PianoRoll
+                | WorkspaceActivePanel::EffectEditor
+        ) {
+            self.active_panel = WorkspaceActivePanel::Arrangement;
+        }
+        self.sync_timeline_chrome_metrics(cx);
+        self.notify_status_bar(cx);
+        cx.notify();
+    }
+
     pub(crate) fn mixer_tree_sidebar_enabled(&self) -> bool {
         self.mixer_view.tree_sidebar_enabled
     }

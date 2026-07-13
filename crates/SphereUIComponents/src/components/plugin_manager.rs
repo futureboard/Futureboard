@@ -1,4 +1,4 @@
-//! Audio Plug-in Manager — external GPUI window (VST3/CLAP scan, Electron layout parity).
+//! Audio Plug-in Manager — GPUI-rendered native dialog (VST3/CLAP scan, Electron layout parity).
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -1811,7 +1811,7 @@ pub fn open_plugin_manager_window(
 
     let mut options = crate::platform_chrome::external_dialog_window_options_partial();
     options.window_bounds = Some(WindowBounds::Windowed(window_bounds));
-    options.kind = WindowKind::Floating;
+    options.kind = WindowKind::Dialog;
     options.is_resizable = true;
     options.is_minimizable = false;
     options.window_background = WindowBackgroundAppearance::Transparent;

@@ -68,7 +68,10 @@ impl TimelineState {
     pub fn begin_master_volume_preview(&mut self, norm: f32) {
         self.master_volume_preview = Some(norm.clamp(0.0, 1.0));
         if Self::fader_debug_enabled() {
-            eprintln!("[fader] drag start target=master norm={:.4}", norm.clamp(0.0, 1.0));
+            eprintln!(
+                "[fader] drag start target=master norm={:.4}",
+                norm.clamp(0.0, 1.0)
+            );
         }
     }
 

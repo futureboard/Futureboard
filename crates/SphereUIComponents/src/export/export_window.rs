@@ -1,4 +1,4 @@
-//! External "Export Arrangement" window.
+//! Native "Export Arrangement" dialog.
 //!
 //! Compact, native-feeling Futureboard dialog (no web-style controls). It owns a
 //! plain [`EngineProjectSnapshot`] + [`ExportProjectDefaults`] captured when the
@@ -1067,7 +1067,7 @@ pub fn open_export_arrangement_window(
 
     let mut window_options = crate::platform_chrome::external_dialog_window_options_partial();
     window_options.window_bounds = Some(WindowBounds::Windowed(window_bounds));
-    window_options.kind = WindowKind::Floating;
+    window_options.kind = WindowKind::Dialog;
     window_options.is_resizable = false;
     window_options.is_minimizable = false;
     window_options.window_background = WindowBackgroundAppearance::Transparent;

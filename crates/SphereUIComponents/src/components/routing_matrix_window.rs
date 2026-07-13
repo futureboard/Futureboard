@@ -1,4 +1,4 @@
-//! Audio Routing Matrix — external "Audio Connections" window.
+//! Audio Routing Matrix — native "Audio Connections" dialog.
 //!
 //! Renders a cross-point grid of source tracks (rows) against routing
 //! destinations (columns: Main + every Bus/Return track). Each cell shows the
@@ -19,7 +19,9 @@ use gpui::{
     WindowBackgroundAppearance, WindowBounds, WindowHandle, WindowKind,
 };
 
-use crate::components::timeline::timeline_state::{TrackOutputRouting, TrackState, TrackType};
+use crate::components::timeline::timeline_state::{
+    is_project_routing_track, TrackOutputRouting, TrackState, TrackType,
+};
 use crate::components::title_bar::external_window_titlebar;
 use crate::theme::{self, Colors};
 use crate::window_position::{apply_owner_display, centered_window_bounds};
@@ -90,7 +92,7 @@ impl RoutingMatrixWindow {
             accepts_sends: false,
         }];
         for track in &self.snapshot.tracks {
-            if track.track_type.is_routing() {
+            if is_project_routing_track(track) {
                 dests.push(Destination {
                     track_id: Some(track.id.clone()),
                     name: track.name.clone(),
@@ -410,7 +412,7 @@ pub fn open_routing_matrix_window(
     );
     let mut options = crate::platform_chrome::external_dialog_window_options_partial();
     options.window_bounds = Some(WindowBounds::Windowed(window_bounds));
-    options.kind = WindowKind::Floating;
+    options.kind = WindowKind::Dialog;
     options.is_resizable = true;
     options.is_minimizable = true;
     options.window_background = WindowBackgroundAppearance::Opaque;

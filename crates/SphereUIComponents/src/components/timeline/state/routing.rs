@@ -2,6 +2,15 @@ use super::*;
 
 pub use crate::project::InputMonitorMode;
 
+/// Whether a track is a user-created Bus/Return that may receive normal track
+/// outputs and aux sends. VSTi multi-output child strips deliberately use the
+/// `Bus` type so the engine can mix them, but they are runtime-derived mixer
+/// channels rather than project routing tracks and must never appear as normal
+/// Send/Output destinations.
+pub fn is_project_routing_track(track: &TrackState) -> bool {
+    track.track_type.is_routing() && !is_vsti_output_child_track_id(&track.id)
+}
+
 /// A single aux send from this track to a Bus/Return track (Phase 3). The
 /// runtime sums `gain_db`-scaled signal into the target's input. UI stores the
 /// descriptor; DirectAudio owns the realtime accumulation.
@@ -393,10 +402,9 @@ impl TimelineState {
             .find(|t| t.id == track_id)
             .map(|t| t.sends.iter().map(|s| s.target_track_id.clone()).collect())
             .unwrap_or_default();
-        let target = self
-            .tracks
-            .iter()
-            .find(|t| t.id != track_id && t.track_type.is_routing() && !existing.contains(&t.id))?;
+        let target = self.tracks.iter().find(|t| {
+            t.id != track_id && is_project_routing_track(t) && !existing.contains(&t.id)
+        })?;
         let target_id = target.id.clone();
         self.add_send_to_target(track_id, &target_id)
     }
@@ -408,7 +416,7 @@ impl TimelineState {
         let (target_id, target_name) = self
             .tracks
             .iter()
-            .find(|t| t.id == target_track_id && t.track_type.is_routing())
+            .find(|t| t.id == target_track_id && is_project_routing_track(t))
             .map(|target| (target.id.clone(), target.name.clone()))?;
 
         let track = self.tracks.iter_mut().find(|t| t.id == track_id)?;
@@ -524,5 +532,59 @@ impl TimelineState {
         let send = track.sends.iter_mut().find(|s| s.id == send_id)?;
         send.enabled = !send.enabled;
         Some(send.enabled)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn create_track(state: &mut TimelineState, track_type: TrackType, name: &str) -> String {
+        state.create_track(CreateTrackOptions {
+            track_type,
+            name: name.to_string(),
+            color: gpui::Rgba {
+                r: 0.0,
+                g: 0.0,
+                b: 0.0,
+                a: 1.0,
+            },
+            volume: volume::db_to_norm(0.0),
+            pan: 0.0,
+            armed: false,
+            input_monitor: InputMonitorMode::Off,
+        })
+    }
+
+    #[test]
+    fn sends_ignore_vsti_multiout_child_tracks() {
+        let mut state = TimelineState::default();
+        state.tracks.clear();
+
+        let source_id = create_track(&mut state, TrackType::Audio, "Audio");
+        let child_id = create_track(&mut state, TrackType::Bus, "VSTi Out 1");
+        state
+            .tracks
+            .iter_mut()
+            .find(|track| track.id == child_id)
+            .unwrap()
+            .id = vsti_output_child_track_id("insert-track-1-1", 0);
+        let child_id = vsti_output_child_track_id("insert-track-1-1", 0);
+        let return_id = create_track(&mut state, TrackType::Return, "Return 1");
+
+        assert!(!is_project_routing_track(
+            state.find_track(&child_id).unwrap()
+        ));
+        assert!(is_project_routing_track(
+            state.find_track(&return_id).unwrap()
+        ));
+        assert!(state.add_send_to_target(&source_id, &child_id).is_none());
+
+        let send_id = state
+            .add_send(&source_id)
+            .expect("real return should be selected");
+        let source = state.find_track(&source_id).unwrap();
+        let send = source.sends.iter().find(|send| send.id == send_id).unwrap();
+        assert_eq!(send.target_track_id, return_id);
     }
 }

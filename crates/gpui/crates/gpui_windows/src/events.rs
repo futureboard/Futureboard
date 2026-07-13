@@ -39,7 +39,26 @@ impl WindowsWindowInner {
         wparam: WPARAM,
         lparam: LPARAM,
     ) -> LRESULT {
-        let handled = match msg {
+        if let Some(result) = self.dispatch_msg(handle, msg, wparam, lparam) {
+            LRESULT(result)
+        } else {
+            unsafe { DefWindowProcW(handle, msg, wparam, lparam) }
+        }
+    }
+
+    /// Dispatch a message without invoking an operating-system default window
+    /// procedure. Native Win32 dialogs must return `FALSE` for messages the
+    /// dialog manager should process itself, whereas normal GPUI windows fall
+    /// through to `DefWindowProcW`; keeping the shared GPUI input/render path
+    /// here lets both hosts use the same renderer and callbacks.
+    pub(crate) fn dispatch_msg(
+        self: &Rc<Self>,
+        handle: HWND,
+        msg: u32,
+        wparam: WPARAM,
+        lparam: LPARAM,
+    ) -> Option<isize> {
+        match msg {
             // eagerly activate the window, so calls to `active_window` will work correctly
             WM_MOUSEACTIVATE => {
                 unsafe { SetActiveWindow(handle).ok() };
@@ -114,11 +133,35 @@ impl WindowsWindowInner {
             DM_POINTERHITTEST => self.handle_dm_pointer_hit_test(wparam),
             WM_GETOBJECT => self.handle_wm_getobject(wparam, lparam),
             _ => None,
-        };
-        if let Some(n) = handled {
-            LRESULT(n)
+        }
+    }
+
+    /// Dialog-procedure counterpart to [`Self::handle_msg`]. A real Win32
+    /// dialog uses the Dialog Manager for its unhandled messages, but GPUI must
+    /// still return native message results for hit testing, painting, and input
+    /// events. `DWLP_MSGRESULT` carries that result while a non-zero return
+    /// marks the message handled.
+    pub(crate) fn handle_dialog_msg(
+        self: &Rc<Self>,
+        handle: HWND,
+        msg: u32,
+        wparam: WPARAM,
+        lparam: LPARAM,
+    ) -> isize {
+        if msg == WM_CLOSE {
+            if self.handle_close_msg().is_none() {
+                unsafe { DestroyWindow(handle).log_err() };
+            }
+            return 1;
+        }
+
+        if let Some(result) = self.dispatch_msg(handle, msg, wparam, lparam) {
+            unsafe {
+                set_window_long(handle, WINDOW_LONG_PTR_INDEX(DWLP_MSGRESULT as i32), result);
+            }
+            1
         } else {
-            unsafe { DefWindowProcW(handle, msg, wparam, lparam) }
+            0
         }
     }
 
@@ -793,7 +836,7 @@ impl WindowsWindowInner {
         Some(lresult.0)
     }
 
-    fn handle_create_msg(&self, handle: HWND) -> Option<isize> {
+    pub(crate) fn handle_create_msg(&self, handle: HWND) -> Option<isize> {
         if self.hide_title_bar {
             notify_frame_changed(handle);
             Some(0)

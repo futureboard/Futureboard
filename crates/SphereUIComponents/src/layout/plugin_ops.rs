@@ -3820,7 +3820,10 @@ mod tests {
         ] {
             assert!(bridge_editor_is_terminal(&state));
             assert!(!bridge_editor_is_open(&state));
-            assert_eq!(editor_reopen_action(&state), EditorReopenAction::DropAndRetry);
+            assert_eq!(
+                editor_reopen_action(&state),
+                EditorReopenAction::DropAndRetry
+            );
         }
     }
 

@@ -663,6 +663,7 @@ impl MacWindow {
             bounds,
             titlebar,
             kind,
+            dialog_parenting,
             is_movable,
             is_resizable,
             is_minimizable,
@@ -929,7 +930,7 @@ impl MacWindow {
                     );
                 }
                 WindowKind::Dialog => {
-                    if !main_window.is_null() {
+                    if dialog_parenting && !main_window.is_null() {
                         let parent = {
                             let active_sheet: id = msg_send![main_window, attachedSheet];
                             if active_sheet.is_null() {

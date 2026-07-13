@@ -110,36 +110,10 @@ pub fn sidebar(
     on_context_menu: BrowserContextCb,
     on_collapse_all: BrowserActionCb,
     on_rescan: BrowserActionCb,
-    preview_enabled: bool,
-    on_toggle_preview: BrowserActionCb,
-    on_preview_play: BrowserActionCb,
 ) -> impl IntoElement {
     // ── Top utility toolbar ─────────────────────────────────────────
     let collapse_cb = on_collapse_all.clone();
     let rescan_cb = on_rescan.clone();
-    let preview_cb = on_toggle_preview.clone();
-    // Auto-preview toggle. Active = accent tint; the honest "no sound yet"
-    // state is communicated by the strip below, not faked here.
-    let preview_color = if preview_enabled {
-        Colors::accent_primary()
-    } else {
-        Colors::text_muted()
-    };
-    let mut preview_btn = icon_button(
-        Some(assets::ICON_VOLUME_2_PATH),
-        "P",
-        px(20.0),
-        px(20.0),
-        px(12.0),
-        preview_color,
-    )
-    .id("browser-preview-toggle")
-    .cursor(gpui::CursorStyle::PointingHand);
-    if preview_enabled {
-        preview_btn = preview_btn.bg(Colors::accent_soft());
-    }
-    let preview_btn = preview_btn.on_click(move |_e, w, cx| preview_cb(w, cx));
-
     let toolbar = div()
         .flex()
         .flex_row()
@@ -157,10 +131,10 @@ pub fn sidebar(
         .child(
             div()
                 .text_color(if active {
-                                    Colors::panel_header_active()
-                                } else {
-                                    Colors::tab_text()
-                                })
+                    Colors::panel_header_active()
+                } else {
+                    Colors::tab_text()
+                })
                 .text_size(px(10.0))
                 .font_weight(gpui::FontWeight::BOLD)
                 .child("BROWSER"),
@@ -173,7 +147,6 @@ pub fn sidebar(
                 .text_color(Colors::text_faint())
                 .child(format!("{}", state.visible_node_count())),
         )
-        .child(preview_btn)
         .child(
             icon_button(
                 Some(assets::ICON_MINUS_PATH),
@@ -218,7 +191,7 @@ pub fn sidebar(
         .bg(Colors::surface_panel())
         .child(
             svg()
-                .path(assets::ICON_MENU_PATH)
+                .path(assets::ICON_SEARCH_PATH)
                 .w(px(11.0))
                 .h(px(11.0))
                 .text_color(Colors::text_faint()),
@@ -287,44 +260,7 @@ pub fn sidebar(
         .child(thumb);
 
     // ── Mini waveform preview pane (shown for the selected audio file) ──
-    let preview_pane = state
-        .selected_audio_path()
-        .map(|path| browser_waveform_pane(path, on_preview_play.clone()));
-
-    // ── Auto-preview status strip (honest "no sound yet" state) ──────
-    let preview_strip = if preview_enabled {
-        Some(
-            div()
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(px(6.0))
-                .px(px(8.0))
-                .py(px(3.0))
-                .border_t(px(1.0))
-                .border_color(Colors::border_subtle())
-                .bg(Colors::surface_panel())
-                .child(
-                    svg()
-                        .path(assets::ICON_VOLUME_2_PATH)
-                        .w(px(10.0))
-                        .h(px(10.0))
-                        .text_color(Colors::accent_primary()),
-                )
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w(px(0.0))
-                        .overflow_hidden()
-                        .truncate()
-                        .text_size(px(9.5))
-                        .text_color(Colors::text_faint())
-                        .child("Auto-preview on · audio engine coming soon"),
-                ),
-        )
-    } else {
-        None
-    };
+    let preview_pane = state.selected_audio_path().map(browser_waveform_pane);
 
     // ── Footer: current selection (lightweight info row) ─────────────
     let selected_label = state
@@ -376,15 +312,14 @@ pub fn sidebar(
         .child(search_container)
         .child(listing)
         .children(preview_pane)
-        .children(preview_strip)
         .child(footer)
 }
 
-/// Mini waveform preview for the selected audio file: a play affordance + name
-/// + duration/format header over a peak-rendered waveform. Peaks come from the
-/// shared waveform cache (decoded off-thread on select); while decoding it shows
-/// an honest pending baseline.
-fn browser_waveform_pane(path: &std::path::Path, on_play: BrowserActionCb) -> impl IntoElement {
+/// Mini waveform details for the selected audio file. Peaks come from the shared
+/// waveform cache (decoded off-thread on select); while decoding it shows an
+/// honest pending baseline. Audition controls stay hidden until the engine can
+/// produce audible previews.
+fn browser_waveform_pane(path: &std::path::Path) -> impl IntoElement {
     let name = path
         .file_name()
         .and_then(|n| n.to_str())
@@ -407,17 +342,11 @@ fn browser_waveform_pane(path: &std::path::Path, on_play: BrowserActionCb) -> im
         .gap(px(6.0))
         .h(px(20.0))
         .child(
-            icon_button(
-                Some(assets::ICON_PLAY_PATH),
-                "▶",
-                px(18.0),
-                px(18.0),
-                px(11.0),
-                Colors::accent_primary(),
-            )
-            .id("browser-preview-play")
-            .cursor(gpui::CursorStyle::PointingHand)
-            .on_click(move |_e, w, cx| on_play(w, cx)),
+            svg()
+                .path(assets::ICON_FILE_PATH)
+                .w(px(12.0))
+                .h(px(12.0))
+                .text_color(Colors::accent_primary()),
         )
         .child(
             div()

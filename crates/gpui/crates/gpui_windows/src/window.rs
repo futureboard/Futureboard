@@ -419,7 +419,7 @@ impl WindowsWindow {
             invalidate_devices,
         } = creation_info;
         register_window_class(icon);
-        let parent_hwnd = if params.kind == WindowKind::Dialog {
+        let parent_hwnd = if params.kind == WindowKind::Dialog && params.dialog_parenting {
             let parent_window = unsafe { GetActiveWindow() };
             if parent_window.is_invalid() {
                 None
@@ -447,7 +447,7 @@ impl WindowsWindow {
                 .unwrap_or(""),
         );
 
-        let (mut dwexstyle, dwstyle) = if params.kind == WindowKind::PopUp {
+        let (mut dwexstyle, mut dwstyle) = if params.kind == WindowKind::PopUp {
             (WS_EX_TOOLWINDOW, WINDOW_STYLE(0x0))
         } else {
             let mut dwstyle = WS_SYSMENU;
@@ -470,6 +470,9 @@ impl WindowsWindow {
 
             (dwexstyle, dwstyle)
         };
+        if params.kind == WindowKind::Dialog {
+            dwstyle |= WINDOW_STYLE(DS_MODALFRAME as u32);
+        }
         if !disable_direct_composition {
             dwexstyle |= WS_EX_NOREDIRECTIONBITMAP;
         }
@@ -503,21 +506,34 @@ impl WindowsWindow {
             invalidate_devices,
             parent_hwnd,
         };
-        let creation_result = unsafe {
-            CreateWindowExW(
-                dwexstyle,
-                WINDOW_CLASS_NAME,
-                &window_name,
-                dwstyle,
-                CW_USEDEFAULT,
-                CW_USEDEFAULT,
-                CW_USEDEFAULT,
-                CW_USEDEFAULT,
-                parent_hwnd,
-                None,
-                Some(hinstance.into()),
-                Some(&context as *const _ as *const _),
-            )
+        let creation_result = if params.kind == WindowKind::Dialog {
+            let template = NativeDialogTemplate::new(dwstyle, dwexstyle);
+            unsafe {
+                CreateDialogIndirectParamW(
+                    Some(hinstance.into()),
+                    template.as_ptr(),
+                    parent_hwnd,
+                    Some(dialog_procedure),
+                    LPARAM(&mut context as *mut _ as isize),
+                )
+            }
+        } else {
+            unsafe {
+                CreateWindowExW(
+                    dwexstyle,
+                    WINDOW_CLASS_NAME,
+                    &window_name,
+                    dwstyle,
+                    CW_USEDEFAULT,
+                    CW_USEDEFAULT,
+                    CW_USEDEFAULT,
+                    CW_USEDEFAULT,
+                    parent_hwnd,
+                    None,
+                    Some(hinstance.into()),
+                    Some(&context as *const _ as *const _),
+                )
+            }
         };
 
         // Failure to create a `WindowsWindowState` can cause window creation to fail,
@@ -525,6 +541,10 @@ impl WindowsWindow {
         let this = context.inner.take().transpose()?;
         let hwnd = creation_result?;
         let this = this.unwrap();
+
+        if params.kind == WindowKind::Dialog {
+            unsafe { SetWindowTextW(hwnd, &window_name).log_err() };
+        }
 
         register_drag_drop(&this)?;
         set_non_rude_hwnd(hwnd, true);
@@ -1300,6 +1320,50 @@ enum WindowOpenState {
 
 const WINDOW_CLASS_NAME: PCWSTR = w!("Zed::Window");
 
+/// A zero-control dialog template used exclusively as a native Win32 host for
+/// GPUI's renderer. The dialog manager owns the outer `#32770` surface while
+/// GPUI continues to own all client rendering, layout, input, and focus state.
+/// Placement is applied immediately after creation from `WindowParams`, so the
+/// template's dialog-unit size is only a short-lived bootstrap value.
+#[repr(C, align(4))]
+struct NativeDialogTemplate {
+    // `DLGTEMPLATE`'s fixed header is 18 bytes. Its variable menu, class,
+    // and title fields must immediately follow at WORD boundaries; embedding a
+    // Rust `DLGTEMPLATE` would add trailing DWORD padding before those fields.
+    // Keep the entire resource layout as WORDs so Win32 sees the exact native
+    // dialog-template memory representation.
+    words: [u16; 12],
+}
+
+impl NativeDialogTemplate {
+    fn new(style: WINDOW_STYLE, extended_style: WINDOW_EX_STYLE) -> Self {
+        let style = style.0;
+        let extended_style = extended_style.0;
+        Self {
+            // `style`, `dwExtendedStyle`, `cdit`, `x`, `y`, `cx`, `cy`, then
+            // menu = 0, class = 0 (the system `#32770` class), title = "".
+            words: [
+                style as u16,
+                (style >> 16) as u16,
+                extended_style as u16,
+                (extended_style >> 16) as u16,
+                0,
+                0,
+                0,
+                160,
+                100,
+                0,
+                0,
+                0,
+            ],
+        }
+    }
+
+    fn as_ptr(&self) -> *const DLGTEMPLATE {
+        self.words.as_ptr().cast()
+    }
+}
+
 fn register_window_class(icon_handle: HICON) {
     static ONCE: Once = Once::new();
     ONCE.call_once(|| {
@@ -1349,6 +1413,67 @@ unsafe extern "system" fn window_procedure(
         inner.handle_msg(hwnd, msg, wparam, lparam)
     } else {
         unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
+    };
+
+    if msg == WM_NCDESTROY {
+        unsafe { set_window_long(hwnd, GWLP_USERDATA, 0) };
+        unsafe { drop(Box::from_raw(ptr)) };
+    }
+
+    result
+}
+
+/// Dialog procedure for [`WindowKind::Dialog`]. Unlike the old popup path,
+/// this receives a genuine Win32 `#32770` dialog HWND from
+/// `CreateDialogIndirectParamW`; GPUI is attached during `WM_INITDIALOG` and
+/// remains the sole renderer for the dialog content.
+unsafe extern "system" fn dialog_procedure(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> isize {
+    if msg == WM_INITDIALOG {
+        let context = unsafe { &mut *(lparam.0 as *mut WindowCreateContext) };
+        let mut window_rect = RECT::default();
+        let mut client_rect = RECT::default();
+        unsafe {
+            GetWindowRect(hwnd, &mut window_rect).log_err();
+            GetClientRect(hwnd, &mut client_rect).log_err();
+        }
+        let create = CREATESTRUCTW {
+            x: window_rect.left,
+            y: window_rect.top,
+            cx: client_rect.right - client_rect.left,
+            cy: client_rect.bottom - client_rect.top,
+            ..Default::default()
+        };
+        return match WindowsWindowInner::new(context, hwnd, &create) {
+            Ok(inner) => {
+                let weak = Box::new(Rc::downgrade(&inner));
+                unsafe { set_window_long(hwnd, GWLP_USERDATA, Box::into_raw(weak) as isize) };
+                context.inner = Some(Ok(inner.clone()));
+                // Dialog creation does not route `WM_CREATE` through the
+                // application procedure. Re-run GPUI's title-frame setup here.
+                let _ = inner.handle_create_msg(hwnd);
+                1
+            }
+            Err(error) => {
+                context.inner = Some(Err(error));
+                0
+            }
+        };
+    }
+
+    let ptr = unsafe { get_window_long(hwnd, GWLP_USERDATA) } as *mut Weak<WindowsWindowInner>;
+    if ptr.is_null() {
+        return 0;
+    }
+    let inner = unsafe { &*ptr };
+    let result = if let Some(inner) = inner.upgrade() {
+        inner.handle_dialog_msg(hwnd, msg, wparam, lparam)
+    } else {
+        0
     };
 
     if msg == WM_NCDESTROY {
@@ -1549,9 +1674,25 @@ fn set_non_rude_hwnd(hwnd: HWND, non_rude: bool) {
 
 #[cfg(test)]
 mod tests {
-    use super::ClickState;
+    use super::{ClickState, NativeDialogTemplate};
     use gpui::{DevicePixels, MouseButton, point};
     use std::time::Duration;
+    use windows::Win32::UI::WindowsAndMessaging::{WINDOW_EX_STYLE, WINDOW_STYLE};
+
+    #[test]
+    fn native_dialog_template_keeps_variable_fields_on_word_boundary() {
+        let template =
+            NativeDialogTemplate::new(WINDOW_STYLE(0x1234_5678), WINDOW_EX_STYLE(0x9ABC_DEF0));
+
+        assert_eq!(
+            template.words[..9],
+            [0x5678, 0x1234, 0xDEF0, 0x9ABC, 0, 0, 0, 160, 100]
+        );
+        // WORD 9 is byte 18: precisely where DLGTEMPLATE's variable menu,
+        // class, and title fields begin in a Win32 dialog resource.
+        assert_eq!(template.words[9..], [0, 0, 0]);
+        assert_eq!((template.as_ptr() as usize) % 4, 0);
+    }
 
     #[test]
     fn test_double_click_interval() {

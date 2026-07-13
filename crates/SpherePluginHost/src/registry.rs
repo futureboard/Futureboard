@@ -819,8 +819,10 @@ impl PluginRegistry {
                         .cloned()
                         .collect();
                     let reusable = bundle_is_reusable(reuse.iter().map(|p| {
-                        let (cached_m, cached_s) =
-                            signature_by_path.get(&p.path).cloned().unwrap_or((None, None));
+                        let (cached_m, cached_s) = signature_by_path
+                            .get(&p.path)
+                            .cloned()
+                            .unwrap_or((None, None));
                         let (current_m, current_s) = crate::plugin_db::file_signature(&p.path);
                         (
                             p.scan_status.is_usable(),

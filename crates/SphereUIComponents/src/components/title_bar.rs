@@ -29,22 +29,16 @@ pub fn chrome_button(
     _active: bool,
     color: Rgba,
 ) -> Div {
-    // Active state is shown with an accent/status icon color — never a filled
-    // background or stroked ring (pro-DAW toolbar feel). Hover supplies the
-    // only surface feedback on inactive buttons.
+    // Transport and panel state is communicated by the semantic icon color
+    // alone. Keeping the chrome flat makes the compact top bar read like a
+    // desktop DAW rather than a row of boxed web controls.
     let mut button = div()
         .w(px(CHROME_ICON_BUTTON_SIZE))
         .h(px(CHROME_ICON_BUTTON_SIZE))
         .flex()
         .items_center()
         .justify_center()
-        .rounded_md()
-        .text_color(color)
-        .hover(|style| {
-            style
-                .bg(Colors::surface_control_hover())
-                .text_color(Colors::text_primary())
-        });
+        .text_color(color);
 
     if let Some(path) = icon_path {
         button = button.child(svg().path(path).w(px(13.0)).h(px(13.0)).text_color(color));

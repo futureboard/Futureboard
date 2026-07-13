@@ -1,4 +1,4 @@
-//! Keymap / Keyboard Shortcuts editor window.
+//! Keymap / Keyboard Shortcuts editor dialog.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -986,7 +986,7 @@ pub fn open_keymap_window(
     );
     let mut options = crate::platform_chrome::external_dialog_window_options_partial();
     options.window_bounds = Some(WindowBounds::Windowed(window_bounds));
-    options.kind = WindowKind::Floating;
+    options.kind = WindowKind::Dialog;
     options.is_resizable = true;
     options.is_minimizable = true;
     options.window_background = WindowBackgroundAppearance::Transparent;

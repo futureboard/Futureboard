@@ -664,7 +664,12 @@ mod tests {
     #[test]
     fn changed_size_is_stale() {
         let m = "2026-07-08T00:00:00Z";
-        assert!(!signature_is_fresh(Some(m), Some(4096), Some(m), Some(8192)));
+        assert!(!signature_is_fresh(
+            Some(m),
+            Some(4096),
+            Some(m),
+            Some(8192)
+        ));
     }
 
     #[test]

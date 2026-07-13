@@ -86,7 +86,9 @@ impl Render for StudioLayout {
         {
             tracks
                 .iter()
-                .filter(|track| track.track_type.is_routing())
+                .filter(|track| {
+                    crate::components::timeline::timeline_state::is_project_routing_track(track)
+                })
                 .map(|track| (track.id.clone(), track.name.clone()))
                 .collect()
         } else {
@@ -312,11 +314,6 @@ impl Render for StudioLayout {
                     if crate::components::file_browser::is_audio_path(&path) {
                         // Visual mini-waveform preview always decodes on select.
                         this.ensure_browser_waveform(path.clone(), cx);
-                        // Audio audition only when the preview toggle is on
-                        // (engine voice is a stub for now — honest "coming soon").
-                        if this.file_browser.preview_enabled {
-                            this.audition_browser_file(&path);
-                        }
                     }
                     cx.notify();
                 });
@@ -427,38 +424,6 @@ impl Render for StudioLayout {
                 });
             })
         };
-        // Toolbar: toggle auto-preview (audition on select). Turning it off
-        // stops any in-progress audition.
-        let on_browser_toggle_preview: std::sync::Arc<
-            dyn Fn(&mut Window, &mut gpui::App) + 'static,
-        > = {
-            let this = cx.entity().clone();
-            std::sync::Arc::new(move |_w, cx| {
-                let _ = this.update(cx, |this, cx| {
-                    let now_on = this.file_browser.toggle_preview_enabled();
-                    if !now_on {
-                        if let Some(engine) = this.audio_bridge.engine.as_ref() {
-                            let _ = engine.stop_audition();
-                        }
-                    }
-                    cx.notify();
-                });
-            })
-        };
-
-        // Mini waveform pane play button: audition the currently-selected file.
-        let on_browser_preview_play: std::sync::Arc<dyn Fn(&mut Window, &mut gpui::App) + 'static> = {
-            let this = cx.entity().clone();
-            std::sync::Arc::new(move |_w, cx| {
-                let _ = this.update(cx, |this, cx| {
-                    if let Some(path) = this.file_browser.selected.clone() {
-                        this.audition_browser_file(&path);
-                    }
-                    cx.notify();
-                });
-            })
-        };
-
         let file_browser = self.file_browser.clone();
         let browser_scroll = self.browser_scroll.clone();
 
@@ -1583,9 +1548,6 @@ impl Render for StudioLayout {
                             on_browser_context,
                             on_browser_collapse_all,
                             on_browser_rescan,
-                            file_browser.preview_enabled,
-                            on_browser_toggle_preview,
-                            on_browser_preview_play,
                         ))
                     });
                 }

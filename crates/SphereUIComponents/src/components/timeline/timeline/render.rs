@@ -62,6 +62,7 @@ impl Render for Timeline {
                     }
                 }
                 this.clip_clone_drag_id = clone_drag.then(|| clip_id.clone());
+                this.clip_clone_hint = None;
                 if *additive {
                     this.state.select_clip_additive(clip_id);
                 } else {
@@ -912,6 +913,10 @@ impl Render for Timeline {
             .file_drop_hint
             .as_ref()
             .and_then(|hint| file_drop_hint_overlay(hint, state));
+        let clip_clone_overlay = self
+            .clip_clone_hint
+            .as_ref()
+            .and_then(|hint| clip_clone_hint_overlay(hint, state));
         let on_zoom_in_btn = on_zoom_in.clone();
         let on_zoom_out_btn = on_zoom_out.clone();
 
@@ -934,8 +939,9 @@ impl Render for Timeline {
                 this.last_drag_position = Some(event.event.position);
                 this.file_drop_hint = Some(FileDropHint {
                     position: event.event.position,
-                    label: "Drop files to import",
+                    label: file_drop_hint_label(event.drag(cx).paths()),
                 });
+                this.clip_clone_hint = None;
                 cx.notify();
             },
         );
@@ -966,8 +972,9 @@ impl Render for Timeline {
                 this.last_drag_position = Some(event.event.position);
                 this.file_drop_hint = Some(FileDropHint {
                     position: event.event.position,
-                    label: "Drop browser item to import",
+                    label: file_drop_hint_label(std::slice::from_ref(&event.drag(cx).path)),
                 });
+                this.clip_clone_hint = None;
                 cx.notify();
             },
         );
@@ -992,10 +999,16 @@ impl Render for Timeline {
                 this.file_drop_hint = None;
                 if this.clip_clone_drag_id.as_deref() == Some(drag.clip_id.as_str()) {
                     let origin = *this.clip_drag_origin.get_or_insert(event.event.position);
-                    let (target_index, _) =
+                    let (target_index, start_beat) =
                         this.resolve_clip_drag_target(&drag, origin, event.event.position);
                     this.clip_drag_target_track_index = Some(target_index);
+                    this.clip_clone_hint = Some(ClipCloneHint {
+                        clip_id: drag.clip_id.clone(),
+                        target_track_index: target_index,
+                        start_beat,
+                    });
                 } else {
+                    this.clip_clone_hint = None;
                     this.move_dragged_clip_to_position(&drag, event.event.position, window);
                 }
                 cx.notify();
@@ -1074,6 +1087,7 @@ impl Render for Timeline {
             this.clip_drag_origin = None;
             this.clip_drag_target_track_index = None;
             this.clip_clone_drag_id = None;
+            this.clip_clone_hint = None;
             this.last_drag_position = None;
             this.file_drop_hint = None;
             cx.notify();
@@ -1445,6 +1459,18 @@ impl Render for Timeline {
             // External/browser file-drop hint. Drawn above lane content and below
             // playhead/tools; it is UI-only and follows the last GPUI drag move.
             .children(file_drop_overlay.map(|overlay| {
+                div()
+                    .absolute()
+                    .left(px(HEADER_WIDTH))
+                    .right_0()
+                    .top(px(content_top))
+                    .bottom_0()
+                    .overflow_hidden()
+                    .child(overlay)
+            }))
+            // Alt-drag clone ghost. Like the MIDI pen/file-drop previews, this
+            // stays transient until the user releases the pointer.
+            .children(clip_clone_overlay.map(|overlay| {
                 div()
                     .absolute()
                     .left(px(HEADER_WIDTH))
@@ -1846,6 +1872,16 @@ pub(crate) fn format_arrangement_target_debug(target: &ArrangementHitTarget) -> 
     }
 }
 
+fn file_drop_hint_label(paths: &[std::path::PathBuf]) -> &'static str {
+    if paths.iter().any(|path| is_supported_audio_ext(path)) {
+        "Drop Audio to import"
+    } else if paths.iter().any(|path| is_supported_midi_ext(path)) {
+        "Drop MIDI to import"
+    } else {
+        "Drop files to import"
+    }
+}
+
 fn file_drop_hint_overlay(hint: &FileDropHint, state: &TimelineState) -> Option<gpui::AnyElement> {
     let window_x: f32 = hint.position.x.into();
     let window_y: f32 = hint.position.y.into();
@@ -1948,6 +1984,70 @@ fn file_drop_hint_overlay(hint: &FileDropHint, state: &TimelineState) -> Option<
             .child(label)
             .into_any_element(),
     )
+}
+
+/// Animated arrangement ghost for an Alt-drag clone. The target bounds are
+/// derived from the same snap/track geometry used by the drop command, so the
+/// visual preview and committed duplicate cannot disagree.
+fn clip_clone_hint_overlay(
+    hint: &ClipCloneHint,
+    state: &TimelineState,
+) -> Option<gpui::AnyElement> {
+    let (_, source_clip) = state.find_clip(&hint.clip_id)?;
+    let target_track = state.tracks.get(hint.target_track_index)?;
+    let row_layout = state.track_row_layout();
+    let row = row_layout.row_for_index(hint.target_track_index)?;
+
+    let x = state.beats_to_x(hint.start_beat).max(0.0);
+    let width = (state.beats_to_x(hint.start_beat + source_clip.duration_beats) - x).max(10.0);
+    let pad = 7.0;
+    let y = row.y - state.viewport.scroll_y + pad;
+    let height = (row.height - pad * 2.0).max(8.0);
+    let color = target_track.color;
+    let kind = match &source_clip.clip_type {
+        ClipType::Audio { .. } => "Audio",
+        ClipType::Midi { .. } => "MIDI",
+    };
+    let label = format!(
+        "Copy {kind} to {} · {}",
+        target_track.name,
+        state.format_bar_beat(hint.start_beat)
+    );
+
+    let ghost = div()
+        .absolute()
+        .left(px(x))
+        .top(px(y.max(0.0)))
+        .w(px(width))
+        .h(px(height))
+        .rounded_md()
+        .border(px(1.0))
+        .border_color(Colors::with_alpha(color, 0.6))
+        .bg(Colors::with_alpha(color, 0.12))
+        .child(
+            div()
+                .h_full()
+                .px(px(7.0))
+                .flex()
+                .items_center()
+                .truncate()
+                .text_size(px(9.0))
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .text_color(Colors::text_primary())
+                .child(label),
+        )
+        .with_animation(
+            "timeline-clip-clone-ghost-pulse",
+            Animation::new(Duration::from_millis(760))
+                .repeat()
+                .with_easing(pulsating_between(0.30, 0.76)),
+            move |this, delta| {
+                this.bg(Colors::with_alpha(color, 0.06 + delta * 0.16))
+                    .border_color(Colors::with_alpha(color, delta))
+            },
+        );
+
+    Some(div().absolute().inset_0().child(ghost).into_any_element())
 }
 
 /// Live ghost-clip overlay for the in-flight pen MIDI clip draw. Translucent,

@@ -186,8 +186,12 @@ impl StudioLayout {
         // mixer rebuilds from this snapshot every meter frame, so skipping the
         // clip clone is the per-frame cost reduction that complements the meter
         // refresh cap. `automation_lanes` is kept (display_volume needs it).
-        let mut tracks: Vec<TrackState> =
-            timeline.state.tracks.iter().map(clone_track_for_mixer).collect();
+        let mut tracks: Vec<TrackState> = timeline
+            .state
+            .tracks
+            .iter()
+            .map(clone_track_for_mixer)
+            .collect();
         let mut master = timeline.state.master.clone();
         timeline
             .state
@@ -265,12 +269,9 @@ impl StudioLayout {
         // measurement itself adds no cost in normal operation. This is what tells
         // whether the pop-out cost is dominated by the clone (this path) or by
         // the element-tree rebuild (the deferred mixer_render migration).
-        let timer = external_mixer_debug_enabled()
-            .then(std::time::Instant::now);
+        let timer = external_mixer_debug_enabled().then(std::time::Instant::now);
         self.push_mixer_snapshot_to_window(cx);
-        let build_nanos = timer
-            .map(|t| t.elapsed().as_nanos() as u64)
-            .unwrap_or(0);
+        let build_nanos = timer.map(|t| t.elapsed().as_nanos() as u64).unwrap_or(0);
         external_mixer_perf_record(true, build_nanos);
     }
 
@@ -1266,32 +1267,33 @@ impl StudioLayout {
         let timeline_master_commit = self.timeline.clone();
         let owner_master_commit = owner.clone();
         let audio_engine_master_final = audio_engine.clone();
-        let on_master_volume_drag_commit: std::sync::Arc<dyn Fn(&mut Window, &mut gpui::App) + 'static> =
-            std::sync::Arc::new(move |_w, cx| {
-                let committed = timeline_master_commit.update(cx, |t, cx| {
-                    let committed = t.state.commit_master_volume_preview();
-                    if committed.is_some() {
-                        cx.notify();
-                    }
-                    committed
-                });
-                let Some(v) = committed else {
-                    return;
-                };
-                crate::perf::count("fader_drag_commit_count", 1);
-                StudioLayout::defer_update(&owner_master_commit, cx, |this, cx| {
-                    this.mark_dirty_view_only();
-                    this.push_mixer_snapshot_to_window(cx);
-                    let _ = this.mixer_panel.update(cx, |_, cx| cx.notify());
-                });
-                if let Some(engine) = audio_engine_master_final.as_ref() {
-                    let _ = engine.update_track_param(
-                        "__master__",
-                        "volume",
-                        volume_norm_to_linear(v) as f64,
-                    );
+        let on_master_volume_drag_commit: std::sync::Arc<
+            dyn Fn(&mut Window, &mut gpui::App) + 'static,
+        > = std::sync::Arc::new(move |_w, cx| {
+            let committed = timeline_master_commit.update(cx, |t, cx| {
+                let committed = t.state.commit_master_volume_preview();
+                if committed.is_some() {
+                    cx.notify();
                 }
+                committed
             });
+            let Some(v) = committed else {
+                return;
+            };
+            crate::perf::count("fader_drag_commit_count", 1);
+            StudioLayout::defer_update(&owner_master_commit, cx, |this, cx| {
+                this.mark_dirty_view_only();
+                this.push_mixer_snapshot_to_window(cx);
+                let _ = this.mixer_panel.update(cx, |_, cx| cx.notify());
+            });
+            if let Some(engine) = audio_engine_master_final.as_ref() {
+                let _ = engine.update_track_param(
+                    "__master__",
+                    "volume",
+                    volume_norm_to_linear(v) as f64,
+                );
+            }
+        });
         let on_context_menu: std::sync::Arc<
             dyn Fn(&(String, f32, f32), &mut Window, &mut gpui::App) + 'static,
         > = {
@@ -1801,7 +1803,10 @@ mod mixer_snapshot_clone_tests {
         assert!(!track.clips.is_empty(), "source track has a clip");
 
         let lite = clone_track_for_mixer(track);
-        assert!(lite.clips.is_empty(), "mixer clone drops the heavy clips vec");
+        assert!(
+            lite.clips.is_empty(),
+            "mixer clone drops the heavy clips vec"
+        );
         // Clone, not move — the live track keeps its clips.
         assert!(!track.clips.is_empty(), "source clips preserved");
         // Mixer-relevant fields survive verbatim.
@@ -1824,14 +1829,26 @@ mod external_mixer_throttle_tests {
 
     #[test]
     fn interval_matches_fps() {
-        assert_eq!(external_mixer_interval_for_fps(60), Duration::from_nanos(16_666_666));
-        assert_eq!(external_mixer_interval_for_fps(30), Duration::from_nanos(33_333_333));
-        assert_eq!(external_mixer_interval_for_fps(120), Duration::from_nanos(8_333_333));
+        assert_eq!(
+            external_mixer_interval_for_fps(60),
+            Duration::from_nanos(16_666_666)
+        );
+        assert_eq!(
+            external_mixer_interval_for_fps(30),
+            Duration::from_nanos(33_333_333)
+        );
+        assert_eq!(
+            external_mixer_interval_for_fps(120),
+            Duration::from_nanos(8_333_333)
+        );
     }
 
     #[test]
     fn zero_fps_falls_back_to_default_not_divide_by_zero() {
-        assert_eq!(external_mixer_interval_for_fps(0), Duration::from_nanos(16_666_666));
+        assert_eq!(
+            external_mixer_interval_for_fps(0),
+            Duration::from_nanos(16_666_666)
+        );
     }
 
     #[test]

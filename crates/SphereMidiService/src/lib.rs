@@ -368,8 +368,16 @@ impl HardwareMidiPlayback {
         self.start_with_config(events, HardwareMidiPlaybackConfig::new(0, 48_000));
     }
 
-    pub fn start_at_sample(&mut self, events: Vec<HardwareMidiEvent>, start_sample: u64, sample_rate: u32) {
-        self.start_with_config(events, HardwareMidiPlaybackConfig::new(start_sample, sample_rate));
+    pub fn start_at_sample(
+        &mut self,
+        events: Vec<HardwareMidiEvent>,
+        start_sample: u64,
+        sample_rate: u32,
+    ) {
+        self.start_with_config(
+            events,
+            HardwareMidiPlaybackConfig::new(start_sample, sample_rate),
+        );
     }
 
     pub fn start_with_config(
@@ -482,10 +490,11 @@ fn run_hardware_midi_thread(
         }
 
         let event = &events[cursor];
-        let scheduled_wall = wall_start + samples_to_duration(
-            event.absolute_sample.saturating_sub(start_sample),
-            sample_rate,
-        );
+        let scheduled_wall = wall_start
+            + samples_to_duration(
+                event.absolute_sample.saturating_sub(start_sample),
+                sample_rate,
+            );
         while Instant::now() < scheduled_wall {
             if cancel_rx.try_recv().is_ok() {
                 send_all_notes_off(&mut connections);
@@ -501,7 +510,14 @@ fn run_hardware_midi_thread(
         if let Some(conn) = connections.get_mut(&event.device_id) {
             let _ = conn.send(&event.message);
         }
-        log_midi_dispatch(event, scheduled_wall, actual, lateness, debug, lateness_warnings);
+        log_midi_dispatch(
+            event,
+            scheduled_wall,
+            actual,
+            lateness,
+            debug,
+            lateness_warnings,
+        );
         cursor += 1;
     }
 }
@@ -694,8 +710,7 @@ fn log_midi_dispatch(
         let (kind, ch, d1, d2) = describe_midi_message(&event.message);
         eprintln!(
             "[midi-output] send type={kind} ch={ch} data1={d1} data2={d2} beat={:.6} sample={} scheduled={scheduled_wall:?} actual={actual:?} late_ms={lateness_ms:.3}",
-            event.beat,
-            event.absolute_sample,
+            event.beat, event.absolute_sample,
         );
     }
     if warnings && lateness_ms >= 2.0 {
@@ -744,15 +759,20 @@ struct HardwareMidiProfiler {
 
 impl HardwareMidiProfiler {
     fn reset(&self) {
-        self.events_total.store(0, std::sync::atomic::Ordering::Relaxed);
-        self.max_jitter_us.store(0, std::sync::atomic::Ordering::Relaxed);
+        self.events_total
+            .store(0, std::sync::atomic::Ordering::Relaxed);
+        self.max_jitter_us
+            .store(0, std::sync::atomic::Ordering::Relaxed);
     }
 
     fn record(&self, lateness: Duration) {
         let _ = self.started.get_or_init(Instant::now);
-        self.events_total.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.events_total
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let us = lateness.as_micros().min(u32::MAX as u128) as u32;
-        let mut prev = self.max_jitter_us.load(std::sync::atomic::Ordering::Relaxed);
+        let mut prev = self
+            .max_jitter_us
+            .load(std::sync::atomic::Ordering::Relaxed);
         while us > prev {
             match self.max_jitter_us.compare_exchange_weak(
                 prev,
@@ -778,7 +798,9 @@ impl HardwareMidiProfiler {
                 / elapsed)
                 .round()
                 .min(u32::MAX as f64) as u32,
-            max_jitter_us: self.max_jitter_us.load(std::sync::atomic::Ordering::Relaxed),
+            max_jitter_us: self
+                .max_jitter_us
+                .load(std::sync::atomic::Ordering::Relaxed),
         }
     }
 }
@@ -819,7 +841,9 @@ impl MidiThreadScope {
 #[cfg(target_os = "windows")]
 fn wait_for_midi_tick(duration: Duration) {
     use windows::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0};
-    use windows::Win32::System::Threading::{CreateWaitableTimerW, SetWaitableTimer, WaitForSingleObject};
+    use windows::Win32::System::Threading::{
+        CreateWaitableTimerW, SetWaitableTimer, WaitForSingleObject,
+    };
 
     let due_100ns = -(duration.as_nanos().min(i64::MAX as u128 / 100) as i64 / 100).max(-1);
     unsafe {
@@ -844,7 +868,9 @@ fn wait_for_midi_tick(duration: Duration) {
 
 #[cfg(target_os = "windows")]
 unsafe fn set_current_thread_priority_high() {
-    use windows::Win32::System::Threading::{GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_TIME_CRITICAL};
+    use windows::Win32::System::Threading::{
+        GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_TIME_CRITICAL,
+    };
     unsafe {
         let _ = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
     }
@@ -974,8 +1000,16 @@ mod tests {
             hw_event(106, &[0x80, 60, 0]),
         ];
         let coalesced = coalesce_hardware_midi_events(events, 48_000);
-        assert!(coalesced.iter().any(|event| event.message == vec![0x90, 60, 100]));
-        assert!(coalesced.iter().any(|event| event.message == vec![0x80, 60, 0]));
+        assert!(
+            coalesced
+                .iter()
+                .any(|event| event.message == vec![0x90, 60, 100])
+        );
+        assert!(
+            coalesced
+                .iter()
+                .any(|event| event.message == vec![0x80, 60, 0])
+        );
         assert_eq!(
             coalesced
                 .iter()

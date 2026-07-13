@@ -1,6 +1,6 @@
 //! Compact progress dialogs for session loading and file copy work.
 //!
-//! Uses the same borderless external-window chrome as the native message box,
+//! Uses the same GPUI-rendered native-dialog chrome as the native message box,
 //! but exposes a reusable progress bar with determinate and indeterminate modes.
 
 use std::sync::Arc;
@@ -512,7 +512,7 @@ pub fn open_progress_dialog_window(
 
     let mut window_options = crate::platform_chrome::external_dialog_window_options_partial();
     window_options.window_bounds = Some(WindowBounds::Windowed(window_bounds));
-    window_options.kind = WindowKind::Floating;
+    window_options.kind = WindowKind::Dialog;
     window_options.is_resizable = false;
     window_options.is_minimizable = false;
     window_options.window_background = WindowBackgroundAppearance::Transparent;

@@ -638,23 +638,41 @@ impl StudioLayout {
     }
 
     pub(super) fn toggle_selected_track_mute(&mut self, cx: &mut Context<Self>) {
-        self.mark_dirty();
-        let _ = self.timeline.update(cx, |timeline, cx| {
-            if let Some(id) = timeline.state.selection.selected_track_id.clone() {
-                timeline.state.toggle_track_mute(&id);
-                cx.notify();
-            }
+        // Live control: mute is applied through `SetTrackMute` (per-block in
+        // the render pass), never via a graph rebuild — `mark_dirty()` here
+        // used to force a full `load_project` and stutter playback.
+        self.mark_dirty_view_only();
+        let toggled = self.timeline.update(cx, |timeline, cx| {
+            let id = timeline.state.selection.selected_track_id.clone()?;
+            timeline.state.toggle_track_mute(&id);
+            let muted = timeline.state.find_track(&id).map(|t| t.muted)?;
+            cx.notify();
+            Some((id, muted))
         });
+        if let Some((id, muted)) = toggled {
+            if let Some(engine) = self.audio_bridge.engine.as_ref() {
+                let _ = engine.update_track_param(&id, "muted", if muted { 1.0 } else { 0.0 });
+            }
+            self.push_mixer_snapshot_to_window(cx);
+        }
     }
 
     pub(super) fn toggle_selected_track_solo(&mut self, cx: &mut Context<Self>) {
-        self.mark_dirty();
-        let _ = self.timeline.update(cx, |timeline, cx| {
-            if let Some(id) = timeline.state.selection.selected_track_id.clone() {
-                timeline.state.toggle_track_solo(&id);
-                cx.notify();
-            }
+        // Live control — see `toggle_selected_track_mute`.
+        self.mark_dirty_view_only();
+        let toggled = self.timeline.update(cx, |timeline, cx| {
+            let id = timeline.state.selection.selected_track_id.clone()?;
+            timeline.state.toggle_track_solo(&id);
+            let solo = timeline.state.find_track(&id).map(|t| t.solo)?;
+            cx.notify();
+            Some((id, solo))
         });
+        if let Some((id, solo)) = toggled {
+            if let Some(engine) = self.audio_bridge.engine.as_ref() {
+                let _ = engine.update_track_param(&id, "solo", if solo { 1.0 } else { 0.0 });
+            }
+            self.push_mixer_snapshot_to_window(cx);
+        }
     }
 
     pub(super) fn toggle_selected_track_arm(&mut self, cx: &mut Context<Self>) {

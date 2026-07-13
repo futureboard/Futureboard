@@ -801,6 +801,24 @@ impl StudioLayout {
         {
             let target = cx.entity().clone();
             let _ = timeline.update(cx, |timeline, _cx| {
+                timeline.set_control_state_changed_callback(Some(Arc::new(move |cx| {
+                    // Track mute/solo from the timeline header: persisted state
+                    // that reaches the engine live through the realtime command
+                    // path. Deferred for the same nested-update reason as the
+                    // project-changed callback below; view-only dirty so the
+                    // audio poll never rebuilds the graph for it.
+                    let target = target.clone();
+                    cx.defer(move |cx| {
+                        let _ = target.update(cx, |this, _cx| {
+                            this.mark_dirty_view_only();
+                        });
+                    });
+                })));
+            });
+        }
+        {
+            let target = cx.entity().clone();
+            let _ = timeline.update(cx, |timeline, _cx| {
                 timeline.set_project_changed_callback(Some(Arc::new(move |cx| {
                     // DEFER the parent update. This callback runs from inside
                     // `Timeline::update` (gesture commits) AND from inside
@@ -1085,7 +1103,7 @@ impl StudioLayout {
                 Some(Arc::new(move |track_id, param_id, value| {
                     let engine_value = match param_id.as_str() {
                         "volume" => volume_norm_to_linear(value) as f64,
-                        "mute" | "solo" => {
+                        "muted" | "solo" => {
                             if value >= 0.5 {
                                 1.0
                             } else {
@@ -2285,7 +2303,7 @@ impl StudioLayout {
                                     Some(Arc::new(move |track_id, param_id, value| {
                                         let engine_value = match param_id.as_str() {
                                             "volume" => volume_norm_to_linear(value) as f64,
-                                            "mute" | "solo" => {
+                                            "muted" | "solo" => {
                                                 if value >= 0.5 {
                                                     1.0
                                                 } else {

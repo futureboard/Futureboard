@@ -162,6 +162,7 @@ impl Timeline {
             on_seek_beats: None,
             on_track_param_change: None,
             on_project_changed: None,
+            on_control_state_changed: None,
             on_loop_changed: None,
             on_tempo_map_changed: None,
             on_time_signature_map_changed: None,
@@ -207,6 +208,7 @@ impl Timeline {
             on_seek_beats: None,
             on_track_param_change: None,
             on_project_changed: None,
+            on_control_state_changed: None,
             on_loop_changed: None,
             on_tempo_map_changed: None,
             on_time_signature_map_changed: None,
@@ -342,6 +344,13 @@ impl Timeline {
         self.on_project_changed = callback;
     }
 
+    pub fn set_control_state_changed_callback(
+        &mut self,
+        callback: Option<TimelineProjectChangedCb>,
+    ) {
+        self.on_control_state_changed = callback;
+    }
+
     pub fn set_loop_changed_callback(&mut self, callback: Option<TimelineProjectChangedCb>) {
         self.on_loop_changed = callback;
     }
@@ -388,6 +397,18 @@ impl Timeline {
     pub(crate) fn mark_project_changed(&self, cx: &mut gpui::App) {
         if let Some(callback) = self.on_project_changed.as_ref() {
             callback(cx);
+        }
+    }
+
+    /// Live mixer-control edit (mute/solo): persisted in the project file but
+    /// applied to the engine through the realtime command path, so the owner
+    /// must not treat it as an engine-graph change. Falls back to
+    /// [`Self::mark_project_changed`] when no dedicated callback is wired.
+    pub(crate) fn mark_control_state_changed(&self, cx: &mut gpui::App) {
+        if let Some(callback) = self.on_control_state_changed.as_ref() {
+            callback(cx);
+        } else {
+            self.mark_project_changed(cx);
         }
     }
 

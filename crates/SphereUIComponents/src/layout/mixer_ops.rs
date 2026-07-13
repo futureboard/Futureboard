@@ -1065,7 +1065,14 @@ impl StudioLayout {
                 let id_for_side_effect_log = id.clone();
                 StudioLayout::defer_update(&owner_dirty, cx, move |this, cx| {
                     let graph_version_before = this.audio_bridge.route_graph_version;
-                    this.mark_dirty();
+                    // Mute reaches the engine live through `SetTrackMute` above
+                    // and is applied per block in the render pass; it is NOT
+                    // graph structure. `mark_dirty()` would set
+                    // `audio_bridge.project_dirty` and the next poll would run a
+                    // full snapshot + `load_project` (graph swap, voice reset,
+                    // note panic) — the audible stutter this replaces. View-only
+                    // dirty keeps save/restore correct without an engine reload.
+                    this.mark_dirty_view_only();
                     this.push_mixer_snapshot_to_window(cx);
                     let graph_version_after = this.audio_bridge.route_graph_version;
                     if crate::forensic_trace::forensic_trace_enabled() {
@@ -1122,7 +1129,9 @@ impl StudioLayout {
                 let id_for_side_effect_log = id.clone();
                 StudioLayout::defer_update(&owner_dirty, cx, move |this, cx| {
                     let graph_version_before = this.audio_bridge.route_graph_version;
-                    this.mark_dirty();
+                    // Live control (see the mute handler above): solo reaches
+                    // the engine through `SetTrackSolo`; no graph rebuild.
+                    this.mark_dirty_view_only();
                     this.push_mixer_snapshot_to_window(cx);
                     let graph_version_after = this.audio_bridge.route_graph_version;
                     if crate::forensic_trace::forensic_trace_enabled() {
@@ -1373,8 +1382,13 @@ impl StudioLayout {
                     this.timeline.update(cx, |timeline, _cx| {
                         timeline.state.toggle_insert_bypass(&track_id, &insert_id);
                     });
-                    this.mark_dirty();
-                    this.audio_bridge.project_dirty = true;
+                    // Bypass is applied live per block via the insert's
+                    // "enabled" runtime param — the plugin instance stays
+                    // loaded and no graph rebuild runs (a full `load_project`
+                    // here used to stutter playback). View-only dirty keeps
+                    // the toggle in the saved project.
+                    this.push_insert_enabled_to_engine(&track_id, &insert_id, cx);
+                    this.mark_dirty_view_only();
                     cx.notify();
                 });
             })

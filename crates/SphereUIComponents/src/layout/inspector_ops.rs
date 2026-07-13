@@ -767,8 +767,11 @@ impl StudioLayout {
                 inspector_debug(&format!(
                     "insert bypass track={track_id} insert={insert_id} bypass={bypassed}"
                 ));
-                this.mark_dirty();
-                this.audio_bridge.project_dirty = true;
+                // Live per-block bypass via the runtime "enabled" insert param —
+                // no plugin unload, no graph rebuild (a full `load_project` here
+                // used to stutter playback). View-only dirty persists the flag.
+                this.push_insert_enabled_to_engine(&track_id, &insert_id, cx);
+                this.mark_dirty_view_only();
                 this.push_mixer_snapshot_to_window(cx);
                 cx.notify();
             });
@@ -791,8 +794,9 @@ impl StudioLayout {
                 inspector_debug(&format!(
                     "insert enabled track={track_id} insert={insert_id} enabled={enabled}"
                 ));
-                this.mark_dirty();
-                this.audio_bridge.project_dirty = true;
+                // Same live path as bypass: runtime "enabled" param, no rebuild.
+                this.push_insert_enabled_to_engine(&track_id, &insert_id, cx);
+                this.mark_dirty_view_only();
                 this.push_mixer_snapshot_to_window(cx);
                 cx.notify();
             });
@@ -1201,8 +1205,17 @@ impl StudioLayout {
                 }
                 _ => {}
             }
-            StudioLayout::defer_update(&owner, cx, |this, cx| {
-                this.mark_dirty();
+            StudioLayout::defer_update(&owner, cx, move |this, cx| {
+                match kind {
+                    // Mute/solo reach the engine live (`update_track_param`
+                    // below); marking the engine dirty here would rebuild the
+                    // whole graph for a non-structural toggle and stutter
+                    // playback. View-only dirty keeps save/restore correct.
+                    TrackToggle::Mute | TrackToggle::Solo => this.mark_dirty_view_only(),
+                    // Arm/monitor change the engine snapshot's input routing
+                    // (input stream selection) — genuinely structural.
+                    TrackToggle::Arm | TrackToggle::Input => this.mark_dirty(),
+                }
                 this.push_mixer_snapshot_to_window(cx);
             });
             if let Some(engine) = audio_engine.as_ref() {

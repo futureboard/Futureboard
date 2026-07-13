@@ -85,12 +85,16 @@ impl Render for Timeline {
 
         let on_toggle_mute = cx.listener(|this, track_id: &String, _window, cx| {
             this.state.toggle_track_mute(track_id);
-            this.mark_project_changed(cx);
+            // Live control: reaches the engine via `on_track_param_change`
+            // below; view-only dirty (no engine graph rebuild).
+            this.mark_control_state_changed(cx);
             if let Some(track) = this.state.find_track(track_id) {
                 if let Some(cb) = this.on_track_param_change.as_ref() {
+                    // Engine param id is "muted" ("mute" hits the
+                    // unknown-param branch and is dropped).
                     cb(
                         track_id.clone(),
-                        "mute".to_string(),
+                        "muted".to_string(),
                         if track.muted { 1.0 } else { 0.0 },
                     );
                 }
@@ -100,7 +104,7 @@ impl Render for Timeline {
 
         let on_toggle_solo = cx.listener(|this, track_id: &String, _window, cx| {
             this.state.toggle_track_solo(track_id);
-            this.mark_project_changed(cx);
+            this.mark_control_state_changed(cx);
             if let Some(track) = this.state.find_track(track_id) {
                 if let Some(cb) = this.on_track_param_change.as_ref() {
                     cb(

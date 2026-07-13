@@ -122,6 +122,11 @@ pub struct Timeline {
     on_track_param_change:
         Option<std::sync::Arc<dyn Fn(String, String, f32) + Send + Sync + 'static>>,
     on_project_changed: Option<TimelineProjectChangedCb>,
+    /// Fired for live mixer-control edits (track mute/solo from the header)
+    /// that are persisted in the project but reach the engine through the
+    /// realtime command path — the owner marks view-only dirty instead of the
+    /// full engine-graph dirty that `on_project_changed` implies.
+    on_control_state_changed: Option<TimelineProjectChangedCb>,
     on_loop_changed: Option<TimelineProjectChangedCb>,
     on_tempo_map_changed: Option<TimelineProjectChangedCb>,
     on_time_signature_map_changed: Option<TimelineProjectChangedCb>,

@@ -3307,12 +3307,16 @@ where
                             if callback_debug_enabled() {
                                 eprintln!("[SphereAudio callback] SetTrackMute track={track_id} muted={muted}");
                             }
-                            runtime.all_notes_off("track_mute");
+                            // Scoped note-off: only tracks that are inaudible
+                            // after the toggle release their notes. The old
+                            // global all_notes_off cut every sounding voice on
+                            // any mute toggle — an audible stutter by itself.
                             runtime.update_track_mute(&track_id, muted);
+                            runtime.notes_off_for_inaudible_tracks("track_mute");
                         }
                         EngineCommand::SetTrackSolo { track_id, solo } => {
-                            runtime.all_notes_off("track_solo");
                             runtime.update_track_solo(&track_id, solo);
+                            runtime.notes_off_for_inaudible_tracks("track_solo");
                         }
                         EngineCommand::SetTrackPreviewMode { track_id, value } => {
                             runtime.update_track_preview_mode(&track_id, RuntimePreviewMode::from_code(value));

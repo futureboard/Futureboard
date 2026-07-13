@@ -198,20 +198,7 @@ fn is_vsti_output_child_track_id(track_id: &str) -> bool {
     track_id.starts_with("vsti-out:")
 }
 
-#[inline]
-fn has_soloed_vsti_output_child(runtime: &RuntimeProject, source_track_index: usize) -> bool {
-    let Some(source_track) = runtime.tracks.get(source_track_index) else {
-        return false;
-    };
-    source_track.inserts.iter().any(|insert| {
-        insert.vsti_output_children.iter().any(|child| {
-            child
-                .dest_track_index
-                .and_then(|idx| runtime.tracks.get(idx))
-                .is_some_and(|track| track.solo)
-        })
-    })
-}
+use crate::runtime::has_soloed_vsti_output_child;
 
 /// Two distinct mutable elements of a slice without allocation. Panics in
 /// debug if `a == b`; callers guarantee distinct indices.

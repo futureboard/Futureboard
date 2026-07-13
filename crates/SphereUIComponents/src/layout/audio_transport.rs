@@ -1392,6 +1392,42 @@ impl StudioLayout {
         self.audio_bridge.project_dirty = true;
     }
 
+    /// Push an insert's effective bypass state (`enabled && !bypassed`) to the
+    /// live engine as the runtime "enabled" insert param. The plugin instance
+    /// stays loaded; the render pass skips (or resumes) it from the next block.
+    /// This is the cheap live path for bypass/enable toggles — callers must NOT
+    /// also set `audio_bridge.project_dirty`, which would trigger a full
+    /// `load_project` graph rebuild for a non-structural change.
+    pub(super) fn push_insert_enabled_to_engine(
+        &mut self,
+        track_id: &str,
+        insert_id: &str,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(engine) = self.audio_bridge.engine.clone() else {
+            return;
+        };
+        let effective = self
+            .timeline
+            .read(cx)
+            .state
+            .find_insert_slot(track_id, insert_id)
+            .map(|slot| slot.enabled && !slot.bypassed);
+        let Some(effective) = effective else {
+            return;
+        };
+        if let Err(error) = engine.set_insert_param(
+            track_id.to_string(),
+            insert_id.to_string(),
+            "enabled".to_string(),
+            if effective { 1.0 } else { 0.0 },
+        ) {
+            eprintln!(
+                "[audio] insert enabled update failed: track={track_id} insert={insert_id} error={error}"
+            );
+        }
+    }
+
     pub(crate) fn mark_engine_media_dirty(&mut self) {
         self.audio_bridge.project_dirty = true;
         self.audio_bridge.media_dirty = true;

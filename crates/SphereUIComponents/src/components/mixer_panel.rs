@@ -1664,7 +1664,11 @@ fn vsti_output_sub_strip(
         // id (via button_row / pan_section / fader_area below), so S/M and the
         // fader operate per output bus.
         .child(strip_header(&sub_track, track_index, None))
-        .child(inert_rack_section("INSERTS", parent_track.color, insert_h))
+        // Real per-bus insert rack: the backing child track is a genuine Bus
+        // model track, so its FX chain is added/bypassed/reordered by child
+        // track id and processed by the engine's pass-2 routing chain for
+        // this output bus only (Add Insert opens the Effects picker).
+        .child(inserts_section(child_track, track_index, callbacks, insert_h))
         .child(vertical_split_handle(
             id_num,
             MixerSplitTarget::InsertSend,

@@ -1116,6 +1116,83 @@ mod tests {
         }));
     }
 
+    /// An FX insert on a VSTi multi-out child strip must reach the engine
+    /// graph: the child is a real Bus track in the snapshot, its insert chain
+    /// serializes like any other track's, and `enabled` mirrors bypass. This
+    /// is the processing contract behind the mixer sub-strip insert rack.
+    #[test]
+    fn substrip_fx_insert_serializes_into_engine_snapshot() {
+        use crate::components::timeline::timeline_state::{
+            vsti_output_child_track_id, InsertPluginFormat,
+        };
+
+        let mut state = TimelineState::default();
+        state.tracks.clear();
+        let track_id = state.create_track(CreateTrackOptions {
+            track_type: TrackType::Instrument,
+            name: "Drums".to_string(),
+            color: gpui::Rgba {
+                r: 0.2,
+                g: 0.3,
+                b: 0.4,
+                a: 1.0,
+            },
+            volume: 1.0,
+            pan: 0.0,
+            armed: false,
+            input_monitor: timeline_state::InputMonitorMode::Off,
+        });
+        let slot = state.ensure_insert_slot_at(&track_id, 0).expect("slot");
+        state.set_insert_plugin(
+            &track_id,
+            &slot,
+            "multiout-class".to_string(),
+            Some(std::path::PathBuf::from("C:/plugins/MultiOut.vst3")),
+            InsertPluginFormat::Vst3,
+            None,
+            "MultiOut".to_string(),
+        );
+        assert!(state.set_insert_output_bus_layout(&track_id, &slot, &[2, 2]));
+        assert!(state.auto_enable_detected_insert_outputs(&track_id, &slot, 4));
+
+        let child_id = vsti_output_child_track_id(&slot, 1);
+        let fx_slot = state.add_insert(&child_id).expect("substrip insert slot");
+        state.set_insert_plugin(
+            &child_id,
+            &fx_slot,
+            "comp-class".to_string(),
+            Some(std::path::PathBuf::from("C:/plugins/Comp.vst3")),
+            InsertPluginFormat::Vst3,
+            None,
+            "Comp".to_string(),
+        );
+        state.toggle_insert_bypass(&child_id, &fx_slot);
+
+        let snap = build_engine_project_snapshot(&state, 48_000, None, None);
+        let child = snap
+            .tracks
+            .iter()
+            .find(|track| track.id == child_id)
+            .expect("child bus track in snapshot");
+        let fx = child
+            .inserts
+            .iter()
+            .find(|insert| insert.id == fx_slot)
+            .expect("substrip insert in snapshot");
+        assert!(
+            !fx.enabled,
+            "bypassed substrip insert must serialize enabled=false"
+        );
+        // The other child strip carries no insert chain.
+        let sibling_id = vsti_output_child_track_id(&slot, 0);
+        let sibling = snap
+            .tracks
+            .iter()
+            .find(|track| track.id == sibling_id)
+            .expect("sibling child track");
+        assert!(sibling.inserts.is_empty());
+    }
+
     #[test]
     fn single_multichannel_vsti_bus_exports_flat_pair_children() {
         use crate::components::timeline::timeline_state::{

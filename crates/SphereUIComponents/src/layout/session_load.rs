@@ -47,6 +47,19 @@ fn persisted_track_count(
         .count()
 }
 
+/// Same exclusion applied to the saved project rows. Child strips ARE saved
+/// now (they carry substrip insert chains), but between load and this check
+/// the plugin-prepare pass may legitimately retain, add, or remove them to
+/// match the plugin's reported bus layout — so the integrity check compares
+/// only the stable, non-derived tracks on both sides.
+fn expected_persisted_track_count(tracks: &[crate::project::ProjectTrack]) -> usize {
+    use crate::components::timeline::timeline_state::is_vsti_output_child_track_id;
+    tracks
+        .iter()
+        .filter(|track| !is_vsti_output_child_track_id(&track.id))
+        .count()
+}
+
 impl StudioLayout {
     /// Bump the session generation and return the new value. Call this at every
     /// point that tears down or replaces the live session (project reset,
@@ -188,7 +201,7 @@ impl StudioLayout {
     ) -> bool {
         let project = &package.project;
         let path = &package.path;
-        let expected_tracks = project.tracks.len();
+        let expected_tracks = expected_persisted_track_count(&project.tracks);
 
         let folder = path.parent().map(PathBuf::from);
         self.project_session.bind_saved(
@@ -684,7 +697,7 @@ impl StudioLayout {
     ) -> bool {
         let project = &package.project;
         let path = &package.path;
-        let expected_tracks = project.tracks.len();
+        let expected_tracks = expected_persisted_track_count(&project.tracks);
 
         self.teardown_all_plugin_instances(cx, "project_load_replace");
 

@@ -713,13 +713,13 @@ impl From<&TimelineState> for FutureboardProject {
         let tracks = tl
             .tracks
             .iter()
-            // VSTi multi-out child strips (`vsti-out:*`) are runtime-derived from
-            // the plugin's reported output bus layout and re-created on load; they
-            // must never be persisted, or they would accumulate and inflate the
-            // saved track count on every save/load cycle.
-            .filter(|t| {
-                !crate::components::timeline::timeline_state::is_vsti_output_child_track_id(&t.id)
-            })
+            // VSTi multi-out child strips (`vsti-out:{insert}:bus:{n}`) ARE
+            // persisted: their ids are deterministic, so
+            // `ensure_vsti_output_child_tracks` retains the loaded rows (never
+            // duplicates them) once the plugin reports its bus layout, and
+            // removes rows the layout no longer supports. Persisting them is
+            // what carries per-bus mixer state and substrip insert chains
+            // (including plugin state) across save/load.
             .map(|t| {
                 let track_type = match t.track_type {
                     TlTrackType::Audio => ProjectTrackType::Audio,
@@ -1499,5 +1499,105 @@ fn desc_to_target(
                 T::TrackVolume
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod vsti_substrip_persistence_tests {
+    use super::*;
+    use crate::components::timeline::timeline_state::{
+        vsti_output_child_track_id, CreateTrackOptions, InsertPluginFormat, TimelineState,
+        TrackType,
+    };
+
+    /// Substrip (VSTi multi-out child strip) mixer state and FX insert chains —
+    /// including opaque plugin state bytes — must survive save -> binary
+    /// encode/decode -> load. Child strips have deterministic ids, so
+    /// `ensure_vsti_output_child_tracks` retains (never duplicates) the loaded
+    /// rows once the plugin reports its layout.
+    #[test]
+    fn substrip_insert_chain_and_mixer_state_roundtrip() {
+        let mut state = TimelineState::default();
+        let track_id = state.create_track(CreateTrackOptions {
+            track_type: TrackType::Instrument,
+            name: "Drums".into(),
+            color: crate::color::auto_color_for_index(0),
+            volume: 0.8,
+            pan: 0.0,
+            armed: false,
+            input_monitor: InputMonitorMode::Off,
+        });
+        let slot = state.ensure_insert_slot_at(&track_id, 0).expect("slot");
+        state.set_insert_plugin(
+            &track_id,
+            &slot,
+            "drums".to_string(),
+            Some(PathBuf::from("C:/p/drums.vst3")),
+            InsertPluginFormat::Vst3,
+            None,
+            "Drums".to_string(),
+        );
+        state.set_insert_output_bus_layout(&track_id, &slot, &[2, 2]);
+        state.auto_enable_detected_insert_outputs(&track_id, &slot, 4);
+
+        let child_id = vsti_output_child_track_id(&slot, 1);
+        assert!(
+            state.tracks.iter().any(|t| t.id == child_id),
+            "multi-out layout should create the bus-1 child strip"
+        );
+
+        // FX insert on the substrip, with plugin state bytes and bypass set.
+        let fx_slot = state
+            .add_insert(&child_id)
+            .expect("substrip accepts inserts");
+        state.set_insert_plugin(
+            &child_id,
+            &fx_slot,
+            "comp".to_string(),
+            Some(PathBuf::from("C:/p/comp.vst3")),
+            InsertPluginFormat::Vst3,
+            None,
+            "Comp".to_string(),
+        );
+        {
+            let slots = state.insert_slots_mut(&child_id).expect("child slots");
+            let fx = slots.iter_mut().find(|s| s.id == fx_slot).expect("fx slot");
+            fx.vst3_state = Some(std::sync::Arc::new(vec![1, 2, 3, 4]));
+            fx.bypassed = true;
+        }
+        // Per-bus mixer state.
+        state.toggle_track_mute(&child_id);
+        state.set_track_pan(&child_id, -0.25);
+
+        let project = FutureboardProject::from(&state);
+        assert!(
+            project.tracks.iter().any(|t| t.id == child_id),
+            "child strip must be persisted"
+        );
+        let bytes = encode_project(&project);
+        let decoded = decode_project(&bytes).expect("decode");
+
+        let mut restored = TimelineState::default();
+        apply_to_timeline(&decoded, &mut restored);
+
+        let child = restored
+            .tracks
+            .iter()
+            .find(|t| t.id == child_id)
+            .expect("substrip restored");
+        assert!(child.muted, "substrip mute state restored");
+        assert!((child.pan + 0.25).abs() < 1e-6, "substrip pan restored");
+        let fx = child
+            .inserts
+            .iter()
+            .find(|s| s.id == fx_slot)
+            .expect("substrip insert restored");
+        assert_eq!(fx.plugin_id.as_deref(), Some("comp"));
+        assert!(fx.bypassed, "substrip insert bypass restored");
+        assert_eq!(
+            fx.vst3_state.as_ref().map(|s| s.as_ref().clone()),
+            Some(vec![1, 2, 3, 4]),
+            "substrip insert plugin state bytes restored"
+        );
     }
 }

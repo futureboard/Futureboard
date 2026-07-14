@@ -1,5 +1,5 @@
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use crate::window::{studio_window_options, welcome_window_options};
 use gpui::{App, AppContext, BorrowAppContext, Global, WindowHandle};
@@ -23,6 +23,30 @@ use sphere_ui_components::startup::{
 };
 use sphere_ui_components::welcome::{WelcomeAction, WelcomeCallbacks, WelcomeWindow};
 
+static DISCORD_RPC: OnceLock<sphere_discord_rpc::DiscordRpcHandle> = OnceLock::new();
+
+pub fn install_discord_rpc(handle: sphere_discord_rpc::DiscordRpcHandle) {
+    let _ = DISCORD_RPC.set(handle);
+}
+
+pub fn shutdown_discord_rpc() {
+    if let Some(rpc) = DISCORD_RPC.get() {
+        rpc.request_shutdown();
+    }
+}
+
+fn set_discord_enabled(enabled: bool) {
+    if let Some(rpc) = DISCORD_RPC.get() {
+        rpc.set_enabled(enabled);
+    }
+}
+
+fn set_discord_presence(presence: sphere_discord_rpc::Presence) {
+    if let Some(rpc) = DISCORD_RPC.get() {
+        rpc.set_presence(presence);
+    }
+}
+
 /// Retains the studio window handle at app scope so GPUI never drops the last
 /// window during LoadingSession → Studio transitions.
 #[derive(Default)]
@@ -38,6 +62,9 @@ pub fn setup(cx: &mut App) {
         mode: AppMode::Welcome,
     });
     cx.set_global(NativeShellWindows::default());
+    sphere_ui_components::settings::install_settings_change_listener(Arc::new(|settings| {
+        set_discord_enabled(settings.general.discord_rpc_enabled);
+    }));
 
     let theme_report = sphere_ui_components::theme::initialize_theme_system();
     let saved_theme = sphere_ui_components::settings::SettingsSchema::load_from_disk()
@@ -125,6 +152,13 @@ fn set_app_mode(cx: &mut App, mode: AppMode) {
         .unwrap_or(AppMode::Welcome);
     if from != mode {
         sphere_ui_components::window_lifecycle::log_app_mode_change(from, mode, "app_shell");
+        match mode {
+            AppMode::Welcome | AppMode::LoadFailed => {
+                set_discord_presence(sphere_discord_rpc::Presence::Welcome)
+            }
+            AppMode::LoadingSession => set_discord_presence(sphere_discord_rpc::Presence::Loading),
+            AppMode::Studio => {}
+        }
     }
     cx.update_global::<AppSessionGate, _>(|gate, _| gate.mode = mode);
 }
@@ -195,6 +229,7 @@ fn transition_loaded_package_to_existing_studio(
     package: LoadedSessionPackage,
     cx: &mut App,
 ) {
+    let project_name = package.project.name.clone();
     log_window_registry(cx, "before install into existing studio");
     eprintln!("[ProjectSwitch] installing loaded session");
     eprintln!("[AppMode] LoadingSession -> Studio");
@@ -214,6 +249,7 @@ fn transition_loaded_package_to_existing_studio(
         return;
     }
     eprintln!("[SessionLoad] install complete");
+    set_discord_presence(sphere_discord_rpc::Presence::editing(project_name));
     eprintln!("[ProjectSwitch] notify root window");
     finish_loading_to_studio(cx);
     log_window_registry(cx, "after switch install");
@@ -318,6 +354,7 @@ fn begin_close_project_session(
 }
 
 fn begin_load_project_from_welcome(path: PathBuf, open_options: ProjectOpenOptions, cx: &mut App) {
+    set_discord_presence(sphere_discord_rpc::Presence::Loading);
     let on_success = Arc::new(|package: LoadedSessionPackage, cx: &mut App| {
         transition_loaded_package_to_studio(package, cx);
     });
@@ -342,6 +379,7 @@ fn begin_workspace_session(
     follow_up: PreparedWorkspaceFinish,
     cx: &mut App,
 ) {
+    set_discord_presence(sphere_discord_rpc::Presence::Loading);
     let on_success = Arc::new(move |package: LoadedSessionPackage, cx: &mut App| {
         transition_prepared_package_to_studio(package, follow_up.clone(), cx);
     });
@@ -361,6 +399,7 @@ fn handle_project_switch_load_failed(
         ctx.title, ctx.message
     );
     if let Some(snapshot) = ctx.rollback {
+        let project_name = snapshot.session.name.clone();
         set_app_mode(cx, AppMode::Studio);
         store_studio_window_handle(cx, studio);
         let _ = studio.update(cx, |layout, _window, cx| {
@@ -375,6 +414,7 @@ fn handle_project_switch_load_failed(
             );
             cx.notify();
         });
+        set_discord_presence(sphere_discord_rpc::Presence::editing(project_name));
         finish_loading_to_studio(cx);
         log_window_registry(cx, "after switch failure rollback");
         return;
@@ -440,6 +480,7 @@ fn request_project_switch_in_studio(
 fn handle_load_failed(ctx: LoadFailedContext, cx: &mut App) {
     eprintln!("[SessionLoad] open failed: {} — {}", ctx.title, ctx.message);
     if let Some(snapshot) = ctx.rollback {
+        let project_name = snapshot.session.name.clone();
         set_app_mode(cx, AppMode::Studio);
         if let Some(studio) = cx
             .try_global::<NativeShellWindows>()
@@ -450,6 +491,7 @@ fn handle_load_failed(ctx: LoadFailedContext, cx: &mut App) {
                 layout.restore_session_rollback_snapshot(snapshot, cx);
                 cx.notify();
             });
+            set_discord_presence(sphere_discord_rpc::Presence::editing(project_name));
             finish_loading_to_studio(cx);
             return;
         }
@@ -485,6 +527,15 @@ enum WorkspaceInit {
     },
     /// Restore a rollback snapshot after a failed in-studio replace.
     Rollback(SessionRollbackSnapshot),
+}
+
+impl WorkspaceInit {
+    fn project_name(&self) -> &str {
+        match self {
+            Self::Loaded(package) | Self::Prepared { package, .. } => &package.project.name,
+            Self::Rollback(snapshot) => &snapshot.session.name,
+        }
+    }
 }
 
 fn open_studio_for_action(action: WelcomeAction, cx: &mut App) {
@@ -542,6 +593,7 @@ fn open_studio_workspace(init: WorkspaceInit, cx: &mut App) -> Result<(), String
         return Err("app mode is not Studio".to_string());
     }
 
+    let project_name = init.project_name().to_string();
     eprintln!("[StudioOpen] opening studio window");
     let studio_options = studio_window_options(cx);
     let studio = cx
@@ -605,6 +657,8 @@ fn open_studio_workspace(init: WorkspaceInit, cx: &mut App) -> Result<(), String
             }
         })
         .map_err(|e| e.to_string())?;
+
+    set_discord_presence(sphere_discord_rpc::Presence::editing(project_name));
 
     // The studio window is created hidden (see `platform_chrome::studio_window_options`,
     // `show: false`) so the OS never displays its empty black client area while the

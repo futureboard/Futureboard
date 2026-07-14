@@ -3,10 +3,247 @@ use crate::components::timeline::timeline_state::{
 };
 use crate::components::timeline::waveform_canvas::waveform_canvas;
 use crate::{custom_cursors, theme::Colors};
+use gpui::prelude::FluentBuilder;
 use gpui::{
-    div, px, AppContext, InteractiveElement, IntoElement, ParentElement, Render,
-    StatefulInteractiveElement, Styled, Window,
+    div, px, relative, AppContext, DragMoveEvent, Empty, InteractiveElement, IntoElement,
+    ParentElement, Render, StatefulInteractiveElement, Styled, Window,
 };
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum AudioClipProcessUpdate {
+    Gain(f32),
+    FadeInMs(f32),
+    FadeOutMs(f32),
+}
+
+pub type AudioClipProcessPreviewCb = std::sync::Arc<
+    dyn Fn(&(String, AudioClipProcessUpdate), &mut gpui::Window, &mut gpui::App) + 'static,
+>;
+pub type AudioClipProcessCommitCb =
+    std::sync::Arc<dyn Fn(&(String, ClipState), &mut gpui::Window, &mut gpui::App) + 'static>;
+
+#[derive(Clone, Debug)]
+struct AudioClipProcessDrag {
+    id: String,
+}
+
+impl Render for AudioClipProcessDrag {
+    fn render(&mut self, _w: &mut Window, _cx: &mut gpui::Context<Self>) -> impl IntoElement {
+        Empty
+    }
+}
+
+fn gain_to_db(gain: f32) -> f32 {
+    if gain <= 0.000_001 {
+        -60.0
+    } else {
+        (20.0 * gain.log10()).clamp(-60.0, 12.0)
+    }
+}
+
+fn db_to_gain(db: f32) -> f32 {
+    10.0_f32.powf(db.clamp(-60.0, 12.0) / 20.0)
+}
+
+fn gain_to_norm(gain: f32) -> f32 {
+    (gain_to_db(gain) + 60.0) / 72.0
+}
+
+fn norm_to_gain(norm: f32) -> f32 {
+    db_to_gain(norm.clamp(0.0, 1.0) * 72.0 - 60.0)
+}
+
+fn compact_gain_control(
+    clip: &ClipState,
+    on_preview: AudioClipProcessPreviewCb,
+    on_commit: AudioClipProcessCommitCb,
+) -> impl IntoElement {
+    let value = gain_to_norm(clip.gain).clamp(0.0, 1.0);
+    let id = format!("audio-clip-gain-{}", clip.id);
+    let move_id = id.clone();
+    let preview_id = clip.id.clone();
+    let commit_id = clip.id.clone();
+    let commit_out_id = clip.id.clone();
+    let original = clip.clone();
+    let original_out = clip.clone();
+    let on_commit_out = on_commit.clone();
+
+    div()
+        .id(gpui::ElementId::Name(id.into()))
+        .w(px(62.0))
+        .h(px(16.0))
+        .flex_none()
+        .relative()
+        .cursor(gpui::CursorStyle::ResizeLeftRight)
+        .child(
+            div()
+                .absolute()
+                .left(px(4.0))
+                .right(px(4.0))
+                .top(px(7.0))
+                .h(px(2.0))
+                .rounded_full()
+                .bg(Colors::fader_rail())
+                .border(px(1.0))
+                .border_color(Colors::fader_groove()),
+        )
+        .child(
+            div()
+                .absolute()
+                .left(relative(value))
+                .ml(-px(3.0))
+                .top(px(2.0))
+                .w(px(6.0))
+                .h(px(12.0))
+                .rounded_sm()
+                .bg(Colors::surface_input())
+                .border(px(1.0))
+                .border_color(Colors::fader_thumb_border())
+                .child(
+                    div()
+                        .absolute()
+                        .top(px(2.0))
+                        .bottom(px(2.0))
+                        .left(px(2.0))
+                        .w(px(1.0))
+                        .bg(Colors::accent_primary()),
+                ),
+        )
+        .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .on_drag(
+            AudioClipProcessDrag {
+                id: move_id.clone(),
+            },
+            |drag, _offset, _window, cx| cx.new(|_| drag.clone()),
+        )
+        .on_drag_move::<AudioClipProcessDrag>(
+            move |event: &DragMoveEvent<AudioClipProcessDrag>, window, cx| {
+                if event.drag(cx).id != move_id {
+                    return;
+                }
+                let x: f32 = event.event.position.x.into();
+                let ox: f32 = event.bounds.origin.x.into();
+                let width = f32::from(event.bounds.size.width).max(1.0);
+                let gain = norm_to_gain((x - ox) / width);
+                on_preview(
+                    &(preview_id.clone(), AudioClipProcessUpdate::Gain(gain)),
+                    window,
+                    cx,
+                );
+            },
+        )
+        .on_mouse_up(gpui::MouseButton::Left, move |_, window, cx| {
+            on_commit(&(commit_id.clone(), original.clone()), window, cx);
+        })
+        .on_mouse_up_out(gpui::MouseButton::Left, move |_, window, cx| {
+            on_commit_out(&(commit_out_id.clone(), original_out.clone()), window, cx);
+        })
+}
+
+#[derive(Clone, Copy)]
+enum FadeEdge {
+    In,
+    Out,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn fade_drag_zone(
+    clip: &ClipState,
+    edge: FadeEdge,
+    clip_duration_seconds: f32,
+    fade_width: f32,
+    body_height: f32,
+    on_preview: AudioClipProcessPreviewCb,
+    on_commit: AudioClipProcessCommitCb,
+) -> impl IntoElement {
+    let edge_name = match edge {
+        FadeEdge::In => "in",
+        FadeEdge::Out => "out",
+    };
+    let id = format!("audio-clip-fade-{edge_name}-{}", clip.id);
+    let move_id = id.clone();
+    let preview_id = clip.id.clone();
+    let commit_id = clip.id.clone();
+    let commit_out_id = clip.id.clone();
+    let original = clip.clone();
+    let original_out = clip.clone();
+    let on_commit_out = on_commit.clone();
+
+    div()
+        .id(gpui::ElementId::Name(id.into()))
+        .absolute()
+        .top_0()
+        .when(matches!(edge, FadeEdge::In), |this| this.left_0())
+        .when(matches!(edge, FadeEdge::Out), |this| this.right_0())
+        .w(relative(0.5))
+        .h(px(10.0))
+        .cursor(match edge {
+            FadeEdge::In => custom_cursors::fade_in(),
+            FadeEdge::Out => custom_cursors::fade_out(),
+        })
+        .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .on_drag(
+            AudioClipProcessDrag {
+                id: move_id.clone(),
+            },
+            |drag, _offset, _window, cx| cx.new(|_| drag.clone()),
+        )
+        .on_drag_move::<AudioClipProcessDrag>(
+            move |event: &DragMoveEvent<AudioClipProcessDrag>, window, cx| {
+                if event.drag(cx).id != move_id {
+                    return;
+                }
+                let x: f32 = event.event.position.x.into();
+                let ox: f32 = event.bounds.origin.x.into();
+                let width = f32::from(event.bounds.size.width).max(1.0);
+                let ratio = match edge {
+                    FadeEdge::In => ((x - ox) / width).clamp(0.0, 1.0),
+                    FadeEdge::Out => (1.0 - (x - ox) / width).clamp(0.0, 1.0),
+                };
+                let ms = ratio * clip_duration_seconds.max(0.001) * 500.0;
+                let update = match edge {
+                    FadeEdge::In => AudioClipProcessUpdate::FadeInMs(ms),
+                    FadeEdge::Out => AudioClipProcessUpdate::FadeOutMs(ms),
+                };
+                on_preview(&(preview_id.clone(), update), window, cx);
+            },
+        )
+        .on_mouse_up(gpui::MouseButton::Left, move |_, window, cx| {
+            on_commit(&(commit_id.clone(), original.clone()), window, cx);
+        })
+        .on_mouse_up_out(gpui::MouseButton::Left, move |_, window, cx| {
+            on_commit_out(&(commit_out_id.clone(), original_out.clone()), window, cx);
+        })
+        .child(
+            div()
+                .absolute()
+                .top_0()
+                .when(matches!(edge, FadeEdge::In), |this| {
+                    this.left(px(fade_width.max(0.0) - 3.0))
+                })
+                .when(matches!(edge, FadeEdge::Out), |this| {
+                    this.right(px(fade_width.max(0.0) - 3.0))
+                })
+                .w(px(6.0))
+                .h(px(6.0))
+                .rounded_sm()
+                .bg(Colors::surface_input())
+                .border(px(1.0))
+                .border_color(Colors::accent_primary()),
+        )
+        .child(
+            div()
+                .absolute()
+                .top(px(5.0))
+                .when(matches!(edge, FadeEdge::In), |this| this.left_0())
+                .when(matches!(edge, FadeEdge::Out), |this| this.right_0())
+                .w(px(fade_width.max(0.0)))
+                .h(px((body_height - 5.0).max(1.0)))
+                .border_color(Colors::with_alpha(Colors::accent_primary(), 0.55))
+                .when(matches!(edge, FadeEdge::In), |this| this.border_r(px(1.0)))
+                .when(matches!(edge, FadeEdge::Out), |this| this.border_l(px(1.0))),
+        )
+}
 
 pub struct ClipDragPreview {
     pub name: String,
@@ -78,6 +315,8 @@ pub fn audio_clip(
     erase_target: bool,
     auto_crossfade_in_beats: f32,
     auto_crossfade_out_beats: f32,
+    on_process_preview: AudioClipProcessPreviewCb,
+    on_process_commit: AudioClipProcessCommitCb,
 ) -> impl IntoElement {
     let _s = crate::perf::PerfScope::enter("AudioClip");
     let clip_id = clip.id.clone();
@@ -116,6 +355,19 @@ pub fn audio_clip(
         .min((clip_duration_seconds - fade_in_seconds).max(0.0));
     let fade_in_w = (fade_in_seconds * pixels_per_second).min(width);
     let fade_out_w = (fade_out_seconds * pixels_per_second).min((width - fade_in_w).max(0.0));
+    let manual_fade_in_w =
+        ((clip.stretch.fade_in_ms.max(0.0) / 1000.0) * pixels_per_second).min(width * 0.5);
+    let manual_fade_out_w =
+        ((clip.stretch.fade_out_ms.max(0.0) / 1000.0) * pixels_per_second).min(width * 0.5);
+    let has_auto_crossfade = auto_crossfade_in_beats > 0.0 || auto_crossfade_out_beats > 0.0;
+    let show_inline_gain = selected
+        && width
+            >= if has_auto_crossfade || stretch_badge.is_some() {
+                220.0
+            } else {
+                150.0
+            };
+    let gain_db = gain_to_db(clip.gain);
 
     // Geometry offsets matching layout
     let pad = 7.0;
@@ -147,6 +399,14 @@ pub fn audio_clip(
         original: clip.clone(),
     };
     const RESIZE_HANDLE_W: f32 = 6.0;
+    const HEADER_H: f32 = 20.0;
+    let body_h = (clip_h - HEADER_H).max(1.0);
+    let gain_preview = on_process_preview.clone();
+    let gain_commit = on_process_commit.clone();
+    let fade_in_preview = on_process_preview.clone();
+    let fade_in_commit = on_process_commit.clone();
+    let fade_out_preview = on_process_preview;
+    let fade_out_commit = on_process_commit;
 
     div()
         .absolute()
@@ -154,21 +414,14 @@ pub fn audio_clip(
         .top(px(pad))
         .w(px(width))
         .h(px(clip_h))
-        .rounded_md()
-        .bg({
-            let mut c = track_color;
-            c.a = 0.12;
-            c
-        }) // semi-transparent background
+        .rounded_sm()
+        .overflow_hidden()
+        .bg(Colors::timeline_audio_clip_fill(track_color, selected))
         .border(px(1.0))
         .border_color(if erase_target {
             Colors::status_error()
-        } else if selected {
-            Colors::text_primary()
         } else {
-            let mut c = track_color;
-            c.a = 0.4;
-            c
+            Colors::timeline_audio_clip_border(track_color, selected)
         })
         .cursor(custom_cursors::move_clip())
         .id(("audio-clip", id_num))
@@ -222,17 +475,24 @@ pub fn audio_clip(
             left,
             width,
         )))
-        // Bottom Clip Label bar
+        // Processing strip: clip identity, inline gain, crossfade, and stretch.
         .child(
             div()
-                .h(px(14.0))
-                .bg(Colors::surface_panel_alt()) // dark bar
+                .h(px(HEADER_H))
+                .flex_none()
+                .bg(if selected {
+                    Colors::surface_selected_soft()
+                } else {
+                    Colors::surface_panel_alt()
+                })
                 .border_t(px(1.0))
                 .border_color(Colors::divider())
-                .px(px(6.0))
+                .pl(px(6.0))
+                .pr(px(4.0))
                 .flex()
                 .items_center()
-                .justify_between()
+                .gap(px(5.0))
+                .child(div().w(px(2.0)).h(px(10.0)).rounded_sm().bg(track_color))
                 .child(
                     div()
                         .text_size(px(9.0))
@@ -247,9 +507,34 @@ pub fn audio_clip(
                         })
                         .child(clip.name.clone()),
                 )
+                .children(
+                    show_inline_gain.then(|| compact_gain_control(clip, gain_preview, gain_commit)),
+                )
+                .child(
+                    div()
+                        .flex_none()
+                        .text_size(px(8.0))
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .text_color(if gain_db.abs() > 0.05 {
+                            Colors::accent_primary()
+                        } else {
+                            Colors::text_muted()
+                        })
+                        .child(format!("{gain_db:+.1} dB")),
+                )
+                .children(has_auto_crossfade.then(|| {
+                    div()
+                        .flex_none()
+                        .px(px(4.0))
+                        .rounded_sm()
+                        .bg(Colors::accent_soft())
+                        .text_size(px(7.5))
+                        .font_weight(gpui::FontWeight::BOLD)
+                        .text_color(Colors::accent_primary())
+                        .child("XFADE")
+                }))
                 .children(stretch_badge.map(|label| {
                     div()
-                        .ml(px(5.0))
                         .px(px(4.0))
                         .rounded_sm()
                         .bg(Colors::with_alpha(Colors::accent_primary(), 0.14))
@@ -267,24 +552,52 @@ pub fn audio_clip(
                 .absolute()
                 .left_0()
                 .top_0()
-                .bottom(px(14.0))
+                .bottom(px(HEADER_H))
                 .w(px(fade_in_w))
-                .cursor(custom_cursors::fade_in())
-                .bg(Colors::with_alpha(Colors::surface_panel_alt(), 0.26))
+                .bg(Colors::with_alpha(Colors::surface_panel_alt(), 0.34))
                 .border_r(px(1.0))
-                .border_color(Colors::with_alpha(track_color, 0.55))
+                .border_color(if auto_crossfade_in_beats > 0.0 {
+                    Colors::accent_primary()
+                } else {
+                    Colors::with_alpha(track_color, 0.55)
+                })
         }))
         .children((fade_out_w > 1.0).then(|| {
             div()
                 .absolute()
                 .right_0()
                 .top_0()
-                .bottom(px(14.0))
+                .bottom(px(HEADER_H))
                 .w(px(fade_out_w))
-                .cursor(custom_cursors::fade_out())
-                .bg(Colors::with_alpha(Colors::surface_panel_alt(), 0.26))
+                .bg(Colors::with_alpha(Colors::surface_panel_alt(), 0.34))
                 .border_l(px(1.0))
-                .border_color(Colors::with_alpha(track_color, 0.55))
+                .border_color(if auto_crossfade_out_beats > 0.0 {
+                    Colors::accent_primary()
+                } else {
+                    Colors::with_alpha(track_color, 0.55)
+                })
+        }))
+        .children((selected && auto_crossfade_in_beats <= 0.0).then(|| {
+            fade_drag_zone(
+                clip,
+                FadeEdge::In,
+                clip_duration_seconds,
+                manual_fade_in_w,
+                body_h,
+                fade_in_preview,
+                fade_in_commit,
+            )
+        }))
+        .children((selected && auto_crossfade_out_beats <= 0.0).then(|| {
+            fade_drag_zone(
+                clip,
+                FadeEdge::Out,
+                clip_duration_seconds,
+                manual_fade_out_w,
+                body_h,
+                fade_out_preview,
+                fade_out_commit,
+            )
         }))
         .child(
             div()
@@ -314,4 +627,18 @@ pub fn audio_clip(
                     cx.new(|_| drag.clone())
                 }),
         )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{db_to_gain, gain_to_db, gain_to_norm, norm_to_gain};
+
+    #[test]
+    fn clip_gain_mapping_roundtrips_unity_and_limits() {
+        assert!((gain_to_db(1.0) - 0.0).abs() < 1.0e-6);
+        assert!((gain_to_norm(1.0) - (60.0 / 72.0)).abs() < 1.0e-6);
+        assert!((norm_to_gain(gain_to_norm(1.0)) - 1.0).abs() < 1.0e-5);
+        assert!((db_to_gain(12.0) - 10.0_f32.powf(12.0 / 20.0)).abs() < 1.0e-5);
+        assert_eq!(gain_to_db(0.0), -60.0);
+    }
 }

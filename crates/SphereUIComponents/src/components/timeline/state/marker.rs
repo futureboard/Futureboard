@@ -112,7 +112,11 @@ impl TimelineRegionState {
 impl TimelineState {
     pub fn add_marker_at_beat(&mut self, beat: f64) -> String {
         let label = format!("Marker {}", self.markers.len() + 1);
-        let marker = TimelineMarkerState::new(beat, label, "#7C5CFF");
+        let marker = TimelineMarkerState::new(
+            beat,
+            label,
+            crate::color::rgba_to_hex(crate::theme::Colors::automation_curve()),
+        );
         let id = marker.id.clone();
         self.markers.push(marker);
         self.markers
@@ -137,7 +141,7 @@ impl TimelineState {
             self.markers.push(TimelineMarkerState::new(
                 (clip_start_beat + marker.beat) as f64,
                 name,
-                "#7C5CFF",
+                crate::color::rgba_to_hex(crate::theme::Colors::automation_curve()),
             ));
         }
         self.markers

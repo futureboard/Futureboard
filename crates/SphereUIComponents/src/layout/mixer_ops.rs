@@ -185,6 +185,7 @@ impl StudioLayout {
     }
 
     pub(crate) fn build_mixer_snapshot(&self, cx: &gpui::App) -> MixerSnapshot {
+        let _scope = crate::perf::PerfScope::enter("MixerWindowSnapshotClone");
         let timeline = self.timeline.read(cx);
         // Clone tracks WITHOUT their `clips` (the heaviest field — MIDI note
         // vectors / audio-clip refs), which the mixer never draws. The detached
@@ -481,19 +482,21 @@ impl StudioLayout {
         viewport_width: f32,
         cx: &mut Context<Self>,
     ) {
-        let collapsed =
-            collapsed_vsti_output_group_keys_from_tracks(&self.timeline.read(cx).state.tracks);
-        let hidden = self
-            .timeline
-            .read(cx)
-            .state
-            .mixer_tree
-            .hidden_channel_ids
-            .clone();
-        let tracks = self.timeline.read(cx).state.tracks.clone();
-        if let Some(index) = mixer_strip_index_for_channel(&tracks, &collapsed, &hidden, channel_id)
-        {
-            let strip_count = mixer_render_item_count(&tracks, &collapsed, &hidden);
+        let _scope = crate::perf::PerfScope::enter("MixerFocusLookup");
+        // This is a read-only index lookup. Keep the timeline borrow scoped and
+        // inspect tracks in place; cloning TrackState here used to clone every
+        // arrangement clip/MIDI event before a channel could receive focus.
+        let (strip_index, strip_count) = {
+            let timeline = self.timeline.read(cx);
+            let tracks = &timeline.state.tracks;
+            let collapsed = collapsed_vsti_output_group_keys_from_tracks(tracks);
+            let hidden = &timeline.state.mixer_tree.hidden_channel_ids;
+            (
+                mixer_strip_index_for_channel(tracks, &collapsed, hidden, channel_id),
+                mixer_render_item_count(tracks, &collapsed, hidden),
+            )
+        };
+        if let Some(index) = strip_index {
             self.mixer_view.scroll_x =
                 mixer_scroll_x_for_strip_index(index, viewport_width, strip_count);
         }
@@ -566,6 +569,13 @@ impl StudioLayout {
     }
 
     pub(crate) fn sync_mixer_tree_to_selection(&mut self, cx: &mut Context<Self>) {
+        // The tree model walks tracks/inserts and expands ancestors. It has no
+        // effect while the sidebar is disabled, so keep it off the ordinary
+        // strip-selection path.
+        if !self.mixer_view.tree_sidebar_enabled {
+            return;
+        }
+        let _scope = crate::perf::PerfScope::enter("MixerTreeSelectionSync");
         let Some(channel_id) = self
             .timeline
             .read(cx)
@@ -897,20 +907,57 @@ impl StudioLayout {
     pub(crate) fn build_mixer_callbacks(&self, owner: Entity<Self>) -> MixerCallbacks {
         let audio_engine = self.audio_bridge.engine.clone();
         let timeline_select = self.timeline.clone();
+        let mixer_panel_select = self.mixer_panel.clone();
         let owner_select = owner.clone();
         let on_select_track: std::sync::Arc<
             dyn Fn(&String, &mut Window, &mut gpui::App) + 'static,
         > = std::sync::Arc::new(move |id: &String, _w, cx| {
+            let _interaction = crate::perf::PerfScope::enter("MixerSelectInteraction");
             let id = id.clone();
-            external_mixer_debug(&format!("mixer command dispatched select_track id={id}"));
-            timeline_select.update(cx, |t, cx| {
+            if external_mixer_debug_enabled() {
+                external_mixer_debug(&format!("mixer command dispatched select_track id={id}"));
+            }
+            if timeline_select
+                .read(cx)
+                .state
+                .selection
+                .selected_track_id
+                .as_deref()
+                == Some(id.as_str())
+            {
+                return;
+            }
+            // Commit the shared selection without scheduling the full Timeline
+            // repaint first. That repaint may include waveform work; when mixer
+            // invalidation was deferred behind it, the strip highlight visibly
+            // lagged even though the model had already changed.
+            timeline_select.update(cx, |t, _cx| {
                 t.state.select_track(&id);
-                cx.notify();
             });
+            // Queue the lightweight mixer repaint first so selection feedback is
+            // not blocked by Timeline/Inspector/tree work.
+            crate::perf::record_notify("mixer_select");
+            let _ = mixer_panel_select.update(cx, |_, cx| cx.notify());
             StudioLayout::defer_update(&owner_select, cx, |layout, cx| {
+                let project_dirty_before = layout.audio_bridge.project_dirty;
+                let graph_version_before = layout.audio_bridge.route_graph_version;
+                let load_count_before = layout.audio_bridge.audio_load_project_count;
                 layout.sync_mixer_tree_to_selection(cx);
                 layout.push_mixer_snapshot_to_window(cx);
+                debug_assert_eq!(layout.audio_bridge.project_dirty, project_dirty_before);
+                debug_assert_eq!(
+                    layout.audio_bridge.route_graph_version,
+                    graph_version_before
+                );
+                debug_assert_eq!(
+                    layout.audio_bridge.audio_load_project_count,
+                    load_count_before
+                );
+                cx.notify();
             });
+            // Keep the arrangement header selection in sync, but enqueue it
+            // after the mixer feedback rather than in front of it.
+            timeline_select.update(cx, |_, cx| cx.notify());
         });
 
         let timeline_vol = self.timeline.clone();
@@ -1041,30 +1088,52 @@ impl StudioLayout {
 
         let audio_engine = self.audio_bridge.engine.clone();
         let timeline_mute = self.timeline.clone();
+        let mixer_panel_mute = self.mixer_panel.clone();
         let owner_dirty = owner.clone();
         let on_toggle_mute: std::sync::Arc<dyn Fn(&String, &mut Window, &mut gpui::App) + 'static> =
             std::sync::Arc::new(move |id: &String, _w, cx| {
+                let _interaction = crate::perf::PerfScope::enter("MixerMuteInteraction");
                 let id = id.clone();
-                let before_state = timeline_mute
-                    .read(cx)
-                    .state
-                    .find_track(&id)
-                    .map(|track| track.muted)
-                    .unwrap_or(false);
+                let mut before_state = false;
                 let mut muted = false;
-                external_mixer_debug(&format!("mixer command dispatched toggle_mute id={id}"));
-                timeline_mute.update(cx, |t, cx| {
-                    t.state.toggle_track_mute(&id);
-                    muted = t
-                        .state
-                        .find_track(&id)
-                        .map(|track| track.muted)
-                        .unwrap_or(false);
-                    cx.notify();
-                });
+                if external_mixer_debug_enabled() {
+                    external_mixer_debug(&format!("mixer command dispatched toggle_mute id={id}"));
+                }
+                {
+                    let _state_update = crate::perf::PerfScope::enter("MixerMuteStateUpdate");
+                    timeline_mute.update(cx, |t, _cx| {
+                        before_state = t
+                            .state
+                            .find_track(&id)
+                            .map(|track| track.muted)
+                            .unwrap_or(false);
+                        t.state.toggle_track_mute(&id);
+                        muted = t
+                            .state
+                            .find_track(&id)
+                            .map(|track| track.muted)
+                            .unwrap_or(false);
+                    });
+                }
+                // Dispatch the bounded, non-blocking realtime command before
+                // scheduling any expensive arrangement/inspector repaint.
+                let mut audio_router_applied = false;
+                {
+                    let _dispatch = crate::perf::PerfScope::enter("MixerMuteCommandDispatch");
+                    if let Some(engine) = audio_engine.as_ref() {
+                        audio_router_applied = engine
+                            .update_track_param(&id, "muted", if muted { 1.0 } else { 0.0 })
+                            .is_ok();
+                    }
+                }
+                // Give the control that was clicked immediate visual feedback.
+                crate::perf::record_notify("mixer_mute");
+                let _ = mixer_panel_mute.update(cx, |_, cx| cx.notify());
                 let id_for_side_effect_log = id.clone();
                 StudioLayout::defer_update(&owner_dirty, cx, move |this, cx| {
+                    let project_dirty_before = this.audio_bridge.project_dirty;
                     let graph_version_before = this.audio_bridge.route_graph_version;
+                    let load_count_before = this.audio_bridge.audio_load_project_count;
                     // Mute reaches the engine live through `SetTrackMute` above
                     // and is applied per block in the render pass; it is NOT
                     // graph structure. `mark_dirty()` would set
@@ -1075,6 +1144,12 @@ impl StudioLayout {
                     this.mark_dirty_view_only();
                     this.push_mixer_snapshot_to_window(cx);
                     let graph_version_after = this.audio_bridge.route_graph_version;
+                    debug_assert_eq!(this.audio_bridge.project_dirty, project_dirty_before);
+                    debug_assert_eq!(
+                        this.audio_bridge.audio_load_project_count,
+                        load_count_before
+                    );
+                    debug_assert_eq!(graph_version_after, graph_version_before);
                     if crate::forensic_trace::forensic_trace_enabled() {
                         eprintln!(
                             "[SOLO_MUTE TOGGLE SIDE EFFECT CHECK]\naction=mute\nstrip_id={id_for_side_effect_log}\nmixer_channel_id={id_for_side_effect_log}\ngraph_version_before={graph_version_before}\ngraph_version_after={graph_version_after}\nroute_changed={}\nsound_was_silent_before=unknown\nsound_after_toggle=unknown",
@@ -1082,12 +1157,9 @@ impl StudioLayout {
                         );
                     }
                 });
-                let mut audio_router_applied = false;
-                if let Some(engine) = audio_engine.as_ref() {
-                    audio_router_applied = engine
-                        .update_track_param(&id, "muted", if muted { 1.0 } else { 0.0 })
-                        .is_ok();
-                }
+                // Arrangement headers and inspector are secondary consumers;
+                // enqueue their heavier repaint after mixer feedback/dispatch.
+                timeline_mute.update(cx, |_, cx| cx.notify());
                 if crate::forensic_trace::forensic_trace_enabled() {
                     let bus_index = id
                         .rsplit_once(":bus:")
@@ -1105,35 +1177,60 @@ impl StudioLayout {
 
         let audio_engine = self.audio_bridge.engine.clone();
         let timeline_solo = self.timeline.clone();
+        let mixer_panel_solo = self.mixer_panel.clone();
         let owner_dirty = owner.clone();
         let on_toggle_solo: std::sync::Arc<dyn Fn(&String, &mut Window, &mut gpui::App) + 'static> =
             std::sync::Arc::new(move |id: &String, _w, cx| {
+                let _interaction = crate::perf::PerfScope::enter("MixerSoloInteraction");
                 let id = id.clone();
-                let before_state = timeline_solo
-                    .read(cx)
-                    .state
-                    .find_track(&id)
-                    .map(|track| track.solo)
-                    .unwrap_or(false);
+                let mut before_state = false;
                 let mut solo = false;
-                external_mixer_debug(&format!("mixer command dispatched toggle_solo id={id}"));
-                timeline_solo.update(cx, |t, cx| {
-                    t.state.toggle_track_solo(&id);
-                    solo = t
-                        .state
-                        .find_track(&id)
-                        .map(|track| track.solo)
-                        .unwrap_or(false);
-                    cx.notify();
-                });
+                if external_mixer_debug_enabled() {
+                    external_mixer_debug(&format!("mixer command dispatched toggle_solo id={id}"));
+                }
+                {
+                    let _state_update = crate::perf::PerfScope::enter("MixerSoloStateUpdate");
+                    timeline_solo.update(cx, |t, _cx| {
+                        before_state = t
+                            .state
+                            .find_track(&id)
+                            .map(|track| track.solo)
+                            .unwrap_or(false);
+                        t.state.toggle_track_solo(&id);
+                        solo = t
+                            .state
+                            .find_track(&id)
+                            .map(|track| track.solo)
+                            .unwrap_or(false);
+                    });
+                }
+                let mut audio_router_applied = false;
+                {
+                    let _dispatch = crate::perf::PerfScope::enter("MixerSoloCommandDispatch");
+                    if let Some(engine) = audio_engine.as_ref() {
+                        audio_router_applied = engine
+                            .update_track_param(&id, "solo", if solo { 1.0 } else { 0.0 })
+                            .is_ok();
+                    }
+                }
+                crate::perf::record_notify("mixer_solo");
+                let _ = mixer_panel_solo.update(cx, |_, cx| cx.notify());
                 let id_for_side_effect_log = id.clone();
                 StudioLayout::defer_update(&owner_dirty, cx, move |this, cx| {
+                    let project_dirty_before = this.audio_bridge.project_dirty;
                     let graph_version_before = this.audio_bridge.route_graph_version;
+                    let load_count_before = this.audio_bridge.audio_load_project_count;
                     // Live control (see the mute handler above): solo reaches
                     // the engine through `SetTrackSolo`; no graph rebuild.
                     this.mark_dirty_view_only();
                     this.push_mixer_snapshot_to_window(cx);
                     let graph_version_after = this.audio_bridge.route_graph_version;
+                    debug_assert_eq!(this.audio_bridge.project_dirty, project_dirty_before);
+                    debug_assert_eq!(
+                        this.audio_bridge.audio_load_project_count,
+                        load_count_before
+                    );
+                    debug_assert_eq!(graph_version_after, graph_version_before);
                     if crate::forensic_trace::forensic_trace_enabled() {
                         eprintln!(
                             "[SOLO_MUTE TOGGLE SIDE EFFECT CHECK]\naction=solo\nstrip_id={id_for_side_effect_log}\nmixer_channel_id={id_for_side_effect_log}\ngraph_version_before={graph_version_before}\ngraph_version_after={graph_version_after}\nroute_changed={}\nsound_was_silent_before=unknown\nsound_after_toggle=unknown",
@@ -1141,12 +1238,7 @@ impl StudioLayout {
                         );
                     }
                 });
-                let mut audio_router_applied = false;
-                if let Some(engine) = audio_engine.as_ref() {
-                    audio_router_applied = engine
-                        .update_track_param(&id, "solo", if solo { 1.0 } else { 0.0 })
-                        .is_ok();
-                }
+                timeline_solo.update(cx, |_, cx| cx.notify());
                 if crate::forensic_trace::forensic_trace_enabled() {
                     let bus_index = id
                         .rsplit_once(":bus:")
@@ -1716,7 +1808,7 @@ fn external_mixer_perf_record(pushed: bool, build_nanos: u64) {
 /// field is a COMPILE ERROR here — forcing an explicit decision about whether
 /// the mixer needs it, instead of silently shipping a stale/defaulted value to
 /// the detached window.
-fn clone_track_for_mixer(track: &TrackState) -> TrackState {
+pub(crate) fn clone_track_for_mixer(track: &TrackState) -> TrackState {
     let TrackState {
         id,
         name,

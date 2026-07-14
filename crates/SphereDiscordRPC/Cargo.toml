@@ -1,0 +1,19 @@
+[package]
+name = "SphereDiscordRPC"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+name = "sphere_discord_rpc"
+
+[dependencies]
+discord-rich-presence = "1.1.0"
+thiserror.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+
+[lints]
+workspace = true

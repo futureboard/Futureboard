@@ -28,6 +28,12 @@ const RAIL_CENTER_X: f32 = 12.0;
 const RAIL_W: f32 = 2.0;
 const THUMB_W: f32 = 22.0;
 const ACCENT_LINE_H: f32 = 2.0;
+const HORIZONTAL_FADER_HEIGHT: f32 = 24.0;
+const HORIZONTAL_THUMB_W: f32 = 10.0;
+const HORIZONTAL_THUMB_H: f32 = 22.0;
+const HORIZONTAL_RAIL_CENTER_Y: f32 = HORIZONTAL_FADER_HEIGHT / 2.0;
+const HORIZONTAL_RAIL_H: f32 = 2.0;
+const HORIZONTAL_ACCENT_LINE_W: f32 = 2.0;
 
 #[derive(Clone, Debug)]
 pub struct FaderDrag {
@@ -63,6 +69,13 @@ fn pointer_y_to_norm(pointer_y: f32, bounds_y: f32, bounds_h: f32) -> f32 {
     let rail_h = (bounds_h - FADER_THUMB_HEIGHT).max(1.0);
     let rail_y = (pointer_y - bounds_y - rail_top).clamp(0.0, rail_h);
     1.0 - rail_y / rail_h
+}
+
+fn pointer_x_to_norm(pointer_x: f32, bounds_x: f32, bounds_w: f32) -> f32 {
+    let rail_left = HORIZONTAL_THUMB_W / 2.0;
+    let rail_w = (bounds_w - HORIZONTAL_THUMB_W).max(1.0);
+    let rail_x = (pointer_x - bounds_x - rail_left).clamp(0.0, rail_w);
+    rail_x / rail_w
 }
 
 /// dB scale column — uses `h_full` so it stretches with the strip's flex_1
@@ -177,6 +190,93 @@ fn fader_rail(value_norm: f32, accent: gpui::Rgba) -> gpui::Div {
                 ),
         )
         .child(div().w(px(0.0)).flex_basis(relative(bot_basis)))
+}
+
+/// Horizontal orientation of the Mixer fader rail. Geometry and theme tokens
+/// intentionally mirror [`fader_rail`]; only the travel axis is rotated.
+fn horizontal_fader_rail(value_norm: f32, accent: gpui::Rgba) -> gpui::Div {
+    let value = value_norm.clamp(0.0, 1.0);
+    let thumb_accent = Colors::with_alpha(accent, 0.9);
+
+    let mut row = div()
+        .relative()
+        .w_full()
+        .h(px(HORIZONTAL_FADER_HEIGHT))
+        .flex()
+        .flex_row()
+        .items_center();
+
+    row = row.child(
+        div()
+            .absolute()
+            .left(px(HORIZONTAL_THUMB_W / 2.0))
+            .right(px(HORIZONTAL_THUMB_W / 2.0))
+            .top(px(HORIZONTAL_RAIL_CENTER_Y - HORIZONTAL_RAIL_H / 2.0))
+            .h(px(HORIZONTAL_RAIL_H))
+            .bg(Colors::fader_rail())
+            .border(px(1.0))
+            .border_color(Colors::fader_groove())
+            .rounded_full(),
+    );
+
+    for &(db, _) in SCALE_MARKS.iter() {
+        let pct = volume::db_to_norm(db);
+        let h = if db == 0.0 || db == volume::MAX_DB {
+            14.0_f32
+        } else {
+            9.0_f32
+        };
+        row = row.child(
+            div()
+                .absolute()
+                .left(relative(pct))
+                .ml(-px(0.5))
+                .top(px(HORIZONTAL_RAIL_CENTER_Y - h / 2.0))
+                .w(px(1.0))
+                .h(px(h))
+                .bg(if db == 0.0 || db == volume::MAX_DB {
+                    Colors::fader_tick()
+                } else {
+                    Colors::with_alpha(Colors::fader_tick(), 0.3)
+                }),
+        );
+    }
+
+    row.child(div().h(px(0.0)).flex_basis(relative(value)))
+        .child(
+            div()
+                .flex_none()
+                .w(px(HORIZONTAL_THUMB_W))
+                .h(px(HORIZONTAL_THUMB_H))
+                .rounded_sm()
+                .bg(Colors::surface_input())
+                .border(px(1.0))
+                .border_color(Colors::fader_thumb_border())
+                .relative()
+                .child(
+                    div()
+                        .absolute()
+                        .top(px(1.0))
+                        .left(px(1.0))
+                        .bottom(px(1.0))
+                        .w(px(1.0))
+                        .bg(Colors::with_alpha(Colors::text_primary(), 0.15)),
+                )
+                .child(
+                    div()
+                        .absolute()
+                        .top(px(2.0))
+                        .bottom(px(2.0))
+                        .left(px((HORIZONTAL_THUMB_W - HORIZONTAL_ACCENT_LINE_W) / 2.0))
+                        .w(px(HORIZONTAL_ACCENT_LINE_W))
+                        .bg(thumb_accent),
+                ),
+        )
+        .child(
+            div()
+                .h(px(0.0))
+                .flex_basis(relative((1.0 - value).clamp(0.0, 1.0))),
+        )
 }
 
 /// Bordered dB readout pill. Use this above the fader instead of plain text so
@@ -298,6 +398,75 @@ pub fn fader_with_drag_callbacks(
         })
 }
 
+/// Mixer-style fader rotated for compact horizontal surfaces such as a
+/// TrackHeader. Drag lifecycle matches [`fader_with_drag_callbacks`].
+pub fn horizontal_fader_with_drag_callbacks(
+    id: impl Into<gpui::SharedString>,
+    value_norm: f32,
+    accent: gpui::Rgba,
+    on_drag_start: Option<impl Fn(&f32, &mut Window, &mut App) + 'static>,
+    on_drag_preview: Option<impl Fn(&f32, &mut Window, &mut App) + 'static>,
+    on_drag_commit: Option<impl Fn(&mut Window, &mut App) + 'static>,
+    on_double_click_reset: Option<impl Fn(&mut Window, &mut App) + 'static>,
+) -> impl IntoElement {
+    let id_str: gpui::SharedString = id.into();
+    let id_string = id_str.to_string();
+    let value = value_norm.clamp(0.0, 1.0);
+
+    div()
+        .id(gpui::ElementId::Name(id_str))
+        .h(px(HORIZONTAL_FADER_HEIGHT))
+        .flex_1()
+        .min_w(px(36.0))
+        .relative()
+        .cursor(gpui::CursorStyle::ResizeLeftRight)
+        .child(horizontal_fader_rail(value, accent))
+        .on_drag(
+            FaderDrag {
+                id: id_string.clone(),
+            },
+            move |drag, _offset, window, cx| {
+                if let Some(start) = on_drag_start.as_ref() {
+                    start(&value, window, cx);
+                }
+                cx.new(|_| FaderDrag {
+                    id: drag.id.clone(),
+                })
+            },
+        )
+        .on_drag_move::<FaderDrag>(move |event: &DragMoveEvent<FaderDrag>, window, cx| {
+            if event.drag(cx).id != id_string {
+                return;
+            }
+            let bounds = event.bounds;
+            let x: f32 = event.event.position.x.into();
+            let ox: f32 = bounds.origin.x.into();
+            let ow: f32 = f32::from(bounds.size.width).max(HORIZONTAL_THUMB_W + 1.0);
+            let new_value = pointer_x_to_norm(x, ox, ow);
+            if let Some(preview) = on_drag_preview.as_ref() {
+                preview(&new_value, window, cx);
+            }
+        })
+        .when_some(on_drag_commit, |this, commit| {
+            use std::sync::Arc;
+            let commit: Arc<dyn Fn(&mut Window, &mut App) + 'static> = Arc::new(commit);
+            this.on_mouse_up(gpui::MouseButton::Left, {
+                let commit = commit.clone();
+                move |_event, window, cx| commit(window, cx)
+            })
+            .on_mouse_up_out(gpui::MouseButton::Left, move |_event, window, cx| {
+                commit(window, cx)
+            })
+        })
+        .when_some(on_double_click_reset, |this, reset| {
+            this.on_click(move |event, window, cx| {
+                if event.click_count() >= 2 {
+                    reset(window, cx);
+                }
+            })
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -318,5 +487,16 @@ mod tests {
         assert!((pointer_y_to_norm(top, 0.0, h) - 1.0).abs() < 1.0e-6);
         assert!((pointer_y_to_norm(bottom, 0.0, h) - 0.0).abs() < 1.0e-6);
         assert!((pointer_y_to_norm(h / 2.0, 0.0, h) - 0.5).abs() < 1.0e-6);
+    }
+
+    #[test]
+    fn horizontal_pointer_mapping_uses_thumb_center_travel() {
+        let w = 210.0;
+        let left = HORIZONTAL_THUMB_W / 2.0;
+        let right = w - HORIZONTAL_THUMB_W / 2.0;
+
+        assert!((pointer_x_to_norm(left, 0.0, w) - 0.0).abs() < 1.0e-6);
+        assert!((pointer_x_to_norm(right, 0.0, w) - 1.0).abs() < 1.0e-6);
+        assert!((pointer_x_to_norm(w / 2.0, 0.0, w) - 0.5).abs() < 1.0e-6);
     }
 }

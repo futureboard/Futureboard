@@ -3,6 +3,7 @@ use crate::paths::FutureboardPaths;
 use gpui::AppContext;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, OnceLock};
 
 pub use sphere_midi_service::{MidiDeviceDirection, MidiDeviceSetting, MidiHardwareSettings};
 
@@ -69,6 +70,8 @@ pub struct GeneralSettings {
     pub show_start_screen: bool,
     #[serde(default = "default_true")]
     pub check_updates: bool,
+    #[serde(default = "default_true")]
+    pub discord_rpc_enabled: bool,
     /// User-configured default directory for new projects. When `None` or empty
     /// the platform default ([`crate::project::io::default_projects_dir`]) is
     /// used. Resolve through [`GeneralSettings::resolved_default_project_dir`].
@@ -88,6 +91,7 @@ impl Default for GeneralSettings {
             language: default_language(),
             show_start_screen: default_true(),
             check_updates: default_true(),
+            discord_rpc_enabled: default_true(),
             default_project_directory: None,
             project_defaults: ProjectDefaults::default(),
             autosave: AutosaveSettings::default(),
@@ -756,6 +760,15 @@ pub struct SettingsModel {
     pub path: PathBuf,
 }
 
+pub type SettingsChangeListener = Arc<dyn Fn(&SettingsSchema) + Send + Sync + 'static>;
+
+static SETTINGS_CHANGE_LISTENER: OnceLock<SettingsChangeListener> = OnceLock::new();
+
+/// Installs the native shell's lightweight settings propagation hook.
+pub fn install_settings_change_listener(listener: SettingsChangeListener) {
+    let _ = SETTINGS_CHANGE_LISTENER.set(listener);
+}
+
 impl SettingsModel {
     pub fn load_or_create(cx: &mut gpui::App) -> gpui::Entity<Self> {
         let path = FutureboardPaths::resolve().settings_file;
@@ -828,6 +841,9 @@ impl SettingsModel {
     {
         updater(&mut self.current);
         self.current.validate_and_clamp();
+        if let Some(listener) = SETTINGS_CHANGE_LISTENER.get() {
+            listener(&self.current);
+        }
         self.save_to_disk();
         cx.notify();
     }
@@ -845,6 +861,7 @@ mod tests {
     fn test_default_settings() {
         let schema = SettingsSchema::default();
         assert_eq!(schema.general.language, "en");
+        assert!(schema.general.discord_rpc_enabled);
         assert_eq!(schema.general.project_defaults.tempo, 120.0);
         assert_eq!(schema.general.project_defaults.sample_rate, 48000);
         assert_eq!(schema.general.project_defaults.buffer_size, 256);

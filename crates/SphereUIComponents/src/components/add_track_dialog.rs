@@ -17,7 +17,8 @@ use crate::components::controls::{
     fb_button, fb_checkbox, fb_form_row, fb_stepper_button, FbButtonKind,
 };
 use crate::components::form::{
-    select_dismiss_backdrop, select_with_placement, SelectMenuPlacement, SelectOption,
+    select_dismiss_backdrop, select_with_placement, select_with_placement_and_header,
+    SelectMenuPlacement, SelectOption,
 };
 use crate::components::text_input::{
     bind_mouse_selection, text_field_with_callbacks, text_field_with_callbacks_and_ime,
@@ -478,6 +479,65 @@ fn instrument_plugin_options(plugins: &[RegistryPlugin]) -> Vec<SelectOption> {
         SelectOption::new(plugin.id.clone(), plugin.name.clone()).description(description)
     }));
     options
+}
+
+fn filtered_instrument_plugin_options(
+    plugins: &[RegistryPlugin],
+    query: &str,
+) -> Vec<SelectOption> {
+    let query = query.trim().to_lowercase();
+    let options = instrument_plugin_options(plugins);
+    if query.is_empty() {
+        return options;
+    }
+    let filtered: Vec<_> = options
+        .into_iter()
+        .filter(|option| {
+            option.label.to_lowercase().contains(&query)
+                || option
+                    .description
+                    .as_deref()
+                    .is_some_and(|description| description.to_lowercase().contains(&query))
+        })
+        .collect();
+    if filtered.is_empty() {
+        vec![SelectOption::new("__no_instrument_results", "No matching instruments").disabled(true)]
+    } else {
+        filtered
+    }
+}
+
+fn plugin_search_header(query: &str) -> gpui::AnyElement {
+    div()
+        .h(px(30.0))
+        .mb(px(4.0))
+        .px(px(8.0))
+        .flex()
+        .items_center()
+        .gap(px(6.0))
+        .rounded_md()
+        .border(px(1.0))
+        .border_color(Colors::border_focus())
+        .bg(Colors::surface_input())
+        .child(icon(assets::ICON_SEARCH_PATH, 11.0, Colors::text_faint()))
+        .child(
+            div()
+                .min_w_0()
+                .flex_1()
+                .truncate()
+                .text_size(px(10.5))
+                .text_color(if query.is_empty() {
+                    Colors::text_faint()
+                } else {
+                    Colors::text_primary()
+                })
+                .child(if query.is_empty() {
+                    "Search instruments...".to_string()
+                } else {
+                    query.to_string()
+                }),
+        )
+        .into_any_element()
 }
 
 fn find_instrument_plugin<'a>(
@@ -1027,6 +1087,7 @@ fn type_fields(
     callbacks: &AddTrackDialogCallbacks,
     open_select: Option<AddTrackSelectId>,
     instrument_plugins: &[RegistryPlugin],
+    instrument_plugin_query: &str,
     i18n: I18n,
 ) -> gpui::AnyElement {
     let show_asc = state.count > 1;
@@ -1156,13 +1217,18 @@ fn type_fields(
                 .child(fb_form_row(
                     "Instrument",
                     if state.instrument_mode == InstrumentMode::Vsti {
-                        add_track_select(
+                        select_with_placement_and_header(
                             "add-track-instrument-plugin-select",
                             state.instrument_plugin_id.as_deref().or(Some("")),
                             "Select instrument...",
-                            instrument_plugin_options(instrument_plugins),
+                            filtered_instrument_plugin_options(
+                                instrument_plugins,
+                                instrument_plugin_query,
+                            ),
                             add_track_select_open(open_select, AddTrackSelectId::InstrumentPlugin),
+                            false,
                             SelectMenuPlacement::Below,
+                            Some(plugin_search_header(instrument_plugin_query)),
                             Arc::new(move |_, w, cx| {
                                 toggle_instrument(&AddTrackSelectId::InstrumentPlugin, w, cx)
                             }),
@@ -1367,6 +1433,7 @@ pub fn add_track_dialog_body(
     count_callbacks: TextInputCallbacks,
     open_select: Option<AddTrackSelectId>,
     instrument_plugins: &[RegistryPlugin],
+    instrument_plugin_query: &str,
     color_ui: AddTrackColorUi,
     callbacks: AddTrackDialogCallbacks,
     i18n: I18n,
@@ -1437,6 +1504,7 @@ pub fn add_track_dialog_body(
                     &callbacks,
                     open_select,
                     instrument_plugins,
+                    instrument_plugin_query,
                     i18n,
                 ))),
         )
@@ -1502,6 +1570,7 @@ pub struct AddTrackWindow {
     count_drag: Option<CountDragState>,
     color_picker: ColorPickerState,
     open_select: Option<AddTrackSelectId>,
+    instrument_plugin_query: String,
     instrument_plugins: Vec<RegistryPlugin>,
     focus_handle: FocusHandle,
     /// Called when the user confirms (creates tracks).
@@ -1537,6 +1606,7 @@ impl AddTrackWindow {
             count_drag: None,
             color_picker,
             open_select: None,
+            instrument_plugin_query: String::new(),
             instrument_plugins,
             focus_handle: cx.focus_handle(),
             on_confirm_request,
@@ -1572,6 +1642,7 @@ impl AddTrackWindow {
         self.count_input.set_value(dialog.count.to_string());
         self.count_editing = false;
         self.open_select = None;
+        self.instrument_plugin_query.clear();
         self.color_picker
             .reset(color_picker_value_for(&dialog), dialog.selected_color());
         self.state = dialog;
@@ -1653,6 +1724,40 @@ impl AddTrackWindow {
     }
 
     fn handle_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if self.open_select == Some(AddTrackSelectId::InstrumentPlugin) {
+            match event.keystroke.key.as_str() {
+                "escape" => {
+                    self.open_select = None;
+                    self.instrument_plugin_query.clear();
+                    cx.notify();
+                    return;
+                }
+                "backspace" => {
+                    self.instrument_plugin_query.pop();
+                    cx.notify();
+                    return;
+                }
+                "enter" | "numpad_enter" => return,
+                _ => {}
+            }
+            let modifiers = event.keystroke.modifiers;
+            let text = event
+                .keystroke
+                .key_char
+                .as_deref()
+                .filter(|text| !text.chars().next().is_some_and(char::is_control))
+                .or_else(|| match event.keystroke.key.as_str() {
+                    "space" => Some(" "),
+                    key if key.chars().count() == 1 => Some(key),
+                    _ => None,
+                });
+            if let Some(text) = text.filter(|_| !modifiers.platform && !modifiers.control) {
+                self.instrument_plugin_query.push_str(text);
+                cx.notify();
+                return;
+            }
+        }
+
         // Route keys to the color-picker hex field when it owns focus. Enter
         // commits the hex color, Escape closes the popover; everything else
         // edits the field with a live preview.
@@ -1998,6 +2103,9 @@ impl Render for AddTrackWindow {
                 move |select_id: &AddTrackSelectId, _w, cx| {
                     let select_id = *select_id;
                     let _ = target.update(cx, |this, cx| {
+                        if select_id == AddTrackSelectId::InstrumentPlugin {
+                            this.instrument_plugin_query.clear();
+                        }
                         this.open_select = if open_select_at_render == Some(select_id) {
                             None
                         } else {
@@ -2057,6 +2165,7 @@ impl Render for AddTrackWindow {
                             this.track_name_input.select_all();
                         }
                         this.open_select = None;
+                        this.instrument_plugin_query.clear();
                         cx.notify();
                     });
                 }
@@ -2105,6 +2214,7 @@ impl Render for AddTrackWindow {
             let on_dismiss: VoidCb = Arc::new(move |_: &(), _w: &mut Window, cx: &mut App| {
                 let _ = target.update(cx, |this, cx| {
                     if this.open_select.take().is_some() {
+                        this.instrument_plugin_query.clear();
                         if crate::ui_debug_enabled() {
                             eprintln!("[ui-select] close reason=click_outside");
                         }
@@ -2289,6 +2399,7 @@ impl Render for AddTrackWindow {
                 count_callbacks,
                 self.open_select,
                 &self.instrument_plugins,
+                &self.instrument_plugin_query,
                 color_ui,
                 callbacks,
                 i18n,

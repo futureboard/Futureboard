@@ -12,9 +12,11 @@ use crate::components::mixer_master_strip_view::{
     mixer_master_meter_signature, MixerMasterStripView,
 };
 use crate::components::mixer_panel::{
-    mixer_center_lightweight, mixer_render_item_count, mixer_strip_scroller, mixer_sub_header,
-    MixerSplit, MixerSplitAction, MixerSplitDrag, VstiOutputMeterState,
+    build_mixer_render_snapshot, mixer_center_lightweight, mixer_render_item_count,
+    mixer_strip_scroller, mixer_sub_header, MixerSplit, MixerSplitAction, MixerSplitDrag,
+    VstiOutputMeterState,
 };
+use crate::components::mixer_surface::render_mixer_primitives;
 use crate::components::mixer_tree_sidebar_view::MixerTreeSidebar;
 use crate::components::timeline::timeline::Timeline;
 use crate::layout::StudioLayout;
@@ -88,6 +90,7 @@ impl MixerPanelView {
     }
 
     fn read_view_state(&self, cx: &App) -> MixerPanelViewState {
+        let _scope = crate::perf::PerfScope::enter("MixerViewStateClone");
         let owner = self.owner.read(cx);
         let chrome = owner.docked_mixer_panel_state(cx);
         let timeline = self.timeline.read(cx);
@@ -98,7 +101,15 @@ impl MixerPanelView {
         let hidden = timeline.state.mixer_tree.hidden_channel_ids.clone();
         let strip_count = mixer_render_item_count(&timeline.state.tracks, &collapsed, &hidden);
 
-        let mut tracks = timeline.state.tracks.clone();
+        // Mixer strips never inspect arrangement clips. A full TrackState clone
+        // also clones every MIDI note/controller vector, which made a simple
+        // selection repaint take seconds in large projects.
+        let mut tracks: Vec<_> = timeline
+            .state
+            .tracks
+            .iter()
+            .map(crate::layout::clone_track_for_mixer)
+            .collect();
         let mut master = timeline.state.master.clone();
         timeline
             .state
@@ -185,7 +196,7 @@ impl Render for MixerPanelView {
         let split_for_move = split.clone();
         let split_for_end = split.clone();
 
-        let channel_row = if state.strip_count == 0 {
+        let mut channel_row = if state.strip_count == 0 {
             crate::perf::count("mixer_center_paint_count", 1);
             div()
                 .flex()
@@ -222,6 +233,28 @@ impl Render for MixerPanelView {
                 .child(div().w(px(1.0)).h_full().bg(Colors::border_default()))
                 .child(self.master_strip.clone())
         };
+
+        // In GPU-decoration mode the strip elements intentionally omit their
+        // background, accent, and separator. Compose the same primitive layer
+        // used by the detached Mixer Window behind the docked strip row.
+        if state.gpu_decor && state.strip_count > 0 {
+            let snapshot = build_mixer_render_snapshot(
+                &state.tracks,
+                &state.collapsed,
+                &state.hidden,
+                state.selected_track_id.as_deref(),
+                state.scroll_x,
+                state.viewport_width,
+                state.strip_available_px,
+            );
+            let primitives = render_mixer_primitives(&snapshot);
+            channel_row = div()
+                .relative()
+                .flex_1()
+                .min_h_0()
+                .child(primitives)
+                .child(channel_row.size_full());
+        }
 
         let body = if state.tree_enabled {
             div()

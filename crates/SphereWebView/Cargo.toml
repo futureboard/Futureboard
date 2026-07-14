@@ -1,0 +1,40 @@
+[package]
+name = "SphereWebView"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Native windowed CEF web views for Futureboard Studio"
+
+[lib]
+name = "sphere_webview"
+
+[[example]]
+name = "install_cef"
+required-features = ["installer"]
+
+[dependencies]
+cef = { workspace = true, optional = true }
+download-cef = { workspace = true, optional = true }
+thiserror.workspace = true
+ureq = { workspace = true, optional = true }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, optional = true, features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+x11-dl = { workspace = true, optional = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = { workspace = true, optional = true }
+objc2-foundation = { workspace = true, optional = true, features = ["NSGeometry"] }
+
+[features]
+default = []
+# Links the cef-rs bindings. Install the SDK first with the installer example.
+cef-runtime = ["dep:cef", "dep:windows-sys", "dep:x11-dl", "dep:objc2", "dep:objc2-foundation"]
+# Enables the explicit, user-invoked CEF downloader/extractor.
+installer = ["dep:download-cef", "dep:ureq"]
+
+[lints]
+workspace = true

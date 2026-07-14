@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    deferred, div, px, svg, App, InteractiveElement, IntoElement, ParentElement,
+    deferred, div, px, svg, AnyElement, App, InteractiveElement, IntoElement, ParentElement,
     StatefulInteractiveElement, Styled, Window,
 };
 
@@ -80,6 +80,33 @@ pub fn select_with_placement(
     open: bool,
     disabled: bool,
     placement: SelectMenuPlacement,
+    on_toggle: Arc<dyn Fn(&(), &mut Window, &mut App) + 'static>,
+    on_change: Arc<dyn Fn(&String, &mut Window, &mut App) + 'static>,
+) -> impl IntoElement {
+    select_with_placement_and_header(
+        id,
+        selected_id,
+        placeholder,
+        options,
+        open,
+        disabled,
+        placement,
+        None,
+        on_toggle,
+        on_change,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn select_with_placement_and_header(
+    id: &'static str,
+    selected_id: Option<&str>,
+    placeholder: impl Into<String>,
+    options: Vec<SelectOption>,
+    open: bool,
+    disabled: bool,
+    placement: SelectMenuPlacement,
+    menu_header: Option<AnyElement>,
     on_toggle: Arc<dyn Fn(&(), &mut Window, &mut App) + 'static>,
     on_change: Arc<dyn Fn(&String, &mut Window, &mut App) + 'static>,
 ) -> impl IntoElement {
@@ -197,8 +224,9 @@ pub fn select_with_placement(
                 SelectMenuPlacement::Below => menu.top(px(31.0)),
                 SelectMenuPlacement::Above => menu.bottom(px(31.0)),
             };
-            let menu =
-                menu.children(options.into_iter().enumerate().map(move |(index, option)| {
+            let menu = menu
+                .children(menu_header)
+                .children(options.into_iter().enumerate().map(move |(index, option)| {
                     let active = selected_id == Some(option.id.as_str());
                     let disabled = option.disabled;
                     let value = option.id.clone();

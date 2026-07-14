@@ -56,15 +56,39 @@ impl Render for StudioLayout {
             self.last_window_title = Some(title);
         }
 
-        // Pull the live track list and current selection out of the Timeline so
-        // the Mixer and Inspector render against the same data the TrackHeader
-        // sees. Cloning the Vec is cheap relative to a full render.
+        // Pull a render-only track snapshot and current selection from the
+        // Timeline. Do not clone every clip here: MIDI clips can contain tens of
+        // thousands of notes/controllers, and a mixer selection clears clip
+        // selection anyway. Cloning the whole project made a strip click block
+        // the UI for seconds. The Inspector only needs the selected clip, so add
+        // that one back to the otherwise clip-free track snapshot.
         let (tracks, selected_track_id, selected_clip_id, project_bpm) = {
             let t = self.timeline.read(cx);
+            let selected_clip_id = t.state.selection.selected_clip_ids.first().cloned();
+            let selected_clip = selected_clip_id.as_deref().and_then(|clip_id| {
+                t.state.tracks.iter().find_map(|track| {
+                    track
+                        .clips
+                        .iter()
+                        .find(|clip| clip.id == clip_id)
+                        .map(|clip| (track.id.clone(), clip.clone()))
+                })
+            });
+            let mut tracks: Vec<_> = t
+                .state
+                .tracks
+                .iter()
+                .map(super::mixer_ops::clone_track_for_mixer)
+                .collect();
+            if let Some((track_id, clip)) = selected_clip {
+                if let Some(track) = tracks.iter_mut().find(|track| track.id == track_id) {
+                    track.clips.push(clip);
+                }
+            }
             (
-                t.state.tracks.clone(),
+                tracks,
                 t.state.selection.selected_track_id.clone(),
-                t.state.selection.selected_clip_ids.first().cloned(),
+                selected_clip_id,
                 t.state.bpm as f64,
             )
         };

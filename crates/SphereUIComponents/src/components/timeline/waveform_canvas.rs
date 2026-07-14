@@ -295,8 +295,7 @@ fn draw_chunk_waveform_locked(
         bars
     };
 
-    let mut waveform_color = color;
-    waveform_color.a = 0.72;
+    let waveform_color = Colors::timeline_audio_clip_waveform(color);
 
     let element = canvas(
         |_bounds, _window, _cx| {},
@@ -383,8 +382,7 @@ fn draw_preview_waveform(
         }
     };
 
-    let mut waveform_color = color;
-    waveform_color.a = 0.72;
+    let waveform_color = Colors::timeline_audio_clip_waveform(color);
 
     let element = canvas(
         |_b, _w, _cx| {},

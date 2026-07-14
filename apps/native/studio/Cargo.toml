@@ -31,6 +31,7 @@ sphere_ui_components = { workspace = true, features = ["gpu-renderer", "native-d
 # This prevents the standalone native binary from linking against Node/N-API
 # symbols. Electron can enable N-API from its own crate/build path instead.
 sphere_directaudioengine.workspace = true
+sphere-discord-rpc.workspace = true
 
 [target.'cfg(target_os = "windows")'.dependencies]
 # Windows GPUI backend.

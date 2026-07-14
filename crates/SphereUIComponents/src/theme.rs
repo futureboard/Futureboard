@@ -457,7 +457,7 @@ macro_rules! theme_color {
 pub struct Colors;
 
 const DEFAULT_TRACK_COLOR_VALUES: [u32; 12] = [
-    0x56C7C9, 0x7EDB9A, 0xF2C96D, 0xF27E77, 0xA99CFF, 0x6EB7E8, 0xE89B61, 0xD982B6, 0xA8D36F,
+    0x56C7C9, 0x7EDB9A, 0xF2C96D, 0xF27E77, 0x8FB7FF, 0x6EB7E8, 0xE89B61, 0xD982B6, 0xA8D36F,
     0x9CAFE8, 0xC49A6C, 0x71D6B5,
 ];
 
@@ -499,8 +499,8 @@ impl Colors {
     theme_color!(border_normal, "border.normal", "#343946");
     theme_color!(border_default, "border.default", "#FFFFFF1F");
     theme_color!(border_strong, "border.strong", "#4C505C");
-    theme_color!(border_focus, "border.focus", "#7B61FFB8");
-    theme_color!(border_accent, "border.accent", "#7B61FF80");
+    theme_color!(border_focus, "border.focus", "#4C8DFFC0");
+    theme_color!(border_accent, "border.accent", "#4C8DFF80");
     theme_color!(divider, "border.divider", "#FFFFFF0F");
 
     // Text
@@ -513,14 +513,14 @@ impl Colors {
     theme_color!(text_inverse, "text.inverse", "#1E1F22");
 
     // Accent
-    theme_color!(accent_primary, "accent.primary", "#7B61FF");
-    theme_color!(accent_primary_hover, "accent.primaryHover", "#8D78FF");
-    theme_color!(accent_hover, "accent.hover", "#8D78FF");
-    theme_color!(accent_active, "accent.active", "#7B61FF28");
-    theme_color!(accent_focus, "accent.focus", "#7B61FFB8");
-    theme_color!(accent_soft, "accent.soft", "#7B61FF30");
-    theme_color!(accent_muted, "accent.muted", "#7B61FF20");
-    theme_color!(accent_pressed, "accent.pressed", "#7B61FF28");
+    theme_color!(accent_primary, "accent.primary", "#4C8DFF");
+    theme_color!(accent_primary_hover, "accent.primaryHover", "#6BA1FF");
+    theme_color!(accent_hover, "accent.hover", "#6BA1FF");
+    theme_color!(accent_active, "accent.active", "#4C8DFF28");
+    theme_color!(accent_focus, "accent.focus", "#4C8DFFC0");
+    theme_color!(accent_soft, "accent.soft", "#4C8DFF30");
+    theme_color!(accent_muted, "accent.muted", "#4C8DFF20");
+    theme_color!(accent_pressed, "accent.pressed", "#4C8DFF28");
     theme_color!(on_accent, "accent.onAccent", "#FFFFFF");
 
     // Status / Alert Accents
@@ -531,17 +531,17 @@ impl Colors {
     theme_color!(accent_success, "accent.success", "#6FCF97");
     theme_color!(accent_warning, "accent.warning", "#E5C07B");
     theme_color!(accent_danger, "accent.danger", "#FF6B68");
-    theme_color!(accent_purple, "accent.purple", "#BB86FC");
+    theme_color!(accent_purple, "accent.purple", "#AEB7C6");
 
     // Workspace tab / focused panel tokens.
     theme_color!(tab_text, "tab.text", "#C3C7D0");
     theme_color!(tab_text_muted, "tab.text_muted", "#8E96A3");
-    theme_color!(tab_text_active, "tab.text_active", "#8D78FF");
-    theme_color!(tab_indicator_active, "tab.indicator_active", "#8D78FF");
-    theme_color!(tab_bg_active, "tab.backgroundActive", "#7B61FF20");
+    theme_color!(tab_text_active, "tab.text_active", "#78A9FF");
+    theme_color!(tab_indicator_active, "tab.indicator_active", "#78A9FF");
+    theme_color!(tab_bg_active, "tab.backgroundActive", "#4C8DFF20");
     theme_color!(tab_bg_hover, "tab.backgroundHover", "#30323A");
-    theme_color!(panel_border_focused, "panel.border_focused", "#7B61FF80");
-    theme_color!(panel_header_active, "panel.header_active", "#7B61FF");
+    theme_color!(panel_border_focused, "panel.border_focused", "#4C8DFF80");
+    theme_color!(panel_header_active, "panel.header_active", "#4C8DFF");
 
     // DAW-specific
     theme_color!(meter_bg, "meter.background", "#FFFFFF0D");
@@ -553,7 +553,7 @@ impl Colors {
     theme_color!(fader_tick, "fader.tick", "#FFFFFF1F");
     theme_color!(fader_scale_text, "fader.scaleText", "#8E96A3");
     theme_color!(knob_bg, "knob.background", "#181A1F");
-    theme_color!(knob_ring, "knob.ring", "#7B61FF");
+    theme_color!(knob_ring, "knob.ring", "#78A9FF");
     theme_color!(slot_bg, "slot.background", "#20232A");
     theme_color!(slot_border, "slot.border", "#FFFFFF1F");
     theme_color!(statusbar_bg, "statusbar.background", "#1B1C20");
@@ -607,13 +607,13 @@ impl Colors {
     );
     theme_color!(timeline_ruler_tick, "timeline.rulerTick", "#FFFFFF1F");
     theme_color!(timeline_ruler_text, "timeline.rulerText", "#C3C7D0");
-    theme_color!(timeline_selection, "timeline.selection", "#7B61FF30");
+    theme_color!(timeline_selection, "timeline.selection", "#4C8DFF30");
 
     // Track colors (fallbacks)
     theme_color!(track_audio, "track.audio", "#48D4D0");
     theme_color!(track_midi, "track.midi", "#E5C07B");
     theme_color!(track_instrument, "track.instrument", "#78D88F");
-    theme_color!(track_bus, "track.bus", "#7B61FF");
+    theme_color!(track_bus, "track.bus", "#78A9FF");
     theme_color!(track_return, "track.return", "#6FCF97");
     theme_color!(track_master, "track.master", "#DFE1E5");
     // Subdued overlays for track row states — graphite-leaning so the selected
@@ -634,8 +634,8 @@ impl Colors {
 
     // Automation sublane tokens — quiet graphite lanes with a purple curve so the
     // envelope is the only saturated element in the section.
-    theme_color!(automation_curve, "automation.curve", "#7C5CFF");
-    theme_color!(automation_curve_hover, "automation.curveHover", "#9A82FF");
+    theme_color!(automation_curve, "automation.curve", "#78A9FF");
+    theme_color!(automation_curve_hover, "automation.curveHover", "#A4C4FF");
     // Left header/label tint (opaque — sits over the header column, not the grid).
     theme_color!(automation_lane_bg, "automation.laneBg", "#181A21");
     theme_color!(
@@ -655,16 +655,16 @@ impl Colors {
     theme_color!(
         automation_canvas_bg_selected,
         "automation.canvasBgSelected",
-        "#7C5CFF0D"
+        "#4C8DFF0D"
     );
     // Faint value/center guides drawn behind the curve.
     theme_color!(
         automation_value_region_bg,
         "automation.valueRegionBg",
-        "#7C5CFF08"
+        "#4C8DFF08"
     );
-    theme_color!(automation_center_line, "automation.centerLine", "#7C5CFF2E");
-    theme_color!(automation_center_band, "automation.centerBand", "#7C5CFF06");
+    theme_color!(automation_center_line, "automation.centerLine", "#4C8DFF2E");
+    theme_color!(automation_center_band, "automation.centerBand", "#4C8DFF06");
     theme_color!(automation_separator, "automation.separator", "#272B35");
     theme_color!(
         automation_separator_strong,
@@ -725,8 +725,26 @@ impl Colors {
 
     // Status
     theme_color!(statusbar_text_muted, "statusbar.textMuted", "#FFFFFF66");
-    theme_color!(statusbar_accent, "statusbar.accent", "#7B61FF");
+    theme_color!(statusbar_accent, "statusbar.accent", "#78A9FF");
     theme_color!(statusbar_warning, "statusbar.warning", "#E5C07B");
+
+    /// Track-tinted audio clip body overlay. The arrangement grid is deliberately
+    /// painted behind clips, so these alphas are part of the timeline layering
+    /// contract rather than arbitrary component-local styling.
+    pub fn timeline_audio_clip_fill(track_color: Rgba, selected: bool) -> Rgba {
+        Self::with_alpha(track_color, if selected { 0.32 } else { 0.16 })
+    }
+
+    /// Audio clip outline, kept substantially stronger than the translucent body.
+    pub fn timeline_audio_clip_border(track_color: Rgba, selected: bool) -> Rgba {
+        Self::with_alpha(track_color, if selected { 0.95 } else { 0.62 })
+    }
+
+    /// Waveforms remain close to full strength even though their clip body is
+    /// translucent, preserving transient readability against the visible grid.
+    pub fn timeline_audio_clip_waveform(track_color: Rgba) -> Rgba {
+        Self::with_alpha(track_color, 0.92)
+    }
 
     // Helper to dynamically adjust alpha channel
     pub fn with_alpha(color: Rgba, alpha: f32) -> Rgba {

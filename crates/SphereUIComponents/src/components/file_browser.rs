@@ -418,12 +418,16 @@ impl FileBrowserState {
                 );
             }
             if let Some(p) = dirs.get("plugins") {
-                let instruments = p.join("Instruments");
-                self.push_root(
+                // Instrument presets are stored below format-specific roots
+                // (`VST3/Instruments`, `CLAP/Instruments`). Do not point this
+                // category at the nonexistent `Audio Plug-ins/Instruments`.
+                // A registry-backed aggregate can replace this honest virtual
+                // state when cross-format browser providers are introduced.
+                self.push_virtual_category(
                     "lib:instruments",
                     "Instruments",
-                    &instruments,
                     BrowserIcon::Instruments,
+                    "Available after a plug-in scan",
                     &mut nodes,
                 );
                 self.push_root(
@@ -1044,7 +1048,12 @@ pub fn resolve_standard_dirs() -> HashMap<String, PathBuf> {
 pub fn read_directory(path: &Path) -> (Vec<FileBrowserEntry>, Option<String>) {
     let read = match std::fs::read_dir(path) {
         Ok(r) => r,
-        Err(e) => return (Vec::new(), Some(e.to_string())),
+        Err(error) => {
+            return (
+                Vec::new(),
+                Some(directory_error_message(error.kind()).to_string()),
+            )
+        }
     };
 
     let mut folders: Vec<FileBrowserEntry> = Vec::new();
@@ -1116,6 +1125,14 @@ pub fn read_directory(path: &Path) -> (Vec<FileBrowserEntry>, Option<String>) {
     files.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
     folders.extend(files);
     (folders, None)
+}
+
+fn directory_error_message(kind: std::io::ErrorKind) -> &'static str {
+    match kind {
+        std::io::ErrorKind::NotFound => "Folder is not available",
+        std::io::ErrorKind::PermissionDenied => "Permission denied",
+        _ => "Unable to read this folder",
+    }
 }
 
 fn read_pst_plugin_name(path: &Path) -> Option<String> {
@@ -1207,6 +1224,29 @@ mod tests {
         assert_eq!(empty.kind, BrowserNodeKind::Info);
         assert!(!empty.is_selectable());
         assert!(empty.path.is_none());
+    }
+
+    #[test]
+    fn instruments_is_not_backed_by_a_nonexistent_aggregate_path() {
+        let state = FileBrowserState::default();
+        let instruments = state
+            .visible_nodes
+            .iter()
+            .find(|node| node.id == "lib:instruments")
+            .expect("instruments category should exist");
+        assert!(instruments.path.is_none());
+    }
+
+    #[test]
+    fn directory_errors_are_safe_for_browser_display() {
+        assert_eq!(
+            directory_error_message(std::io::ErrorKind::NotFound),
+            "Folder is not available"
+        );
+        assert_eq!(
+            directory_error_message(std::io::ErrorKind::PermissionDenied),
+            "Permission denied"
+        );
     }
 
     #[test]

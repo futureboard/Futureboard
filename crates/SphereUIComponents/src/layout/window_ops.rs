@@ -1126,9 +1126,13 @@ impl StudioLayout {
         let virtual_keyboard = self.virtual_keyboard.clone();
         let owner = cx.entity().clone();
         let on_close: Arc<dyn Fn(&mut Window, &mut gpui::App) + Send + Sync> =
-            Arc::new(move |_window, cx| {
-                StudioLayout::defer_update(&owner, cx, |layout, cx| {
-                    layout.note_midi_editor_window_closed(cx);
+            Arc::new(move |window, cx| {
+                // Capture the id while the window is still alive. The deferred
+                // cleanup runs after `remove_window`, so it must not consult the
+                // stored handle for metadata from an already-destroyed window.
+                let window_id = window.window_handle().window_id();
+                StudioLayout::defer_update(&owner, cx, move |layout, cx| {
+                    layout.note_midi_editor_window_closed(window_id, cx);
                 });
             });
         let dispatch_owner = cx.entity().clone();
@@ -1181,20 +1185,19 @@ impl StudioLayout {
         cx.notify();
     }
 
-    pub(super) fn note_midi_editor_window_closed(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn note_midi_editor_window_closed(
+        &mut self,
+        window_id: gpui::WindowId,
+        cx: &mut Context<Self>,
+    ) {
         let _ = self.piano_roll_floating.update(cx, |roll, cx| {
             roll.preview_all_notes_off("editor_close", cx);
         });
-        if let Some(handle) = self.midi_editor.window.as_ref() {
-            // The popout closed itself (titlebar X). Reading the stored id never
-            // touches the dead window; unregister releases its notes safely.
-            let window_id = handle.window_id();
-            midi_editor_debug(&format!(
-                "unregister virtual-keyboard window id={}",
-                window_id.as_u64()
-            ));
-            self.unregister_virtual_keyboard_window(window_id, cx);
-        }
+        midi_editor_debug(&format!(
+            "unregister virtual-keyboard window id={}",
+            window_id.as_u64()
+        ));
+        self.unregister_virtual_keyboard_window(window_id, cx);
         self.midi_editor.window = None;
         cx.notify();
     }

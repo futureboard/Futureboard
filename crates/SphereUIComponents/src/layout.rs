@@ -50,6 +50,7 @@ mod input_ops;
 mod inspector_ops;
 mod midi_input_router;
 mod mixer_ops;
+pub(crate) use mixer_ops::clone_track_for_mixer;
 pub(crate) mod plugin_bridge_runtime;
 mod plugin_ops;
 mod plugin_picker_window;
@@ -1919,24 +1920,22 @@ impl StudioLayout {
                 let undone = self
                     .timeline
                     .update(cx, |timeline, cx| timeline.undo_edit(cx));
-                self.mark_dirty();
                 if undone {
-                    // An undone edit may change the project's audio graph (FX
-                    // chain order, track/insert restore, …). Flag the engine
-                    // dirty so the next poll re-syncs; the sync is signature-
-                    // gated, so this is a no-op when audio is unaffected.
-                    self.audio_bridge.project_dirty = true;
-                    self.schedule_audio_project_sync(cx, false, "edit_undo");
+                    // Snapshot construction and serialization are synchronous.
+                    // Mark the engine dirty so the UI can publish the restored
+                    // state first; the regular audio poll coalesces the sync on
+                    // its next control-rate tick.
+                    self.mark_dirty();
                 }
             }
             "edit:redo" => {
                 let redone = self
                     .timeline
                     .update(cx, |timeline, cx| timeline.redo_edit(cx));
-                self.mark_dirty();
                 if redone {
-                    self.audio_bridge.project_dirty = true;
-                    self.schedule_audio_project_sync(cx, false, "edit_redo");
+                    // Match undo: do not block shortcut dispatch on preparing a
+                    // full native-engine snapshot.
+                    self.mark_dirty();
                 }
             }
             "edit:duplicate" | "clip:duplicate" => self.duplicate_selected_clip(cx),

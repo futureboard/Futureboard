@@ -1,0 +1,4 @@
+[env]
+# cef-dll-sys reads CEF_PATH while compiling. `relative = true` anchors this at
+# the workspace root instead of whichever package Cargo is currently building.
+CEF_PATH = { value = "build/cef", relative = true, force = false }

@@ -253,7 +253,12 @@ pub(crate) fn files_media_section() -> impl IntoElement {
         ))
 }
 
-pub(crate) fn advanced_section() -> impl IntoElement {
+pub(crate) fn advanced_section(
+    schema: &SettingsSchema,
+    on_update: Arc<dyn Fn(UpdateSettingFn, &mut Window, &mut App) + 'static>,
+) -> impl IntoElement {
+    let discord_rpc_enabled = schema.general.discord_rpc_enabled;
+    let update_discord_rpc = on_update.clone();
     settings_section("Advanced")
         .child(settings_section_hint_text(
             "Experimental features, developer tools, and low-level engine options.",
@@ -265,6 +270,22 @@ pub(crate) fn advanced_section() -> impl IntoElement {
         .child(settings_row(
             "Developer Logging",
             settings_readout("Environment controlled"),
+        ))
+        .child(settings_row(
+            "Discord RPC",
+            settings_toggle(
+                "settings-discord-rpc-toggle",
+                discord_rpc_enabled,
+                move |_, window, cx| {
+                    update_discord_rpc(
+                        Arc::new(move |settings| {
+                            settings.general.discord_rpc_enabled = !discord_rpc_enabled;
+                        }),
+                        window,
+                        cx,
+                    );
+                },
+            ),
         ))
         .child(settings_row(
             "Audio Engine",

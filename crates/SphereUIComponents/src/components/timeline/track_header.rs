@@ -5,9 +5,8 @@ use gpui::{
 };
 
 use crate::assets;
-use crate::components::fader::db_value_pill;
+use crate::components::fader::{db_value_pill, horizontal_fader_with_drag_callbacks};
 use crate::components::knob::format_pan_label;
-use crate::components::slider::slider_with_drag_callbacks;
 use crate::components::timeline::timeline_state::{
     volume, TimelineState, TrackDragItem, TrackLaneMode, TrackState, TrackType, HEADER_WIDTH,
     TRACK_HEADER_CONTROLS_MIN_HEIGHT,
@@ -504,7 +503,7 @@ pub fn track_header(
                                 )),
                         ),
                 )
-                // Row 2: volume slider + pan pill + meter + dB pill.
+                // Row 2: horizontal volume fader + pan pill + meter + dB pill.
                 // Only rendered when the row is tall enough to hold it; the
                 // compact header (short rows) shows just row 1.
                 .when(show_controls, |col| {
@@ -516,16 +515,20 @@ pub fn track_header(
                             .gap(px(8.0))
                             .w_full()
                             .px(px(8.0))
-                            .py(px(4.0))
+                            // 24px horizontal fader + 2px vertical padding on
+                            // each side keeps the two-row header at its exact
+                            // 72px intrinsic height.
+                            .py(px(2.0))
                             .rounded_md()
                             .bg(Colors::with_alpha(Colors::surface_canvas(), 0.16))
                             .border(px(1.0))
                             .border_color(Colors::with_alpha(Colors::text_primary(), 0.03))
-                            // Real horizontal slider
-                            .child(slider_with_drag_callbacks(
+                            // Mixer fader geometry, rotated for the compact
+                            // horizontal TrackHeader control row.
+                            .child(horizontal_fader_with_drag_callbacks(
                                 format!("track-vol-{}", track.id),
                                 state.display_track_volume(track),
-                                track.color,
+                                Colors::accent_primary(),
                                 Some(on_volume_drag_start),
                                 Some(on_volume_drag_preview),
                                 Some(on_volume_drag_commit),

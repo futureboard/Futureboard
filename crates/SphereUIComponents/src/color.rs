@@ -19,7 +19,7 @@ use gpui::Rgba;
 /// auto-color assignment and the picker's quick presets stay consistent and
 /// existing projects keep loading with the same swatches.
 pub const DEFAULT_TRACK_COLORS: &[&str] = &[
-    "#56C7C9", "#7EDB9A", "#F2C96D", "#F27E77", "#A99CFF", "#6EB7E8", "#E89B61", "#D982B6",
+    "#56C7C9", "#7EDB9A", "#F2C96D", "#F27E77", "#8FB7FF", "#6EB7E8", "#E89B61", "#D982B6",
     "#A8D36F", "#9CAFE8", "#C49A6C", "#71D6B5",
 ];
 

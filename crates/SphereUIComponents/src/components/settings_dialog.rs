@@ -2045,9 +2045,14 @@ fn build_settings_content(
 
     // Advanced Panel
     if (state.active_tab == SettingsTab::Advanced && query.is_empty())
-        || (!query.is_empty() && is_match("Advanced", &["experimental", "developer", "engine"]))
+        || (!query.is_empty()
+            && is_match(
+                "Advanced Discord RPC",
+                &["experimental", "developer", "engine", "discord", "presence"],
+            ))
     {
-        sections.push(advanced_section().into_any_element());
+        sections
+            .push(advanced_section(schema, callbacks.on_update_setting.clone()).into_any_element());
     }
 
     // About Panel

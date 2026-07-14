@@ -1,5 +1,7 @@
 //! Undo/redo edit commands — all timeline mutations go through here.
 
+use std::collections::VecDeque;
+
 use crate::components::timeline::timeline_state::{
     AudioClipStretchState, ClipState, MidiControllerKind, MidiControllerPoint, MidiNoteState,
     TimelineState, TrackState,
@@ -501,6 +503,26 @@ mod stretch_command_tests {
         assert_eq!(state.clip_stretch("clip-1"), Some(&next));
         assert!((state.clip_duration_beats("clip-1").unwrap() - next_len).abs() < 0.001);
     }
+
+    #[test]
+    fn edit_history_keeps_the_newest_bounded_steps() {
+        let mut history = EditHistory::new(2);
+        let command = || EditCommand::SetTrackHeights {
+            prev: Vec::new(),
+            next: Vec::new(),
+        };
+        history.push(command());
+        history.push(command());
+        history.push(command());
+
+        let mut state = TimelineState::default();
+        assert!(history.undo(&mut state));
+        assert!(history.undo(&mut state));
+        assert!(!history.undo(&mut state), "oldest entry must be evicted");
+        assert!(history.redo(&mut state));
+        assert!(history.redo(&mut state));
+        assert!(!history.redo(&mut state));
+    }
 }
 
 fn restore_track_snapshot(state: &mut TimelineState, snapshot: &TrackSnapshot) {
@@ -520,43 +542,43 @@ fn restore_track_snapshot(state: &mut TimelineState, snapshot: &TrackSnapshot) {
 /// Bounded undo/redo stack.
 #[derive(Debug, Clone, Default)]
 pub struct EditHistory {
-    undo_stack: Vec<EditCommand>,
-    redo_stack: Vec<EditCommand>,
+    undo_stack: VecDeque<EditCommand>,
+    redo_stack: VecDeque<EditCommand>,
     max_steps: usize,
 }
 
 impl EditHistory {
     pub fn new(max_steps: usize) -> Self {
         Self {
-            undo_stack: Vec::new(),
-            redo_stack: Vec::new(),
+            undo_stack: VecDeque::new(),
+            redo_stack: VecDeque::new(),
             max_steps: max_steps.max(1),
         }
     }
 
     pub fn push(&mut self, cmd: EditCommand) {
-        self.undo_stack.push(cmd);
+        self.undo_stack.push_back(cmd);
         if self.undo_stack.len() > self.max_steps {
-            self.undo_stack.remove(0);
+            self.undo_stack.pop_front();
         }
         self.redo_stack.clear();
     }
 
     pub fn undo(&mut self, state: &mut TimelineState) -> bool {
-        let Some(cmd) = self.undo_stack.pop() else {
+        let Some(cmd) = self.undo_stack.pop_back() else {
             return false;
         };
         cmd.undo(state);
-        self.redo_stack.push(cmd);
+        self.redo_stack.push_back(cmd);
         true
     }
 
     pub fn redo(&mut self, state: &mut TimelineState) -> bool {
-        let Some(cmd) = self.redo_stack.pop() else {
+        let Some(cmd) = self.redo_stack.pop_back() else {
             return false;
         };
         cmd.execute(state);
-        self.undo_stack.push(cmd);
+        self.undo_stack.push_back(cmd);
         true
     }
 

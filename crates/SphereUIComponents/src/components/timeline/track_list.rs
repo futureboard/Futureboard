@@ -1,5 +1,8 @@
 use gpui::{div, px, IntoElement, ParentElement, Styled};
 
+use crate::components::timeline::audio_clip::{
+    AudioClipProcessCommitCb, AudioClipProcessPreviewCb,
+};
 use crate::components::timeline::automation_control_lane::{
     automation_control_lane, AutomationControlCallback,
 };
@@ -60,6 +63,8 @@ pub fn track_list(
         std::sync::Arc<dyn Fn(&String, &mut gpui::Window, &mut gpui::App) + 'static>,
     >,
     erase_preview_ids: Option<&std::collections::HashSet<String>>,
+    on_audio_clip_process_preview: AudioClipProcessPreviewCb,
+    on_audio_clip_process_commit: AudioClipProcessCommitCb,
     on_automation_down: Option<AutomationDownCallback>,
     on_automation_lane_action: Option<AutomationLaneActionCallback>,
     on_automation_hover: Option<AutomationHoverCallback>,
@@ -224,6 +229,8 @@ pub fn track_list(
                                 on_erase_start.clone(),
                                 on_erase_clip.clone(),
                                 erase_preview_ids,
+                                on_audio_clip_process_preview.clone(),
+                                on_audio_clip_process_commit.clone(),
                             )),
                     )
                     .child(track_row_resize_handle(

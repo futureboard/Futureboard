@@ -127,7 +127,7 @@ pub fn sidebar(
         } else {
             Colors::border_subtle()
         })
-        .bg(Colors::surface_panel())
+        .bg(Colors::surface_panel_alt())
         .child(
             div()
                 .text_color(if active {
@@ -136,7 +136,7 @@ pub fn sidebar(
                     Colors::tab_text()
                 })
                 .text_size(px(10.0))
-                .font_weight(gpui::FontWeight::BOLD)
+                .font_weight(gpui::FontWeight::SEMIBOLD)
                 .child("BROWSER"),
         )
         .child(div().flex_1())
@@ -188,13 +188,13 @@ pub fn sidebar(
         .py(px(5.0))
         .border_b(px(1.0))
         .border_color(Colors::border_subtle())
-        .bg(Colors::surface_panel())
+        .bg(Colors::surface_panel_alt())
         .child(
             svg()
                 .path(assets::ICON_SEARCH_PATH)
                 .w(px(11.0))
                 .h(px(11.0))
-                .text_color(Colors::text_faint()),
+                .text_color(Colors::text_muted()),
         )
         .child(
             div()
@@ -274,7 +274,7 @@ pub fn sidebar(
         .items_center()
         .gap(px(6.0))
         .px(px(8.0))
-        .py(px(4.0))
+        .h(px(24.0))
         .border_t(px(1.0))
         .border_color(Colors::border_subtle())
         .bg(Colors::surface_input())
@@ -282,7 +282,7 @@ pub fn sidebar(
             div()
                 .text_size(px(8.5))
                 .font_weight(gpui::FontWeight::SEMIBOLD)
-                .text_color(Colors::text_faint())
+                .text_color(Colors::text_muted())
                 .child("SEL"),
         )
         .child(
@@ -502,7 +502,7 @@ fn group_header_row(
                 .path(chevron)
                 .w(px(9.0))
                 .h(px(9.0))
-                .text_color(Colors::text_faint()),
+                .text_color(Colors::text_muted()),
         )
         .child(
             div()
@@ -510,9 +510,9 @@ fn group_header_row(
                 .min_w(px(0.0))
                 .overflow_hidden()
                 .truncate()
-                .text_size(px(9.0))
+                .text_size(px(9.5))
                 .font_weight(gpui::FontWeight::SEMIBOLD)
-                .text_color(Colors::text_faint())
+                .text_color(Colors::text_muted())
                 .child(node.label.to_uppercase()),
         )
         .on_click(move |_e, w, cx| {
@@ -523,6 +523,7 @@ fn group_header_row(
 /// Non-interactive empty-state / hint row (honest "no provider yet" state).
 fn info_row(node: &BrowserVisibleNode) -> impl IntoElement {
     let depth = node.depth as f32;
+    let is_error = node.error.is_some();
     div()
         .flex()
         .flex_row()
@@ -533,8 +534,16 @@ fn info_row(node: &BrowserVisibleNode) -> impl IntoElement {
         .pr(px(6.0))
         .child(
             div()
-                .text_size(px(10.0))
-                .text_color(Colors::text_faint())
+                .flex_1()
+                .min_w(px(0.0))
+                .overflow_hidden()
+                .truncate()
+                .text_size(px(9.5))
+                .text_color(if is_error {
+                    Colors::status_warning()
+                } else {
+                    Colors::text_faint()
+                })
                 .child(node.label.clone()),
         )
 }
@@ -567,7 +576,7 @@ fn tree_row(
     let row_height = TREE_ROW_HEIGHT;
 
     let bg = if selected {
-        Colors::accent_soft()
+        Colors::surface_selected()
     } else {
         gpui::transparent_black().into()
     };
@@ -631,7 +640,13 @@ fn tree_row(
         .bg(bg)
         .id(("browser-tree-row", index))
         .cursor(gpui::CursorStyle::PointingHand)
-        .hover(|s| s.bg(Colors::surface_hover()))
+        .hover(move |s| {
+            s.bg(if selected {
+                Colors::surface_pressed()
+            } else {
+                Colors::surface_hover()
+            })
+        })
         .children(indent_guides)
         .child(if selected {
             div()

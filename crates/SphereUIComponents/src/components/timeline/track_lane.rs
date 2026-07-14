@@ -1,5 +1,7 @@
 use crate::components::sidebar::SIDEBAR_WIDTH;
-use crate::components::timeline::audio_clip::audio_clip;
+use crate::components::timeline::audio_clip::{
+    audio_clip, AudioClipProcessCommitCb, AudioClipProcessPreviewCb,
+};
 use crate::components::timeline::midi_clip::midi_clip;
 use crate::components::timeline::timeline_state::{
     ClipState, ClipType, TimelineState, TimelineTool, TrackState, HEADER_WIDTH,
@@ -37,6 +39,8 @@ pub fn track_lane(
         std::sync::Arc<dyn Fn(&String, &mut gpui::Window, &mut gpui::App) + 'static>,
     >,
     erase_preview_ids: Option<&std::collections::HashSet<String>>,
+    on_audio_clip_process_preview: AudioClipProcessPreviewCb,
+    on_audio_clip_process_commit: AudioClipProcessCommitCb,
 ) -> impl IntoElement {
     let _s = crate::perf::PerfScope::enter("TrackLane");
     let track_id = track.id.clone();
@@ -82,6 +86,8 @@ pub fn track_lane(
                 .unwrap_or(false);
             let auto_crossfade_in = audio_auto_crossfade_in_beats(track, clip);
             let auto_crossfade_out = audio_auto_crossfade_out_beats(track, clip);
+            let on_process_preview = on_audio_clip_process_preview.clone();
+            let on_process_commit = on_audio_clip_process_commit.clone();
             Some(match clip.clip_type {
                 ClipType::Audio { .. } => audio_clip(
                     clip,
@@ -96,6 +102,8 @@ pub fn track_lane(
                     erase_target,
                     auto_crossfade_in,
                     auto_crossfade_out,
+                    on_process_preview,
+                    on_process_commit,
                 )
                 .into_any_element(),
                 ClipType::Midi { .. } => midi_clip(
@@ -195,6 +203,20 @@ fn renderable_audio_clip(clip: &ClipState) -> bool {
     )
 }
 
+fn ordered_audio_overlap_beats(
+    left_start: f32,
+    left_duration: f32,
+    right_start: f32,
+    right_duration: f32,
+) -> f32 {
+    if right_start < left_start {
+        return 0.0;
+    }
+    let overlap_start = left_start.max(right_start);
+    let overlap_end = (left_start + left_duration).min(right_start + right_duration);
+    (overlap_end - overlap_start).max(0.0)
+}
+
 fn audio_auto_crossfade_in_beats(track: &TrackState, clip: &ClipState) -> f32 {
     if !renderable_audio_clip(clip) {
         return 0.0;
@@ -203,13 +225,13 @@ fn audio_auto_crossfade_in_beats(track: &TrackState, clip: &ClipState) -> f32 {
         .clips
         .iter()
         .filter(|candidate| candidate.id != clip.id && renderable_audio_clip(candidate))
-        .filter_map(|candidate| {
-            let candidate_end = candidate.start_beat + candidate.duration_beats;
-            let clip_end = clip.start_beat + clip.duration_beats;
-            let overlap_start = candidate.start_beat.max(clip.start_beat);
-            let overlap_end = candidate_end.min(clip_end);
-            (candidate.start_beat <= clip.start_beat && overlap_end > overlap_start)
-                .then_some(overlap_end - overlap_start)
+        .map(|candidate| {
+            ordered_audio_overlap_beats(
+                candidate.start_beat,
+                candidate.duration_beats,
+                clip.start_beat,
+                clip.duration_beats,
+            )
         })
         .fold(0.0, f32::max)
 }
@@ -222,13 +244,25 @@ fn audio_auto_crossfade_out_beats(track: &TrackState, clip: &ClipState) -> f32 {
         .clips
         .iter()
         .filter(|candidate| candidate.id != clip.id && renderable_audio_clip(candidate))
-        .filter_map(|candidate| {
-            let clip_end = clip.start_beat + clip.duration_beats;
-            let candidate_end = candidate.start_beat + candidate.duration_beats;
-            let overlap_start = clip.start_beat.max(candidate.start_beat);
-            let overlap_end = clip_end.min(candidate_end);
-            (candidate.start_beat >= clip.start_beat && overlap_end > overlap_start)
-                .then_some(overlap_end - overlap_start)
+        .map(|candidate| {
+            ordered_audio_overlap_beats(
+                clip.start_beat,
+                clip.duration_beats,
+                candidate.start_beat,
+                candidate.duration_beats,
+            )
         })
         .fold(0.0, f32::max)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ordered_audio_overlap_beats;
+
+    #[test]
+    fn ordered_overlap_drives_crossfade_length() {
+        assert!((ordered_audio_overlap_beats(0.0, 4.0, 3.0, 4.0) - 1.0).abs() < 1.0e-6);
+        assert_eq!(ordered_audio_overlap_beats(0.0, 2.0, 2.0, 2.0), 0.0);
+        assert_eq!(ordered_audio_overlap_beats(4.0, 2.0, 3.0, 2.0), 0.0);
+    }
 }

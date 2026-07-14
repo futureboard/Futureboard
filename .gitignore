@@ -118,3 +118,6 @@ references
 
 
 crates/SphereUIComponents/recent-test.json
+
+.discordrpcsecret
+.env

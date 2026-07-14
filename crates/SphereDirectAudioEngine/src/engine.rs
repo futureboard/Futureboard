@@ -11,7 +11,7 @@
 //!     `Relaxed` ordering, which is sufficient for meter display purposes.
 //!   - Stream lifecycle (open/close) is guarded by `parking_lot::Mutex`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, OnceLock};
 
@@ -55,6 +55,11 @@ use crate::vst3_processor::RuntimeTransportContext;
 // ── Version ───────────────────────────────────────────────────────────────────
 
 pub const ENGINE_VERSION: &str = "0.1.0";
+
+/// Keep a few sources that just disappeared from the arrangement so a normal
+/// delete/undo cycle can reuse the open mapping or decoded buffer. Active
+/// sources do not count toward this limit.
+const MAX_INACTIVE_AUDIO_CACHE_ENTRIES: usize = 4;
 
 fn command_debug_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
@@ -627,6 +632,7 @@ pub struct EngineInner {
     // Prepared render graph shared with new streams and pushed to callbacks.
     runtime: Mutex<RuntimeProject>,
     audio_cache: Mutex<HashMap<String, Arc<ClipAudioSource>>>,
+    inactive_audio_cache_lru: Mutex<VecDeque<String>>,
 
     // DAUx config & glitch counter (shared with audio thread for diagnostics).
     glitch_counter: Arc<AtomicU64>,
@@ -694,6 +700,7 @@ impl EngineInner {
             project: Mutex::new(None),
             runtime: Mutex::new(RuntimeProject::default()),
             audio_cache: Mutex::new(HashMap::new()),
+            inactive_audio_cache_lru: Mutex::new(VecDeque::new()),
             glitch_counter: Arc::new(AtomicU64::new(0)),
             daux_config: Mutex::new(DauxDeviceConfig::default()),
             recording: Mutex::new(None),
@@ -1672,6 +1679,16 @@ impl EngineInner {
             self.shared.playing.load(Ordering::Relaxed)
         );
         let output_sample_rate = self.shared.sample_rate.load(Ordering::Relaxed).max(1);
+        let previously_active_paths: Vec<String> = self
+            .project
+            .lock()
+            .as_ref()
+            .into_iter()
+            .flat_map(|project| project.clips.iter())
+            .filter_map(|clip| clip.media_path.as_deref())
+            .filter(|path| !path.is_empty())
+            .map(str::to_owned)
+            .collect();
 
         // Log how many clips have paths before building runtime.
         let clips_with_path = snapshot
@@ -1727,15 +1744,35 @@ impl EngineInner {
                 self.pdc_enabled(),
             ) {
                 Ok(project) => {
-                    // Evict cache entries no longer referenced by any clip in the new snapshot.
-                    // This keeps memory bounded when clips are removed between project loads.
-                    let active_paths: std::collections::HashSet<&str> = snapshot
+                    // Keep recently removed sources warm for delete/undo. Opening
+                    // a large mapped or streaming source again can take long
+                    // enough to make undo appear stuck. The inactive LRU remains
+                    // bounded, while every source still used by the project is
+                    // retained independently of that limit.
+                    let active_paths: HashSet<String> = snapshot
                         .clips
                         .iter()
                         .filter_map(|c| c.media_path.as_deref())
                         .filter(|p| !p.is_empty())
+                        .map(str::to_owned)
                         .collect();
-                    audio_cache.retain(|path, _| active_paths.contains(path.as_str()));
+                    let mut inactive_lru = self.inactive_audio_cache_lru.lock();
+                    inactive_lru.retain(|path| !active_paths.contains(path));
+                    for path in &previously_active_paths {
+                        if !active_paths.contains(path)
+                            && audio_cache.contains_key(path)
+                            && !inactive_lru.contains(path)
+                        {
+                            inactive_lru.push_back(path.clone());
+                        }
+                    }
+                    while inactive_lru.len() > MAX_INACTIVE_AUDIO_CACHE_ENTRIES {
+                        if let Some(path) = inactive_lru.pop_front() {
+                            if !active_paths.contains(&path) {
+                                audio_cache.remove(&path);
+                            }
+                        }
+                    }
                     project
                 }
                 Err(e) => {

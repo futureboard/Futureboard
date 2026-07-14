@@ -15,7 +15,7 @@ members = [
     "crates/SpherePluginHost",
     "crates/SphereSoundfontPlayer",
     "crates/SphereUIComponents",
-    "crates/SphereWebAudioCore", "crates/SpherePackageInstaller", "apps/native/apakinstaller", "crates/SphereAudioProcessor", "crates/SphereMidiService",
+    "crates/SphereWebAudioCore", "crates/SpherePackageInstaller", "apps/native/apakinstaller", "crates/SphereAudioProcessor", "crates/SphereMidiService", "crates/SphereDiscordRPC", "crates/SphereWebView",
 ]
 
 exclude = [
@@ -61,6 +61,14 @@ sphere-graphic-engine = { path = "crates/SphereGraphicEngine" }
 sphere-midi-service = { path = "crates/SphereMidiService", package = "SphereMidiService" }
 sphere-plugin-host = { path = "crates/SpherePluginHost", default-features = false }
 sphere-soundfont-player = { path = "crates/SphereSoundfontPlayer", package = "SphereSoundfontPlayer" }
+sphere-discord-rpc = { path = "crates/SphereDiscordRPC", package = "SphereDiscordRPC" }
+sphere-webview = { path = "crates/SphereWebView", package = "SphereWebView" }
+
+# CEF 150.0.11 bindings have not reached crates.io yet. Keep the exact upstream
+# revision that declares workspace version 150.1.0+150.0.11.
+cef = { git = "https://github.com/tauri-apps/cef-rs.git", rev = "8c8af8cb5a6b4cce994d5745d031b0196959c22f", default-features = false }
+download-cef = "2.3.2"
+ureq = "3"
 
 
 # =============================================================================
@@ -234,7 +242,9 @@ core-foundation-sys = "0.8.6"
 mach2 = "0.5"
 metal = "0.33"
 objc = "0.2"
+objc2 = "0.6"
 objc2-app-kit = { version = "0.3", default-features = false, features = ["NSGraphics"] }
+objc2-foundation = "0.3"
 
 
 # =============================================================================
@@ -308,6 +318,8 @@ windows = { version = "0.61", features = [
     "Win32_UI_Shell_PropertiesSystem",
     "Win32_UI_WindowsAndMessaging",
 ] }
+windows-sys = "0.61"
+x11-dl = "2"
 windows-core = "0.61"
 
 

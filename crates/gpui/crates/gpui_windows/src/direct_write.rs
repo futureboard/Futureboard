@@ -314,6 +314,7 @@ impl DirectWriteState {
                         font,
                         font_collection,
                         &components.factory,
+                        &this.custom_font_collection,
                         &this.system_font_collection,
                         &components.system_ui_font_name,
                     )
@@ -388,6 +389,7 @@ impl DirectWriteState {
     fn generate_font_fallbacks(
         fallbacks: &FontFallbacks,
         factory: &IDWriteFactory5,
+        custom_font_collection: &IDWriteFontCollection1,
         system_font_collection: &IDWriteFontCollection1,
     ) -> Result<Option<IDWriteFontFallback>> {
         let fallback_list = fallbacks.fallback_list();
@@ -396,46 +398,59 @@ impl DirectWriteState {
         }
         unsafe {
             let builder = factory.CreateFontFallbackBuilder()?;
-            let font_set = &system_font_collection.GetFontSet()?;
             let mut unicode_ranges = Vec::new();
             for family_name in fallback_list {
                 let family_name = HSTRING::from(family_name);
-                let Some(fonts) = font_set
-                    .GetMatchingFonts(
-                        &family_name,
-                        DWRITE_FONT_WEIGHT_NORMAL,
-                        DWRITE_FONT_STRETCH_NORMAL,
-                        DWRITE_FONT_STYLE_NORMAL,
-                    )
-                    .log_err()
-                else {
-                    continue;
-                };
-                let Ok(font_face) = fonts.GetFontFaceReference(0) else {
-                    continue;
-                };
-                let font = font_face.CreateFontFace()?;
-                let mut count = 0;
-                font.GetUnicodeRanges(None, &mut count).ok();
-                if count == 0 {
-                    continue;
+                // A fallback family can come from `add_fonts`, not only from
+                // Windows. Bind each mapping to the collection that actually
+                // owns the face; passing `None` makes DirectWrite search only
+                // the system collection and silently drops embedded fallbacks.
+                for collection in [custom_font_collection, system_font_collection] {
+                    let Some(font_set) = collection.GetFontSet().log_err() else {
+                        continue;
+                    };
+                    let Some(fonts) = font_set
+                        .GetMatchingFonts(
+                            &family_name,
+                            DWRITE_FONT_WEIGHT_NORMAL,
+                            DWRITE_FONT_STRETCH_NORMAL,
+                            DWRITE_FONT_STYLE_NORMAL,
+                        )
+                        .log_err()
+                    else {
+                        continue;
+                    };
+                    if fonts.GetFontCount() == 0 {
+                        continue;
+                    }
+                    let Ok(font_face) = fonts.GetFontFaceReference(0) else {
+                        continue;
+                    };
+                    let font = font_face.CreateFontFace()?;
+                    let mut count = 0;
+                    font.GetUnicodeRanges(None, &mut count).ok();
+                    if count == 0 {
+                        continue;
+                    }
+                    unicode_ranges.clear();
+                    unicode_ranges.resize_with(count as usize, DWRITE_UNICODE_RANGE::default);
+                    let Some(_) = font
+                        .GetUnicodeRanges(Some(&mut unicode_ranges), &mut count)
+                        .log_err()
+                    else {
+                        continue;
+                    };
+                    let fallback_collection: IDWriteFontCollection = collection.cast()?;
+                    builder.AddMapping(
+                        &unicode_ranges,
+                        &[family_name.as_ptr()],
+                        &fallback_collection,
+                        None,
+                        None,
+                        1.0,
+                    )?;
+                    break;
                 }
-                unicode_ranges.clear();
-                unicode_ranges.resize_with(count as usize, DWRITE_UNICODE_RANGE::default);
-                let Some(_) = font
-                    .GetUnicodeRanges(Some(&mut unicode_ranges), &mut count)
-                    .log_err()
-                else {
-                    continue;
-                };
-                builder.AddMapping(
-                    &unicode_ranges,
-                    &[family_name.as_ptr()],
-                    None,
-                    None,
-                    None,
-                    1.0,
-                )?;
             }
             let system_fallbacks = factory.GetSystemFontFallback()?;
             builder.AddMappings(&system_fallbacks)?;
@@ -462,6 +477,7 @@ impl DirectWriteState {
         }: &Font,
         collection: &IDWriteFontCollection1,
         factory: &IDWriteFactory5,
+        custom_font_collection: &IDWriteFontCollection1,
         system_font_collection: &IDWriteFontCollection1,
         system_ui_font_name: &SharedString,
     ) -> Option<FontInfo> {
@@ -491,9 +507,14 @@ impl DirectWriteState {
                 let direct_write_features =
                     unsafe { Self::generate_font_features(factory, features).log_err()? };
                 let fallbacks = fallbacks.as_ref().and_then(|fallbacks| {
-                    Self::generate_font_fallbacks(fallbacks, factory, system_font_collection)
-                        .log_err()
-                        .flatten()
+                    Self::generate_font_fallbacks(
+                        fallbacks,
+                        factory,
+                        custom_font_collection,
+                        system_font_collection,
+                    )
+                    .log_err()
+                    .flatten()
                 });
                 let font_info = FontInfo {
                     font_family_h: font_family_h.clone(),

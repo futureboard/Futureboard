@@ -480,16 +480,6 @@ struct StartRow {
     action: WelcomeAction,
 }
 
-fn focus_ring_shadow() -> Vec<gpui::BoxShadow> {
-    vec![gpui::BoxShadow {
-        color: Colors::accent_focus().into(),
-        offset: gpui::point(px(0.0), px(0.0)),
-        blur_radius: px(0.0),
-        spread_radius: px(1.0),
-        inset: false,
-    }]
-}
-
 fn start_rows() -> Vec<StartRow> {
     let modifier = if cfg!(target_os = "macos") {
         "Cmd"
@@ -626,8 +616,8 @@ fn welcome_header(version: SharedString) -> impl IntoElement {
         .items_center()
         .justify_between()
         .gap(px(16.0))
-        .h(px(72.0))
-        .px(px(20.0))
+        .h(px(58.0))
+        .px(px(16.0))
         .border_b(px(1.0))
         .border_color(Colors::border_subtle())
         .bg(Colors::surface_panel())
@@ -635,35 +625,35 @@ fn welcome_header(version: SharedString) -> impl IntoElement {
             div()
                 .flex()
                 .items_center()
-                .gap(px(12.0))
+                .gap(px(10.0))
                 .min_w_0()
                 .child(
                     div()
                         .flex()
                         .items_center()
                         .justify_center()
-                        .w(px(42.0))
-                        .h(px(42.0))
-                        .rounded_md()
+                        .w(px(32.0))
+                        .h(px(32.0))
+                        .rounded_sm()
                         .overflow_hidden()
                         .border(px(1.0))
                         .border_color(Colors::border_default())
                         .child(
                             img(SharedString::from(APP_LOGO_PATH))
-                                .w(px(42.0))
-                                .h(px(42.0)),
+                                .w(px(32.0))
+                                .h(px(32.0)),
                         ),
                 )
                 .child(
                     div()
                         .flex()
                         .flex_col()
-                        .gap(px(4.0))
+                        .gap(px(2.0))
                         .min_w_0()
                         .child(
                             div()
                                 .truncate()
-                                .text_size(px(17.0))
+                                .text_size(px(15.0))
                                 .font_weight(gpui::FontWeight::SEMIBOLD)
                                 .text_color(Colors::text_primary())
                                 .child("Futureboard Studio"),
@@ -671,7 +661,7 @@ fn welcome_header(version: SharedString) -> impl IntoElement {
                         .child(
                             div()
                                 .truncate()
-                                .text_size(px(11.0))
+                                .text_size(px(10.5))
                                 .text_color(Colors::text_muted())
                                 .child("Create, open, or continue."),
                         ),
@@ -691,13 +681,14 @@ fn left_rail(cx: &mut Context<WelcomeWindow>, active: &StartupNav) -> impl IntoE
     div()
         .flex()
         .flex_col()
-        .w(px(176.0))
+        .w(px(164.0))
         .flex_none()
         .border_r(px(1.0))
         .border_color(Colors::border_subtle())
         .bg(Colors::surface_sidebar())
-        .p(px(8.0))
-        .gap(px(2.0))
+        .px(px(6.0))
+        .py(px(8.0))
+        .gap(px(1.0))
         .child(rail_item(
             cx,
             StartupNav::Welcome,
@@ -769,15 +760,15 @@ fn rail_item(
         .flex()
         .items_center()
         .gap(px(8.0))
-        .h(px(30.0))
-        .px(px(8.0))
-        .rounded_md()
+        .h(px(28.0))
+        .px(px(7.0))
+        .rounded_sm()
         .bg(if is_active {
-            Colors::surface_card_selected()
+            Colors::surface_selected()
         } else {
             Colors::surface_sidebar()
         })
-        .border_l(px(if is_active { 3.0 } else { 0.0 }))
+        .border_l(px(if is_active { 2.0 } else { 0.0 }))
         .border_color(Colors::accent_primary())
         .cursor(gpui::CursorStyle::PointingHand)
         .hover(|style| style.bg(Colors::surface_card_hover()))
@@ -794,8 +785,8 @@ fn rail_item(
         .child(
             svg()
                 .path(icon)
-                .w(px(13.0))
-                .h(px(13.0))
+                .w(px(12.0))
+                .h(px(12.0))
                 .text_color(if is_active {
                     Colors::text_primary()
                 } else {
@@ -804,7 +795,7 @@ fn rail_item(
         )
         .child(
             div()
-                .text_size(px(11.0))
+                .text_size(px(10.5))
                 .font_weight(if is_active {
                     gpui::FontWeight::SEMIBOLD
                 } else {
@@ -828,8 +819,8 @@ fn center_actions(
     let mut rows = div()
         .flex()
         .flex_col()
-        .gap(px(7.0))
-        .max_w(px(560.0))
+        .gap(px(4.0))
+        .max_w(px(620.0))
         .w_full();
     for (index, row) in start_rows().into_iter().enumerate() {
         let target = cx.entity().clone();
@@ -875,15 +866,15 @@ fn center_actions(
         .flex_col()
         .flex_1()
         .min_w_0()
-        .p(px(16.0))
-        .gap(px(12.0))
+        .p(px(20.0))
+        .gap(px(10.0))
         .bg(Colors::surface_panel())
         .child(section_label("Start"))
         .child(rows)
         .child(
             div()
                 .mt(px(2.0))
-                .max_w(px(560.0))
+                .max_w(px(620.0))
                 .w_full()
                 .child(continue_row(continue_selected, move |window, cx| {
                     let _ = target.update(cx, |this, cx| {
@@ -1283,44 +1274,54 @@ fn start_row(
 ) -> impl IntoElement {
     div()
         .id(("welcome-start-row", index))
+        .relative()
         .flex()
         .flex_row()
         .items_center()
-        .gap(px(10.0))
-        .min_h(px(58.0))
+        .gap(px(9.0))
+        .min_h(px(50.0))
         .border(px(1.0))
-        .border_l(px(if selected { 3.0 } else { 1.0 }))
         .border_color(if selected {
-            Colors::accent_primary()
+            Colors::border_normal()
         } else {
             Colors::border_subtle()
         })
-        .rounded_md()
+        .rounded_sm()
         .bg(if selected {
-            Colors::surface_card_selected()
+            Colors::surface_selected()
         } else {
-            Colors::surface_card()
+            Colors::surface_panel()
         })
-        .when(selected, |row| row.shadow(focus_ring_shadow()))
-        .px(px(11.0))
-        .py(px(8.0))
+        .px(px(9.0))
+        .py(px(6.0))
         .cursor(gpui::CursorStyle::PointingHand)
         .hover(|style| style.bg(Colors::surface_card_hover()))
         .on_mouse_down(gpui::MouseButton::Left, move |_event, window, cx| {
             on_click(window, cx);
+        })
+        .when(selected, |item| {
+            item.child(
+                div()
+                    .absolute()
+                    .left_0()
+                    .top(px(5.0))
+                    .bottom(px(5.0))
+                    .w(px(2.0))
+                    .bg(Colors::accent_primary()),
+            )
         })
         .child(row_icon(row.icon))
         .child(
             div()
                 .flex()
                 .flex_col()
-                .gap(px(3.0))
+                .gap(px(2.0))
                 .min_w_0()
                 .flex_1()
                 .child(
                     div()
                         .truncate()
-                        .text_size(px(12.0))
+                        .text_size(px(11.5))
                         .font_weight(gpui::FontWeight::SEMIBOLD)
                         .text_color(Colors::text_primary())
                         .child(row.title),
@@ -1328,7 +1329,7 @@ fn start_row(
                 .child(
                     div()
                         .truncate()
-                        .text_size(px(10.5))
+                        .text_size(px(10.0))
                         .text_color(Colors::text_muted())
                         .child(row.description),
                 ),
@@ -1342,40 +1343,50 @@ fn continue_row(
 ) -> impl IntoElement {
     div()
         .id("welcome-continue-row")
+        .relative()
         .flex()
         .items_center()
-        .gap(px(10.0))
-        .min_h(px(50.0))
-        .rounded_md()
+        .gap(px(9.0))
+        .min_h(px(46.0))
+        .rounded_sm()
         .border(px(1.0))
-        .border_l(px(if selected { 3.0 } else { 1.0 }))
         .border_color(if selected {
-            Colors::accent_primary()
+            Colors::border_normal()
         } else {
             Colors::border_subtle()
         })
         .bg(if selected {
-            Colors::surface_card_selected()
+            Colors::surface_selected()
         } else {
-            Colors::surface_card()
+            Colors::surface_panel()
         })
-        .when(selected, |row| row.shadow(focus_ring_shadow()))
-        .px(px(11.0))
+        .px(px(9.0))
         .cursor(gpui::CursorStyle::PointingHand)
         .hover(|style| style.bg(Colors::surface_card_hover()))
         .on_mouse_down(gpui::MouseButton::Left, move |_event, window, cx| {
             on_click(window, cx);
+        })
+        .when(selected, |item| {
+            item.child(
+                div()
+                    .absolute()
+                    .left_0()
+                    .top(px(5.0))
+                    .bottom(px(5.0))
+                    .w(px(2.0))
+                    .bg(Colors::accent_primary()),
+            )
         })
         .child(row_icon(assets::ICON_CORNER_DOWN_LEFT_PATH))
         .child(
             div()
                 .flex()
                 .flex_col()
-                .gap(px(3.0))
+                .gap(px(2.0))
                 .min_w_0()
                 .child(
                     div()
-                        .text_size(px(12.0))
+                        .text_size(px(11.5))
                         .font_weight(gpui::FontWeight::SEMIBOLD)
                         .text_color(Colors::text_primary())
                         .child("Continue Without Project"),
@@ -1383,7 +1394,7 @@ fn continue_row(
                 .child(
                     div()
                         .truncate()
-                        .text_size(px(10.5))
+                        .text_size(px(10.0))
                         .text_color(Colors::text_muted())
                         .child("Use source files until you save"),
                 ),
@@ -1648,7 +1659,7 @@ fn right_panel(
             .child("No recent projects yet")
             .into_any_element()
     } else {
-        let mut list = div().flex().flex_col().gap(px(6.0));
+        let mut list = div().flex().flex_col().gap(px(3.0));
         for (index, item) in recent.iter().cloned().enumerate() {
             let target = cx.entity().clone();
             let on_action = callbacks.on_action.clone();
@@ -1674,14 +1685,15 @@ fn right_panel(
     div()
         .flex()
         .flex_col()
-        .w(px(340.0))
+        .w(px(320.0))
         .flex_none()
         .min_h_0()
         .border_l(px(1.0))
         .border_color(Colors::border_subtle())
         .bg(Colors::surface_sidebar())
-        .p(px(12.0))
-        .gap(px(10.0))
+        .px(px(12.0))
+        .py(px(10.0))
+        .gap(px(8.0))
         .child(section_label("Recent"))
         .child(
             div()
@@ -1784,27 +1796,26 @@ fn recent_row(
     let last_opened = format_last_opened(recent.last_opened_at);
     div()
         .id(("welcome-recent-row", index))
+        .relative()
         .flex()
         .flex_col()
-        .gap(px(3.0))
-        .min_h(px(54.0))
-        .rounded_md()
+        .gap(px(2.0))
+        .min_h(px(48.0))
+        .rounded_sm()
         .border(px(1.0))
-        .border_l(px(if selected { 3.0 } else { 1.0 }))
         .border_color(if selected {
-            Colors::accent_primary()
+            Colors::border_normal()
         } else {
             Colors::border_subtle()
         })
         .bg(if selected {
-            Colors::surface_card_selected()
+            Colors::surface_selected()
         } else {
-            Colors::surface_card()
+            Colors::surface_sidebar()
         })
-        .when(selected, |row| row.shadow(focus_ring_shadow()))
         .opacity(if missing { 0.48 } else { 1.0 })
-        .px(px(10.0))
-        .py(px(8.0))
+        .px(px(9.0))
+        .py(px(6.0))
         .cursor(if missing {
             gpui::CursorStyle::Arrow
         } else {
@@ -1822,6 +1833,17 @@ fn recent_row(
                 on_click(path.clone(), window, cx);
             })
         })
+        .when(selected, |item| {
+            item.child(
+                div()
+                    .absolute()
+                    .left_0()
+                    .top(px(5.0))
+                    .bottom(px(5.0))
+                    .w(px(2.0))
+                    .bg(Colors::accent_primary()),
+            )
+        })
         .child(
             div()
                 .flex()
@@ -1833,7 +1855,7 @@ fn recent_row(
                         .truncate()
                         .min_w_0()
                         .flex_1()
-                        .text_size(px(11.5))
+                        .text_size(px(11.0))
                         .font_weight(gpui::FontWeight::SEMIBOLD)
                         .text_color(Colors::text_primary())
                         .child(recent.name),
@@ -1865,7 +1887,7 @@ fn recent_row(
         .child(
             div()
                 .truncate()
-                .text_size(px(10.0))
+                .text_size(px(9.5))
                 .text_color(Colors::text_muted())
                 .child(path_label),
         )
@@ -2002,10 +2024,10 @@ fn section_label(label: &'static str) -> impl IntoElement {
         .h(px(22.0))
         .flex()
         .items_center()
-        .text_size(px(10.0))
+        .text_size(px(9.0))
         .font_weight(gpui::FontWeight::SEMIBOLD)
         .text_color(Colors::text_muted())
-        .child(label)
+        .child(label.to_uppercase())
 }
 
 fn row_icon(path: &'static str) -> impl IntoElement {
@@ -2014,17 +2036,17 @@ fn row_icon(path: &'static str) -> impl IntoElement {
         .flex()
         .items_center()
         .justify_center()
-        .w(px(32.0))
-        .h(px(32.0))
-        .rounded_md()
+        .w(px(28.0))
+        .h(px(28.0))
+        .rounded_sm()
         .border(px(1.0))
         .border_color(Colors::border_subtle())
         .bg(Colors::surface_badge())
         .child(
             svg()
                 .path(path)
-                .w(px(14.0))
-                .h(px(14.0))
+                .w(px(13.0))
+                .h(px(13.0))
                 .text_color(Colors::text_secondary()),
         )
 }
@@ -2032,14 +2054,8 @@ fn row_icon(path: &'static str) -> impl IntoElement {
 fn shortcut_badge(shortcut: String) -> impl IntoElement {
     div()
         .flex_none()
-        .rounded_sm()
-        .border(px(1.0))
-        .border_color(Colors::border_subtle())
-        .bg(Colors::surface_code())
-        .px(px(7.0))
-        .py(px(3.0))
-        .text_size(px(9.5))
-        .font_weight(gpui::FontWeight::MEDIUM)
-        .text_color(Colors::text_muted())
+        .px(px(4.0))
+        .text_size(px(9.0))
+        .text_color(Colors::text_faint())
         .child(shortcut)
 }

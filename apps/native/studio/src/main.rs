@@ -30,6 +30,39 @@ fn main() {
     // app-visible plugin window from spawning a stray taskbar identity.
     sphere_ui_components::plugin_host_lifecycle::set_futureboard_app_user_model_id();
 
+    // Discord IPC is optional and never runs on the GPUI thread. Production
+    // builds can bake in FUTUREBOARD_DISCORD_CLIENT_ID; development builds may
+    // provide it at runtime. Missing Discord/config must not block app startup.
+    let discord_rpc_enabled = sphere_ui_components::settings::SettingsSchema::load_from_disk()
+        .general
+        .discord_rpc_enabled;
+    let discord_application_id = std::env::var("FUTUREBOARD_DISCORD_CLIENT_ID")
+        .ok()
+        .or_else(|| option_env!("FUTUREBOARD_DISCORD_CLIENT_ID").map(str::to_owned));
+    let discord_rpc = discord_application_id
+        .and_then(|application_id| {
+            sphere_discord_rpc::DiscordRpcConfig::from_application_id(
+                application_id,
+                env!("CARGO_PKG_VERSION"),
+            )
+        })
+        .and_then(|config| {
+            match sphere_discord_rpc::DiscordRpc::start(
+                config,
+                sphere_discord_rpc::Presence::Welcome,
+                discord_rpc_enabled,
+            ) {
+                Ok(rpc) => {
+                    app::install_discord_rpc(rpc.handle());
+                    Some(rpc)
+                }
+                Err(error) => {
+                    boot::log(&format!("Discord RPC disabled: {error}"));
+                    None
+                }
+            }
+        });
+
     // Catch any panic that escapes the GPUI render loop so we see *why*
     // the window blanks out instead of getting a silent crash.
     std::panic::set_hook(Box::new(|info| {
@@ -39,6 +72,7 @@ fn main() {
         sphere_ui_components::plugin_host_lifecycle::PluginHostProcessManager::global()
             .shutdown_all(sphere_ui_components::plugin_host_lifecycle::HOST_SHUTDOWN_TIMEOUT)
             .ok();
+        app::shutdown_discord_rpc();
     }));
 
     // GPUI's default DirectComposition target is created with topmost=true, which
@@ -56,6 +90,9 @@ fn main() {
     application()
         .with_assets(EmbeddedAssets::new())
         .run(app::setup);
+    if let Some(discord_rpc) = discord_rpc {
+        discord_rpc.shutdown();
+    }
     boot::log("gpui application exited");
 }
 

@@ -1457,8 +1457,10 @@ fn channel_strip(
     let select_id = track.id.clone();
     let select_cb = callbacks.on_select_track.clone();
     let on_select_strip =
-        move |_: &gpui::MouseDownEvent, w: &mut gpui::Window, cx: &mut gpui::App| {
-            select_cb(&select_id, w, cx);
+        move |event: &gpui::MouseDownEvent, w: &mut gpui::Window, cx: &mut gpui::App| {
+            if event.button == gpui::MouseButton::Left {
+                select_cb(&select_id, w, cx);
+            }
         };
     let context_id = track.id.clone();
     let on_context = callbacks.on_context_menu.clone();
@@ -1492,7 +1494,10 @@ fn channel_strip(
                 .hover(|h| h.bg(Colors::surface_hover()))
         })
         .id(("mix-strip", id_num))
-        .on_mouse_down(gpui::MouseButton::Left, on_select_strip)
+        // Select during capture so occluding child controls (header, inserts,
+        // pan and fader) cannot delay or swallow channel selection. The child
+        // still receives the same event and performs its own action normally.
+        .capture_any_mouse_down(on_select_strip)
         .when_some(on_context, |this, cb| {
             this.on_mouse_down(
                 gpui::MouseButton::Right,
@@ -1606,8 +1611,10 @@ fn vsti_output_sub_strip(
     let select_id = child_track.id.clone();
     let select_cb = callbacks.on_select_track.clone();
     let on_select_strip =
-        move |_: &gpui::MouseDownEvent, w: &mut gpui::Window, cx: &mut gpui::App| {
-            select_cb(&select_id, w, cx);
+        move |event: &gpui::MouseDownEvent, w: &mut gpui::Window, cx: &mut gpui::App| {
+            if event.button == gpui::MouseButton::Left {
+                select_cb(&select_id, w, cx);
+            }
         };
     let context_id = child_track.id.clone();
     let on_context = callbacks.on_context_menu.clone();
@@ -1646,7 +1653,7 @@ fn vsti_output_sub_strip(
             .hover(|h| h.bg(Colors::surface_hover()))
         })
         .id(("mix-vsti-sub-strip", id_num))
-        .on_mouse_down(gpui::MouseButton::Left, on_select_strip)
+        .capture_any_mouse_down(on_select_strip)
         .when_some(on_context, |this, cb| {
             this.on_mouse_down(
                 gpui::MouseButton::Right,
@@ -1668,7 +1675,12 @@ fn vsti_output_sub_strip(
         // model track, so its FX chain is added/bypassed/reordered by child
         // track id and processed by the engine's pass-2 routing chain for
         // this output bus only (Add Insert opens the Effects picker).
-        .child(inserts_section(child_track, track_index, callbacks, insert_h))
+        .child(inserts_section(
+            child_track,
+            track_index,
+            callbacks,
+            insert_h,
+        ))
         .child(vertical_split_handle(
             id_num,
             MixerSplitTarget::InsertSend,
@@ -2117,7 +2129,7 @@ fn mixer_empty_bay(spare_w: f32, height: f32) -> impl IntoElement {
 /// `STRIP_WIDTH`), and reproduces each strip's background / accent / separator so
 /// the batched canvas paints exactly what the legacy `div` strips would. Reads
 /// only cloned UI state — never the audio engine, project, or routing.
-fn build_mixer_render_snapshot(
+pub(crate) fn build_mixer_render_snapshot(
     tracks: &[TrackState],
     collapsed_vsti_output_groups: &HashSet<String>,
     hidden_mixer_channels: &HashSet<String>,

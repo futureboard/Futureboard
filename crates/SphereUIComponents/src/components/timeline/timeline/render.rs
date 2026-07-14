@@ -238,6 +238,59 @@ impl Render for Timeline {
             cx.notify();
         });
 
+        let on_audio_clip_process_preview = cx.listener(
+            |this,
+             (clip_id, update): &(
+                String,
+                crate::components::timeline::audio_clip::AudioClipProcessUpdate,
+            ),
+             _window,
+             cx| {
+                use crate::components::timeline::audio_clip::AudioClipProcessUpdate;
+                let changed = match *update {
+                    AudioClipProcessUpdate::Gain(gain) => this.state.set_clip_gain(clip_id, gain),
+                    AudioClipProcessUpdate::FadeInMs(ms) => {
+                        let Some(mut stretch) = this.state.clip_stretch(clip_id).cloned() else {
+                            return;
+                        };
+                        stretch.fade_in_ms = ms.max(0.0);
+                        stretch.dirty = true;
+                        this.state.set_clip_stretch(clip_id, stretch)
+                    }
+                    AudioClipProcessUpdate::FadeOutMs(ms) => {
+                        let Some(mut stretch) = this.state.clip_stretch(clip_id).cloned() else {
+                            return;
+                        };
+                        stretch.fade_out_ms = ms.max(0.0);
+                        stretch.dirty = true;
+                        this.state.set_clip_stretch(clip_id, stretch)
+                    }
+                };
+                if changed {
+                    cx.notify();
+                }
+            },
+        );
+        let on_audio_clip_process_commit = cx.listener(
+            |this, (clip_id, original): &(String, ClipState), _window, cx| {
+                if let Some(next) = ClipSnapshot::capture(&this.state, clip_id) {
+                    let previous = ClipSnapshot {
+                        track_id: next.track_id.clone(),
+                        clip: original.clone(),
+                    };
+                    if previous.clip != next.clip {
+                        this.record_executed_command(
+                            EditCommand::UpdateClip { previous, next },
+                            cx,
+                        );
+                        this.mark_project_changed(cx);
+                        this.mark_media_changed(cx);
+                    }
+                }
+                cx.notify();
+            },
+        );
+
         let on_range_start = cx.listener(
             |this, (track_id, beat, additive): &(String, f32, bool), _window, cx| {
                 if this.state.active_tool == TimelineTool::Pointer {
@@ -584,6 +637,12 @@ impl Render for Timeline {
         let on_add_clip: std::sync::Arc<
             dyn Fn(&(String, f32), &mut gpui::Window, &mut gpui::App) + 'static,
         > = std::sync::Arc::new(on_add_clip);
+        let on_audio_clip_process_preview:
+            crate::components::timeline::audio_clip::AudioClipProcessPreviewCb =
+            std::sync::Arc::new(on_audio_clip_process_preview);
+        let on_audio_clip_process_commit:
+            crate::components::timeline::audio_clip::AudioClipProcessCommitCb =
+            std::sync::Arc::new(on_audio_clip_process_commit);
         let on_add_track: std::sync::Arc<dyn Fn(&(), &mut gpui::Window, &mut gpui::App) + 'static> =
             std::sync::Arc::new(on_add_track);
         let on_toggle_snap: std::sync::Arc<
@@ -1468,6 +1527,8 @@ impl Render for Timeline {
                 Some(on_erase_start.clone()),
                 Some(on_erase_clip.clone()),
                 Some(&self.erase_preview_ids),
+                on_audio_clip_process_preview.clone(),
+                on_audio_clip_process_commit.clone(),
                 Some(on_automation_down.clone()),
                 Some(on_automation_lane_action.clone()),
                 Some(on_automation_hover.clone()),

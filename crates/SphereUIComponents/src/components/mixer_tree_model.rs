@@ -97,6 +97,8 @@ pub struct MixerTreeRow {
     pub visible_in_mixer: bool,
     pub pinned: bool,
     pub selected: bool,
+    pub muted: bool,
+    pub solo: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -288,6 +290,8 @@ impl MixerTreeModel {
             visible_in_mixer,
             pinned,
             selected,
+            muted: false,
+            solo: false,
         });
         if has_children && expanded {
             for child in &node.children {

@@ -420,7 +420,7 @@ impl TimelineState {
             .map(|target| (target.id.clone(), target.name.clone()))?;
 
         let track = self.tracks.iter_mut().find(|t| t.id == track_id)?;
-        if track.track_type.is_routing()
+        if (track.track_type.is_routing() && !is_vsti_output_child_track_id(&track.id))
             || track.sends.iter().any(|s| s.target_track_id == target_id)
         {
             return None;
@@ -448,7 +448,9 @@ impl TimelineState {
             .tracks
             .iter()
             .find(|track| track.id == track_id)
-            .is_none_or(|track| track.track_type.is_routing())
+            .is_none_or(|track| {
+                track.track_type.is_routing() && !is_vsti_output_child_track_id(&track.id)
+            })
         {
             return None;
         }
@@ -586,5 +588,32 @@ mod tests {
         let source = state.find_track(&source_id).unwrap();
         let send = source.sends.iter().find(|send| send.id == send_id).unwrap();
         assert_eq!(send.target_track_id, return_id);
+
+        let child_send_id = state
+            .add_send_to_target(&child_id, &return_id)
+            .expect("VSTi output child may send to a project routing track");
+        let child = state.find_track(&child_id).unwrap();
+        assert!(child.sends.iter().any(|send| send.id == child_send_id));
+
+        let return_count_before = state
+            .tracks
+            .iter()
+            .filter(|track| track.track_type == TrackType::Return)
+            .count();
+        let (created_return_id, created_send_id) = state
+            .create_return_and_send(&child_id)
+            .expect("VSTi output child may create a return and send to it");
+        assert_eq!(
+            state
+                .tracks
+                .iter()
+                .filter(|track| track.track_type == TrackType::Return)
+                .count(),
+            return_count_before + 1
+        );
+        let child = state.find_track(&child_id).unwrap();
+        assert!(child.sends.iter().any(|send| {
+            send.id == created_send_id && send.target_track_id == created_return_id
+        }));
     }
 }

@@ -128,7 +128,7 @@ impl StudioLayout {
 
             let targets = entity.update(cx, |layout, cx| {
                 layout.set_session_install_progress(
-                    "Restoring plugin chains",
+                    "Loading Plugins",
                     ProgressBarValue::value(0.2),
                     cx,
                 );
@@ -150,7 +150,7 @@ impl StudioLayout {
                     "insert effect"
                 };
                 let detail = format!(
-                    "Restoring plugins {}/{}: {} on {}",
+                    "Loading Plugin {}/{}: {} on {}",
                     index + 1,
                     total,
                     target.display_name,

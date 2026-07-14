@@ -66,6 +66,8 @@ pub struct MixerTreeCallbacks {
     pub on_toggle_expand: MixerTreeToggleCb,
     pub on_toggle_visibility: MixerTreeChannelCb,
     pub on_toggle_pin: MixerTreeChannelCb,
+    pub on_toggle_mute: MixerTreeChannelCb,
+    pub on_toggle_solo: MixerTreeChannelCb,
     pub on_collapse_all: MixerTreeActionCb,
     pub on_expand_all: MixerTreeActionCb,
     pub on_show_only_selected_group: MixerTreeActionCb,
@@ -137,6 +139,8 @@ pub fn mixer_tree_sidebar(
         .flex()
         .flex_row()
         .items_center()
+        .justify_between()
+        .w_full()
         .gap(px(2.0))
         .h(px(26.0))
         .px(px(6.0))
@@ -257,8 +261,8 @@ fn tree_row(
     let on_toggle_expand = callbacks.on_toggle_expand.clone();
     let on_select = callbacks.on_select_channel.clone();
     let on_focus = callbacks.on_focus_channel.clone();
-    let on_vis = callbacks.on_toggle_visibility.clone();
-    let on_pin = callbacks.on_toggle_pin.clone();
+    let on_mute = callbacks.on_toggle_mute.clone();
+    let on_solo = callbacks.on_toggle_solo.clone();
 
     let disclosure = div()
         .w(px(DISCLOSURE_W))
@@ -282,10 +286,8 @@ fn tree_row(
     let toggle_id = node_id.clone();
     let toggle_expanded = row.expanded;
     let has_children = row.has_children;
-    let hidden = !row.visible_in_mixer;
-    let pinned = row.pinned;
-    let vis_id = channel_id.clone();
-    let pin_id = channel_id.clone();
+    let mute_id = channel_id.clone();
+    let solo_id = channel_id.clone();
 
     let mut row_el = div()
         .flex()
@@ -329,52 +331,52 @@ fn tree_row(
         .children(channel_id.as_ref().map(|_| {
             div()
                 .flex_shrink_0()
+                .w(px(31.0))
                 .flex()
                 .flex_row()
                 .items_center()
+                .justify_between()
                 .gap(px(1.0))
                 .child(
                     icon_button(
-                        Some(if hidden {
-                            assets::ICON_VOLUME_X_PATH
-                        } else {
-                            assets::ICON_VOLUME_2_PATH
-                        }),
-                        "V",
+                        None,
+                        "M",
                         px(14.0),
                         px(14.0),
                         px(9.0),
-                        if hidden {
+                        if row.muted {
                             Colors::accent_primary()
                         } else {
                             Colors::text_faint()
                         },
                     )
-                    .id(("mixer-tree-vis", row_index))
+                    .text_size(px(9.0))
+                    .id(("mixer-tree-mute", row_index))
                     .on_click(move |_e, w, cx| {
-                        if let Some(id) = vis_id.as_ref() {
-                            on_vis(id, w, cx);
+                        if let Some(id) = mute_id.as_ref() {
+                            on_mute(id, w, cx);
                         }
                     })
                     .into_any_element(),
                 )
                 .child(
                     icon_button(
-                        Some(assets::ICON_STAR_PATH),
-                        "P",
+                        None,
+                        "S",
                         px(14.0),
                         px(14.0),
                         px(9.0),
-                        if pinned {
+                        if row.solo {
                             Colors::accent_primary()
                         } else {
                             Colors::text_faint()
                         },
                     )
-                    .id(("mixer-tree-pin", row_index))
+                    .text_size(px(9.0))
+                    .id(("mixer-tree-solo", row_index))
                     .on_click(move |_e, w, cx| {
-                        if let Some(id) = pin_id.as_ref() {
-                            on_pin(id, w, cx);
+                        if let Some(id) = solo_id.as_ref() {
+                            on_solo(id, w, cx);
                         }
                     })
                     .into_any_element(),

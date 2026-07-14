@@ -80,7 +80,7 @@ pub fn run_pre_studio_session_install(
             let p = 0.2 + (0.55 * (index as f32) / total as f32);
             progress(
                 &format!(
-                    "Restoring plugins {}/{}: {} on {}",
+                    "Loading Plugin {}/{}: {} on {}",
                     index + 1,
                     total,
                     target.display_name,

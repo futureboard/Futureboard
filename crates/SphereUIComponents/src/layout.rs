@@ -734,8 +734,17 @@ impl StudioLayout {
             let target = cx.entity().clone();
             let preview_handler = Arc::new(
                 move |command: components::piano_roll::UiMidiPreviewCommand, cx: &mut gpui::App| {
-                    let _ = target.update(cx, |layout, cx| {
-                        layout.dispatch_midi_preview_command(command, cx);
+                    // PianoRoll is a child entity and may emit while StudioLayout
+                    // already owns its parent lease (notably editor close). Never
+                    // synchronously update the parent from this child callback.
+                    // Queue the control-path MIDI command until the current GPUI
+                    // update stack has unwound, avoiding a double lease while
+                    // preserving AllNotesOff ordering before later UI work.
+                    let target = target.clone();
+                    cx.defer(move |cx| {
+                        let _ = target.update(cx, |layout, cx| {
+                            layout.dispatch_midi_preview_command(command, cx);
+                        });
                     });
                 },
             );
@@ -1393,7 +1402,7 @@ impl StudioLayout {
             return;
         }
         if let Some(rest) = command_id.strip_prefix("mixer:add-send-to:") {
-            if let Some((track_id, target_track_id)) = rest.split_once(':') {
+            if let Some((track_id, target_track_id)) = rest.rsplit_once(':') {
                 let added = self.timeline.update(cx, |timeline, _cx| {
                     timeline.state.add_send_to_target(track_id, target_track_id)
                 });

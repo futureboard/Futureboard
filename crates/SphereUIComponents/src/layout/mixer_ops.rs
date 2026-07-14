@@ -694,6 +694,60 @@ impl StudioLayout {
                 });
             });
 
+        let owner_mute = owner.clone();
+        let on_toggle_mute: std::sync::Arc<dyn Fn(&String, &mut Window, &mut gpui::App) + 'static> =
+            std::sync::Arc::new(move |id: &String, _w, cx| {
+                let id = id.clone();
+                StudioLayout::defer_update(&owner_mute, cx, move |layout, cx| {
+                    layout.mark_dirty_view_only();
+                    let muted = layout.timeline.update(cx, |timeline, cx| {
+                        timeline.state.toggle_track_mute(&id);
+                        let value = timeline.state.find_track(&id).map(|track| track.muted);
+                        cx.notify();
+                        value
+                    });
+                    if let Some(muted) = muted {
+                        if let Some(engine) = layout.audio_bridge.engine.as_ref() {
+                            let _ = engine.update_track_param(
+                                &id,
+                                "muted",
+                                if muted { 1.0 } else { 0.0 },
+                            );
+                        }
+                        layout.invalidate_mixer_tree_model_cache();
+                        layout.refresh_mixer_tree_sidebar_entity(cx);
+                        layout.push_mixer_snapshot_to_window(cx);
+                    }
+                });
+            });
+
+        let owner_solo = owner.clone();
+        let on_toggle_solo: std::sync::Arc<dyn Fn(&String, &mut Window, &mut gpui::App) + 'static> =
+            std::sync::Arc::new(move |id: &String, _w, cx| {
+                let id = id.clone();
+                StudioLayout::defer_update(&owner_solo, cx, move |layout, cx| {
+                    layout.mark_dirty_view_only();
+                    let solo = layout.timeline.update(cx, |timeline, cx| {
+                        timeline.state.toggle_track_solo(&id);
+                        let value = timeline.state.find_track(&id).map(|track| track.solo);
+                        cx.notify();
+                        value
+                    });
+                    if let Some(solo) = solo {
+                        if let Some(engine) = layout.audio_bridge.engine.as_ref() {
+                            let _ = engine.update_track_param(
+                                &id,
+                                "solo",
+                                if solo { 1.0 } else { 0.0 },
+                            );
+                        }
+                        layout.invalidate_mixer_tree_model_cache();
+                        layout.refresh_mixer_tree_sidebar_entity(cx);
+                        layout.push_mixer_snapshot_to_window(cx);
+                    }
+                });
+            });
+
         let owner_collapse = owner.clone();
         let on_collapse_all: std::sync::Arc<dyn Fn(&mut Window, &mut gpui::App) + 'static> =
             std::sync::Arc::new(move |_w, cx| {
@@ -741,6 +795,8 @@ impl StudioLayout {
             on_toggle_expand,
             on_toggle_visibility,
             on_toggle_pin,
+            on_toggle_mute,
+            on_toggle_solo,
             on_collapse_all,
             on_expand_all,
             on_show_only_selected_group,

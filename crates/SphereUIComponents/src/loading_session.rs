@@ -159,12 +159,11 @@ impl LoadStage {
     }
 
     fn progress(self) -> ProgressBarValue {
-        match self {
-            LoadStage::SessionShutdown => ProgressBarValue::value(0.05),
-            LoadStage::Validate => ProgressBarValue::value(0.1),
-            LoadStage::Decode => ProgressBarValue::value(0.2),
-            LoadStage::SessionInstall => ProgressBarValue::value(0.25),
-        }
+        // Session/plugin restore work cannot report a reliable overall fraction:
+        // one slow plug-in may dominate an otherwise short project load. Keep the
+        // app-level gate honestly indeterminate and communicate progress through
+        // the current activity label instead.
+        ProgressBarValue::Indeterminate
     }
 }
 
@@ -498,11 +497,11 @@ impl LoadingSessionWindow {
     fn set_progress(
         &mut self,
         detail: impl Into<SharedString>,
-        progress: ProgressBarValue,
+        _progress: ProgressBarValue,
         cx: &mut Context<Self>,
     ) {
         self.detail = detail.into();
-        self.progress = progress;
+        self.progress = ProgressBarValue::Indeterminate;
         cx.notify();
     }
 
@@ -951,7 +950,7 @@ impl Render for LoadingSessionWindow {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         let heading = self.heading.clone();
         let detail = self.detail.clone();
-        let progress = self.progress;
+        let progress = ProgressBarValue::Indeterminate;
         let footer = self.footer.clone();
 
         div()
@@ -1125,7 +1124,7 @@ pub fn begin_pre_studio_workspace_prepare(
             let _ = handle.update(cx, |window, _win, cx| {
                 window.heading = heading;
                 window.set_detail("Preparing session", cx);
-                window.progress = ProgressBarValue::value(0.25);
+                window.progress = ProgressBarValue::Indeterminate;
                 window.start_progress_animation(cx);
                 window.schedule_tick(cx);
             });

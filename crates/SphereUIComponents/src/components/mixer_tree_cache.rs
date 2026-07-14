@@ -20,6 +20,8 @@ pub struct MixerTreeVisibleRow {
     pub visible_in_mixer: bool,
     pub pinned: bool,
     pub selected: bool,
+    pub muted: bool,
+    pub solo: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -192,6 +194,16 @@ impl MixerTreeRenderCache {
         }
         self.rebuild_model_if_needed(tracks, view);
         self.rebuild_visible_rows_if_needed(view);
+        for row in &mut self.visible_rows {
+            if let Some(track) = row
+                .channel_id
+                .as_deref()
+                .and_then(|id| tracks.iter().find(|track| track.id == id))
+            {
+                row.muted = track.muted;
+                row.solo = track.solo;
+            }
+        }
     }
 }
 
@@ -211,6 +223,8 @@ fn visible_row_from_flat(row: MixerTreeRow) -> MixerTreeVisibleRow {
         visible_in_mixer: row.visible_in_mixer,
         pinned: row.pinned,
         selected: row.selected,
+        muted: row.muted,
+        solo: row.solo,
     }
 }
 

@@ -11,7 +11,9 @@ use crate::components::plugin_picker::{
     sync_selection_from_highlight, visible_plugin_id_at, PluginPickerState,
 };
 use crate::components::text_input::{is_repeatable_edit_key, TextInputAction, TextInputState};
-use crate::components::timeline::timeline_state::{is_project_routing_track, ClipType, TrackType};
+use crate::components::timeline::timeline_state::{
+    is_project_routing_track, is_vsti_output_child_track_id, ClipType, TrackType,
+};
 
 use super::helpers::{is_supported_audio_ext, is_text_input_key};
 use super::{ContextMenuTarget, ContextTarget, OpenPopover, StudioLayout, TextMenuTarget};
@@ -1068,7 +1070,7 @@ impl StudioLayout {
                     return vec![ContextMenuEntry::disabled_item("Track unavailable", "noop")];
                 };
                 let mut entries = vec![ContextMenuEntry::Header("Send To".to_string())];
-                if source.track_type.is_routing() {
+                if source.track_type.is_routing() && !is_vsti_output_child_track_id(&source.id) {
                     entries.push(ContextMenuEntry::disabled_item(
                         "Routing tracks cannot send",
                         "noop",

@@ -175,8 +175,15 @@ impl StudioLayout {
                     return;
                 }
             }
-            if let Some(id) = timeline.state.selection.selected_clip_ids.first().cloned() {
-                timeline.delete_clip_command(&id, cx);
+            let snapshots: Vec<ClipSnapshot> = timeline
+                .state
+                .selection
+                .selected_clip_ids
+                .iter()
+                .filter_map(|id| ClipSnapshot::capture(&timeline.state, id))
+                .collect();
+            if !snapshots.is_empty() {
+                timeline.run_edit_command(EditCommand::BatchDeleteClips { snapshots }, cx);
             } else if let Some(id) = timeline.state.selection.selected_track_id.clone() {
                 if let Some(snapshot) = TrackSnapshot::capture(&timeline.state, &id) {
                     timeline.run_edit_command(EditCommand::DeleteTrack { snapshot }, cx);

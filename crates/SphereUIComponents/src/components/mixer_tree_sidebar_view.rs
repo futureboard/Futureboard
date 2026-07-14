@@ -395,8 +395,8 @@ fn tree_row_element(
     let on_toggle_expand = callbacks.on_toggle_expand.clone();
     let on_select = callbacks.on_select_channel.clone();
     let on_focus = callbacks.on_focus_channel.clone();
-    let on_vis = callbacks.on_toggle_visibility.clone();
-    let on_pin = callbacks.on_toggle_pin.clone();
+    let on_mute = callbacks.on_toggle_mute.clone();
+    let on_solo = callbacks.on_toggle_solo.clone();
 
     let disclosure = div()
         .w(px(DISCLOSURE_W))
@@ -419,17 +419,17 @@ fn tree_row_element(
     let toggle_id = node_id.to_string();
     let toggle_expanded = row.expanded;
     let has_children = row.has_children;
-    let hidden = !row.visible_in_mixer;
-    let pinned = row.pinned;
     let select_id = channel_id.map(str::to_string);
-    let vis_id = channel_id.map(str::to_string);
-    let pin_id = channel_id.map(str::to_string);
+    let mute_id = channel_id.map(str::to_string);
+    let solo_id = channel_id.map(str::to_string);
     let label = row.label.clone();
 
     let mut row_el = div()
         .flex()
         .flex_row()
         .items_center()
+        .justify_between()
+        .w_full()
         .h(px(TREE_ROW_HEIGHT))
         .pl(px(TREE_LEFT_PAD + depth as f32 * TREE_INDENT))
         .pr(px(4.0))
@@ -481,33 +481,32 @@ fn tree_row_element(
         .children(channel_id.is_some().then(|| {
             div()
                 .flex_shrink_0()
+                .w(px(31.0))
                 .flex()
                 .flex_row()
                 .items_center()
+                .justify_between()
                 .gap(px(1.0))
                 .child(
                     icon_button(
-                        Some(if hidden {
-                            assets::ICON_VOLUME_X_PATH
-                        } else {
-                            assets::ICON_VOLUME_2_PATH
-                        }),
-                        "V",
+                        None,
+                        "M",
                         px(14.0),
                         px(14.0),
                         px(9.0),
-                        if hidden {
+                        if row.muted {
                             Colors::accent_primary()
                         } else {
                             Colors::text_faint()
                         },
                     )
-                    .id(("mixer-tree-vis", row_index))
+                    .text_size(px(9.0))
+                    .id(("mixer-tree-mute", row_index))
                     .on_click({
-                        let vis_id = vis_id.clone();
+                        let mute_id = mute_id.clone();
                         move |_e, w, app| {
-                            if let Some(id) = vis_id.as_ref() {
-                                on_vis(id, w, app);
+                            if let Some(id) = mute_id.as_ref() {
+                                on_mute(id, w, app);
                             }
                         }
                     })
@@ -515,23 +514,24 @@ fn tree_row_element(
                 )
                 .child(
                     icon_button(
-                        Some(assets::ICON_STAR_PATH),
-                        "P",
+                        None,
+                        "S",
                         px(14.0),
                         px(14.0),
                         px(9.0),
-                        if pinned {
+                        if row.solo {
                             Colors::accent_primary()
                         } else {
                             Colors::text_faint()
                         },
                     )
-                    .id(("mixer-tree-pin", row_index))
+                    .text_size(px(9.0))
+                    .id(("mixer-tree-solo", row_index))
                     .on_click({
-                        let pin_id = pin_id.clone();
+                        let solo_id = solo_id.clone();
                         move |_e, w, app| {
-                            if let Some(id) = pin_id.as_ref() {
-                                on_pin(id, w, app);
+                            if let Some(id) = solo_id.as_ref() {
+                                on_solo(id, w, app);
                             }
                         }
                     })

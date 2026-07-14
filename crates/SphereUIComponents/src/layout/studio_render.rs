@@ -1243,6 +1243,7 @@ impl Render for StudioLayout {
             self.command_palette_input.focus_handle.focus(window, cx);
         }
         let focus_holder = self.focus_handle.clone();
+        let focus_holder_on_pointer = self.focus_handle.clone();
 
         // Systemwide IME bridge: when a main-window text field owns focus, mount
         // the OS composition handler against it (routed to the focused field by
@@ -1272,6 +1273,13 @@ impl Render for StudioLayout {
             .relative()
             .bg(Colors::surface_base())
             .font(theme::ui_font())
+            // Reclaim the studio shortcut anchor before the clicked child handles
+            // the pointer. Focusable controls (text fields, piano roll, etc.) take
+            // focus again in their own target handler, while non-focusable
+            // arrangement clips now reliably route Delete/Cut to the Timeline.
+            .capture_any_mouse_down(move |_event, window, cx| {
+                focus_holder_on_pointer.focus(window, cx);
+            })
             .capture_key_down(move |event, window, cx| {
                 let handled = shortcut_keydown_target.update(cx, |this, cx| {
                     let handled = this.handle_command_palette_key(event, window, cx)

@@ -1092,7 +1092,8 @@ fn sends_section(
 ) -> impl IntoElement {
     // Routing tracks (bus/return) don't themselves carry an aux-send rack in
     // this slice — they are send *targets*. Show an empty placeholder.
-    let is_routing = track.track_type.is_routing();
+    let is_routing = track.track_type.is_routing()
+        && !crate::components::timeline::timeline_state::is_vsti_output_child_track_id(&track.id);
     let mut chips = div().flex().flex_col().flex_none().gap(px(2.0)).px(px(2.0));
     if is_routing {
         chips = chips.child(empty_slot());
@@ -1138,25 +1139,6 @@ fn sends_section(
                 .min_h_0()
                 .overflow_y_scroll()
                 .child(chips),
-        )
-}
-
-fn inert_rack_section(label: &'static str, accent: gpui::Rgba, height_px: f32) -> impl IntoElement {
-    div()
-        .flex()
-        .flex_col()
-        .flex_none()
-        .h(px(height_px))
-        .overflow_hidden()
-        .border_b(px(1.0))
-        .border_color(Colors::border_default())
-        .child(section_header(label, accent, None))
-        .child(
-            div()
-                .flex_1()
-                .min_h_0()
-                .overflow_hidden()
-                .child(empty_slot()),
         )
 }
 
@@ -1553,6 +1535,7 @@ fn channel_strip(
 fn vsti_output_sub_strip(
     parent_track: &TrackState,
     child_track: &TrackState,
+    all_tracks: &[TrackState],
     track_index: usize,
     insert_id: &str,
     bus_index: u8,
@@ -1686,7 +1669,7 @@ fn vsti_output_sub_strip(
             MixerSplitTarget::InsertSend,
             split,
         ))
-        .child(inert_rack_section("SENDS", parent_track.color, send_h))
+        .child(sends_section(child_track, all_tracks, callbacks, send_h))
         .child(vertical_split_handle(
             id_num,
             MixerSplitTarget::SendFader,
@@ -2460,6 +2443,7 @@ pub(crate) fn mixer_strip_scroller(
                 vsti_output_sub_strip(
                     parent,
                     &tracks[child_index],
+                    tracks,
                     parent_index,
                     &parent.inserts[insert_index].id,
                     bus_index,

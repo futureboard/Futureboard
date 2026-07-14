@@ -17,9 +17,11 @@ use gpui::{
 };
 
 use sphere_encoder::AudioFileFormat;
+use DirectAudio::plugin_bridge::PluginBridgeSinkMap;
 use DirectAudio::types::EngineProjectSnapshot;
 use DirectAudio::{
-    export_arrangement, ArrangementExportSummary, ExportCancelToken, ExportProgress, ExportStage,
+    export_arrangement_with_bridges, export_tracks_single_pass_with_bridges,
+    ArrangementExportSummary, ExportCancelToken, ExportProgress, ExportStage, TrackExportTarget,
 };
 
 use crate::components::form::select::{select, SelectOption};
@@ -33,12 +35,12 @@ use crate::theme::{self, Colors};
 use gpui::AppContext;
 
 use super::export_settings::{
-    ExportChannelMode, ExportNormalizeChoice, ExportProjectDefaults, ExportRangeChoice,
+    ExportChannelMode, ExportMode, ExportNormalizeChoice, ExportProjectDefaults, ExportRangeChoice,
     ExportSampleRateChoice, ExportSettings, ExportTailChoice,
 };
 
-pub const EXPORT_WINDOW_WIDTH: f32 = 540.0;
-const EXPORT_WINDOW_HEIGHT: f32 = 588.0;
+pub const EXPORT_WINDOW_WIDTH: f32 = 560.0;
+const EXPORT_WINDOW_HEIGHT: f32 = 548.0;
 const BODY_PAD: f32 = 14.0;
 const ROW_GAP: f32 = 9.0;
 const LABEL_W: f32 = 96.0;
@@ -49,7 +51,7 @@ const BUTTON_H: f32 = 28.0;
 pub enum ExportJobState {
     Editing,
     Running(ExportProgress),
-    Complete(ArrangementExportSummary),
+    Complete(Vec<ArrangementExportSummary>),
     Failed(String),
     Cancelled,
 }
@@ -57,7 +59,7 @@ pub enum ExportJobState {
 #[derive(Default)]
 struct ExportShared {
     progress: Option<ExportProgress>,
-    done: Option<Result<ArrangementExportSummary, String>>,
+    done: Option<Result<Vec<ArrangementExportSummary>, String>>,
 }
 
 struct ExportJob {
@@ -68,6 +70,7 @@ struct ExportJob {
 /// Which dropdown is currently open (only one at a time).
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum SelectField {
+    Mode,
     Format,
     FormatOption,
     Range,
@@ -80,6 +83,8 @@ enum SelectField {
 pub struct ExportArrangementWindow {
     project_name: String,
     snapshot: EngineProjectSnapshot,
+    bridge_sinks: PluginBridgeSinkMap,
+    audio_engine: Option<DirectAudio::AudioEngine>,
     defaults: ExportProjectDefaults,
     settings: ExportSettings,
     state: ExportJobState,
@@ -92,6 +97,8 @@ impl ExportArrangementWindow {
     pub fn new(
         project_name: String,
         snapshot: EngineProjectSnapshot,
+        bridge_sinks: PluginBridgeSinkMap,
+        audio_engine: Option<DirectAudio::AudioEngine>,
         defaults: ExportProjectDefaults,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -103,6 +110,8 @@ impl ExportArrangementWindow {
         Self {
             project_name,
             snapshot,
+            bridge_sinks,
+            audio_engine,
             defaults,
             settings,
             state: ExportJobState::Editing,
@@ -124,10 +133,11 @@ impl ExportArrangementWindow {
             ExportRangeChoice::LoopRange { .. } => "Loop range",
             ExportRangeChoice::Custom { .. } => "Custom range",
         };
+        let mode = self.settings.mode.label();
         if self.project_name.trim().is_empty() {
-            range.to_string()
+            format!("{mode} — {range}")
         } else {
-            format!("{} — {range}", self.project_name)
+            format!("{} — {mode} — {range}", self.project_name)
         }
     }
 
@@ -171,6 +181,8 @@ impl ExportArrangementWindow {
         {
             let entity = cx.entity().clone();
             let format = self.settings.format;
+            let mode = self.settings.mode;
+            let project_name = self.project_name.clone();
             let start = self
                 .settings
                 .output_path
@@ -179,15 +191,30 @@ impl ExportArrangementWindow {
                 .unwrap_or_else(std::env::temp_dir);
             let file = ExportSettings::default_file_name(&self.project_name, format);
             cx.spawn(async move |_this, cx| {
-                let result = rfd::AsyncFileDialog::new()
-                    .set_title("Export Arrangement")
-                    .set_directory(&start)
-                    .set_file_name(&file)
-                    .add_filter(format.as_str().to_uppercase(), &[format.extension()])
-                    .save_file()
-                    .await;
+                let dialog = rfd::AsyncFileDialog::new()
+                    .set_title(if mode == ExportMode::Mixdown {
+                        "Export Mixdown"
+                    } else {
+                        "Choose Export Folder"
+                    })
+                    .set_directory(&start);
+                let result = if mode == ExportMode::Mixdown {
+                    dialog
+                        .set_file_name(&file)
+                        .add_filter(format.as_str().to_uppercase(), &[format.extension()])
+                        .save_file()
+                        .await
+                } else {
+                    dialog.pick_folder().await
+                };
                 if let Some(handle) = result {
-                    let path = handle.path().to_path_buf();
+                    let path = if mode == ExportMode::Mixdown {
+                        handle.path().to_path_buf()
+                    } else {
+                        handle
+                            .path()
+                            .join(ExportSettings::default_file_name(&project_name, format))
+                    };
                     let _ = entity.update(cx, |this, cx| {
                         this.settings.output_path = Some(path);
                         cx.notify();
@@ -228,20 +255,64 @@ impl ExportArrangementWindow {
         ));
 
         // Worker thread: plain data only, never touches GPUI.
-        let snapshot = self.snapshot.clone();
+        let batch_targets = build_batch_targets(
+            &request,
+            self.settings.mode,
+            &self.defaults,
+            &self.project_name,
+        );
+        if self.settings.mode != ExportMode::Mixdown && batch_targets.is_empty() {
+            self.state = ExportJobState::Failed("No source tracks are available to export.".into());
+            self.job = None;
+            cx.notify();
+            return;
+        }
         let worker_shared = shared.clone();
         let worker_cancel = cancel.clone();
+        let snapshot = self.snapshot.clone();
+        let bridge_sinks = self.bridge_sinks.clone();
+        let audio_engine = self.audio_engine.clone();
         std::thread::Builder::new()
             .name("fb-arrangement-export".to_string())
             .spawn(move || {
-                let progress_shared = worker_shared.clone();
-                let result = export_arrangement(&snapshot, &request, &worker_cancel, |p| {
-                    if let Ok(mut guard) = progress_shared.lock() {
-                        guard.progress = Some(p);
+                if let Some(engine) = audio_engine.as_ref() {
+                    for id in bridge_sinks.keys() {
+                        let _ = engine.set_plugin_bridge_sink(id.clone(), None);
                     }
-                });
+                    std::thread::sleep(std::time::Duration::from_millis(25));
+                }
+                let progress_shared = worker_shared.clone();
+                let mut on_progress = move |progress| {
+                    if let Ok(mut guard) = progress_shared.lock() {
+                        guard.progress = Some(progress);
+                    }
+                };
+                let result = if batch_targets.is_empty() {
+                    export_arrangement_with_bridges(
+                        &snapshot,
+                        &request,
+                        &worker_cancel,
+                        Some(&bridge_sinks),
+                        &mut on_progress,
+                    )
+                    .map(|summary| vec![summary])
+                } else {
+                    export_tracks_single_pass_with_bridges(
+                        &snapshot,
+                        &batch_targets,
+                        &worker_cancel,
+                        Some(&bridge_sinks),
+                        &mut on_progress,
+                    )
+                }
+                .map_err(|error| error.to_string());
+                if let Some(engine) = audio_engine.as_ref() {
+                    for (id, sink) in &bridge_sinks {
+                        let _ = engine.set_plugin_bridge_sink(id.clone(), Some(sink.clone()));
+                    }
+                }
                 if let Ok(mut guard) = worker_shared.lock() {
-                    guard.done = Some(result.map_err(|e| e.to_string()));
+                    guard.done = Some(result);
                 }
             })
             .ok();
@@ -380,12 +451,16 @@ impl ExportArrangementWindow {
             .px(px(BODY_PAD))
             .py(px(BODY_PAD))
             .gap(px(ROW_GAP))
+            .child(section_label("DESTINATION"))
             .child(self.output_row(target.clone()))
+            .child(self.mode_row(target.clone()))
+            .child(section_label("FORMAT"))
             .child(self.format_row(target.clone()))
             .child(self.format_option_row(target.clone()))
-            .child(self.range_row(target.clone()))
             .child(self.sample_rate_row(target.clone()))
             .child(self.channels_row(target.clone()))
+            .child(section_label("RENDER"))
+            .child(self.range_row(target.clone()))
             .child(self.normalize_row(target.clone()))
             .child(self.tail_row(target.clone()))
             .child(div().flex_1());
@@ -457,7 +532,35 @@ impl ExportArrangementWindow {
                     let _ = target.update(cx, |this, cx| this.browse_output(cx));
                 }
             }));
-        self.labeled("Output", control)
+        self.labeled(
+            if self.settings.mode == ExportMode::Mixdown {
+                "Output file"
+            } else {
+                "Output base"
+            },
+            control,
+        )
+    }
+
+    fn mode_row(&self, target: gpui::Entity<Self>) -> impl IntoElement {
+        let selected = match self.settings.mode {
+            ExportMode::Mixdown => "mixdown",
+            ExportMode::Stems => "stems",
+            ExportMode::Multitrack => "multitrack",
+        };
+        let options = vec![
+            SelectOption::new("mixdown", "Mixdown — master output"),
+            SelectOption::new("stems", "Stems — all mixer channels"),
+            SelectOption::new("multitrack", "Multitrack — direct tracks"),
+        ];
+        let control = self.dropdown(
+            SelectField::Mode,
+            "export-mode",
+            selected.to_string(),
+            options,
+            target,
+        );
+        self.labeled("Export", control)
     }
 
     fn dropdown(
@@ -637,7 +740,8 @@ impl ExportArrangementWindow {
         };
         let options = vec![
             SelectOption::new("off", "Off"),
-            SelectOption::new("peak", "Peak −1.0 dB"),
+            SelectOption::new("peak", "Peak −1.0 dB")
+                .disabled(self.settings.mode != ExportMode::Mixdown),
         ];
         let control = self.dropdown(
             SelectField::Normalize,
@@ -672,6 +776,16 @@ impl ExportArrangementWindow {
 
     fn apply_select(&mut self, field: SelectField, value: &str) {
         match field {
+            SelectField::Mode => {
+                self.settings.mode = match value {
+                    "stems" => ExportMode::Stems,
+                    "multitrack" => ExportMode::Multitrack,
+                    _ => ExportMode::Mixdown,
+                };
+                if self.settings.mode != ExportMode::Mixdown {
+                    self.settings.normalize = ExportNormalizeChoice::Off;
+                }
+            }
             SelectField::Format => {
                 self.settings.format = match value {
                     "flac" => AudioFileFormat::Flac,
@@ -849,12 +963,26 @@ impl ExportArrangementWindow {
 
     fn render_complete(
         &self,
-        summary: ArrangementExportSummary,
+        summaries: Vec<ArrangementExportSummary>,
         target: gpui::Entity<Self>,
     ) -> gpui::AnyElement {
+        let Some(summary) = summaries.first() else {
+            return self.render_terminal_message(
+                "Export completed without output files.",
+                Colors::text_secondary(),
+                target,
+            );
+        };
         let info = format!(
-            "{:.2} s • {} ch • {} Hz",
-            summary.duration_seconds, summary.channels, summary.sample_rate
+            "{} • {:.2} s • {} ch • {} Hz",
+            if summaries.len() == 1 {
+                "1 file".to_string()
+            } else {
+                format!("{} files", summaries.len())
+            },
+            summary.duration_seconds,
+            summary.channels,
+            summary.sample_rate
         );
         let path = summary.output_path.clone();
         div()
@@ -956,6 +1084,82 @@ impl ExportArrangementWindow {
     }
 }
 
+fn section_label(label: &'static str) -> impl IntoElement {
+    div()
+        .mt(px(2.0))
+        .pb(px(2.0))
+        .border_b(px(1.0))
+        .border_color(Colors::border_subtle())
+        .text_size(px(9.0))
+        .font_weight(gpui::FontWeight::SEMIBOLD)
+        .text_color(Colors::text_faint())
+        .child(label)
+}
+
+pub(super) fn build_batch_targets(
+    request: &DirectAudio::ArrangementExportRequest,
+    mode: ExportMode,
+    defaults: &ExportProjectDefaults,
+    project_name: &str,
+) -> Vec<TrackExportTarget> {
+    if mode == ExportMode::Mixdown {
+        return Vec::new();
+    }
+    let base_dir = request
+        .output_path
+        .parent()
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_else(std::env::temp_dir);
+    let suffix = if mode == ExportMode::Stems {
+        "Stems"
+    } else {
+        "Multitrack"
+    };
+    let output_dir = base_dir.join(format!("{} {suffix}", sanitize_file_stem(project_name)));
+
+    defaults
+        .track_targets
+        .iter()
+        .filter(|target| mode != ExportMode::Multitrack || target.include_in_multitrack)
+        .enumerate()
+        .map(|(index, target)| {
+            let mut item_request = request.clone();
+            item_request.output_path = output_dir.join(format!(
+                "{:02} {}.{}",
+                index + 1,
+                sanitize_file_stem(&target.name),
+                request.format.extension()
+            ));
+            TrackExportTarget {
+                track_id: target.id.clone(),
+                request: item_request,
+            }
+        })
+        .collect()
+}
+
+fn sanitize_file_stem(name: &str) -> String {
+    let sanitized: String = name
+        .trim()
+        .chars()
+        .map(|character| {
+            if matches!(
+                character,
+                '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|'
+            ) {
+                '_'
+            } else {
+                character
+            }
+        })
+        .collect();
+    if sanitized.is_empty() {
+        "Track".to_string()
+    } else {
+        sanitized
+    }
+}
+
 // ── Small shared button helpers (compact, theme-token only) ──────────────────
 
 fn secondary_button(
@@ -1054,6 +1258,8 @@ pub fn open_export_arrangement_window(
     owner_bounds: Option<Bounds<gpui::Pixels>>,
     project_name: String,
     snapshot: EngineProjectSnapshot,
+    bridge_sinks: PluginBridgeSinkMap,
+    audio_engine: Option<DirectAudio::AudioEngine>,
     defaults: ExportProjectDefaults,
     default_output: Option<PathBuf>,
     cx: &mut App,
@@ -1075,7 +1281,14 @@ pub fn open_export_arrangement_window(
 
     cx.open_window(window_options, move |_window, cx| {
         cx.new(|cx| {
-            let mut win = ExportArrangementWindow::new(project_name, snapshot, defaults, cx);
+            let mut win = ExportArrangementWindow::new(
+                project_name,
+                snapshot,
+                bridge_sinks,
+                audio_engine,
+                defaults,
+                cx,
+            );
             if let Some(path) = default_output {
                 win.set_default_output(path);
             }
@@ -1090,6 +1303,8 @@ pub fn open_export_arrangement_window(
     _owner_bounds: Option<Bounds<gpui::Pixels>>,
     _project_name: String,
     _snapshot: EngineProjectSnapshot,
+    _bridge_sinks: PluginBridgeSinkMap,
+    _audio_engine: Option<DirectAudio::AudioEngine>,
     _defaults: ExportProjectDefaults,
     _default_output: Option<PathBuf>,
     _cx: &mut App,

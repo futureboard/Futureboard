@@ -105,3 +105,4 @@ pub trait PluginBridgeSink: Send + Sync + std::fmt::Debug {
 
 /// Shared handle to a realtime plugin-bridge sink.
 pub type SharedPluginBridgeSink = Arc<dyn PluginBridgeSink>;
+pub type PluginBridgeSinkMap = std::collections::HashMap<String, SharedPluginBridgeSink>;

@@ -55,6 +55,30 @@ pub enum ExportChannelMode {
     Mono,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExportMode {
+    Mixdown,
+    Stems,
+    Multitrack,
+}
+
+impl ExportMode {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Mixdown => "Mixdown",
+            Self::Stems => "Stems (all mixer channels)",
+            Self::Multitrack => "Multitrack (direct)",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ExportTrackTarget {
+    pub id: String,
+    pub name: String,
+    pub include_in_multitrack: bool,
+}
+
 impl ExportChannelMode {
     pub fn channels(self) -> u16 {
         match self {
@@ -101,6 +125,7 @@ pub struct ExportProjectDefaults {
     pub loop_range: Option<(f64, f64)>,
     /// Whether the build can encode MP3 (the `mp3` feature is compiled in).
     pub mp3_available: bool,
+    pub track_targets: Vec<ExportTrackTarget>,
 }
 
 #[derive(Debug, Clone)]
@@ -116,6 +141,7 @@ pub struct ExportSettings {
     pub mp3_bitrate_kbps: u16,
     pub normalize: ExportNormalizeChoice,
     pub tail: ExportTailChoice,
+    pub mode: ExportMode,
 }
 
 impl Default for ExportSettings {
@@ -134,6 +160,7 @@ impl Default for ExportSettings {
             // Capture reverb/delay/instrument-release tails past the last content
             // by default so exports don't hard-cut the decay.
             tail: ExportTailChoice::FixedSeconds(5.0),
+            mode: ExportMode::Mixdown,
         }
     }
 }
@@ -147,6 +174,7 @@ pub enum ExportSettingsError {
     UnsupportedSampleRate(u32),
     Mp3Unavailable,
     FlacUnsupportedBitDepth(u16),
+    NoTracksForBatchExport,
 }
 
 impl ExportSettingsError {
@@ -163,6 +191,9 @@ impl ExportSettingsError {
             Self::Mp3Unavailable => "MP3 export is not available in this build.".to_string(),
             Self::FlacUnsupportedBitDepth(b) => {
                 format!("FLAC supports 16-bit or 24-bit, not {b}-bit.")
+            }
+            Self::NoTracksForBatchExport => {
+                "No source tracks are available for stem export.".to_string()
             }
         }
     }
@@ -267,6 +298,9 @@ impl ExportSettings {
             return Err(ExportSettingsError::FlacUnsupportedBitDepth(
                 self.flac_bit_depth,
             ));
+        }
+        if self.mode != ExportMode::Mixdown && defaults.track_targets.is_empty() {
+            return Err(ExportSettingsError::NoTracksForBatchExport);
         }
         Ok(())
     }

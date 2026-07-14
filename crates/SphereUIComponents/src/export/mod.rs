@@ -7,8 +7,9 @@ mod export_settings;
 mod export_window;
 
 pub use export_settings::{
-    ExportChannelMode, ExportNormalizeChoice, ExportProjectDefaults, ExportRangeChoice,
+    ExportChannelMode, ExportMode, ExportNormalizeChoice, ExportProjectDefaults, ExportRangeChoice,
     ExportSampleRateChoice, ExportSettings, ExportSettingsError, ExportTailChoice,
+    ExportTrackTarget,
 };
 pub use export_window::{
     open_export_arrangement_window, ExportArrangementWindow, ExportJobState, EXPORT_WINDOW_WIDTH,
@@ -91,6 +92,7 @@ mod tests {
             time_selection: None,
             loop_range: None,
             mp3_available: false,
+            track_targets: Vec::new(),
         }
     }
 
@@ -103,6 +105,49 @@ mod tests {
     #[test]
     fn valid_wav_settings_pass() {
         assert!(valid_wav().validate(&defaults()).is_ok());
+    }
+
+    #[test]
+    fn batch_export_requires_source_tracks() {
+        let mut settings = valid_wav();
+        settings.mode = ExportMode::Stems;
+        assert_eq!(
+            settings.validate(&defaults()),
+            Err(ExportSettingsError::NoTracksForBatchExport)
+        );
+    }
+
+    #[test]
+    fn stem_jobs_isolate_each_source_and_name_outputs() {
+        let mut snapshot = snapshot_with_content(4.0);
+        let mut bus = snapshot.tracks[0].clone();
+        bus.id = "bus-1".to_string();
+        bus.track_type = "bus".to_string();
+        snapshot.tracks[0].output_track_id = Some(bus.id.clone());
+        snapshot.tracks.push(bus);
+        let mut defaults = defaults();
+        defaults.track_targets = vec![
+            ExportTrackTarget {
+                id: "track-1".to_string(),
+                name: "Lead / Vox".to_string(),
+                include_in_multitrack: true,
+            },
+            ExportTrackTarget {
+                id: "bus-1".to_string(),
+                name: "Drum Bus".to_string(),
+                include_in_multitrack: false,
+            },
+        ];
+        let request = valid_wav().to_request(&snapshot, &defaults).unwrap();
+        let jobs =
+            export_window::build_batch_targets(&request, ExportMode::Stems, &defaults, "Song");
+        assert_eq!(jobs.len(), 2);
+        assert_eq!(jobs[0].track_id, "track-1");
+        assert_eq!(jobs[1].track_id, "bus-1");
+        assert!(jobs[0]
+            .request
+            .output_path
+            .ends_with(std::path::Path::new("Song Stems").join("01 Lead _ Vox.wav")));
     }
 
     #[test]

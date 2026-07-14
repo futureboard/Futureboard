@@ -8,7 +8,7 @@ use gpui::{Bounds, Context};
 
 use super::engine_snapshot::{build_engine_project_snapshot_for_export, volume_norm_to_linear};
 use super::StudioLayout;
-use crate::export::{open_export_arrangement_window, ExportProjectDefaults};
+use crate::export::{open_export_arrangement_window, ExportProjectDefaults, ExportTrackTarget};
 
 impl StudioLayout {
     pub(super) fn open_export_arrangement_external_window(
@@ -54,6 +54,12 @@ impl StudioLayout {
                 0,
             ),
         };
+        let bridge_sinks = self
+            .audio_bridge
+            .engine
+            .as_ref()
+            .map(|engine| engine.plugin_bridge_sinks())
+            .unwrap_or_default();
         // Export renders plugins in-process from the saved VST3 state captured by
         // refresh_bridge_plugin_states above — the isolated offline graph has no
         // out-of-process bridge host attached.
@@ -86,6 +92,22 @@ impl StudioLayout {
             time_selection: None,
             loop_range: None,
             mp3_available: sphere_encoder::mp3_available(),
+            track_targets: tl_state
+                .tracks
+                .iter()
+                .filter(|track| {
+                    track.track_type
+                        != crate::components::timeline::timeline_state::TrackType::Master
+                })
+                .map(|track| ExportTrackTarget {
+                    id: track.id.clone(),
+                    name: track.name.clone(),
+                    include_in_multitrack: !track.track_type.is_routing()
+                        || crate::components::timeline::timeline_state::is_vsti_output_child_track_id(
+                            &track.id,
+                        ),
+                })
+                .collect(),
         };
 
         // Default output: <project folder>/Exports/<Name>.wav when the project
@@ -107,6 +129,8 @@ impl StudioLayout {
             owner_bounds,
             project_name,
             snapshot,
+            bridge_sinks,
+            self.audio_bridge.engine.clone(),
             defaults,
             default_output,
             cx,

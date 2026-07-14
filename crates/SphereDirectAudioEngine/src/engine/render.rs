@@ -714,12 +714,48 @@ pub fn render_project_block_interleaved(
     time_sig_den: u32,
     loop_bounds: Option<crate::transport::LoopBounds>,
 ) -> u64 {
+    render_project_block_interleaved_with_taps(
+        runtime,
+        base_sample,
+        master_volume,
+        output,
+        channels,
+        transport_active,
+        time_sig_num,
+        time_sig_den,
+        loop_bounds,
+        None,
+    )
+}
+
+/// Offline/export variant that captures every mixer channel post-fader in the
+/// same graph pass. `track_taps` follows `runtime.tracks` order and is ignored
+/// by realtime callers through the wrapper above.
+#[allow(clippy::too_many_arguments)]
+pub fn render_project_block_interleaved_with_taps(
+    runtime: &mut RuntimeProject,
+    base_sample: u64,
+    master_volume: f32,
+    output: &mut [f32],
+    channels: usize,
+    transport_active: bool,
+    time_sig_num: u32,
+    time_sig_den: u32,
+    loop_bounds: Option<crate::transport::LoopBounds>,
+    mut track_taps: Option<&mut [Vec<f32>]>,
+) -> u64 {
     if channels < 2 {
         return 0;
     }
     let frames = output.len() / channels;
     if frames == 0 {
         return 0;
+    }
+    if let Some(taps) = track_taps.as_deref_mut() {
+        for tap in taps.iter_mut().take(runtime.tracks.len()) {
+            tap.resize(frames * 2, 0.0);
+            tap.fill(0.0);
+        }
     }
     runtime.refresh_runtime_latency_graph(frames as u32);
     let block_beat = sample_to_beat(runtime, base_sample);
@@ -992,6 +1028,15 @@ pub fn render_project_block_interleaved(
             block_beat,
             transport,
         );
+        if let Some(tap) = track_taps
+            .as_deref_mut()
+            .and_then(|taps| taps.get_mut(track_index))
+        {
+            for frame in 0..frames {
+                tap[frame * 2] = runtime.tracks[track_index].block_l[frame];
+                tap[frame * 2 + 1] = runtime.tracks[track_index].block_r[frame];
+            }
+        }
     }
     runtime.audio_graph.pass1_source_indices = pass1_indices;
 
@@ -1026,6 +1071,15 @@ pub fn render_project_block_interleaved(
             block_beat,
             transport,
         );
+        if let Some(tap) = track_taps
+            .as_deref_mut()
+            .and_then(|taps| taps.get_mut(track_index))
+        {
+            for frame in 0..frames {
+                tap[frame * 2] = runtime.tracks[track_index].block_l[frame];
+                tap[frame * 2 + 1] = runtime.tracks[track_index].block_r[frame];
+            }
+        }
         if is_vsti_output_child_track_id(&runtime.tracks[track_index].id)
             && (runtime.tracks[track_index]
                 .meter_peak_l
@@ -1060,6 +1114,15 @@ pub fn render_project_block_interleaved(
                 let out = &mut output[i * channels..i * channels + channels];
                 out[0] = l;
                 out[1] = r;
+            }
+            if let Some(tap) = track_taps
+                .as_deref_mut()
+                .and_then(|taps| taps.get_mut(m_idx))
+            {
+                for frame in 0..frames {
+                    tap[frame * 2] = master.block_l[frame];
+                    tap[frame * 2 + 1] = master.block_r[frame];
+                }
             }
         }
     }

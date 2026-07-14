@@ -821,6 +821,10 @@ impl AudioEngine {
         self.inner.latency_graph_version()
     }
 
+    pub fn plugin_bridge_sinks(&self) -> crate::plugin_bridge::PluginBridgeSinkMap {
+        self.inner.plugin_bridge_sinks()
+    }
+
     /// Active Dropout Protection mode.
     pub fn dropout_protection_mode(&self) -> crate::engine::DropoutProtectionMode {
         self.inner.dropout_protection_mode()

@@ -69,10 +69,12 @@ pub use crate::audio_source::{
 pub use crate::engine::{DropoutDiagnostics, DropoutProtectionMode, DropoutReason};
 pub use crate::error::SphereAudioError;
 pub use crate::export::{
-    arrangement_bounds_samples, beats_to_samples, export_arrangement, partial_path_for,
-    render_offline, ArrangementExportRequest, ArrangementExportSummary, ExportCancelToken,
+    arrangement_bounds_samples, beats_to_samples, export_arrangement,
+    export_arrangement_with_bridges, export_tracks_single_pass,
+    export_tracks_single_pass_with_bridges, partial_path_for, render_offline,
+    render_offline_tracks, ArrangementExportRequest, ArrangementExportSummary, ExportCancelToken,
     ExportError, ExportNormalizeMode, ExportProgress, ExportStage, ExportTailMode,
-    OfflineRenderRequest, OfflineRenderSummary,
+    OfflineRenderRequest, OfflineRenderSummary, TrackExportTarget,
 };
 pub use crate::latency_graph::{
     apply_pdc_delay_block, plan_runtime_latency_graph, strip_plugin_latency_samples,

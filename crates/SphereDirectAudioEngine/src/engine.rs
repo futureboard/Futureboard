@@ -631,6 +631,7 @@ pub struct EngineInner {
 
     // Prepared render graph shared with new streams and pushed to callbacks.
     runtime: Mutex<RuntimeProject>,
+    plugin_bridge_sinks: Mutex<crate::plugin_bridge::PluginBridgeSinkMap>,
     audio_cache: Mutex<HashMap<String, Arc<ClipAudioSource>>>,
     inactive_audio_cache_lru: Mutex<VecDeque<String>>,
 
@@ -699,6 +700,7 @@ impl EngineInner {
             master: Mutex::new(MasterState::default()),
             project: Mutex::new(None),
             runtime: Mutex::new(RuntimeProject::default()),
+            plugin_bridge_sinks: Mutex::new(Default::default()),
             audio_cache: Mutex::new(HashMap::new()),
             inactive_audio_cache_lru: Mutex::new(VecDeque::new()),
             glitch_counter: Arc::new(AtomicU64::new(0)),
@@ -735,6 +737,12 @@ impl EngineInner {
     #[inline]
     pub fn latency_graph_version(&self) -> u64 {
         self.shared.latency_graph_version.load(Ordering::Relaxed)
+    }
+
+    /// Snapshot the currently attached external-plugin DSP endpoints for an
+    /// offline export worker. Cloning only increments the shared handles.
+    pub fn plugin_bridge_sinks(&self) -> crate::plugin_bridge::PluginBridgeSinkMap {
+        self.plugin_bridge_sinks.lock().clone()
     }
 
     /// Active Dropout Protection mode (Settings → Playback).
@@ -1059,6 +1067,13 @@ impl EngineInner {
         insert_id: String,
         sink: Option<std::sync::Arc<dyn crate::plugin_bridge::PluginBridgeSink>>,
     ) -> Result<(), SphereAudioError> {
+        if let Some(sink) = sink.as_ref() {
+            self.plugin_bridge_sinks
+                .lock()
+                .insert(insert_id.clone(), sink.clone());
+        } else {
+            self.plugin_bridge_sinks.lock().remove(&insert_id);
+        }
         self.send_command(EngineCommand::SetPluginBridgeSink { insert_id, sink })
     }
 

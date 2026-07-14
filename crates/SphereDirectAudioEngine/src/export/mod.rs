@@ -10,10 +10,9 @@
 //! frames; `sphere_encoder` turns them into a container; the UI/layout builds
 //! the snapshot + request. No FFmpeg, no external processes, no realtime device.
 //!
-//! Plugin support: in-process inserts built by `RuntimeProject::build` render
-//! offline. Out-of-process *bridged* plugins are not driven offline (no host
-//! process running) and are effectively bypassed — reported, never silently
-//! claimed as rendered.
+//! Plugin support: in-process inserts render directly. Callers may also supply
+//! the live external bridge endpoints; the export worker then uses a blocking
+//! handshake while the realtime callback remains wait-free.
 
 mod exporter;
 mod offline_renderer;
@@ -21,9 +20,14 @@ mod render_progress;
 mod render_request;
 
 pub use exporter::{
-    export_arrangement, partial_path_for, ArrangementExportRequest, ArrangementExportSummary,
+    export_arrangement, export_arrangement_with_bridges, export_tracks_single_pass,
+    export_tracks_single_pass_with_bridges, partial_path_for, ArrangementExportRequest,
+    ArrangementExportSummary, TrackExportTarget,
 };
-pub use offline_renderer::{render_offline, OfflineRenderSummary};
+pub use offline_renderer::{
+    render_offline, render_offline_tracks, render_offline_tracks_with_bridges,
+    render_offline_with_bridges, OfflineRenderSummary,
+};
 pub use render_progress::{ExportCancelToken, ExportProgress, ExportStage};
 pub use render_request::{
     arrangement_bounds_samples, beats_to_samples, ExportNormalizeMode, ExportTailMode,

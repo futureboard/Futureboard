@@ -7,9 +7,10 @@ use sphere_encoder::{
     create_encoder, AudioEncodeOptions, AudioEncodeSpec, AudioFileFormat, AudioSampleFormat,
 };
 
+use crate::plugin_bridge::PluginBridgeSinkMap;
 use crate::types::EngineProjectSnapshot;
 
-use super::offline_renderer::render_offline;
+use super::offline_renderer::{render_offline_tracks_with_bridges, render_offline_with_bridges};
 use super::render_progress::{ExportCancelToken, ExportProgress, ExportStage};
 use super::render_request::{ExportNormalizeMode, OfflineRenderRequest};
 use super::ExportError;
@@ -24,6 +25,12 @@ pub struct ArrangementExportRequest {
     pub render: OfflineRenderRequest,
     /// Per-format encoder options (WAV/FLAC/MP3 + metadata).
     pub encode_options: AudioEncodeOptions,
+}
+
+#[derive(Debug, Clone)]
+pub struct TrackExportTarget {
+    pub track_id: String,
+    pub request: ArrangementExportRequest,
 }
 
 #[derive(Debug, Clone)]
@@ -62,6 +69,16 @@ pub fn export_arrangement(
     snapshot: &EngineProjectSnapshot,
     request: &ArrangementExportRequest,
     cancel: &ExportCancelToken,
+    on_progress: impl FnMut(ExportProgress),
+) -> Result<ArrangementExportSummary, ExportError> {
+    export_arrangement_with_bridges(snapshot, request, cancel, None, on_progress)
+}
+
+pub fn export_arrangement_with_bridges(
+    snapshot: &EngineProjectSnapshot,
+    request: &ArrangementExportRequest,
+    cancel: &ExportCancelToken,
+    bridge_sinks: Option<&PluginBridgeSinkMap>,
     mut on_progress: impl FnMut(ExportProgress),
 ) -> Result<ArrangementExportSummary, ExportError> {
     request.render.validate().map_err(ExportError::Settings)?;
@@ -96,11 +113,12 @@ pub fn export_arrangement(
                 ExportStage::AnalyzingPeak,
                 total,
             ));
-            let analysis = render_offline(
+            let analysis = render_offline_with_bridges(
                 snapshot,
                 &request.render,
                 cancel,
                 1.0,
+                bridge_sinks,
                 |_block| Ok(()),
                 |_p| {},
             )?;
@@ -122,11 +140,12 @@ pub fn export_arrangement(
 
     on_progress(ExportProgress::new(ExportStage::Encoding, 0, total));
 
-    let render_result = render_offline(
+    let render_result = render_offline_with_bridges(
         snapshot,
         &request.render,
         cancel,
         gain,
+        bridge_sinks,
         |block| {
             encoder.write_interleaved_f32(block)?;
             Ok(())
@@ -194,6 +213,155 @@ pub fn export_arrangement(
     })
 }
 
+/// Export mixer-channel taps in one offline graph/timeline pass. Each target is
+/// encoded independently, but plug-ins and routing are processed only once.
+pub fn export_tracks_single_pass(
+    snapshot: &EngineProjectSnapshot,
+    targets: &[TrackExportTarget],
+    cancel: &ExportCancelToken,
+    on_progress: impl FnMut(ExportProgress),
+) -> Result<Vec<ArrangementExportSummary>, ExportError> {
+    export_tracks_single_pass_with_bridges(snapshot, targets, cancel, None, on_progress)
+}
+
+pub fn export_tracks_single_pass_with_bridges(
+    snapshot: &EngineProjectSnapshot,
+    targets: &[TrackExportTarget],
+    cancel: &ExportCancelToken,
+    bridge_sinks: Option<&PluginBridgeSinkMap>,
+    mut on_progress: impl FnMut(ExportProgress),
+) -> Result<Vec<ArrangementExportSummary>, ExportError> {
+    let Some(first) = targets.first() else {
+        return Ok(Vec::new());
+    };
+    if targets.iter().any(|target| {
+        target.request.render.sample_rate != first.request.render.sample_rate
+            || target.request.render.channels != first.request.render.channels
+            || target.request.render.start_sample != first.request.render.start_sample
+            || target.request.render.end_sample != first.request.render.end_sample
+    }) {
+        return Err(ExportError::Settings(
+            "batch export targets must share render settings".to_string(),
+        ));
+    }
+    if targets
+        .iter()
+        .any(|target| !matches!(target.request.render.normalize, ExportNormalizeMode::None))
+    {
+        return Err(ExportError::Settings(
+            "normalization is unavailable for single-pass stem export".to_string(),
+        ));
+    }
+
+    let track_indices: Vec<usize> = targets
+        .iter()
+        .map(|target| {
+            snapshot
+                .tracks
+                .iter()
+                .position(|track| track.id == target.track_id)
+                .ok_or_else(|| {
+                    ExportError::Settings(format!("export track not found: {}", target.track_id))
+                })
+        })
+        .collect::<Result<_, _>>()?;
+    let mut partials = Vec::with_capacity(targets.len());
+    let mut encoders = Vec::with_capacity(targets.len());
+    for target in targets {
+        if let Some(parent) = target.request.output_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let partial = partial_path_for(&target.request.output_path);
+        let _ = std::fs::remove_file(&partial);
+        let spec = AudioEncodeSpec {
+            sample_rate: target.request.render.sample_rate,
+            channels: target.request.render.channels,
+            sample_format: target.request.sample_format,
+        };
+        encoders.push(create_encoder(
+            &partial,
+            spec,
+            target.request.encode_options.clone(),
+        )?);
+        partials.push(partial);
+    }
+
+    let channels = first.request.render.channels as usize;
+    let mut mono_scratch = vec![Vec::<f32>::new(); targets.len()];
+    let mut target_peaks = vec![0.0_f32; targets.len()];
+    let render_result = render_offline_tracks_with_bridges(
+        snapshot,
+        &first.request.render,
+        cancel,
+        bridge_sinks,
+        |taps, frames| {
+            for (target_index, &track_index) in track_indices.iter().enumerate() {
+                let tap = taps
+                    .get(track_index)
+                    .ok_or_else(|| ExportError::Build("missing offline track tap".to_string()))?;
+                target_peaks[target_index] = tap[..frames * 2]
+                    .iter()
+                    .fold(target_peaks[target_index], |peak, sample| {
+                        peak.max(sample.abs())
+                    });
+                if channels == 1 {
+                    let mono = &mut mono_scratch[target_index];
+                    mono.resize(frames, 0.0);
+                    for frame in 0..frames {
+                        mono[frame] = (tap[frame * 2] + tap[frame * 2 + 1]) * 0.5;
+                    }
+                    encoders[target_index].write_interleaved_f32(mono)?;
+                } else {
+                    encoders[target_index].write_interleaved_f32(&tap[..frames * 2])?;
+                }
+            }
+            Ok(())
+        },
+        |progress| {
+            on_progress(ExportProgress::new(
+                ExportStage::Encoding,
+                progress.rendered_frames,
+                progress.total_frames,
+            ));
+        },
+    );
+    match render_result {
+        Ok(_) => {}
+        Err(error) => {
+            drop(encoders);
+            for partial in &partials {
+                let _ = std::fs::remove_file(partial);
+            }
+            return Err(error);
+        }
+    }
+
+    let mut summaries = Vec::with_capacity(targets.len());
+    for ((((target, partial), mut encoder), _), peak) in targets
+        .iter()
+        .zip(partials.iter())
+        .zip(encoders.into_iter())
+        .zip(track_indices.iter())
+        .zip(target_peaks.into_iter())
+    {
+        let encoded = encoder.finalize()?;
+        if target.request.output_path.exists() {
+            std::fs::remove_file(&target.request.output_path)?;
+        }
+        std::fs::rename(partial, &target.request.output_path)?;
+        summaries.push(ArrangementExportSummary {
+            output_path: target.request.output_path.clone(),
+            format: target.request.format,
+            sample_rate: encoded.sample_rate,
+            channels: encoded.channels,
+            frames_written: encoded.frames_written,
+            duration_seconds: encoded.frames_written as f64 / encoded.sample_rate.max(1) as f64,
+            peak_db: linear_to_db(peak),
+        });
+    }
+    Ok(summaries)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -253,6 +421,40 @@ mod tests {
         let bytes = std::fs::read(&out).unwrap();
         assert_eq!(&bytes[0..4], b"RIFF");
         let _ = std::fs::remove_file(out);
+    }
+
+    #[test]
+    fn single_pass_track_export_writes_all_targets() {
+        let first = temp_path("single-pass-a");
+        let second = temp_path("single-pass-b");
+        let targets = vec![
+            TrackExportTarget {
+                track_id: "track-1".to_string(),
+                request: wav_request(first.clone(), 1_000),
+            },
+            TrackExportTarget {
+                track_id: "track-1".to_string(),
+                request: wav_request(second.clone(), 1_000),
+            },
+        ];
+        let snapshot = silence_snapshot(48_000);
+        let summaries = export_tracks_single_pass(
+            &snapshot,
+            &targets,
+            &ExportCancelToken::new(),
+            |_progress| {},
+        )
+        .unwrap();
+
+        assert_eq!(summaries.len(), 2);
+        assert!(summaries
+            .iter()
+            .all(|summary| summary.frames_written == 1_000));
+        for output in [first, second] {
+            assert_eq!(&std::fs::read(&output).unwrap()[..4], b"RIFF");
+            assert!(!partial_path_for(&output).exists());
+            let _ = std::fs::remove_file(output);
+        }
     }
 
     #[test]

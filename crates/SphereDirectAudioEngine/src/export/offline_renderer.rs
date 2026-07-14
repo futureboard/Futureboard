@@ -5,8 +5,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::audio_source::ClipAudioSource;
-use crate::engine::{render_project_block_interleaved, schedule_midi_render_block};
+use crate::engine::{render_project_block_interleaved_with_taps, schedule_midi_render_block};
 use crate::latency_graph::RuntimeLatencyGraph;
+use crate::plugin_bridge::{PluginBridgeSink, PluginBridgeSinkMap};
 use crate::runtime::{clip_dsp_debug_enabled, describe_clip_dsp_state, RuntimeProject};
 use crate::types::EngineProjectSnapshot;
 
@@ -20,6 +21,86 @@ pub struct OfflineRenderSummary {
     pub frames_rendered: u64,
     /// Absolute peak sample magnitude observed across the render.
     pub peak: f32,
+}
+
+/// Export-only adapter: unlike the realtime callback, the worker may wait for
+/// the external host to finish the requested block. This prevents a faster-than-
+/// realtime bounce from outrunning the shared-memory producer and writing zeros.
+#[derive(Debug)]
+struct OfflineBridgeSink(crate::plugin_bridge::SharedPluginBridgeSink);
+
+impl OfflineBridgeSink {
+    fn wait_step(deadline: std::time::Instant) -> bool {
+        if std::time::Instant::now() >= deadline {
+            false
+        } else {
+            std::thread::sleep(std::time::Duration::from_micros(100));
+            true
+        }
+    }
+}
+
+impl PluginBridgeSink for OfflineBridgeSink {
+    fn dsp_ready(&self) -> bool {
+        self.0.dsp_ready()
+    }
+    fn plugin_output_channels(&self) -> u32 {
+        self.0.plugin_output_channels()
+    }
+    fn read_output(&self, l: &mut [f32], r: &mut [f32], frames: usize) -> usize {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let got = self.0.read_output(l, r, frames);
+            if got > 0 || !Self::wait_step(deadline) {
+                return got;
+            }
+        }
+    }
+    fn read_output_for_channels(
+        &self,
+        l: &mut [f32],
+        r: &mut [f32],
+        frames: usize,
+        enabled: &[u8],
+    ) -> usize {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let got = self.0.read_output_for_channels(l, r, frames, enabled);
+            if got > 0 || !Self::wait_step(deadline) {
+                return got;
+            }
+        }
+    }
+    fn output_channel_peak(&self, channel: u8) -> f32 {
+        self.0.output_channel_peak(channel)
+    }
+    fn read_output_multichannel(&self, out: &mut [f32], frames: usize) -> (usize, usize) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let got = self.0.read_output_multichannel(out, frames);
+            if got.0 > 0 || !Self::wait_step(deadline) {
+                return got;
+            }
+        }
+    }
+    fn push_midi(&self, status: u8, data1: u8, data2: u8, offset: u32) {
+        self.0.push_midi(status, data1, data2, offset);
+    }
+    fn push_param(&self, id: u32, value: f32, offset: u32) {
+        self.0.push_param(id, value, offset);
+    }
+    fn write_input(&self, l: &[f32], r: &[f32], frames: usize) {
+        self.0.write_input(l, r, frames);
+    }
+    fn request_block(&self, frames: u32) {
+        self.0.request_block(frames);
+    }
+    fn reported_latency_samples(&self) -> u32 {
+        self.0.reported_latency_samples()
+    }
+    fn set_transport(&self, ctx: &crate::vst3_processor::RuntimeTransportContext) {
+        self.0.set_transport(ctx);
+    }
 }
 
 /// Render the arrangement offline.
@@ -36,8 +117,78 @@ pub fn render_offline(
     request: &OfflineRenderRequest,
     cancel: &ExportCancelToken,
     gain: f32,
+    on_block: impl FnMut(&[f32]) -> Result<(), ExportError>,
+    on_progress: impl FnMut(ExportProgress),
+) -> Result<OfflineRenderSummary, ExportError> {
+    render_offline_with_bridges(snapshot, request, cancel, gain, None, on_block, on_progress)
+}
+
+pub fn render_offline_with_bridges(
+    snapshot: &EngineProjectSnapshot,
+    request: &OfflineRenderRequest,
+    cancel: &ExportCancelToken,
+    gain: f32,
+    bridge_sinks: Option<&PluginBridgeSinkMap>,
     mut on_block: impl FnMut(&[f32]) -> Result<(), ExportError>,
     mut on_progress: impl FnMut(ExportProgress),
+) -> Result<OfflineRenderSummary, ExportError> {
+    render_offline_impl(
+        snapshot,
+        request,
+        cancel,
+        gain,
+        bridge_sinks,
+        false,
+        &mut on_block,
+        &mut |_taps, _frames| Ok(()),
+        &mut on_progress,
+    )
+}
+
+/// Render every mixer-channel tap alongside the master in one runtime graph
+/// pass. Taps are stereo, post-insert/post-fader, and ordered like
+/// `snapshot.tracks`; the slices are reused on the next callback.
+pub fn render_offline_tracks(
+    snapshot: &EngineProjectSnapshot,
+    request: &OfflineRenderRequest,
+    cancel: &ExportCancelToken,
+    on_track_block: impl FnMut(&[Vec<f32>], usize) -> Result<(), ExportError>,
+    on_progress: impl FnMut(ExportProgress),
+) -> Result<OfflineRenderSummary, ExportError> {
+    render_offline_tracks_with_bridges(snapshot, request, cancel, None, on_track_block, on_progress)
+}
+
+pub fn render_offline_tracks_with_bridges(
+    snapshot: &EngineProjectSnapshot,
+    request: &OfflineRenderRequest,
+    cancel: &ExportCancelToken,
+    bridge_sinks: Option<&PluginBridgeSinkMap>,
+    mut on_track_block: impl FnMut(&[Vec<f32>], usize) -> Result<(), ExportError>,
+    mut on_progress: impl FnMut(ExportProgress),
+) -> Result<OfflineRenderSummary, ExportError> {
+    render_offline_impl(
+        snapshot,
+        request,
+        cancel,
+        1.0,
+        bridge_sinks,
+        true,
+        &mut |_block| Ok(()),
+        &mut on_track_block,
+        &mut on_progress,
+    )
+}
+
+fn render_offline_impl(
+    snapshot: &EngineProjectSnapshot,
+    request: &OfflineRenderRequest,
+    cancel: &ExportCancelToken,
+    gain: f32,
+    bridge_sinks: Option<&PluginBridgeSinkMap>,
+    capture_tracks: bool,
+    on_block: &mut dyn FnMut(&[f32]) -> Result<(), ExportError>,
+    on_track_block: &mut dyn FnMut(&[Vec<f32>], usize) -> Result<(), ExportError>,
+    on_progress: &mut dyn FnMut(ExportProgress),
 ) -> Result<OfflineRenderSummary, ExportError> {
     request.validate().map_err(ExportError::Settings)?;
 
@@ -60,6 +211,25 @@ pub fn render_offline(
     )
     .map_err(|e| ExportError::Build(e.to_string()))?;
     runtime.sample_rate = request.sample_rate;
+    if let Some(sinks) = bridge_sinks {
+        runtime.plugin_bridge_sinks = sinks
+            .iter()
+            .map(|(id, sink)| {
+                (
+                    id.clone(),
+                    Arc::new(OfflineBridgeSink(sink.clone()))
+                        as crate::plugin_bridge::SharedPluginBridgeSink,
+                )
+            })
+            .collect();
+        runtime.resolve_bridge_sinks();
+        // Prime the bridge's one-block pipeline. The first rendered block
+        // consumes this silent/stale response and requests the first timeline
+        // block, matching realtime's one-block bridge latency (covered by PDC).
+        for sink in runtime.plugin_bridge_sinks.values() {
+            sink.request_block(request.block_size.max(1) as u32);
+        }
+    }
     // Deterministic bounce: apply the exact constant per-block fader gain, never
     // the realtime anti-zipper ramp (which is for live fader drags).
     runtime.fader_smoothing = false;
@@ -138,6 +308,11 @@ pub fn render_offline(
     // scratch and fold down to mono on output when requested.
     let mut stereo = vec![0.0f32; block * 2];
     let mut out = vec![0.0f32; block * channels];
+    let mut track_taps = if capture_tracks {
+        vec![Vec::new(); runtime.tracks.len()]
+    } else {
+        Vec::new()
+    };
 
     let content_frames = request.content_frames();
     let tail_cap = request.max_tail_frames();
@@ -203,7 +378,7 @@ pub fn render_offline(
         // Schedule MIDI for this block, then render the kernel block. Mirrors the
         // realtime callback order in `fill_output_f32_inner`.
         let _ = schedule_midi_render_block(&mut runtime, pos, this_block as u64, None);
-        let frames = render_project_block_interleaved(
+        let frames = render_project_block_interleaved_with_taps(
             &mut runtime,
             pos,
             request.master_volume,
@@ -213,6 +388,7 @@ pub fn render_offline(
             ts_num,
             ts_den,
             None,
+            capture_tracks.then_some(track_taps.as_mut_slice()),
         );
         // Match the realtime path: per-block MIDI events are consumed once.
         for track in &mut runtime.tracks {
@@ -248,6 +424,9 @@ pub fn render_offline(
             }
             peak = peak.max(block_peak);
             on_block(out_slice)?;
+            if capture_tracks {
+                on_track_block(&track_taps, frames)?;
+            }
             written = written.saturating_add(frames_u64);
 
             // UntilSilence: stop early once a tail block has decayed below threshold.

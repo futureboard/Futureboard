@@ -68,11 +68,13 @@ The automated single-pass test uses a silent synthetic snapshot and verifies mul
    - `request_seq` and `done_seq` advance for every block;
    - `read_output_multichannel` returns non-zero frames/channels;
    - `scratch_multi`, child `recv_l/recv_r`, processed child `block_l/block_r`, and export taps have non-zero peaks.
-3. Replace the 25 ms ownership-transfer delay with an acknowledged engine command/barrier if it races on slower devices.
-4. Make the blocking bridge wait cancellation-aware; currently cancellation may wait until the per-read 5-second deadline when a host is stalled.
-5. Add a deterministic non-silent fake `PluginBridgeSink` integration test covering parent instrument plus multiple child output taps.
+3. ~~Replace the 25 ms ownership-transfer delay with an acknowledged engine command/barrier.~~ DONE (2026-07-15): `EngineCommand::CommandBarrier` acked by both callback drain loops (legacy cpal + DAUx); `wait_for_command_barrier(500ms)` in `BridgeSinkHandoff::detach`, with the 25 ms sleep kept only as the timeout fallback (no open stream / stalled callback).
+4. ~~Make the blocking bridge wait cancellation-aware.~~ DONE: `OfflineBridgeSink` carries the `ExportCancelToken`; a cancelled export aborts a pending bridge wait immediately instead of stalling out the 5 s per-read deadline.
+5. ~~Add a deterministic non-silent fake `PluginBridgeSink` integration test.~~ DONE: `single_pass_bridged_multiout_stems_are_not_silent` in `export/exporter.rs` — freshness-guarded 4-channel constant sink, parent instrument + two `vsti-out:` child bus strips through `export_tracks_single_pass_with_bridges`; asserts child A peaks at plugin channels 1/2 and child B at 3/4, parent silent (no fallback downmix).
 6. Verify bridge latency alignment. The bridge is one block pipelined; warmup/PDC should discard that latency, but this needs a known impulse test.
-7. Check error cleanup when one of several encoder finalizations fails; ensure every remaining partial file is removed and live bridge sinks are always restored.
+7. ~~Check error cleanup when one of several encoder finalizations fails.~~ DONE: both the encoder-open loop and the finalize/rename loop in `export_tracks_single_pass_with_bridges` now close remaining encoder handles and remove every not-yet-finalized `.partial` on error (already-renamed outputs are kept — they are complete stems). Live sink restore moved into the `BridgeSinkHandoff` Drop guard, so a worker panic can no longer leave bridged inserts detached/silent.
+
+Steps 1, 2 (manual Addictive Drums validation) and 6 (impulse latency test) remain open.
 
 ## Constraints
 

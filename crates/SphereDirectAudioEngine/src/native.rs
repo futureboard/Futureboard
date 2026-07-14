@@ -437,6 +437,13 @@ impl AudioEngine {
         self.inner.set_plugin_bridge_sink(insert_id, sink)
     }
 
+    /// Wait (bounded, control thread only) until the audio callback has drained
+    /// every command sent before this call. `true` = confirmed ack; `false` =
+    /// timeout / no open stream, caller falls back to its own grace handling.
+    pub fn wait_for_command_barrier(&self, timeout: std::time::Duration) -> bool {
+        self.inner.wait_for_command_barrier(timeout)
+    }
+
     pub fn set_bridge_editor_active(
         &self,
         track_id: String,

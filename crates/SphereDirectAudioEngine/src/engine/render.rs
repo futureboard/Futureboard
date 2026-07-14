@@ -1115,10 +1115,7 @@ pub fn render_project_block_interleaved_with_taps(
                 out[0] = l;
                 out[1] = r;
             }
-            if let Some(tap) = track_taps
-                .as_deref_mut()
-                .and_then(|taps| taps.get_mut(m_idx))
-            {
+            if let Some(tap) = track_taps.and_then(|taps| taps.get_mut(m_idx)) {
                 for frame in 0..frames {
                     tap[frame * 2] = master.block_l[frame];
                     tap[frame * 2 + 1] = master.block_r[frame];

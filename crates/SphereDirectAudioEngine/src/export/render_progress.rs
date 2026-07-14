@@ -72,7 +72,7 @@ impl ExportProgress {
 
 /// Cheap, cloneable cancellation flag. Cloning shares the same flag, so the UI
 /// can hold one handle while the worker thread polls another.
-#[derive(Clone, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct ExportCancelToken(Arc<AtomicBool>);
 
 impl ExportCancelToken {

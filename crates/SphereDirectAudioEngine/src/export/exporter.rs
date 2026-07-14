@@ -268,22 +268,37 @@ pub fn export_tracks_single_pass_with_bridges(
     let mut partials = Vec::with_capacity(targets.len());
     let mut encoders = Vec::with_capacity(targets.len());
     for target in targets {
-        if let Some(parent) = target.request.output_path.parent() {
-            std::fs::create_dir_all(parent)?;
+        let setup = (|| -> Result<_, ExportError> {
+            if let Some(parent) = target.request.output_path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            let partial = partial_path_for(&target.request.output_path);
+            let _ = std::fs::remove_file(&partial);
+            let spec = AudioEncodeSpec {
+                sample_rate: target.request.render.sample_rate,
+                channels: target.request.render.channels,
+                sample_format: target.request.sample_format,
+            };
+            let encoder = create_encoder(&partial, spec, target.request.encode_options.clone())?;
+            Ok((partial, encoder))
+        })();
+        match setup {
+            Ok((partial, encoder)) => {
+                encoders.push(encoder);
+                partials.push(partial);
+            }
+            Err(error) => {
+                // Opening one encoder failed: close the already-opened encoder
+                // handles, then remove every partial created so far (plus the
+                // failing target's, in case create_encoder touched the file).
+                drop(encoders);
+                for partial in &partials {
+                    let _ = std::fs::remove_file(partial);
+                }
+                let _ = std::fs::remove_file(partial_path_for(&target.request.output_path));
+                return Err(error);
+            }
         }
-        let partial = partial_path_for(&target.request.output_path);
-        let _ = std::fs::remove_file(&partial);
-        let spec = AudioEncodeSpec {
-            sample_rate: target.request.render.sample_rate,
-            channels: target.request.render.channels,
-            sample_format: target.request.sample_format,
-        };
-        encoders.push(create_encoder(
-            &partial,
-            spec,
-            target.request.encode_options.clone(),
-        )?);
-        partials.push(partial);
     }
 
     let channels = first.request.render.channels as usize;
@@ -337,18 +352,39 @@ pub fn export_tracks_single_pass_with_bridges(
     }
 
     let mut summaries = Vec::with_capacity(targets.len());
-    for ((((target, partial), mut encoder), _), peak) in targets
+    let mut encoders = encoders.into_iter();
+    for (index, ((target, partial), peak)) in targets
         .iter()
         .zip(partials.iter())
-        .zip(encoders.into_iter())
-        .zip(track_indices.iter())
-        .zip(target_peaks.into_iter())
+        .zip(target_peaks)
+        .enumerate()
     {
-        let encoded = encoder.finalize()?;
-        if target.request.output_path.exists() {
-            std::fs::remove_file(&target.request.output_path)?;
-        }
-        std::fs::rename(partial, &target.request.output_path)?;
+        let mut encoder = encoders
+            .next()
+            .ok_or_else(|| ExportError::Build("missing encoder for export target".to_string()))?;
+        let finalized = (|| -> Result<_, ExportError> {
+            let encoded = encoder.finalize()?;
+            if target.request.output_path.exists() {
+                std::fs::remove_file(&target.request.output_path)?;
+            }
+            std::fs::rename(partial, &target.request.output_path)?;
+            Ok(encoded)
+        })();
+        let encoded = match finalized {
+            Ok(encoded) => encoded,
+            Err(error) => {
+                // One target failed to finalize/replace: close every remaining
+                // encoder handle first (Windows cannot delete open files), then
+                // sweep this and all not-yet-finalized partials off disk.
+                // Already-renamed outputs are complete files and stay.
+                drop(encoder);
+                drop(encoders);
+                for partial in &partials[index..] {
+                    let _ = std::fs::remove_file(partial);
+                }
+                return Err(error);
+            }
+        };
         summaries.push(ArrangementExportSummary {
             output_path: target.request.output_path.clone(),
             format: target.request.format,
@@ -365,7 +401,7 @@ pub fn export_tracks_single_pass_with_bridges(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::export::offline_renderer::silence_snapshot;
+    use crate::export::offline_renderer::{make_track_snapshot, silence_snapshot};
     use crate::export::render_request::{ExportNormalizeMode, ExportTailMode};
     use sphere_encoder::AudioEncodeOptions;
 
@@ -453,6 +489,167 @@ mod tests {
         for output in [first, second] {
             assert_eq!(&std::fs::read(&output).unwrap()[..4], b"RIFF");
             assert!(!partial_path_for(&output).exists());
+            let _ = std::fs::remove_file(output);
+        }
+    }
+
+    /// Deterministic stand-in for the shared-memory plugin host: a 4-channel
+    /// multi-out "instrument" that emits constant per-channel values with the
+    /// real one-block freshness contract (each produced block is handed out at
+    /// most once; a read before the next `request_block` returns 0).
+    #[derive(Debug, Default)]
+    struct ConstantMultiOutSink {
+        fresh: std::sync::atomic::AtomicBool,
+    }
+
+    impl ConstantMultiOutSink {
+        const CHANNELS: usize = 4;
+
+        /// Channel `c` (0-based) carries the constant `0.1 * (c + 1)`.
+        fn channel_value(channel: usize) -> f32 {
+            0.1 * (channel + 1) as f32
+        }
+    }
+
+    impl crate::plugin_bridge::PluginBridgeSink for ConstantMultiOutSink {
+        fn dsp_ready(&self) -> bool {
+            true
+        }
+        fn plugin_output_channels(&self) -> u32 {
+            Self::CHANNELS as u32
+        }
+        fn read_output(&self, out_l: &mut [f32], out_r: &mut [f32], frames: usize) -> usize {
+            if !self.fresh.swap(false, std::sync::atomic::Ordering::AcqRel) {
+                return 0;
+            }
+            let n = frames.min(out_l.len()).min(out_r.len());
+            out_l[..n].fill(Self::channel_value(0));
+            out_r[..n].fill(Self::channel_value(1));
+            n
+        }
+        fn read_output_multichannel(&self, out: &mut [f32], frames: usize) -> (usize, usize) {
+            if !self.fresh.swap(false, std::sync::atomic::Ordering::AcqRel) {
+                return (0, 0);
+            }
+            let n = frames.min(out.len() / Self::CHANNELS);
+            for frame in 0..n {
+                for channel in 0..Self::CHANNELS {
+                    out[frame * Self::CHANNELS + channel] = Self::channel_value(channel);
+                }
+            }
+            (n, Self::CHANNELS)
+        }
+        fn push_midi(&self, _: u8, _: u8, _: u8, _: u32) {}
+        fn write_input(&self, _: &[f32], _: &[f32], _: usize) {}
+        fn request_block(&self, _frames: u32) {
+            self.fresh.store(true, std::sync::atomic::Ordering::Release);
+        }
+    }
+
+    /// End-to-end single-pass stem export through a bridged multi-out
+    /// instrument: parent VSTi track plus two `vsti-out:` child bus strips, all
+    /// captured from ONE offline graph pass. Verifies the offline bridge
+    /// handoff produces non-silent files (the Addictive Drums silence bug) and
+    /// that each child gets exactly its own channel pair.
+    #[test]
+    fn single_pass_bridged_multiout_stems_are_not_silent() {
+        use crate::types::{EngineInsertSnapshot, EngineTrackSnapshot};
+        use std::collections::HashMap;
+        use std::sync::Arc;
+
+        let mut snapshot = silence_snapshot(48_000);
+        let child_a_id = "vsti-out:insert-1:bus:0".to_string();
+        let child_b_id = "vsti-out:insert-1:bus:1".to_string();
+
+        let mut params: HashMap<String, serde_json::Value> = HashMap::new();
+        params.insert("role".to_string(), serde_json::json!("instrument"));
+        params.insert(
+            "vstiOutputChildren".to_string(),
+            serde_json::json!([
+                { "trackId": child_a_id, "channelL": 1, "channelR": 2, "busIndex": 0 },
+                { "trackId": child_b_id, "channelL": 3, "channelR": 4, "busIndex": 1 },
+            ]),
+        );
+        snapshot.tracks[0].track_type = "instrument".to_string();
+        snapshot.tracks[0].inserts.push(EngineInsertSnapshot {
+            id: "insert-1".to_string(),
+            kind: "external-bridge-plugin".to_string(),
+            enabled: true,
+            params,
+            state: None,
+        });
+        for child_id in [&child_a_id, &child_b_id] {
+            snapshot.tracks.push(EngineTrackSnapshot {
+                track_type: "bus".to_string(),
+                ..make_track_snapshot(child_id)
+            });
+        }
+
+        let mut bridge_sinks = crate::plugin_bridge::PluginBridgeSinkMap::new();
+        bridge_sinks.insert(
+            "insert-1".to_string(),
+            Arc::new(ConstantMultiOutSink::default())
+                as crate::plugin_bridge::SharedPluginBridgeSink,
+        );
+
+        let parent_out = temp_path("multiout-parent");
+        let child_a_out = temp_path("multiout-child-a");
+        let child_b_out = temp_path("multiout-child-b");
+        let targets = vec![
+            TrackExportTarget {
+                track_id: "track-1".to_string(),
+                request: wav_request(parent_out.clone(), 1_000),
+            },
+            TrackExportTarget {
+                track_id: child_a_id,
+                request: wav_request(child_a_out.clone(), 1_000),
+            },
+            TrackExportTarget {
+                track_id: child_b_id,
+                request: wav_request(child_b_out.clone(), 1_000),
+            },
+        ];
+
+        let summaries = export_tracks_single_pass_with_bridges(
+            &snapshot,
+            &targets,
+            &ExportCancelToken::new(),
+            Some(&bridge_sinks),
+            |_progress| {},
+        )
+        .unwrap();
+
+        assert_eq!(summaries.len(), 3);
+        assert!(summaries
+            .iter()
+            .all(|summary| summary.frames_written == 1_000));
+        for output in [&parent_out, &child_a_out, &child_b_out] {
+            assert_eq!(&std::fs::read(output).unwrap()[..4], b"RIFF");
+            assert!(!partial_path_for(output).exists());
+        }
+
+        // With explicit child routes the parent instrument strip receives no
+        // fallback downmix — its stem is silent by contract.
+        assert_eq!(
+            summaries[0].peak_db, None,
+            "parent with explicit multi-out children must not receive a downmix"
+        );
+        // Each child stem carries exactly its own channel pair: A = plugin
+        // channels 1/2 (0.1/0.2), B = channels 3/4 (0.3/0.4). Unity fader,
+        // centered pan → the tap peak is the pair's larger constant.
+        let peak_lin = |db: Option<f32>| db.map(|d| 10f32.powf(d / 20.0)).unwrap_or(0.0);
+        let child_a_peak = peak_lin(summaries[1].peak_db);
+        let child_b_peak = peak_lin(summaries[2].peak_db);
+        assert!(
+            (child_a_peak - 0.2).abs() < 1e-3,
+            "child A should carry plugin channels 1/2, got peak {child_a_peak}"
+        );
+        assert!(
+            (child_b_peak - 0.4).abs() < 1e-3,
+            "child B should carry plugin channels 3/4, got peak {child_b_peak}"
+        );
+
+        for output in [parent_out, child_a_out, child_b_out] {
             let _ = std::fs::remove_file(output);
         }
     }

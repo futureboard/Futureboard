@@ -619,6 +619,11 @@ pub fn drain_commands(
                 // Re-cache per-insert sink handles for the block path.
                 runtime.resolve_bridge_sinks();
             }
+            EngineCommand::CommandBarrier { ack } => {
+                // Wait-free ack: every command sent before this one has now
+                // been applied to the callback's runtime.
+                ack.store(true, Ordering::Release);
+            }
             EngineCommand::SetBridgeEditorActive { track_id, active } => {
                 runtime.set_bridge_editor_active(&track_id, active);
                 if !active {

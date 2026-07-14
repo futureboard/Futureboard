@@ -67,6 +67,49 @@ struct ExportJob {
     cancel: ExportCancelToken,
 }
 
+/// Detaches the live realtime plugin-bridge sinks for the duration of an export
+/// and guarantees they are re-installed when the guard leaves scope — success,
+/// error, or worker panic (Drop runs during unwind). Losing the restore would
+/// leave every bridged insert silent in realtime playback after the export.
+struct BridgeSinkHandoff<'a> {
+    engine: Option<&'a DirectAudio::AudioEngine>,
+    sinks: &'a PluginBridgeSinkMap,
+}
+
+impl<'a> BridgeSinkHandoff<'a> {
+    fn detach(
+        engine: Option<&'a DirectAudio::AudioEngine>,
+        sinks: &'a PluginBridgeSinkMap,
+    ) -> Self {
+        if let Some(engine) = engine {
+            if !sinks.is_empty() {
+                for id in sinks.keys() {
+                    let _ = engine.set_plugin_bridge_sink(id.clone(), None);
+                }
+                // Deterministic handoff: wait for the audio callback to ack that
+                // the removals were applied before the offline worker starts
+                // driving the shared bridge. Ack timeout (no open stream, paused
+                // device, stalled callback) falls back to the old fixed grace
+                // sleep rather than racing the callback.
+                if !engine.wait_for_command_barrier(std::time::Duration::from_millis(500)) {
+                    std::thread::sleep(std::time::Duration::from_millis(25));
+                }
+            }
+        }
+        Self { engine, sinks }
+    }
+}
+
+impl Drop for BridgeSinkHandoff<'_> {
+    fn drop(&mut self) {
+        if let Some(engine) = self.engine {
+            for (id, sink) in self.sinks {
+                let _ = engine.set_plugin_bridge_sink(id.clone(), Some(sink.clone()));
+            }
+        }
+    }
+}
+
 /// Which dropdown is currently open (only one at a time).
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum SelectField {
@@ -275,42 +318,38 @@ impl ExportArrangementWindow {
         std::thread::Builder::new()
             .name("fb-arrangement-export".to_string())
             .spawn(move || {
-                if let Some(engine) = audio_engine.as_ref() {
-                    for id in bridge_sinks.keys() {
-                        let _ = engine.set_plugin_bridge_sink(id.clone(), None);
-                    }
-                    std::thread::sleep(std::time::Duration::from_millis(25));
-                }
                 let progress_shared = worker_shared.clone();
                 let mut on_progress = move |progress| {
                     if let Ok(mut guard) = progress_shared.lock() {
                         guard.progress = Some(progress);
                     }
                 };
-                let result = if batch_targets.is_empty() {
-                    export_arrangement_with_bridges(
-                        &snapshot,
-                        &request,
-                        &worker_cancel,
-                        Some(&bridge_sinks),
-                        &mut on_progress,
-                    )
-                    .map(|summary| vec![summary])
-                } else {
-                    export_tracks_single_pass_with_bridges(
-                        &snapshot,
-                        &batch_targets,
-                        &worker_cancel,
-                        Some(&bridge_sinks),
-                        &mut on_progress,
-                    )
-                }
-                .map_err(|error| error.to_string());
-                if let Some(engine) = audio_engine.as_ref() {
-                    for (id, sink) in &bridge_sinks {
-                        let _ = engine.set_plugin_bridge_sink(id.clone(), Some(sink.clone()));
+                // Scope the sink handoff so the live sinks are re-installed
+                // (guard Drop) before the terminal result is published below —
+                // and on any panic path, since Drop runs during unwind.
+                let result = {
+                    let _bridge_handoff =
+                        BridgeSinkHandoff::detach(audio_engine.as_ref(), &bridge_sinks);
+                    if batch_targets.is_empty() {
+                        export_arrangement_with_bridges(
+                            &snapshot,
+                            &request,
+                            &worker_cancel,
+                            Some(&bridge_sinks),
+                            &mut on_progress,
+                        )
+                        .map(|summary| vec![summary])
+                    } else {
+                        export_tracks_single_pass_with_bridges(
+                            &snapshot,
+                            &batch_targets,
+                            &worker_cancel,
+                            Some(&bridge_sinks),
+                            &mut on_progress,
+                        )
                     }
-                }
+                    .map_err(|error| error.to_string())
+                };
                 if let Ok(mut guard) = worker_shared.lock() {
                     guard.done = Some(result);
                 }

@@ -117,4 +117,12 @@ pub enum EngineCommand {
     /// Keep rendering a bridged track while its plugin editor is open (VSTi
     /// internal keyboard / groove preview needs a live DSP loop).
     SetBridgeEditorActive { track_id: String, active: bool },
+    /// Control-thread synchronization point: the callback sets `ack` when it
+    /// drains this command, proving every command sent *before* it has been
+    /// applied. Used by offline export to hand bridge-sink ownership across
+    /// deterministically instead of sleeping a guessed interval. The handler is
+    /// one atomic store — wait-free; only the control side ever waits.
+    CommandBarrier {
+        ack: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    },
 }

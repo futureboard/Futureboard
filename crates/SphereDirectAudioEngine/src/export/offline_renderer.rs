@@ -15,6 +15,10 @@ use super::render_progress::{ExportCancelToken, ExportProgress, ExportStage};
 use super::render_request::{ExportTailMode, OfflineRenderRequest};
 use super::ExportError;
 
+/// Per-block callback receiving each rendered mixer-channel tap (stereo, in
+/// runtime-track order) and the frame count valid this block.
+type TrackBlockCallback<'a> = &'a mut dyn FnMut(&[Vec<f32>], usize) -> Result<(), ExportError>;
+
 /// Result of an offline render pass.
 #[derive(Debug, Clone)]
 pub struct OfflineRenderSummary {
@@ -26,12 +30,19 @@ pub struct OfflineRenderSummary {
 /// Export-only adapter: unlike the realtime callback, the worker may wait for
 /// the external host to finish the requested block. This prevents a faster-than-
 /// realtime bounce from outrunning the shared-memory producer and writing zeros.
+///
+/// The wait is cancellation-aware: cancelling the export aborts a pending wait
+/// immediately (the read returns 0 and the render loop's cancel check exits)
+/// instead of stalling until the per-read deadline when a host is wedged.
 #[derive(Debug)]
-struct OfflineBridgeSink(crate::plugin_bridge::SharedPluginBridgeSink);
+struct OfflineBridgeSink {
+    live: crate::plugin_bridge::SharedPluginBridgeSink,
+    cancel: ExportCancelToken,
+}
 
 impl OfflineBridgeSink {
-    fn wait_step(deadline: std::time::Instant) -> bool {
-        if std::time::Instant::now() >= deadline {
+    fn wait_step(&self, deadline: std::time::Instant) -> bool {
+        if self.cancel.is_cancelled() || std::time::Instant::now() >= deadline {
             false
         } else {
             std::thread::sleep(std::time::Duration::from_micros(100));
@@ -42,16 +53,16 @@ impl OfflineBridgeSink {
 
 impl PluginBridgeSink for OfflineBridgeSink {
     fn dsp_ready(&self) -> bool {
-        self.0.dsp_ready()
+        self.live.dsp_ready()
     }
     fn plugin_output_channels(&self) -> u32 {
-        self.0.plugin_output_channels()
+        self.live.plugin_output_channels()
     }
     fn read_output(&self, l: &mut [f32], r: &mut [f32], frames: usize) -> usize {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         loop {
-            let got = self.0.read_output(l, r, frames);
-            if got > 0 || !Self::wait_step(deadline) {
+            let got = self.live.read_output(l, r, frames);
+            if got > 0 || !self.wait_step(deadline) {
                 return got;
             }
         }
@@ -65,41 +76,41 @@ impl PluginBridgeSink for OfflineBridgeSink {
     ) -> usize {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         loop {
-            let got = self.0.read_output_for_channels(l, r, frames, enabled);
-            if got > 0 || !Self::wait_step(deadline) {
+            let got = self.live.read_output_for_channels(l, r, frames, enabled);
+            if got > 0 || !self.wait_step(deadline) {
                 return got;
             }
         }
     }
     fn output_channel_peak(&self, channel: u8) -> f32 {
-        self.0.output_channel_peak(channel)
+        self.live.output_channel_peak(channel)
     }
     fn read_output_multichannel(&self, out: &mut [f32], frames: usize) -> (usize, usize) {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         loop {
-            let got = self.0.read_output_multichannel(out, frames);
-            if got.0 > 0 || !Self::wait_step(deadline) {
+            let got = self.live.read_output_multichannel(out, frames);
+            if got.0 > 0 || !self.wait_step(deadline) {
                 return got;
             }
         }
     }
     fn push_midi(&self, status: u8, data1: u8, data2: u8, offset: u32) {
-        self.0.push_midi(status, data1, data2, offset);
+        self.live.push_midi(status, data1, data2, offset);
     }
     fn push_param(&self, id: u32, value: f32, offset: u32) {
-        self.0.push_param(id, value, offset);
+        self.live.push_param(id, value, offset);
     }
     fn write_input(&self, l: &[f32], r: &[f32], frames: usize) {
-        self.0.write_input(l, r, frames);
+        self.live.write_input(l, r, frames);
     }
     fn request_block(&self, frames: u32) {
-        self.0.request_block(frames);
+        self.live.request_block(frames);
     }
     fn reported_latency_samples(&self) -> u32 {
-        self.0.reported_latency_samples()
+        self.live.reported_latency_samples()
     }
     fn set_transport(&self, ctx: &crate::vst3_processor::RuntimeTransportContext) {
-        self.0.set_transport(ctx);
+        self.live.set_transport(ctx);
     }
 }
 
@@ -179,6 +190,11 @@ pub fn render_offline_tracks_with_bridges(
     )
 }
 
+// Shared implementation behind the four public render entry points; the
+// parameter set IS the render contract (source, range, bridge handles, and the
+// master/tap/progress callbacks), so grouping them into a struct would only
+// move the same nine names one level down.
+#[allow(clippy::too_many_arguments)]
 fn render_offline_impl(
     snapshot: &EngineProjectSnapshot,
     request: &OfflineRenderRequest,
@@ -187,7 +203,7 @@ fn render_offline_impl(
     bridge_sinks: Option<&PluginBridgeSinkMap>,
     capture_tracks: bool,
     on_block: &mut dyn FnMut(&[f32]) -> Result<(), ExportError>,
-    on_track_block: &mut dyn FnMut(&[Vec<f32>], usize) -> Result<(), ExportError>,
+    on_track_block: TrackBlockCallback,
     on_progress: &mut dyn FnMut(ExportProgress),
 ) -> Result<OfflineRenderSummary, ExportError> {
     request.validate().map_err(ExportError::Settings)?;
@@ -217,8 +233,10 @@ fn render_offline_impl(
             .map(|(id, sink)| {
                 (
                     id.clone(),
-                    Arc::new(OfflineBridgeSink(sink.clone()))
-                        as crate::plugin_bridge::SharedPluginBridgeSink,
+                    Arc::new(OfflineBridgeSink {
+                        live: sink.clone(),
+                        cancel: cancel.clone(),
+                    }) as crate::plugin_bridge::SharedPluginBridgeSink,
                 )
             })
             .collect();
@@ -551,9 +569,37 @@ fn restore_offline_plugin_states(snapshot: &EngineProjectSnapshot, runtime: &mut
     }
 }
 
+/// Test-support: a plain unrouted audio track snapshot with unity fader.
+#[cfg(test)]
+pub(crate) fn make_track_snapshot(id: &str) -> crate::types::EngineTrackSnapshot {
+    crate::types::EngineTrackSnapshot {
+        id: id.to_string(),
+        track_type: "audio".to_string(),
+        volume: 1.0,
+        pan: 0.0,
+        muted: false,
+        solo: false,
+        armed: false,
+        input_monitor: false,
+        input_source: Default::default(),
+        preview_mode: "stereo".to_string(),
+        output_track_id: None,
+        inserts: Vec::new(),
+        sends: Vec::new(),
+        automation_lanes: Vec::new(),
+        builtin_soundfont_player: false,
+        soundfont_path: None,
+        soundfont_preset_bank: None,
+        soundfont_preset_patch: None,
+        soundfont_volume: 1.0,
+        soundfont_reverb_chorus: true,
+        soundfont_polyphony: 64,
+    }
+}
+
 #[cfg(test)]
 pub(crate) fn silence_snapshot(sample_rate: u32) -> EngineProjectSnapshot {
-    use crate::types::{EngineRoutingSnapshot, EngineTrackSnapshot};
+    use crate::types::EngineRoutingSnapshot;
     EngineProjectSnapshot {
         project_id: "test".to_string(),
         project_root: None,
@@ -562,29 +608,7 @@ pub(crate) fn silence_snapshot(sample_rate: u32) -> EngineProjectSnapshot {
         tempo_points: Vec::new(),
         time_signature: [4, 4],
         sample_rate,
-        tracks: vec![EngineTrackSnapshot {
-            id: "track-1".to_string(),
-            track_type: "audio".to_string(),
-            volume: 1.0,
-            pan: 0.0,
-            muted: false,
-            solo: false,
-            armed: false,
-            input_monitor: false,
-            input_source: Default::default(),
-            preview_mode: "stereo".to_string(),
-            output_track_id: None,
-            inserts: Vec::new(),
-            sends: Vec::new(),
-            automation_lanes: Vec::new(),
-            builtin_soundfont_player: false,
-            soundfont_path: None,
-            soundfont_preset_bank: None,
-            soundfont_preset_patch: None,
-            soundfont_volume: 1.0,
-            soundfont_reverb_chorus: true,
-            soundfont_polyphony: 64,
-        }],
+        tracks: vec![make_track_snapshot("track-1")],
         clips: Vec::new(),
         midi_clips: Vec::new(),
         pdc_enabled: true,

@@ -1085,6 +1085,33 @@ impl EngineInner {
         self.send_command(EngineCommand::SetBridgeEditorActive { track_id, active })
     }
 
+    /// Block the *calling control thread* (never the callback) until the audio
+    /// callback has drained every command sent before this call, or `timeout`
+    /// elapses. Returns `true` on a confirmed ack. `false` means the barrier was
+    /// not confirmed — no stream is open, the callback is stalled, or the device
+    /// is paused — and the caller should fall back to its own grace handling.
+    ///
+    /// Used by offline export to confirm `SetPluginBridgeSink(None)` handoffs
+    /// have reached the realtime graph before the export worker starts driving
+    /// the shared bridge, replacing a guessed fixed sleep.
+    pub fn wait_for_command_barrier(&self, timeout: std::time::Duration) -> bool {
+        let ack = Arc::new(AtomicBool::new(false));
+        if self
+            .send_command(EngineCommand::CommandBarrier { ack: ack.clone() })
+            .is_err()
+        {
+            return false;
+        }
+        let deadline = std::time::Instant::now() + timeout;
+        while std::time::Instant::now() < deadline {
+            if ack.load(Ordering::Acquire) {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        ack.load(Ordering::Acquire)
+    }
+
     pub fn set_time_signature(
         &self,
         numerator: u32,
@@ -2890,6 +2917,7 @@ impl EngineInner {
                 EngineCommand::SetTimeSignatureMap(_) => "SetTimeSignatureMap",
                 EngineCommand::SetLoop { .. } => "SetLoop",
                 EngineCommand::SetPluginBridgeSink { .. } => "SetPluginBridgeSink",
+                EngineCommand::CommandBarrier { .. } => "CommandBarrier",
                 EngineCommand::SetBridgeEditorActive { .. } => "SetBridgeEditorActive",
                 EngineCommand::StartAudition { .. } => "StartAudition",
                 EngineCommand::StopAudition => "StopAudition",
@@ -3335,6 +3363,11 @@ where
                             }
                             // Re-cache per-insert sink handles for the block path.
                             runtime.resolve_bridge_sinks();
+                        }
+                        EngineCommand::CommandBarrier { ack } => {
+                            // Wait-free ack: every command sent before this one
+                            // has now been applied to the callback's runtime.
+                            ack.store(true, Ordering::Release);
                         }
                         EngineCommand::SetBridgeEditorActive { track_id, active } => {
                             runtime.set_bridge_editor_active(&track_id, active);

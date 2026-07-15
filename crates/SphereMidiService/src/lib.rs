@@ -555,15 +555,18 @@ fn seconds_to_samples(seconds: f64, sample_rate: u32) -> u64 {
     (seconds.max(0.0) * sample_rate.max(1) as f64).round() as u64
 }
 
+#[cfg_attr(target_os = "macos", allow(dead_code))]
 fn samples_to_duration(samples: u64, sample_rate: f64) -> Duration {
     Duration::from_secs_f64(samples as f64 / sample_rate.max(1.0))
 }
 
+#[cfg_attr(target_os = "macos", allow(dead_code))]
 fn midi_output_debug_enabled() -> bool {
     static FLAG: OnceLock<bool> = OnceLock::new();
     *FLAG.get_or_init(|| std::env::var_os("FUTUREBOARD_MIDI_OUTPUT_DEBUG").is_some())
 }
 
+#[cfg_attr(target_os = "macos", allow(dead_code))]
 fn midi_lateness_warnings_enabled() -> bool {
     static FLAG: OnceLock<bool> = OnceLock::new();
     *FLAG.get_or_init(|| std::env::var_os("FUTUREBOARD_MIDI_OUTPUT_LATENESS_WARN").is_some())
@@ -687,6 +690,7 @@ fn coalesce_hardware_midi_events(
     out
 }
 
+#[cfg_attr(target_os = "macos", allow(dead_code))]
 fn unique_event_devices(events: &[HardwareMidiEvent]) -> Vec<String> {
     let mut devices = Vec::new();
     for event in events {
@@ -697,6 +701,7 @@ fn unique_event_devices(events: &[HardwareMidiEvent]) -> Vec<String> {
     devices
 }
 
+#[cfg_attr(target_os = "macos", allow(dead_code))]
 fn log_midi_dispatch(
     event: &HardwareMidiEvent,
     scheduled_wall: Instant,
@@ -730,6 +735,7 @@ fn log_midi_dispatch(
     }
 }
 
+#[cfg_attr(target_os = "macos", allow(dead_code))]
 fn describe_midi_message(message: &[u8]) -> (&'static str, u8, u8, u8) {
     let status = message.first().copied().unwrap_or(0);
     let channel = status & 0x0f;
@@ -765,6 +771,7 @@ impl HardwareMidiProfiler {
             .store(0, std::sync::atomic::Ordering::Relaxed);
     }
 
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
     fn record(&self, lateness: Duration) {
         let _ = self.started.get_or_init(Instant::now);
         self.events_total
@@ -829,9 +836,11 @@ impl Drop for MidiThreadScope {
 }
 
 #[cfg(not(target_os = "windows"))]
+#[cfg_attr(target_os = "macos", allow(dead_code))]
 struct MidiThreadScope;
 
 #[cfg(not(target_os = "windows"))]
+#[cfg_attr(target_os = "macos", allow(dead_code))]
 impl MidiThreadScope {
     fn enter() -> Self {
         Self
@@ -862,6 +871,7 @@ fn wait_for_midi_tick(duration: Duration) {
 }
 
 #[cfg(not(target_os = "windows"))]
+#[cfg_attr(target_os = "macos", allow(dead_code))]
 fn wait_for_midi_tick(duration: Duration) {
     std::thread::sleep(duration);
 }

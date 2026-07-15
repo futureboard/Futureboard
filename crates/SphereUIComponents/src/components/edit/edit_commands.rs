@@ -50,6 +50,7 @@ impl TrackSnapshot {
 
 /// Editable command with perfect undo.
 #[derive(Debug, Clone)]
+#[allow(clippy::large_enum_variant)]
 pub enum EditCommand {
     CreateClip {
         track_id: String,

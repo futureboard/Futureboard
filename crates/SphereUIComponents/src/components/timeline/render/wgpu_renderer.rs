@@ -171,7 +171,7 @@ impl WgpuTimelineRenderer {
             PREFERRED_DEVICE_ID
                 .get()
                 .cloned()
-                .and_then(|s| if s.is_empty() { None } else { Some(s) });
+                .filter(|s| !s.is_empty());
         Self::with_preference_and_device(preference, selected_device_id)
     }
 

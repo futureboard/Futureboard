@@ -51,6 +51,7 @@ pub fn window_control_icon(
     }
     #[cfg(not(target_os = "windows"))]
     {
+        let _ = area;
         chrome_button(Some(icon_path), fallback_text, false, Colors::text_muted())
     }
 }

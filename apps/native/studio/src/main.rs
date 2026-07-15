@@ -5,7 +5,6 @@ mod audio_state;
 mod window;
 
 #[cfg(feature = "exclusive")]
-#[path = "../../../../crates/ExclusiveEdition/src/lib.rs"]
 mod exclusive_edition;
 
 use sphere_ui_components::boot;

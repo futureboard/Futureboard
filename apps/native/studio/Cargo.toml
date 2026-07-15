@@ -32,8 +32,14 @@ sphere_ui_components = { workspace = true, features = ["gpu-renderer", "native-d
 # symbols. Electron can enable N-API from its own crate/build path instead.
 sphere_directaudioengine.workspace = true
 sphere-discord-rpc.workspace = true
+# Exclusive Edition license client + offline token verification. All optional so
+# the Community manifest stays valid with the private source tree absent.
 reqwest = { workspace = true, optional = true, features = ["blocking", "json"] }
 serde = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
+base64 = { workspace = true, optional = true }
+ed25519-dalek = { workspace = true, optional = true }
+sha2 = { workspace = true, optional = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 # Windows GPUI backend.
@@ -42,6 +48,8 @@ gpui_windows.workspace = true
 # the dependency here lets the public Community manifest remain valid when the
 # ignored `crates/ExclusiveEdition` directory is absent.
 cpal = { workspace = true, optional = true, features = ["asio"] }
+# Machine fingerprint source (HKLM MachineGuid) for license binding.
+windows-registry = { workspace = true, optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # macOS GPUI backend.
@@ -62,8 +70,19 @@ gpui_linux = { workspace = true, features = ["wayland", "x11"] }
 [features]
 default = ["gpu-renderer"]
 gpu-renderer = ["sphere_ui_components/gpu-renderer"]
-# Enable the private Exclusive Edition module and its Windows ASIO toolchain.
-exclusive = ["dep:cpal", "dep:reqwest", "dep:serde"]
+# Compile the private Exclusive Edition module and its Windows ASIO toolchain.
+# This feature is not an entitlement: providers stay uninstalled until a signed
+# license token verifies for the running machine.
+exclusive = [
+    "dep:cpal",
+    "dep:reqwest",
+    "dep:serde",
+    "dep:serde_json",
+    "dep:base64",
+    "dep:ed25519-dalek",
+    "dep:sha2",
+    "dep:windows-registry",
+]
 
 [build-dependencies]
 embed-resource.workspace = true

@@ -284,7 +284,7 @@ fn open_welcome_window(cx: &mut App) {
                     label: "License",
                     icon: assets::ICON_FILE_PATH,
                     on_click: Arc::new(|welcome_window, cx| {
-                        let activation = crate::exclusive_edition::environment_license_activator(
+                        let activation = crate::exclusive_edition::configured_license_activator(
                             env!("CARGO_PKG_VERSION"),
                         );
                         if let Err(error) = crate::exclusive_edition::open_license_activation_window(

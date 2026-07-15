@@ -265,13 +265,20 @@ pub(crate) fn notify_window_root<T: gpui::Render>(app: &mut gpui::App, handle: &
     }
 }
 
+/// Map a persisted `driver_type` string to an engine backend.
+///
+/// `settings.json` is user-editable, so the mapped backend is sanitized rather
+/// than trusted: a driver this build cannot drive (e.g. `"ASIO"` with no
+/// licensed ASIO host registered) falls back to `Auto` instead of reaching the
+/// engine.
 fn native_audio_backend_from_driver_type(driver_type: &str) -> DirectAudio::AudioBackend {
-    match driver_type {
+    let backend = match driver_type {
         "WASAPI Exclusive" => DirectAudio::AudioBackend::WasapiExclusive,
         "WDM-KS" => DirectAudio::AudioBackend::WdmKs,
         "ASIO" => DirectAudio::AudioBackend::Asio,
         _ => DirectAudio::AudioBackend::Auto,
-    }
+    };
+    backend.sanitize_for_current_build()
 }
 
 /// Map the persisted Dropout Protection setting to the engine's mode enum.

@@ -24,12 +24,9 @@ pub const QUICK_START_FILE: &str = "getting-started.mdx";
 /// Returns the first existing manual root directory, searching installed and
 /// development layouts in priority order. Pure filesystem probing, no spawn.
 pub fn manual_root() -> Option<PathBuf> {
-    for candidate in candidate_roots() {
-        if candidate.join(INDEX_FILE).is_file() {
-            return Some(candidate);
-        }
-    }
-    None
+    candidate_roots()
+        .into_iter()
+        .find(|candidate| candidate.join(INDEX_FILE).is_file())
 }
 
 /// Resolves a specific manual section file (e.g. [`INDEX_FILE`]) if the manual

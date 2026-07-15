@@ -52,13 +52,30 @@ pub enum AudioBackend {
     WasapiExclusive,
     /// Windows: WDM-KS low-level driver path (experimental).
     WdmKs,
-    /// Windows: ASIO driver path (requires the `asio` build feature).
+    /// Windows: ASIO driver path. Selectable only once an edition provider has
+    /// registered an ASIO host — see [`AudioBackend::sanitize_for_current_build`].
     Asio,
 }
 
 impl AudioBackend {
     pub fn display_name(self) -> &'static str {
         self.to_backend_kind().display_name()
+    }
+
+    /// Normalize a backend that came from persisted settings or another
+    /// untrusted string source. A backend this build/machine cannot actually
+    /// drive — notably `Asio` with no registered host — becomes `Auto`.
+    ///
+    /// The `asio_host()` path already fails closed, but sanitizing here keeps a
+    /// hand-edited `settings.json` from leaving the engine pointed at a backend
+    /// the UI never offered. Mirrors
+    /// [`BackendKind::sanitize_for_current_platform`].
+    pub fn sanitize_for_current_build(self) -> Self {
+        if self.to_backend_kind().is_allowed_on_current_platform() {
+            self
+        } else {
+            AudioBackend::Auto
+        }
     }
 
     fn to_backend_kind(self) -> BackendKind {

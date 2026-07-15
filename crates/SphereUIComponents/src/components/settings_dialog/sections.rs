@@ -293,20 +293,87 @@ pub(crate) fn advanced_section(
         ))
 }
 
-pub(crate) fn about_section() -> impl IntoElement {
-    settings_section("Futureboard Studio")
-        .child(settings_section_hint_text(
-            "Futureboard Studio / Mochi DAW v0.1.0",
-        ))
+/// About panel. `edition` is `Some` only on builds that install an edition
+/// provider (Exclusive Edition); Community builds pass `None` and see the plain
+/// panel. When present, the license rows re-read verified state each render, so
+/// activation — or a background renewal on a later launch — shows up here
+/// without extra refresh wiring.
+pub(crate) fn about_section(edition: Option<crate::edition::EditionInfo>) -> impl IntoElement {
+    let version = edition
+        .as_ref()
+        .map(|info| info.app_version.clone())
+        .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string());
+    let edition_name = edition.as_ref().map(|info| info.edition).unwrap_or("Community");
+
+    let mut section = settings_section("Futureboard Studio")
+        .child(settings_section_hint_text(format!(
+            "Futureboard Studio / Mochi DAW v{version}"
+        )))
+        .child(settings_row("Edition", settings_readout(edition_name)))
         .child(settings_row("Runtime", settings_readout("GPUI + Rust")))
         .child(settings_row(
             "Plugin Host",
             settings_readout("VST3 / CLAP scaffold"),
-        ))
-        .child(settings_row(
-            "Copyright",
-            settings_readout("© 2026 Futureboard Studio team"),
-        ))
+        ));
+
+    if let Some(info) = edition.as_ref() {
+        section = section.child(license_status_row(info.license.as_ref()));
+        if let Some(license) = info.license.as_ref() {
+            if let Some(licensee) = license
+                .licensee
+                .as_deref()
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+            {
+                section =
+                    section.child(settings_row("Licensed To", settings_readout(licensee.to_string())));
+            }
+            section = section.child(settings_row("Expires", settings_readout(license_expiry_text(license))));
+            if !license.entitlements.is_empty() {
+                section = section.child(settings_row(
+                    "Entitlements",
+                    settings_readout(license.entitlements.join(", ")),
+                ));
+            }
+        }
+    }
+
+    section.child(settings_row(
+        "Copyright",
+        settings_readout("© 2026 Futureboard Studio team"),
+    ))
+}
+
+/// License row: a status badge that reads Active (accent) or Expired / Not
+/// activated (muted).
+fn license_status_row(license: Option<&crate::edition::LicenseDisplay>) -> impl IntoElement {
+    use crate::edition::LicenseDisplayState;
+    let (label, ok) = match license.map(|license| license.state) {
+        Some(LicenseDisplayState::Active) => ("Active", true),
+        Some(LicenseDisplayState::Expired) => ("Expired", false),
+        None => ("Not activated", false),
+    };
+    settings_row("License", settings_status_badge(label, ok))
+}
+
+/// Human-readable expiry line for the About panel.
+fn license_expiry_text(license: &crate::edition::LicenseDisplay) -> String {
+    use crate::edition::LicenseDisplayState;
+    match (license.state, license.expires_at) {
+        (_, None) => "Perpetual".to_string(),
+        (LicenseDisplayState::Expired, Some(_)) => "Expired — reactivate to continue".to_string(),
+        (LicenseDisplayState::Active, Some(expires_at)) => {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|elapsed| elapsed.as_secs())
+                .unwrap_or(0);
+            match expires_at.saturating_sub(now) / 86_400 {
+                0 => "Under a day remaining".to_string(),
+                1 => "1 day remaining".to_string(),
+                days => format!("{days} days remaining"),
+            }
+        }
+    }
 }
 
 /// Performance > Rendering section. Renderer and GPU Device choices are

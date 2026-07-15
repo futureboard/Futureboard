@@ -2059,7 +2059,7 @@ fn build_settings_content(
     if (state.active_tab == SettingsTab::About && query.is_empty())
         || (!query.is_empty() && (is_match("Version About", &["version", "credits", "about"])))
     {
-        sections.push(about_section().into_any_element());
+        sections.push(about_section(crate::edition::current_edition_info()).into_any_element());
     }
 
     // Placeholder panel for categories not yet fully wired.

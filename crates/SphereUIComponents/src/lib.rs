@@ -32,6 +32,7 @@
     clippy::useless_format
 )]
 
+pub mod account;
 pub mod app_state;
 pub mod assets;
 pub mod audio_routing;
@@ -40,6 +41,7 @@ pub mod color;
 pub mod components;
 pub mod custom_cursors;
 pub mod device_registry;
+pub mod edition;
 pub mod embedded_assets;
 pub mod export;
 pub mod feeds;

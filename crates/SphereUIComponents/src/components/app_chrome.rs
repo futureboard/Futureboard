@@ -839,6 +839,111 @@ fn report_bug_button() -> impl IntoElement {
         .occlude()
 }
 
+// ── Account chip ──────────────────────────────────────────────────────────────
+
+/// Titlebar account control. Present only on builds that install an account
+/// provider (Exclusive Edition); Community builds render nothing. Signed out it
+/// is a "Sign in" chip; signed in it shows an avatar initial + name and opens
+/// the account menu. Reads the account snapshot fresh each render, so sign-in /
+/// sign-out reflect here without extra wiring.
+fn account_chip() -> Option<impl IntoElement> {
+    let snapshot = crate::account::current_account()?;
+    let signed_in = snapshot.signed_in;
+    let action = if signed_in {
+        crate::account::AccountAction::OpenMenu
+    } else {
+        crate::account::AccountAction::SignIn
+    };
+    let label = if signed_in {
+        let raw = snapshot
+            .username
+            .clone()
+            .or_else(|| snapshot.email.clone())
+            .unwrap_or_else(|| "Account".to_string());
+        clamp_label(&raw, 18)
+    } else {
+        "Sign in".to_string()
+    };
+    let text_color = if signed_in {
+        Colors::text_secondary()
+    } else {
+        Colors::text_muted()
+    };
+
+    let mut chip = div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(6.0))
+        .h(px(24.0))
+        .px(px(6.0))
+        .mr(px(4.0))
+        .rounded_md()
+        .cursor(gpui::CursorStyle::PointingHand)
+        .hover(|s| s.bg(Colors::surface_control_hover()))
+        .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+            crate::account::dispatch_account_action(action, window, cx);
+        });
+
+    chip = if signed_in {
+        chip.child(account_avatar(&snapshot))
+    } else {
+        chip.child(
+            svg()
+                .path(assets::ICON_USER_PATH)
+                .w(px(13.0))
+                .h(px(13.0))
+                .text_color(text_color),
+        )
+    };
+
+    Some(
+        chip.child(
+            div()
+                .text_size(px(11.0))
+                .text_color(text_color)
+                .child(label),
+        )
+        .occlude(),
+    )
+}
+
+/// Compact circular avatar badge showing the user's first initial. A remote
+/// profile image is intentionally deferred (needs async download/decode); the
+/// URL is already carried in the session for that follow-up.
+fn account_avatar(snapshot: &crate::account::AccountSnapshot) -> impl IntoElement {
+    let initial = snapshot
+        .username
+        .as_deref()
+        .or(snapshot.email.as_deref())
+        .and_then(|value| value.trim().chars().next())
+        .map(|character| character.to_uppercase().to_string())
+        .unwrap_or_else(|| "?".to_string());
+
+    div()
+        .flex()
+        .items_center()
+        .justify_center()
+        .w(px(18.0))
+        .h(px(18.0))
+        .rounded_full()
+        .bg(Colors::accent_muted())
+        .text_size(px(10.0))
+        .font_weight(gpui::FontWeight::SEMIBOLD)
+        .text_color(Colors::accent_primary())
+        .child(initial)
+}
+
+/// Truncate a chip label to `max` chars, appending an ellipsis when clipped.
+fn clamp_label(value: &str, max: usize) -> String {
+    if value.chars().count() <= max {
+        return value.to_string();
+    }
+    let mut clipped: String = value.chars().take(max.saturating_sub(1)).collect();
+    clipped.push('…');
+    clipped
+}
+
 fn window_controls(window: &gpui::Window, on_close: Option<ChromeActionCb>) -> impl IntoElement {
     let is_maximized = window.is_maximized();
     let (max_path, max_fallback) = if is_maximized {
@@ -972,6 +1077,12 @@ pub fn app_chrome(
         .child(section_separator())
         .child(panel_toggles(panels))
         .child(section_separator());
+
+    // Account chip sits between the panel toggles and the window controls. Only
+    // an Exclusive build with an installed account provider renders it.
+    if let Some(chip) = account_chip() {
+        chrome = chrome.child(chip).child(section_separator());
+    }
 
     if policy.show_window_controls {
         chrome = chrome.child(window_controls(window, on_window_close));

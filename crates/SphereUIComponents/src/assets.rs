@@ -62,6 +62,8 @@ pub mod icons {
     pub const LINK: &str = include_str!("../../../packages/shared/lucide/icons/link.svg");
     pub const VOLUME_X: &str = include_str!("../../../packages/shared/lucide/icons/volume-x.svg");
     pub const CLOCK: &str = include_str!("../../../packages/shared/lucide/icons/clock.svg");
+    pub const USER: &str = include_str!("../../../packages/shared/lucide/icons/user.svg");
+    pub const LOG_OUT: &str = include_str!("../../../packages/shared/lucide/icons/log-out.svg");
     pub const SLIDERS_HORIZONTAL: &str =
         include_str!("../../../packages/shared/lucide/icons/sliders-horizontal.svg");
     pub const SPARKLES: &str = include_str!("../../../packages/shared/lucide/icons/sparkles.svg");
@@ -134,6 +136,8 @@ pub const ICON_LINK_PATH: &str = "icons/link.svg";
 pub const ICON_VOLUME_X_PATH: &str = "icons/volume-x.svg";
 pub const ICON_CLOCK_PATH: &str = "icons/clock.svg";
 pub const ICON_AUTOMATION_PATH: &str = "icons/automation.svg";
+pub const ICON_USER_PATH: &str = "icons/user.svg";
+pub const ICON_LOG_OUT_PATH: &str = "icons/log-out.svg";
 pub const ICON_SLIDERS_HORIZONTAL_PATH: &str = "icons/sliders-horizontal.svg";
 pub const ICON_SPARKLES_PATH: &str = "icons/sparkles.svg";
 pub const ICON_PLUS_PATH: &str = "icons/plus.svg";

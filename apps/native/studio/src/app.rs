@@ -143,6 +143,13 @@ pub fn setup(cx: &mut App) {
         if let Some(splash) = splash {
             cx.update(|app| splash.close(app));
         }
+
+        // First-run EULA gate (Exclusive Edition). Opens on top of the first
+        // surface; declining quits. No-op once accepted for this version.
+        #[cfg(feature = "exclusive")]
+        {
+            let _ = cx.update(|app| crate::exclusive_edition::show_eula_if_needed(app));
+        }
     })
     .detach();
 }

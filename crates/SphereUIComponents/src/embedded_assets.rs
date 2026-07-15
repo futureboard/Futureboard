@@ -77,6 +77,8 @@ impl AssetSource for EmbeddedAssets {
             assets::ICON_VOLUME_X_PATH => Some(assets::icons::VOLUME_X.as_bytes()),
             assets::ICON_CLOCK_PATH => Some(assets::icons::CLOCK.as_bytes()),
             assets::ICON_AUTOMATION_PATH => Some(assets::icons::AUTOMATION.as_bytes()),
+            assets::ICON_USER_PATH => Some(assets::icons::USER.as_bytes()),
+            assets::ICON_LOG_OUT_PATH => Some(assets::icons::LOG_OUT.as_bytes()),
             assets::ICON_SLIDERS_HORIZONTAL_PATH => {
                 Some(assets::icons::SLIDERS_HORIZONTAL.as_bytes())
             }

@@ -1,5 +1,5 @@
 pub mod add_track_dialog;
-mod app_chrome;
+pub(crate) mod app_chrome;
 mod audio_editor_adapter;
 mod audio_editor_host;
 pub mod background_tasks;

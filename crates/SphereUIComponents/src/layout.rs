@@ -2215,6 +2215,17 @@ impl StudioLayout {
         let schema = self.settings.read(cx).current.clone();
         let backend = native_audio_backend_from_driver_type(&schema.hardware.audio.driver_type);
 
+        // Do not claim the first ASIO driver while Settings is still enumerating
+        // the driver list. ASIO drivers are commonly single-client; opening one
+        // here would make the immediately-following enumeration return empty.
+        // Selecting the unified ASIO Device row fills `device_out` (and mirrors
+        // `device_in`), then the normal sync below reopens the chosen driver.
+        if backend == DirectAudio::AudioBackend::Asio
+            && schema.hardware.audio.device_out.trim().is_empty()
+        {
+            return;
+        }
+
         if let Some(engine) = self.audio_bridge.engine.as_mut() {
             let output_device = resolve_output_device_for_backend(
                 engine,

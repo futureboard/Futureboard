@@ -312,7 +312,7 @@ fn open_welcome_window(cx: &mut App) {
     };
     let _welcome = cx
         .open_window(welcome_window_options(cx), |_window, cx| {
-            cx.new(|cx| WelcomeWindow::new(env!("CARGO_PKG_VERSION"), callbacks, cx.focus_handle()))
+            cx.new(|cx| WelcomeWindow::new(callbacks, cx.focus_handle()))
         })
         .expect("failed to open welcome window");
     boot::log("welcome window shown");

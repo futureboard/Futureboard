@@ -127,6 +127,7 @@ pub(crate) fn hardware_combo_overlay(
         }
         HardwareCombo::OutputDevice => {
             let selected = schema.hardware.audio.device_out.clone();
+            let is_asio = schema.hardware.audio.driver_type == "ASIO";
             let up = on_update.clone();
             combo_box_string_menu(
                 "settings-audio-output-menu",
@@ -135,7 +136,12 @@ pub(crate) fn hardware_combo_overlay(
                 available_outputs,
                 Arc::new(move |value, window, cx| {
                     up(
-                        Arc::new(move |s| s.hardware.audio.device_out = value.clone()),
+                        Arc::new(move |s| {
+                            s.hardware.audio.device_out = value.clone();
+                            if is_asio {
+                                s.hardware.audio.device_in = value.clone();
+                            }
+                        }),
                         window,
                         cx,
                     );

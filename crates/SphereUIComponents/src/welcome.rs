@@ -19,11 +19,9 @@ use crate::assets;
 use crate::components::text_input::{
     is_repeatable_edit_key, text_field_with_callbacks_and_ime, TextInputCallbacks,
 };
-use crate::components::title_bar::{
-    draggable_spacer, section_separator, window_control_button, CHROME_PAD_X, CHROME_TITLE_SIZE,
-};
+use crate::components::title_bar::{draggable_spacer, section_separator, window_control_button};
 use crate::components::{TextInputAction, TextInputState};
-use crate::embedded_assets::APP_LOGO_PATH;
+use crate::embedded_assets::LOGO_TEXT_PATH;
 use crate::platform_chrome::PlatformChromePolicy;
 use crate::project::{ProjectCreateOptions, ProjectTemplate, RecentProject, RecentProjectsStore};
 use crate::settings::SettingsSchema;
@@ -128,7 +126,6 @@ pub struct WelcomeFooterAction {
 }
 
 pub struct WelcomeWindow {
-    version: SharedString,
     active_nav: StartupNav,
     recent_projects: Vec<RecentProject>,
     selected: Option<WelcomeSelection>,
@@ -151,11 +148,7 @@ pub struct WelcomeWindow {
 }
 
 impl WelcomeWindow {
-    pub fn new(
-        version: impl Into<SharedString>,
-        callbacks: WelcomeCallbacks,
-        focus_handle: FocusHandle,
-    ) -> Self {
+    pub fn new(callbacks: WelcomeCallbacks, focus_handle: FocusHandle) -> Self {
         let mut recent = RecentProjectsStore::load();
         recent.refresh_missing();
 
@@ -175,7 +168,6 @@ impl WelcomeWindow {
         project_name_input.set_value("Untitled Project");
 
         Self {
-            version: version.into(),
             active_nav: StartupNav::Welcome,
             recent_projects: recent.entries().iter().take(7).cloned().collect(),
             selected: Some(WelcomeSelection::Start(0)),
@@ -458,7 +450,7 @@ impl WelcomeWindow {
             .flex_1()
             .min_h_0()
             .bg(Colors::surface_panel())
-            .child(welcome_header(self.version.clone()))
+            .child(welcome_header())
             .child(
                 div()
                     .flex()
@@ -551,43 +543,6 @@ fn startup_titlebar(window: &Window) -> impl IntoElement {
         .on_mouse_down(gpui::MouseButton::Left, |_, window, _cx| {
             window.start_window_move();
         })
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .gap(px(8.0))
-                .h_full()
-                .px(px(CHROME_PAD_X))
-                .occlude()
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .w(px(18.0))
-                        .h(px(18.0))
-                        .rounded_sm()
-                        .overflow_hidden()
-                        .child(
-                            img(SharedString::from(APP_LOGO_PATH))
-                                .w(px(18.0))
-                                .h(px(18.0)),
-                        ),
-                )
-                .child(
-                    div()
-                        .text_size(px(CHROME_TITLE_SIZE))
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .text_color(Colors::text_primary())
-                        .child("Futureboard Studio"),
-                )
-                .child(
-                    div()
-                        .text_size(px(10.0))
-                        .text_color(Colors::text_faint())
-                        .child("Welcome"),
-                ),
-        )
         .child(draggable_spacer());
 
     if policy.show_window_controls {
@@ -618,72 +573,29 @@ fn startup_titlebar(window: &Window) -> impl IntoElement {
     chrome
 }
 
-fn welcome_header(version: SharedString) -> impl IntoElement {
-    div()
+fn welcome_header() -> impl IntoElement {
+    let mut header = div()
         .flex()
         .flex_row()
         .items_center()
         .justify_between()
         .gap(px(16.0))
-        .h(px(58.0))
+        .h(px(44.0))
         .px(px(16.0))
         .border_b(px(1.0))
         .border_color(Colors::border_subtle())
         .bg(Colors::surface_panel())
         .child(
-            div()
-                .flex()
-                .items_center()
-                .gap(px(10.0))
-                .min_w_0()
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .w(px(32.0))
-                        .h(px(32.0))
-                        .rounded_sm()
-                        .overflow_hidden()
-                        .border(px(1.0))
-                        .border_color(Colors::border_default())
-                        .child(
-                            img(SharedString::from(APP_LOGO_PATH))
-                                .w(px(32.0))
-                                .h(px(32.0)),
-                        ),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap(px(2.0))
-                        .min_w_0()
-                        .child(
-                            div()
-                                .truncate()
-                                .text_size(px(15.0))
-                                .font_weight(gpui::FontWeight::SEMIBOLD)
-                                .text_color(Colors::text_primary())
-                                .child("Futureboard Studio"),
-                        )
-                        .child(
-                            div()
-                                .truncate()
-                                .text_size(px(10.5))
-                                .text_color(Colors::text_muted())
-                                .child("Create, open, or continue."),
-                        ),
-                ),
-        )
-        .child(
-            div()
-                .flex_none()
-                .text_size(px(10.5))
-                .font_weight(gpui::FontWeight::MEDIUM)
-                .text_color(Colors::text_muted())
-                .child(format!("v{version}")),
-        )
+            img(SharedString::from(LOGO_TEXT_PATH))
+                .h(px(24.0))
+                .flex_none(),
+        );
+
+    if let Some(account) = crate::components::app_chrome::account_chip() {
+        header = header.child(account);
+    }
+
+    header
 }
 
 fn left_rail(

@@ -6,11 +6,14 @@ use std::borrow::Cow;
 pub const SPLASH_IMAGE_PATH: &str = "images/splash.png";
 /// Futureboard application icon/logo from packages/assets, resolvable via `gpui::img(...)`.
 pub const APP_LOGO_PATH: &str = "images/app.png";
+/// Futureboard horizontal wordmark from packages/assets, embedded for app chrome.
+pub const LOGO_TEXT_PATH: &str = "images/logo-text.png";
 
 /// Splash PNG, embedded at compile time so it ships inside the binary (no
 /// runtime file dependency on the source tree / install layout).
 static SPLASH_PNG: &[u8] = include_bytes!("../../../packages/shared/images/splash.png");
 static APP_LOGO_PNG: &[u8] = include_bytes!("../../../packages/assets/app.png");
+static LOGO_TEXT_PNG: &[u8] = include_bytes!("../../../packages/assets/LogoText.png");
 
 pub fn splash_image_available() -> bool {
     !SPLASH_PNG.is_empty()
@@ -37,6 +40,9 @@ impl AssetSource for EmbeddedAssets {
         }
         if path == APP_LOGO_PATH {
             return Ok(Some(Cow::Borrowed(APP_LOGO_PNG)));
+        }
+        if path == LOGO_TEXT_PATH {
+            return Ok(Some(Cow::Borrowed(LOGO_TEXT_PNG)));
         }
         if path == assets::FONT_INTER_VARIABLE_PATH {
             return Ok(Some(Cow::Borrowed(assets::INTER_VARIABLE)));
@@ -115,6 +121,7 @@ impl AssetSource for EmbeddedAssets {
     fn list(&self, path: &str) -> Result<Vec<SharedString>> {
         let all_paths = [
             APP_LOGO_PATH,
+            LOGO_TEXT_PATH,
             SPLASH_IMAGE_PATH,
             assets::FONT_INTER_VARIABLE_PATH,
             assets::FONT_GOOGLE_SANS_VARIABLE_PATH,

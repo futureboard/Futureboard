@@ -171,6 +171,11 @@ pub(crate) fn find_input_device_for_host(
     host: &cpal::Host,
     device_id: Option<&str>,
 ) -> Result<cpal::Device, SphereAudioError> {
+    if crate::device::is_asio_host(host) {
+        return crate::device::resolve_duplex_device_for_host(host, device_id)
+            .map(|(device, _)| device)
+            .map_err(SphereAudioError::NativeError);
+    }
     if let Some(id) = device_id {
         if !id.is_empty() {
             let mut devices = host

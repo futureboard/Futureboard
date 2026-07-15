@@ -649,7 +649,7 @@ impl AudioEngine {
                 .map(EngineDeviceInfo::from_wasapi)
                 .collect(),
             AudioBackend::Asio => backend::asio_host()
-                .map(|host| device::list_output_devices_for_host(&host))
+                .map(|host| device::list_asio_devices_for_host(&host, "output"))
                 .unwrap_or_default()
                 .into_iter()
                 .map(EngineDeviceInfo::from_asio)
@@ -674,7 +674,7 @@ impl AudioEngine {
                 .map(EngineDeviceInfo::from_wasapi)
                 .collect(),
             AudioBackend::Asio => backend::asio_host()
-                .map(|host| device::list_input_devices_for_host(&host))
+                .map(|host| device::list_asio_devices_for_host(&host, "input"))
                 .unwrap_or_default()
                 .into_iter()
                 .map(EngineDeviceInfo::from_asio)

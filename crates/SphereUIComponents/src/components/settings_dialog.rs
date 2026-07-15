@@ -643,7 +643,7 @@ fn build_settings_content(
         || (!query.is_empty()
             && (is_match(
                 "Audio Driver",
-                &["driver", "backend", "wasapi", "wdm", "ks"],
+                &["driver", "backend", "wasapi", "wdm", "ks", "asio"],
             ) || is_match("Input Device", &["input", "microphone"])
                 || is_match("Output Device", &["output", "speakers"])
                 || is_match("Sample Rate", &["sample", "rate", "hz"])
@@ -662,6 +662,7 @@ fn build_settings_content(
             on_toggle.clone(),
         );
 
+        let is_asio = schema.hardware.audio.driver_type == "ASIO";
         let input_label = if schema.hardware.audio.device_in.trim().is_empty()
             || !available_inputs.contains(&schema.hardware.audio.device_in)
         {
@@ -709,12 +710,18 @@ fn build_settings_content(
                     i18n.tr("settings.field.backend"),
                     driver_select,
                 ))
+                .when(!is_asio, |section| {
+                    section.child(settings_daw_row(
+                        i18n.tr("settings.field.input-device"),
+                        input_select,
+                    ))
+                })
                 .child(settings_daw_row(
-                    i18n.tr("settings.field.input-device"),
-                    input_select,
-                ))
-                .child(settings_daw_row(
-                    i18n.tr("settings.field.output-device"),
+                    if is_asio {
+                        "ASIO Device".to_string()
+                    } else {
+                        i18n.tr("settings.field.output-device")
+                    },
                     output_select,
                 ))
                 .child(driver_status_row(&i18n, latency, state, &callbacks))

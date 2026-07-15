@@ -1,0 +1,81 @@
+---
+title: Mixing & Plugins
+description: The mixer, inserts, sends, and hosting VST3/CLAP plugins.
+sidebar_label: Mixing & Plugins
+---
+
+# Mixing & Plugins
+
+## The mixer
+
+Open the mixer from **View ▸ Mixer** (docked) or float it into its own window.
+Each track has a channel strip:
+
+- **Upper rack** — inserts and sends (scrollable).
+- **Lower control** — pan and fader.
+- **Meters** — level and peak.
+
+The mixer strip layout mirrors the arrangement's track order and routing.
+
+## Volume, pan, and metering
+
+- Drag the **fader** to set level; reset from the channel context menu.
+- Drag **pan** to place the signal; reset to center from the context menu.
+- Meters show live level and peak. Metering is transient and does not mark the
+  project dirty.
+
+## Routing and sends
+
+- **Sends** route a portion of a track to a **Return** or **Bus**.
+- **Output** routing sets where a track's signal goes.
+- **Audio ▸ Audio Connections** opens the routing matrix, a grid view of sends
+  and outputs. Click a cell to toggle a send.
+
+## Inserts (effects and instruments)
+
+Inserts are plugins placed in series on a track:
+
+1. In the track inspector or mixer strip, add an insert.
+2. Pick a plugin from the scanned registry.
+3. The insert processes audio in order, top to bottom.
+
+Instruments sit on the input of MIDI/Instrument tracks; effects sit inline on
+audio, bus, and group tracks.
+
+## Plugin formats
+
+Studio hosts native plugins through its own plugin host (no JUCE dependency):
+
+- **VST3** — supported.
+- **CLAP** — supported.
+- **AU / LV2** — planned.
+
+Scanning discovers installed plugins and builds a registry; the registry is
+kept separate from live plugin instances. Run a scan from **Audio ▸ Audio
+Plug-in Scanner** (or the rescan controls in **Audio ▸ Audio Plug-in
+Manager**). Rescan after installing new plugins so they appear in the picker.
+
+## Plugin editor windows
+
+Opening a plugin's editor shows the plugin's **native UI** hosted in a Studio
+shell window:
+
+- The plugin's own view is a native child window owned by the host.
+- Studio draws only the shell/header around it — not the plugin UI itself.
+- The editor attaches to the **live** plugin instance, so what you see and
+  tweak is what is playing.
+- Resizing follows the plugin's constraints where the plugin supports it.
+
+Close or detach the editor before closing the host window.
+
+## Plugin state
+
+Plugin state is saved with the project. On load, each insert's state is
+restored **after** the plugin is instantiated and **before** playback, so
+presets, parameters, and internal plugin data come back exactly. Studio does
+not silently discard plugin state; a failed restore is reported.
+
+## Automation of plugin parameters
+
+Plugin parameters can be automated end-to-end — see
+[Automation & Export](./automation-and-export.mdx).

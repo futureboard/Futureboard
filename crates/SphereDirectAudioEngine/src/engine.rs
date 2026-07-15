@@ -1380,7 +1380,7 @@ impl EngineInner {
             .collect();
 
         JsAudioDiagnostics {
-            backend: cpal::default_host().id().name().to_string(),
+            backend: self.daux_config.lock().backend.display_name().to_string(),
             input_device_name,
             output_device_name: st.output_device,
             input_stream_running: input_running,
@@ -2082,6 +2082,20 @@ impl EngineInner {
 
     // ── Recording API ──────────────────────────────────────────────────────
 
+    fn find_input_device_for_active_backend(
+        &self,
+        device_id: Option<&str>,
+    ) -> Result<cpal::Device, SphereAudioError> {
+        let backend = self.daux_config.lock().backend.clone();
+        match backend {
+            BackendKind::Asio => {
+                let host = crate::backend::asio_host()?;
+                recording::find_input_device_for_host(&host, device_id)
+            }
+            _ => recording::find_input_device(device_id),
+        }
+    }
+
     /// Open an input stream and begin writing armed tracks to WAV files.
     pub fn start_recording(&self, config: JsStartRecordingConfig) -> Result<(), SphereAudioError> {
         let mut guard = self.recording.lock();
@@ -2097,7 +2111,17 @@ impl EngineInner {
         // WASAPI shared clients don't contend on the same endpoint — a likely
         // source of jitter while recording.
         self.stop_live_input_stream();
-        match recording::start_recording(config, Arc::clone(&self.shared), monitor_mix) {
+        let session = self
+            .find_input_device_for_active_backend(config.input_device_id.as_deref())
+            .and_then(|device| {
+                recording::start_recording_with_device(
+                    config,
+                    Arc::clone(&self.shared),
+                    monitor_mix,
+                    device,
+                )
+            });
+        match session {
             Ok(session) => {
                 *guard = Some(session);
                 drop(guard);
@@ -2243,6 +2267,22 @@ impl EngineInner {
                 let dev_name = handle.device_name.clone();
                 let stream = ActiveStream::WdmKs(handle);
                 self.commit_stream_open(sr, bs, dev_name, "DAUx WDM-KS".into());
+                stream
+            }
+            BackendKind::Asio => {
+                let host = crate::backend::asio_host()?;
+                let handle = cpal_backend::open_on_host(
+                    &host,
+                    &daux_cfg,
+                    Arc::clone(&self.shared),
+                    initial_runtime,
+                    Arc::clone(&self.glitch_counter),
+                )?;
+                let sr = handle.sample_rate;
+                let bs = handle.buffer_size;
+                let dev_name = handle.device_name.clone();
+                let stream = ActiveStream::Cpal(handle);
+                self.commit_stream_open(sr, bs, dev_name, "DAUx ASIO".into());
                 stream
             }
             #[cfg(not(target_os = "windows"))]
@@ -2458,7 +2498,7 @@ impl EngineInner {
         }
 
         self.stop_live_input_stream();
-        let device = crate::recording::find_input_device(desired_device.as_deref())?;
+        let device = self.find_input_device_for_active_backend(desired_device.as_deref())?;
         let default_cfg = device.default_input_config().map_err(|e| {
             SphereAudioError::NativeError(format!("Input device config error: {e}"))
         })?;
@@ -2611,7 +2651,7 @@ impl EngineInner {
         // Replace any existing test stream.
         *self.input_test.lock() = None;
 
-        let device = crate::recording::find_input_device(device_id.as_deref())?;
+        let device = self.find_input_device_for_active_backend(device_id.as_deref())?;
         let default_cfg = device.default_input_config().map_err(|e| {
             SphereAudioError::NativeError(format!("Input device config error: {e}"))
         })?;
@@ -3013,6 +3053,7 @@ fn sample_rate_mode_label(backend: &BackendKind) -> &'static str {
         BackendKind::WasapiShared => "WASAPI_SHARED",
         BackendKind::WasapiExclusive => "WASAPI_EXCLUSIVE",
         BackendKind::WdmKs => "WDM_KS",
+        BackendKind::Asio => "ASIO",
         BackendKind::CoreAudio => "COREAUDIO",
         BackendKind::Alsa => "ALSA",
         BackendKind::MmeFallback => "MME",

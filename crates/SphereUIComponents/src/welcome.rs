@@ -116,6 +116,15 @@ struct PayloadPostMeta {
 #[derive(Clone)]
 pub struct WelcomeCallbacks {
     pub on_action: Arc<dyn Fn(WelcomeAction, &mut Window, &mut App) + 'static>,
+    /// Optional edition-owned action rendered at the bottom of the Welcome rail.
+    pub footer_action: Option<WelcomeFooterAction>,
+}
+
+#[derive(Clone)]
+pub struct WelcomeFooterAction {
+    pub label: &'static str,
+    pub icon: &'static str,
+    pub on_click: Arc<dyn Fn(&mut Window, &mut App) + 'static>,
 }
 
 pub struct WelcomeWindow {
@@ -456,7 +465,7 @@ impl WelcomeWindow {
                     .flex_row()
                     .flex_1()
                     .min_h_0()
-                    .child(left_rail(cx, &self.active_nav))
+                    .child(left_rail(cx, &self.active_nav, &self.callbacks))
                     .child(center)
                     .child(right_panel(
                         cx,
@@ -677,7 +686,11 @@ fn welcome_header(version: SharedString) -> impl IntoElement {
         )
 }
 
-fn left_rail(cx: &mut Context<WelcomeWindow>, active: &StartupNav) -> impl IntoElement {
+fn left_rail(
+    cx: &mut Context<WelcomeWindow>,
+    active: &StartupNav,
+    callbacks: &WelcomeCallbacks,
+) -> impl IntoElement {
     div()
         .flex()
         .flex_col()
@@ -738,6 +751,16 @@ fn left_rail(cx: &mut Context<WelcomeWindow>, active: &StartupNav) -> impl IntoE
             None,
         ))
         .child(div().flex_1())
+        .when_some(callbacks.footer_action.clone(), |rail, action| {
+            rail.child(rail_item(
+                cx,
+                StartupNav::Welcome,
+                action.label,
+                action.icon,
+                active,
+                Some(action.on_click),
+            ))
+        })
 }
 
 fn rail_item(
@@ -746,14 +769,12 @@ fn rail_item(
     label: &'static str,
     icon: &'static str,
     active: &StartupNav,
-    action: Option<(
-        Arc<dyn Fn(WelcomeAction, &mut Window, &mut App) + 'static>,
-        WelcomeAction,
-    )>,
+    action: Option<Arc<dyn Fn(&mut Window, &mut App) + 'static>>,
 ) -> impl IntoElement {
     // Action rows (Open Project) never show the active highlight — only real
     // tabs do.
     let is_active = action.is_none() && active == &nav;
+    let changes_nav = action.is_none();
     let target = cx.entity().clone();
     div()
         .id(label)
@@ -773,13 +794,15 @@ fn rail_item(
         .cursor(gpui::CursorStyle::PointingHand)
         .hover(|style| style.bg(Colors::surface_card_hover()))
         .on_mouse_down(gpui::MouseButton::Left, move |_event, window, cx| {
-            let _ = target.update(cx, |this, cx| {
-                this.active_nav = nav.clone();
-                welcome_debug!("selected tab -> {:?}", this.active_nav);
-                cx.notify();
-            });
-            if let Some((callback, action)) = &action {
-                callback(action.clone(), window, cx);
+            if changes_nav {
+                let _ = target.update(cx, |this, cx| {
+                    this.active_nav = nav.clone();
+                    welcome_debug!("selected tab -> {:?}", this.active_nav);
+                    cx.notify();
+                });
+            }
+            if let Some(callback) = &action {
+                callback(window, cx);
             }
         })
         .child(

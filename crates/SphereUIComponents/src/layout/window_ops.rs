@@ -602,12 +602,15 @@ impl StudioLayout {
         // (or shown as selected) on Linux/macOS, since it cannot resolve to a
         // real driver there.
         #[cfg(target_os = "windows")]
-        let available_backends = vec![
+        let mut available_backends = vec![
             "WASAPI Shared".to_string(),
             "WASAPI Exclusive".to_string(),
             "WDM-KS".to_string(),
-            "ASIO".to_string(),
         ];
+        #[cfg(target_os = "windows")]
+        if DirectAudio::asio_support_enabled() {
+            available_backends.push("ASIO".to_string());
+        }
         #[cfg(target_os = "macos")]
         let available_backends = vec!["Auto".to_string(), "CoreAudio".to_string()];
         #[cfg(all(unix, not(target_os = "macos")))]

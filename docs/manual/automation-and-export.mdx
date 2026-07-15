@@ -1,0 +1,73 @@
+---
+title: Automation & Export
+description: Automation lanes, plugin delay compensation, and rendering audio.
+sidebar_label: Automation & Export
+---
+
+# Automation & Export
+
+## Automation
+
+Automation records parameter changes over time — volume, pan, sends, and
+plugin parameters.
+
+### Automation lanes
+
+Each track can show automation lanes beneath its clip lane. A lane draws the
+automation curve for one target parameter:
+
+- **Add points** — click on the lane.
+- **Move points** — drag.
+- **Delete points** — select and remove.
+- **Select all points** — within the automation editor context.
+
+Automation lanes live in track/project state and stay aligned with the timeline
+grid at any zoom or scroll position.
+
+### Automation modes
+
+Switch a track's automation mode (read/write behavior) and cycle its active
+target from the track controls. Automation for plugin parameters travels the
+full path from the lane through the engine to the target plugin instance —
+routed to that specific insert, never broadcast to all plugins.
+
+## Plugin delay compensation (PDC)
+
+Plugins that add latency are compensated automatically so tracks stay in time.
+Bridged plugin inserts contribute their reported latency (plus any bridge
+handoff latency) to PDC, keeping parallel and summed signals phase-correct.
+
+## Transport context
+
+Hosted plugins receive real transport information — sample rate, block size,
+play/stop state, project position, tempo, and time signature — from the actual
+engine timeline, not a fixed stub. Tempo-synced plugins follow your project.
+
+## Exporting audio
+
+Open **File ▸ Export Arrangement** to render your project to audio.
+
+### Export types
+
+- **Master mixdown** — the full stereo output.
+- **Stems** — grouped submixes.
+- **Multitrack** — individual tracks.
+
+### How rendering works
+
+Export renders offline. Native plugin inserts are rendered **in process** and
+their saved state is restored for the offline pass, so the exported audio
+matches what you hear. A tail (default 5 seconds) is included so reverbs and
+delays ring out fully.
+
+### Steps
+
+1. **File ▸ Export Arrangement**.
+2. Choose the export type (master / stems / multitrack).
+3. Set format, range, and tail.
+4. Render. When finished, you can reveal the output folder.
+
+## Tips
+
+- Freeze reverb/delay tails by leaving enough tail time.
+- Use stems/multitrack when handing off to another engineer or DAW.

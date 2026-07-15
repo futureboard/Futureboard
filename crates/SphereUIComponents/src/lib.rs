@@ -74,6 +74,7 @@ pub use SpherePluginHost::process_manager::PluginHostProcessManager;
 pub mod splash;
 pub mod startup;
 pub mod theme;
+pub mod user_manual;
 pub mod welcome;
 
 pub fn ui_debug_enabled() -> bool {

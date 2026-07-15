@@ -21,6 +21,8 @@ use sphere_ui_components::splash::SplashWindowHandle;
 use sphere_ui_components::startup::{
     log_startup_phase, run_lightweight_boot, StartupPhase, StartupRoute,
 };
+#[cfg(feature = "exclusive")]
+use sphere_ui_components::welcome::WelcomeFooterAction;
 use sphere_ui_components::welcome::{WelcomeAction, WelcomeCallbacks, WelcomeWindow};
 
 static DISCORD_RPC: OnceLock<sphere_discord_rpc::DiscordRpcHandle> = OnceLock::new();
@@ -275,6 +277,31 @@ fn open_welcome_window(cx: &mut App) {
                 welcome_window.remove_window();
             }
         }),
+        footer_action: {
+            #[cfg(feature = "exclusive")]
+            {
+                Some(WelcomeFooterAction {
+                    label: "License",
+                    icon: assets::ICON_FILE_PATH,
+                    on_click: Arc::new(|welcome_window, cx| {
+                        let activation = crate::exclusive_edition::environment_license_activator(
+                            env!("CARGO_PKG_VERSION"),
+                        );
+                        if let Err(error) = crate::exclusive_edition::open_license_activation_window(
+                            Some(welcome_window.bounds()),
+                            activation,
+                            cx,
+                        ) {
+                            eprintln!("[LicenseActivation] failed to open dialog: {error}");
+                        }
+                    }),
+                })
+            }
+            #[cfg(not(feature = "exclusive"))]
+            {
+                None
+            }
+        },
     };
     let _welcome = cx
         .open_window(welcome_window_options(cx), |_window, cx| {

@@ -488,6 +488,13 @@ export const APP_MENUS: AppMenuGroup[] = [
         action: "plugins:manager",
       },
       {
+        id: "audio.plugin_scanner",
+        label: "Audio Plug-in Scanner...",
+        icon: "scan",
+        action: "plugins:scan",
+        description: "Scan for installed VST3 and CLAP plug-ins",
+      },
+      {
         type: "separator",
         id: "audio.sep.routing",
       },

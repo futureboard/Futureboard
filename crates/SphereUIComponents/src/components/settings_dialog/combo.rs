@@ -45,11 +45,6 @@ pub(crate) fn hardware_combo_overlay(
     let i18n = I18n::new(&schema.general.language);
     let position = combo_menu_position(anchor, window);
     let close_target = close_target.clone();
-    let experimental_asio = std::env::var("FUTUREBOARD_EXPERIMENTAL_ASIO")
-        .ok()
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false);
-
     let menu = match open_combo {
         HardwareCombo::Theme => {
             let themes = crate::theme::available_theme_summaries();
@@ -89,20 +84,11 @@ pub(crate) fn hardware_combo_overlay(
             let selected =
                 sanitized_backend_label(&schema.hardware.audio.driver_type, available_backends);
             let up = on_update.clone();
-            let filtered_backends: Vec<String> = if experimental_asio {
-                available_backends.to_vec()
-            } else {
-                available_backends
-                    .iter()
-                    .filter(|b| !b.to_ascii_lowercase().contains("asio"))
-                    .cloned()
-                    .collect()
-            };
             combo_box_string_menu(
                 "settings-audio-driver-menu",
                 position,
                 &selected,
-                &filtered_backends,
+                available_backends,
                 Arc::new(move |value, window, cx| {
                     up(
                         Arc::new(move |s| {

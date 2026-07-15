@@ -164,6 +164,13 @@ fn format_take_id(take_id: [u8; 16]) -> String {
 
 pub fn find_input_device(device_id: Option<&str>) -> Result<cpal::Device, SphereAudioError> {
     let host = cpal::default_host();
+    find_input_device_for_host(&host, device_id)
+}
+
+pub(crate) fn find_input_device_for_host(
+    host: &cpal::Host,
+    device_id: Option<&str>,
+) -> Result<cpal::Device, SphereAudioError> {
     if let Some(id) = device_id {
         if !id.is_empty() {
             let mut devices = host
@@ -519,13 +526,21 @@ pub fn start_recording(
     shared: Arc<crate::engine::SharedState>,
     monitor_mix: bool,
 ) -> Result<RecordingSession, SphereAudioError> {
+    let device = find_input_device(config.input_device_id.as_deref())?;
+    start_recording_with_device(config, shared, monitor_mix, device)
+}
+
+pub(crate) fn start_recording_with_device(
+    config: JsStartRecordingConfig,
+    shared: Arc<crate::engine::SharedState>,
+    monitor_mix: bool,
+    device: cpal::Device,
+) -> Result<RecordingSession, SphereAudioError> {
     if config.tracks.is_empty() {
         return Err(SphereAudioError::NativeError(
             "No armed tracks — nothing to record".to_string(),
         ));
     }
-
-    let device = find_input_device(config.input_device_id.as_deref())?;
 
     let default_cfg = device
         .default_input_config()

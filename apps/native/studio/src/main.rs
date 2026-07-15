@@ -4,10 +4,17 @@ mod app;
 mod audio_state;
 mod window;
 
+#[cfg(feature = "exclusive")]
+#[path = "../../../../crates/ExclusiveEdition/src/lib.rs"]
+mod exclusive_edition;
+
 use sphere_ui_components::boot;
 use sphere_ui_components::embedded_assets::EmbeddedAssets;
 
 fn main() {
+    #[cfg(feature = "exclusive")]
+    exclusive_edition::install().expect("failed to install Exclusive Edition providers");
+
     // ── Phase 0 — process setup ───────────────────────────────────────────────
     // env flags (before GPUI/window creation), panic hook, logging. No window,
     // no settings I/O, no device/plugin work here.

@@ -32,10 +32,16 @@ sphere_ui_components = { workspace = true, features = ["gpu-renderer", "native-d
 # symbols. Electron can enable N-API from its own crate/build path instead.
 sphere_directaudioengine.workspace = true
 sphere-discord-rpc.workspace = true
+reqwest = { workspace = true, optional = true, features = ["blocking", "json"] }
+serde = { workspace = true, optional = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 # Windows GPUI backend.
 gpui_windows.workspace = true
+# Exclusive Edition's private source registers this host at startup. Keeping
+# the dependency here lets the public Community manifest remain valid when the
+# ignored `crates/ExclusiveEdition` directory is absent.
+cpal = { workspace = true, optional = true, features = ["asio"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # macOS GPUI backend.
@@ -56,6 +62,8 @@ gpui_linux = { workspace = true, features = ["wayland", "x11"] }
 [features]
 default = ["gpu-renderer"]
 gpu-renderer = ["sphere_ui_components/gpu-renderer"]
+# Enable the private Exclusive Edition module and its Windows ASIO toolchain.
+exclusive = ["dep:cpal", "dep:reqwest", "dep:serde"]
 
 [build-dependencies]
 embed-resource.workspace = true

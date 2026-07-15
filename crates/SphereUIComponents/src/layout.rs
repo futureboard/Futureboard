@@ -269,6 +269,7 @@ fn native_audio_backend_from_driver_type(driver_type: &str) -> DirectAudio::Audi
     match driver_type {
         "WASAPI Exclusive" => DirectAudio::AudioBackend::WasapiExclusive,
         "WDM-KS" => DirectAudio::AudioBackend::WdmKs,
+        "ASIO" => DirectAudio::AudioBackend::Asio,
         _ => DirectAudio::AudioBackend::Auto,
     }
 }
@@ -1764,6 +1765,12 @@ impl StudioLayout {
             "help:keyboard-shortcuts" => {
                 self.open_keymap_window(owner_bounds, cx);
             }
+            "help:documentation" => {
+                crate::user_manual::open_section(crate::user_manual::INDEX_FILE);
+            }
+            "help:quick-start" => {
+                crate::user_manual::open_section(crate::user_manual::QUICK_START_FILE);
+            }
             "app:about" | "app:check-for-updates" => {
                 self.open_settings_dialog(owner_bounds, cx);
             }
@@ -1846,6 +1853,10 @@ impl StudioLayout {
                 self.open_add_track_external_window(AddTrackKind::Master, owner_bounds, cx)
             }
             "plugins:manager" => self.open_plugin_manager_external_window(owner_bounds, cx),
+            // Audio ▸ Audio Plug-in Scanner. The scanner UI (rescan / rescan-all
+            // / AU rescan controls) lives inside the Plug-in Manager window.
+            // TODO: auto-start a rescan once the manager handle exposes begin_scan.
+            "plugins:scan" => self.open_plugin_manager_external_window(owner_bounds, cx),
             "plugins:insert" => {
                 let track_id = self
                     .timeline

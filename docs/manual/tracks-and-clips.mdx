@@ -1,0 +1,70 @@
+---
+title: Tracks & Clips
+description: Track types, recording, editing clips, and the MIDI piano roll.
+sidebar_label: Tracks & Clips
+---
+
+# Tracks & Clips
+
+## Track types
+
+Add tracks from **Track ▸ Add** or the timeline context menu:
+
+- **Audio** — records and plays audio clips.
+- **MIDI** — holds MIDI clips that drive a plugin instrument.
+- **Instrument** — a MIDI track with a hosted instrument on its input.
+- **Bus** — sums signal from other tracks.
+- **Group** — groups tracks for shared control.
+- **Return** — a destination for sends (effects returns).
+- **Master** — the final output stage.
+
+Each track header carries **Mute**, **Solo**, and **Arm** controls, a color,
+and a height preset (Small / Normal / Large / Huge).
+
+## Recording
+
+1. **Arm** the target track(s).
+2. Choose the input in the track inspector.
+3. Position the playhead and press **Record** in the transport.
+4. Press **Stop** to end the take.
+
+Recording writes audio to disk while capturing; the resulting clip appears on
+the track lane.
+
+## Working with clips
+
+Clips are the audio or MIDI segments on a track lane. Common operations:
+
+- **Move** — drag along the lane.
+- **Resize / trim** — drag a clip edge.
+- **Select** — click, or rubber-band multiple.
+- **Copy / Cut / Paste** — standard edit shortcuts.
+- **Delete** — remove the selected clip(s).
+
+Edit shortcuts (Ctrl/Cmd+A/C/V/X, Delete) work in the timeline but do **not**
+fire while you are typing in a text field.
+
+## Audio clips
+
+Audio clips show a waveform and support gain and time-stretch. Fades and clip
+gain are edited from the clip or inspector.
+
+## MIDI clips and the piano roll
+
+Double-click a MIDI clip to open the **piano roll** in the bottom Editor tab.
+There you can:
+
+- Draw, move, resize, and delete notes.
+- Adjust velocity.
+- Edit against the same grid and snap settings as the arrangement.
+
+The piano keyboard and note grid share one coordinate system so notes stay
+aligned with the ruler at any zoom.
+
+> MIDI editing is available now. Some engine-playback refinements for edited
+> MIDI are ongoing — check the release notes for the current state.
+
+## Selection and snapping
+
+Selection and snapping follow the arrangement grid. Snap keeps edits aligned to
+bars/beats; disable it for free placement.

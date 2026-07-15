@@ -20,7 +20,7 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use crate::audio_file;
-use crate::backend::BackendKind;
+use crate::backend::{self, BackendKind};
 use crate::device;
 use crate::engine::EngineInner;
 use crate::error::SphereAudioError;
@@ -32,6 +32,11 @@ use crate::types::{EngineProjectSnapshot, JsDauxConfig, JsMeterSnapshot, JsStart
 pub const DEFAULT_SAMPLE_RATE: u32 = 48_000;
 /// Default buffer size used when the caller does not specify one.
 pub const DEFAULT_BUFFER_SIZE: u32 = 256;
+
+/// Whether this binary was built with the Windows ASIO host.
+pub fn asio_support_enabled() -> bool {
+    crate::backend::asio_support_enabled()
+}
 
 /// Which DAUx audio backend to drive. Mirrors [`BackendKind`] but is
 /// re-exposed under a more Rust-Native-friendly name and limited to the
@@ -47,6 +52,8 @@ pub enum AudioBackend {
     WasapiExclusive,
     /// Windows: WDM-KS low-level driver path (experimental).
     WdmKs,
+    /// Windows: ASIO driver path (requires the `asio` build feature).
+    Asio,
 }
 
 impl AudioBackend {
@@ -60,6 +67,7 @@ impl AudioBackend {
             AudioBackend::Cpal => BackendKind::Auto,
             AudioBackend::WasapiExclusive => BackendKind::WasapiExclusive,
             AudioBackend::WdmKs => BackendKind::WdmKs,
+            AudioBackend::Asio => BackendKind::Asio,
         }
     }
 
@@ -74,6 +82,7 @@ impl AudioBackend {
                 AudioBackend::WasapiExclusive,
                 AudioDeviceId::WasapiEndpoint(_)
             ) | (AudioBackend::WdmKs, AudioDeviceId::WdmKsFilterPin { .. })
+                | (AudioBackend::Asio, AudioDeviceId::AsioDevice(_))
                 | (
                     AudioBackend::Auto | AudioBackend::Cpal,
                     AudioDeviceId::DauxEndpoint(_)
@@ -94,12 +103,16 @@ pub enum AudioDeviceId {
     WdmKsFilterPin { filter_path: String, pin_id: u32 },
     /// Cross-platform DAUx/cpal endpoint id/name (Auto/Cpal/CoreAudio/ALSA path).
     DauxEndpoint(String),
+    /// ASIO driver/device name resolved only against CPAL's ASIO host.
+    AsioDevice(String),
 }
 
 impl AudioDeviceId {
     pub fn raw_id(&self) -> &str {
         match self {
-            AudioDeviceId::WasapiEndpoint(id) | AudioDeviceId::DauxEndpoint(id) => id,
+            AudioDeviceId::WasapiEndpoint(id)
+            | AudioDeviceId::DauxEndpoint(id)
+            | AudioDeviceId::AsioDevice(id) => id,
             AudioDeviceId::WdmKsFilterPin { filter_path, .. } => filter_path,
         }
     }
@@ -189,6 +202,19 @@ impl EngineDeviceInfo {
             default_sample_rate: d.default_sample_rate,
             is_default: d.is_default,
             backend: "DAUx WASAPI Exclusive".into(),
+        }
+    }
+
+    fn from_asio(d: crate::types::JsAudioDeviceInfo) -> Self {
+        Self {
+            device_id: AudioDeviceId::AsioDevice(d.id.clone()),
+            id: d.id,
+            name: d.name,
+            kind: d.kind,
+            channels: d.channels,
+            default_sample_rate: d.default_sample_rate,
+            is_default: d.is_default,
+            backend: "DAUx ASIO".into(),
         }
     }
 }
@@ -605,6 +631,12 @@ impl AudioEngine {
                 .into_iter()
                 .map(EngineDeviceInfo::from_wasapi)
                 .collect(),
+            AudioBackend::Asio => backend::asio_host()
+                .map(|host| device::list_output_devices_for_host(&host))
+                .unwrap_or_default()
+                .into_iter()
+                .map(EngineDeviceInfo::from_asio)
+                .collect(),
             AudioBackend::Auto | AudioBackend::Cpal => device::list_output_devices()
                 .into_iter()
                 .map(EngineDeviceInfo::from_daux)
@@ -623,6 +655,12 @@ impl AudioEngine {
             AudioBackend::WasapiExclusive => device::list_input_devices()
                 .into_iter()
                 .map(EngineDeviceInfo::from_wasapi)
+                .collect(),
+            AudioBackend::Asio => backend::asio_host()
+                .map(|host| device::list_input_devices_for_host(&host))
+                .unwrap_or_default()
+                .into_iter()
+                .map(EngineDeviceInfo::from_asio)
                 .collect(),
             AudioBackend::Auto | AudioBackend::Cpal => device::list_input_devices()
                 .into_iter()

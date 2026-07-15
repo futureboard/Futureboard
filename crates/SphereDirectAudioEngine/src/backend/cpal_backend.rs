@@ -66,10 +66,29 @@ pub fn open(
     initial_runtime: RuntimeProject,
     glitch_counter: Arc<AtomicU64>,
 ) -> Result<CpalStreamHandle, SphereAudioError> {
-    let (dev, dev_name) = crate::device::resolve_output_device(config.output_device_id.as_deref())
-        .map_err(SphereAudioError::DeviceNotFound)?;
+    open_on_host(
+        &cpal::default_host(),
+        config,
+        shared,
+        initial_runtime,
+        glitch_counter,
+    )
+}
 
-    let backend_name = cpal::default_host().id().name().to_string();
+/// Open through a specific CPAL host while reusing the DAUx render kernel.
+/// Host/device discovery and stream creation are control-thread operations.
+pub(crate) fn open_on_host(
+    host: &cpal::Host,
+    config: &DauxDeviceConfig,
+    shared: Arc<SharedState>,
+    initial_runtime: RuntimeProject,
+    glitch_counter: Arc<AtomicU64>,
+) -> Result<CpalStreamHandle, SphereAudioError> {
+    let (dev, dev_name) =
+        crate::device::resolve_output_device_for_host(host, config.output_device_id.as_deref())
+            .map_err(SphereAudioError::DeviceNotFound)?;
+
+    let backend_name = host.id().name().to_string();
 
     // Build stream config candidates.
     let default_supported = dev
@@ -210,11 +229,19 @@ where
     let mut mmcss_set = false;
     #[cfg(not(target_os = "windows"))]
     let mmcss_set = false;
-    // f32 scratch buffer for shared render kernel.
-    let mut f32_scratch: Vec<f32> = Vec::new();
+    // Preallocate before stream start: the callback must never grow this on the
+    // audio thread. Default-sized streams get a conservative upper bound; an
+    // unexpectedly larger callback is silenced below.
+    const DEFAULT_SCRATCH_FRAMES: usize = 8_192;
+    let scratch_frames = match config.buffer_size {
+        BufferSize::Fixed(frames) => frames as usize,
+        BufferSize::Default => DEFAULT_SCRATCH_FRAMES,
+    };
+    let mut f32_scratch = vec![0.0f32; scratch_frames.saturating_mul(ch)];
 
     // Separate handle for the error callback (the data callback moves `shared`).
     let err_shared = Arc::clone(&shared);
+    let callback_glitch_counter = Arc::clone(&glitch_counter);
 
     let stream = device
         .build_output_stream::<T, _, _>(
@@ -240,8 +267,12 @@ where
                 // ── Fill via shared f32 kernel ────────────────────────────────
                 let frames_needed = data.len() / ch.max(1);
                 let f32_len = frames_needed * ch;
-                if f32_scratch.len() < f32_len {
-                    f32_scratch.resize(f32_len, 0.0f32);
+                if f32_len > f32_scratch.len() {
+                    for sample in data.iter_mut() {
+                        *sample = T::from_sample(0.0);
+                    }
+                    callback_glitch_counter.fetch_add(1, Ordering::Relaxed);
+                    return;
                 }
                 let scratch = &mut f32_scratch[..f32_len];
                 for s in scratch.iter_mut() {

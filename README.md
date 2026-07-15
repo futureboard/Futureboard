@@ -2,7 +2,7 @@
 
 <img width="2111" height="684" alt="Futureboard Studio banner" src="packages/assets/banner.png" />
 
-**A modern open-source Digital Audio Workstation built with Rust, GPUI, TypeScript, WebAssembly, and native audio/plugin infrastructure.**
+**A modern open-source Digital Audio Workstation Community Edition built with Rust, GPUI, TypeScript, WebAssembly, and native audio/plugin infrastructure.**
 
 [![CI](https://img.shields.io/github/actions/workflow/status/futureboard/Futureboard/ci.yml?branch=main&style=for-the-badge&label=CI&logo=github&logoColor=white&color=22c55e&labelColor=0f172a)](https://github.com/futureboard/Futureboard/actions/workflows/ci.yml)
 [![Status](https://img.shields.io/badge/status-pre--alpha-f59e0b?style=for-the-badge&labelColor=0f172a)](ARCHITECTURE.md)
@@ -23,7 +23,8 @@
 [Getting Started](#getting-started) ·
 [Build](#building-the-native-app) ·
 [Debugging](#debugging--diagnostics) ·
-[Contributing](#contributing)
+[Contributing](#contributing) ·
+[Forks & Trademarks](#third-party-forks--trademarks)
 
 </div>
 
@@ -55,6 +56,34 @@
 
 > [!WARNING]
 > **Pre-alpha.** Under active early development — expect breaking changes, incomplete features, and no persistence guarantees. Not ready for production; don't trust it with irreplaceable projects. Nightly builds are test snapshots only.
+
+---
+
+## Community and Exclusive Editions
+
+This public repository contains **Futureboard Community Edition** source code,
+licensed under the [MIT License](LICENSE). A normal Community build does not
+contain the private Exclusive Edition crate, ASIO provider, license activation
+client, or other separately licensed commercial components.
+
+Authorized private checkouts may add the Git-ignored
+`crates/ExclusiveEdition` source and use [build-private.ps1](build-private.ps1).
+The presence of shared extension hooks or an Exclusive build-feature name does
+not grant access to or redistribution rights in Exclusive Edition.
+
+```bash
+# Public Community Edition
+cargo build -p futureboard_native
+
+# Authorized private checkout only (PowerShell)
+.\build-private.ps1
+
+# Equivalent direct Cargo command
+cargo build --release -p futureboard_native --features exclusive
+
+# Fully temporary LLVM + ASIO SDK setup (downloads about 822 MiB)
+python .\build-private-temporary.py --accept-asio-license
+```
 
 ---
 
@@ -195,6 +224,34 @@ Contributions are welcome — bug reports, build testing, documentation, UI fixe
 
 ---
 
+## Third-Party Forks & Trademarks
+
+The MIT License permits forks and modified distributions of covered Community
+Edition source code. It does not authorize third parties to present modified
+software as an official Futureboard product or to imply endorsement.
+
+Third-party forks that refer to Futureboard in product-facing materials must use
+distinct product branding and prominently display this notice:
+
+> This project is an independent third-party fork of Futureboard Community
+> Edition. It is not affiliated with, endorsed by, sponsored by, or supported
+> by the Futureboard project or its maintainers.
+
+Factual statements such as "based on Futureboard Community Edition" are allowed
+when accurate and when the fork's own branding is more prominent. See
+[TRADEMARKS.md](TRADEMARKS.md) for the complete naming, logo, redistribution,
+fork, and Exclusive Edition policy.
+
+---
+
 ## License
 
-MIT — see [LICENSE](LICENSE).
+Futureboard Community Edition source code is licensed under the
+[MIT License](LICENSE). Required third-party notices and licenses remain
+applicable; see [NOTICE.md](NOTICE.md) and the relevant dependency directories.
+
+The Futureboard names, logos, product identity, and trade dress are not licensed
+for use as the branding of modified products merely because the source code is
+open source. See [TRADEMARKS.md](TRADEMARKS.md). Futureboard Exclusive Edition
+components are separately licensed and are not part of the public Community
+Edition repository.

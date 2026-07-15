@@ -8,10 +8,15 @@
 //! | `DauxCpalBackend`        | All          | cpal: WASAPI Shared / CoreAudio / ALSA |
 //! | `DauxWasapiExclBackend`  | Windows only | Raw WASAPI exclusive + MMCSS        |
 //! | `DauxWdmKsBackend`       | Windows only | WDM-KS low-level driver path        |
+//! | `DauxAsioBackend`        | Windows only | Host supplied by an edition provider |
 //! | `DauxMmeBackend`         | Windows only | Legacy MME stub (fallback only)     |
 //!
 //! Audio engine rule: all backends share `Arc<SharedState>` for meters/transport
 //! and receive `EngineCommand` through a `crossbeam_channel::Receiver`.
+
+use std::sync::OnceLock;
+
+use crate::error::SphereAudioError;
 
 pub mod cpal_backend;
 pub mod render;
@@ -35,6 +40,8 @@ pub enum BackendKind {
     WasapiExclusive,
     /// Windows: WDM-KS low-level driver path (experimental).
     WdmKs,
+    /// Windows: Steinberg ASIO driver path supplied by Exclusive Edition.
+    Asio,
     /// macOS: CoreAudio (same as Auto on macOS, explicit selection).
     CoreAudio,
     /// Linux: ALSA PCM (same as Auto on Linux, explicit selection).
@@ -50,6 +57,7 @@ impl BackendKind {
             BackendKind::WasapiShared => "DAUx WASAPI Shared",
             BackendKind::WasapiExclusive => "DAUx WASAPI Exclusive",
             BackendKind::WdmKs => "DAUx WDM-KS",
+            BackendKind::Asio => "DAUx ASIO",
             BackendKind::CoreAudio => "DAUx CoreAudio",
             BackendKind::Alsa => "DAUx ALSA",
             BackendKind::MmeFallback => "DAUx MME (Legacy Fallback)",
@@ -62,6 +70,7 @@ impl BackendKind {
             BackendKind::WasapiShared => "wasapi-shared",
             BackendKind::WasapiExclusive => "wasapi-exclusive",
             BackendKind::WdmKs => "wdm-ks",
+            BackendKind::Asio => "asio",
             BackendKind::CoreAudio => "coreaudio",
             BackendKind::Alsa => "alsa",
             BackendKind::MmeFallback => "mme",
@@ -73,6 +82,7 @@ impl BackendKind {
             "wasapi-shared" | "wasapishared" => BackendKind::WasapiShared,
             "wasapi-exclusive" | "wasapiexclusive" => BackendKind::WasapiExclusive,
             "wdm-ks" | "wdmks" | "wdm_ks" => BackendKind::WdmKs,
+            "asio" | "daux-asio" => BackendKind::Asio,
             "coreaudio" | "core-audio" => BackendKind::CoreAudio,
             "alsa" => BackendKind::Alsa,
             "mme" | "mmefallback" => BackendKind::MmeFallback,
@@ -83,24 +93,28 @@ impl BackendKind {
     /// Backends that are actually selectable on the current build target.
     /// `Auto` is always valid everywhere — it falls back to cpal's
     /// platform-default backend (WASAPI Shared / CoreAudio / ALSA).
-    pub fn allowed_for_current_platform() -> &'static [BackendKind] {
+    pub fn allowed_for_current_platform() -> Vec<BackendKind> {
         #[cfg(target_os = "windows")]
         {
-            &[
+            let mut backends = vec![
                 BackendKind::Auto,
                 BackendKind::WasapiShared,
                 BackendKind::WasapiExclusive,
                 BackendKind::WdmKs,
                 BackendKind::MmeFallback,
-            ]
+            ];
+            if asio_support_enabled() {
+                backends.insert(backends.len() - 1, BackendKind::Asio);
+            }
+            backends
         }
         #[cfg(target_os = "macos")]
         {
-            &[BackendKind::Auto, BackendKind::CoreAudio]
+            vec![BackendKind::Auto, BackendKind::CoreAudio]
         }
         #[cfg(all(unix, not(target_os = "macos")))]
         {
-            &[BackendKind::Auto, BackendKind::Alsa]
+            vec![BackendKind::Auto, BackendKind::Alsa]
         }
     }
 
@@ -212,6 +226,15 @@ pub fn list_available_backends() -> Vec<BackendInfo> {
             is_default: false,
             description: "WDM-KS low-level Windows driver path — experimental".into(),
         });
+        if asio_support_enabled() {
+            list.push(BackendInfo {
+                id: "asio".into(),
+                name: "DAUx ASIO".into(),
+                available: true,
+                is_default: false,
+                description: "ASIO native low-latency driver path".into(),
+            });
+        }
         list.push(BackendInfo {
             id: "mme".into(),
             name: "DAUx MME (Legacy Fallback)".into(),
@@ -244,4 +267,51 @@ pub fn list_available_backends() -> Vec<BackendInfo> {
     }
 
     list
+}
+
+/// Factory registered by the private edition module. Registration checks do
+/// not initialize ASIO drivers; device enumeration performs that work later.
+pub type AsioHostFactory = fn() -> Result<cpal::Host, String>;
+
+static ASIO_HOST_FACTORY: OnceLock<AsioHostFactory> = OnceLock::new();
+
+/// Register the ASIO provider supplied by the separately linked edition crate.
+pub fn register_asio_host_factory(factory: AsioHostFactory) -> Result<(), String> {
+    ASIO_HOST_FACTORY
+        .set(factory)
+        .map_err(|_| "ASIO host provider is already registered".to_string())
+}
+
+pub(crate) fn asio_host() -> Result<cpal::Host, SphereAudioError> {
+    let factory = ASIO_HOST_FACTORY.get().ok_or_else(|| {
+        SphereAudioError::BackendUnavailable(
+            "DAUx ASIO requires a Futureboard Exclusive Edition build".into(),
+        )
+    })?;
+    factory().map_err(SphereAudioError::BackendUnavailable)
+}
+
+pub fn asio_support_enabled() -> bool {
+    cfg!(target_os = "windows") && ASIO_HOST_FACTORY.get().is_some()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::BackendKind;
+
+    #[test]
+    fn asio_backend_id_round_trips() {
+        assert_eq!(BackendKind::from_id("asio"), BackendKind::Asio);
+        assert_eq!(BackendKind::Asio.id(), "asio");
+    }
+
+    #[test]
+    fn unavailable_asio_setting_sanitizes_to_auto() {
+        if !super::asio_support_enabled() {
+            assert_eq!(
+                BackendKind::sanitize_for_current_platform(BackendKind::Asio),
+                BackendKind::Auto
+            );
+        }
+    }
 }

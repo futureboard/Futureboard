@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "generatedAt": "2026-07-14T02:49:07.110Z",
+  "generatedAt": "2026-07-15T04:22:24.733Z",
   "menus": [
     {
       "id": "file",
@@ -892,6 +892,21 @@
           "checked": false,
           "danger": false,
           "description": null,
+          "children": []
+        },
+        {
+          "id": "audio.plugin_scanner",
+          "kind": "normal",
+          "label": "Audio Plug-in Scanner...",
+          "icon": "scan",
+          "shortcut": null,
+          "command": "plugins:scan",
+          "role": null,
+          "enabled": true,
+          "visible": true,
+          "checked": false,
+          "danger": false,
+          "description": "Scan for installed VST3 and CLAP plug-ins",
           "children": []
         },
         {

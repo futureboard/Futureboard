@@ -21,7 +21,11 @@ fn log_devices(direction: &str, devices: &[JsAudioDeviceInfo]) {
 /// Enumerate all available output devices on the default host.
 /// Never panics — returns empty vec on any cpal error.
 pub fn list_output_devices() -> Vec<JsAudioDeviceInfo> {
-    let host = cpal::default_host();
+    list_output_devices_for_host(&cpal::default_host())
+}
+
+/// Enumerate output devices from a specific CPAL host (for example ASIO).
+pub(crate) fn list_output_devices_for_host(host: &cpal::Host) -> Vec<JsAudioDeviceInfo> {
     let backend = host.id().name().to_string();
     let default_name = host.default_output_device().and_then(|d| d.name().ok());
 
@@ -54,7 +58,11 @@ pub fn list_output_devices() -> Vec<JsAudioDeviceInfo> {
 
 /// Enumerate all available input devices on the default host.
 pub fn list_input_devices() -> Vec<JsAudioDeviceInfo> {
-    let host = cpal::default_host();
+    list_input_devices_for_host(&cpal::default_host())
+}
+
+/// Enumerate input devices from a specific CPAL host (for example ASIO).
+pub(crate) fn list_input_devices_for_host(host: &cpal::Host) -> Vec<JsAudioDeviceInfo> {
     let backend = host.id().name().to_string();
     let default_name = host.default_input_device().and_then(|d| d.name().ok());
 
@@ -88,7 +96,14 @@ pub fn list_input_devices() -> Vec<JsAudioDeviceInfo> {
 /// Resolve a named output device (or the system default if `id` is None).
 /// Returns `(device, actual_name)` or an error string.
 pub fn resolve_output_device(id: Option<&str>) -> Result<(cpal::Device, String), String> {
-    let host = cpal::default_host();
+    resolve_output_device_for_host(&cpal::default_host(), id)
+}
+
+/// Resolve an output device against a specific CPAL host.
+pub(crate) fn resolve_output_device_for_host(
+    host: &cpal::Host,
+    id: Option<&str>,
+) -> Result<(cpal::Device, String), String> {
     match id {
         None => {
             let dev = host

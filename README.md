@@ -83,6 +83,9 @@ cargo build --release -p futureboard_native --features exclusive
 
 # Fully temporary LLVM + ASIO SDK setup (downloads about 822 MiB)
 python .\build-private-temporary.py --accept-asio-license
+
+# Build all default workspace targets with Exclusive enabled for Studio
+python .\build-private-temporary.py --accept-asio-license --workspace
 ```
 
 ---

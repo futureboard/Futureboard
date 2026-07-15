@@ -843,7 +843,7 @@ fn report_bug_button() -> impl IntoElement {
 
 /// Titlebar account control. Present only on builds that install an account
 /// provider (Exclusive Edition); Community builds render nothing. Signed out it
-/// is a "Sign in" chip; signed in it shows an avatar initial + name and opens
+/// is a "Sign in" chip; signed in it shows only the compact avatar and opens
 /// the account menu. Reads the account snapshot fresh each render, so sign-in /
 /// sign-out reflect here without extra wiring.
 fn account_chip() -> Option<impl IntoElement> {
@@ -853,16 +853,6 @@ fn account_chip() -> Option<impl IntoElement> {
         crate::account::AccountAction::OpenMenu
     } else {
         crate::account::AccountAction::SignIn
-    };
-    let label = if signed_in {
-        let raw = snapshot
-            .username
-            .clone()
-            .or_else(|| snapshot.email.clone())
-            .unwrap_or_else(|| "Account".to_string());
-        clamp_label(&raw, 18)
-    } else {
-        "Sign in".to_string()
     };
     let text_color = if signed_in {
         Colors::text_secondary()
@@ -897,15 +887,17 @@ fn account_chip() -> Option<impl IntoElement> {
         )
     };
 
-    Some(
+    Some(if signed_in {
+        chip.occlude()
+    } else {
         chip.child(
             div()
                 .text_size(px(11.0))
                 .text_color(text_color)
-                .child(label),
+                .child("Sign in"),
         )
-        .occlude(),
-    )
+        .occlude()
+    })
 }
 
 /// Compact circular avatar badge showing the user's first initial. A remote
@@ -932,16 +924,6 @@ fn account_avatar(snapshot: &crate::account::AccountSnapshot) -> impl IntoElemen
         .font_weight(gpui::FontWeight::SEMIBOLD)
         .text_color(Colors::accent_primary())
         .child(initial)
-}
-
-/// Truncate a chip label to `max` chars, appending an ellipsis when clipped.
-fn clamp_label(value: &str, max: usize) -> String {
-    if value.chars().count() <= max {
-        return value.to_string();
-    }
-    let mut clipped: String = value.chars().take(max.saturating_sub(1)).collect();
-    clipped.push('…');
-    clipped
 }
 
 fn window_controls(window: &gpui::Window, on_close: Option<ChromeActionCb>) -> impl IntoElement {

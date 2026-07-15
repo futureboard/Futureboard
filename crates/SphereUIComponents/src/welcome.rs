@@ -587,7 +587,8 @@ fn welcome_header() -> impl IntoElement {
         .bg(Colors::surface_panel())
         .child(
             img(SharedString::from(LOGO_TEXT_PATH))
-                .h(px(24.0))
+                .w(px(199.0))
+                .h(px(18.0))
                 .flex_none(),
         );
 

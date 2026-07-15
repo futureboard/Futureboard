@@ -13,7 +13,9 @@ pub const LOGO_TEXT_PATH: &str = "images/logo-text.png";
 /// runtime file dependency on the source tree / install layout).
 static SPLASH_PNG: &[u8] = include_bytes!("../../../packages/shared/images/splash.png");
 static APP_LOGO_PNG: &[u8] = include_bytes!("../../../packages/assets/app.png");
-static LOGO_TEXT_PNG: &[u8] = include_bytes!("../../../packages/assets/LogoText.png");
+// UI-sized 2x derivative (398x36) avoids asking the renderer to minify the
+// 3487x315 source at runtime, which produced visibly jagged text at 100% DPI.
+static LOGO_TEXT_PNG: &[u8] = include_bytes!("../../../packages/assets/LogoText.UI@2x.png");
 
 pub fn splash_image_available() -> bool {
     !SPLASH_PNG.is_empty()

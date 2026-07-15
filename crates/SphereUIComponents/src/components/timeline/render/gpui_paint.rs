@@ -101,17 +101,6 @@ fn arrangement_canvas_size(bounds: Bounds<Pixels>) -> (f32, f32) {
     )
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn arrangement_grid_uses_current_canvas_height_after_resize() {
-        let bounds = Bounds::new(point(px(12.0), px(24.0)), size(px(900.0), px(466.0)));
-        assert_eq!(arrangement_canvas_size(bounds), (900.0, 466.0));
-    }
-}
-
 /// Dev-only: log snapshot stats when WGPU path runs in parallel with GPUI display.
 pub fn log_snapshot_stats(snapshot: &TimelineRenderSnapshot, backend: &str) {
     if std::env::var_os("FUTUREBOARD_GPU_RENDERER_DEBUG").is_some() {
@@ -123,5 +112,16 @@ pub fn log_snapshot_stats(snapshot: &TimelineRenderSnapshot, backend: &str) {
             snapshot.visible_tracks.start_index,
             snapshot.visible_tracks.end_index,
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn arrangement_grid_uses_current_canvas_height_after_resize() {
+        let bounds = Bounds::new(point(px(12.0), px(24.0)), size(px(900.0), px(466.0)));
+        assert_eq!(arrangement_canvas_size(bounds), (900.0, 466.0));
     }
 }

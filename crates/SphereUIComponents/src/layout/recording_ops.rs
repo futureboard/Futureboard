@@ -1064,8 +1064,9 @@ mod tests {
             channels: 2,
             is_default: true,
         };
-        let route = recording_input_channels_checked(track, &[device.clone()], Some(&device))
-            .expect("fresh armed-track route should resolve to the default input");
+        let route =
+            recording_input_channels_checked(track, std::slice::from_ref(&device), Some(&device))
+                .expect("fresh armed-track route should resolve to the default input");
 
         assert_eq!(route.device_id.as_deref(), Some("default-input"));
         assert_eq!(route.channels, vec![0, 1]);

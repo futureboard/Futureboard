@@ -167,11 +167,7 @@ pub struct WgpuTimelineRenderer {
 impl WgpuTimelineRenderer {
     pub fn new() -> Self {
         let preference = TimelineGpuPreference::from_env();
-        let selected_device_id =
-            PREFERRED_DEVICE_ID
-                .get()
-                .cloned()
-                .filter(|s| !s.is_empty());
+        let selected_device_id = PREFERRED_DEVICE_ID.get().cloned().filter(|s| !s.is_empty());
         Self::with_preference_and_device(preference, selected_device_id)
     }
 

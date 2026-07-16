@@ -205,7 +205,7 @@ pub struct RuntimeTrack {
     pub smoothed_gain_r: f32,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RuntimeTrackInputSource {
     None,
     Mono { channel: usize },
@@ -213,7 +213,7 @@ pub enum RuntimeTrackInputSource {
 }
 
 impl RuntimeTrackInputSource {
-    fn from_channels(channels: &[u32]) -> Self {
+    pub(crate) fn from_channels(channels: &[u32]) -> Self {
         match channels {
             [] => Self::None,
             [channel] => Self::Mono {
@@ -2629,6 +2629,21 @@ impl RuntimeProject {
     }
 
     #[inline]
+    pub fn update_track_input_state(
+        &mut self,
+        track_index: usize,
+        record_armed: bool,
+        monitor_enabled: bool,
+        input_source: RuntimeTrackInputSource,
+    ) {
+        if let Some(track) = self.tracks.get_mut(track_index) {
+            track.record_armed = record_armed;
+            track.monitor_enabled = monitor_enabled;
+            track.input_source = input_source;
+        }
+    }
+
+    #[inline]
     pub fn update_track_preview_mode(&mut self, track_id: &str, mode: RuntimePreviewMode) {
         if let Some(track) = self.tracks.iter_mut().find(|t| t.id == track_id) {
             track.preview_mode = mode;
@@ -3451,6 +3466,31 @@ mod pdc_reset_tests {
                 buffer_size: 512,
             },
         }
+    }
+
+    #[test]
+    fn track_input_state_updates_without_rebuilding_runtime() {
+        let mut cache = HashMap::new();
+        let snapshot = two_track_snapshot(48_000);
+        let mut runtime =
+            RuntimeProject::build(&snapshot, 48_000, &mut cache, None, true).expect("build");
+        let original_track_count = runtime.tracks.len();
+
+        runtime.update_track_input_state(
+            0,
+            true,
+            true,
+            RuntimeTrackInputSource::Stereo { left: 2, right: 3 },
+        );
+
+        let track = &runtime.tracks[0];
+        assert!(track.record_armed);
+        assert!(track.monitor_enabled);
+        assert_eq!(
+            track.input_source,
+            RuntimeTrackInputSource::Stereo { left: 2, right: 3 }
+        );
+        assert_eq!(runtime.tracks.len(), original_track_count);
     }
 
     /// `reset_pdc_delay_lines` must zero every track's delay ring and rewind the

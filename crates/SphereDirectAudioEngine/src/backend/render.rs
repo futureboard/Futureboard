@@ -656,6 +656,17 @@ pub fn drain_commands(
                 runtime.update_track_solo(&track_id, solo);
                 runtime.notes_off_for_inaudible_tracks("track_solo");
             }
+            EngineCommand::SetTrackInputState {
+                track_index,
+                record_armed,
+                monitor_enabled,
+                input_source,
+            } => runtime.update_track_input_state(
+                track_index,
+                record_armed,
+                monitor_enabled,
+                input_source,
+            ),
             EngineCommand::SetTrackPreviewMode { track_id, value } => {
                 runtime.update_track_preview_mode(&track_id, RuntimePreviewMode::from_code(value));
             }

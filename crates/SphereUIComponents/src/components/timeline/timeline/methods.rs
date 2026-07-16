@@ -161,6 +161,7 @@ impl Timeline {
             edit_history: EditHistory::new(100),
             on_seek_beats: None,
             on_track_param_change: None,
+            on_track_input_state_change: None,
             on_project_changed: None,
             on_control_state_changed: None,
             on_loop_changed: None,
@@ -207,6 +208,7 @@ impl Timeline {
             edit_history: EditHistory::new(100),
             on_seek_beats: None,
             on_track_param_change: None,
+            on_track_input_state_change: None,
             on_project_changed: None,
             on_control_state_changed: None,
             on_loop_changed: None,
@@ -1153,9 +1155,15 @@ impl Timeline {
         on_track_param_change: Option<
             std::sync::Arc<dyn Fn(String, String, f32) + Send + Sync + 'static>,
         >,
+        on_track_input_state_change: Option<
+            std::sync::Arc<
+                dyn Fn(String, bool, bool) -> Result<(), String> + Send + Sync + 'static,
+            >,
+        >,
     ) {
         self.on_seek_beats = on_seek_beats;
         self.on_track_param_change = on_track_param_change;
+        self.on_track_input_state_change = on_track_input_state_change;
     }
 
     pub fn set_playhead_scrub_callbacks(

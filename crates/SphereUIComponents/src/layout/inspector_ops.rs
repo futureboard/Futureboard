@@ -22,7 +22,7 @@ use crate::components::timeline::timeline_state::{
 };
 use crate::overlay::OverlayAnchor;
 
-use super::engine_snapshot::volume_norm_to_linear;
+use super::engine_snapshot::{apply_engine_track_input_state, volume_norm_to_linear};
 use super::StudioLayout;
 
 /// Stereo channel pair (1-based) of the VSTi output bus that owns `channel`,
@@ -1005,6 +1005,7 @@ impl StudioLayout {
     }
 
     fn input_routing_cb(&self, owner: Entity<Self>) -> InputRoutingCb {
+        let audio_engine = self.audio_bridge.engine.clone();
         let timeline = self.timeline.clone();
         Arc::new(move |(id, input): &(String, TrackInputRouting), _w, cx| {
             let id = id.clone();
@@ -1021,16 +1022,40 @@ impl StudioLayout {
                 }
                 changed
             });
-            if changed {
-                inspector_debug(&format!(
-                    "routing input track={id} old={:?} new={:?}",
-                    old, input
-                ));
-                StudioLayout::defer_update(&owner, cx, |this, cx| {
-                    this.mark_dirty();
+            if !changed {
+                return;
+            }
+
+            inspector_debug(&format!(
+                "routing input track={id} old={:?} new={:?}",
+                old, input
+            ));
+            let apply_error = audio_engine.as_ref().and_then(|engine| {
+                timeline
+                    .read(cx)
+                    .state
+                    .find_track(&id)
+                    .and_then(|track| apply_engine_track_input_state(engine, track).err())
+            });
+            if let Some(error) = apply_error {
+                if let Some(old) = old.clone() {
+                    timeline.update(cx, |t, cx| {
+                        t.state.set_track_input_routing(&id, old);
+                        cx.notify();
+                    });
+                }
+                StudioLayout::defer_update(&owner, cx, move |this, cx| {
+                    this.audio_bridge.last_error =
+                        Some(format!("Input routing update failed: {error}"));
                     cx.notify();
                 });
+                return;
             }
+
+            StudioLayout::defer_update(&owner, cx, |this, cx| {
+                this.mark_dirty_view_only();
+                cx.notify();
+            });
         })
     }
 
@@ -1158,14 +1183,19 @@ impl StudioLayout {
         })
     }
 
-    /// Build one of the four M/S/R/I toggle callbacks. They share the engine /
-    /// dirty / mixer-resync plumbing; only the state mutation + realtime param
-    /// differ. Input-monitor has no realtime param (UI-only for now).
+    /// Build one of the four M/S/R/I toggle callbacks. Every toggle is persisted
+    /// without marking the project graph dirty; arm/monitor use the dedicated
+    /// input-state command while mute/solo keep their existing realtime params.
     fn track_toggle_cb(&self, owner: Entity<Self>, kind: TrackToggle) -> StrCb {
         let audio_engine = self.audio_bridge.engine.clone();
         let timeline = self.timeline.clone();
         Arc::new(move |id: &String, _w, cx: &mut App| {
             let id = id.clone();
+            let previous_input_state = timeline
+                .read(cx)
+                .state
+                .find_track(&id)
+                .map(|track| (track.armed, track.input_monitor));
             let mut value = false;
             let changed = timeline.update(cx, |t, cx| {
                 let changed = match kind {
@@ -1196,26 +1226,38 @@ impl StudioLayout {
                 "edit track {} track={id} new={value}",
                 kind.label()
             ));
-            match kind {
-                TrackToggle::Arm => {
-                    eprintln!("[GPUI] SetTrackRecordArm track={id} armed={value}")
+
+            if matches!(kind, TrackToggle::Arm | TrackToggle::Input) {
+                let apply_error = audio_engine.as_ref().and_then(|engine| {
+                    timeline
+                        .read(cx)
+                        .state
+                        .find_track(&id)
+                        .and_then(|track| apply_engine_track_input_state(engine, track).err())
+                });
+                if let Some(error) = apply_error {
+                    if let Some((armed, input_monitor)) = previous_input_state {
+                        timeline.update(cx, |t, cx| {
+                            if let Some(track) =
+                                t.state.tracks.iter_mut().find(|track| track.id == id)
+                            {
+                                track.armed = armed;
+                                track.input_monitor = input_monitor;
+                            }
+                            cx.notify();
+                        });
+                    }
+                    StudioLayout::defer_update(&owner, cx, move |this, cx| {
+                        this.audio_bridge.last_error =
+                            Some(format!("Track input update failed: {error}"));
+                        this.push_mixer_snapshot_to_window(cx);
+                    });
+                    return;
                 }
-                TrackToggle::Input => {
-                    eprintln!("[GPUI] SetTrackMonitor track={id} enabled={value}")
-                }
-                _ => {}
             }
+
             StudioLayout::defer_update(&owner, cx, move |this, cx| {
-                match kind {
-                    // Mute/solo reach the engine live (`update_track_param`
-                    // below); marking the engine dirty here would rebuild the
-                    // whole graph for a non-structural toggle and stutter
-                    // playback. View-only dirty keeps save/restore correct.
-                    TrackToggle::Mute | TrackToggle::Solo => this.mark_dirty_view_only(),
-                    // Arm/monitor change the engine snapshot's input routing
-                    // (input stream selection) — genuinely structural.
-                    TrackToggle::Arm | TrackToggle::Input => this.mark_dirty(),
-                }
+                this.mark_dirty_view_only();
                 this.push_mixer_snapshot_to_window(cx);
             });
             if let Some(engine) = audio_engine.as_ref() {

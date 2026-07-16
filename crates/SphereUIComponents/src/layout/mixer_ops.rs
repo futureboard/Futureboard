@@ -20,7 +20,7 @@ use crate::components::timeline::timeline_state::{
 };
 use crate::components::{external_mixer_debug, external_mixer_debug_enabled, MixerSnapshot};
 
-use super::engine_snapshot::volume_norm_to_linear;
+use super::engine_snapshot::{apply_engine_track_input_state, volume_norm_to_linear};
 use super::{ContextMenuRequest, ContextMenuTarget, ContextTarget, MixerWindow, StudioLayout};
 
 /// Mixer-panel view state — horizontal scroll, the shared insert/send section
@@ -1310,11 +1310,17 @@ impl StudioLayout {
                 }
             });
 
+        let audio_engine_arm = self.audio_bridge.engine.clone();
         let timeline_arm = self.timeline.clone();
         let owner_dirty = owner.clone();
         let on_toggle_arm: std::sync::Arc<dyn Fn(&String, &mut Window, &mut gpui::App) + 'static> =
             std::sync::Arc::new(move |id: &String, _w, cx| {
                 let id = id.clone();
+                let previous = timeline_arm
+                    .read(cx)
+                    .state
+                    .find_track(&id)
+                    .map(|track| track.armed);
                 external_mixer_debug(&format!("mixer command dispatched toggle_arm id={id}"));
                 let changed = timeline_arm.update(cx, |t, cx| {
                     let changed = t.state.toggle_track_arm(&id);
@@ -1323,20 +1329,52 @@ impl StudioLayout {
                     }
                     changed
                 });
-                if changed {
-                    StudioLayout::defer_update(&owner_dirty, cx, |this, cx| {
-                        this.mark_dirty();
+                if !changed {
+                    return;
+                }
+                let apply_error = audio_engine_arm.as_ref().and_then(|engine| {
+                    timeline_arm
+                        .read(cx)
+                        .state
+                        .find_track(&id)
+                        .and_then(|track| apply_engine_track_input_state(engine, track).err())
+                });
+                if let Some(error) = apply_error {
+                    if let Some(previous) = previous {
+                        timeline_arm.update(cx, |t, cx| {
+                            if let Some(track) =
+                                t.state.tracks.iter_mut().find(|track| track.id == id)
+                            {
+                                track.armed = previous;
+                            }
+                            cx.notify();
+                        });
+                    }
+                    StudioLayout::defer_update(&owner_dirty, cx, move |this, cx| {
+                        this.audio_bridge.last_error =
+                            Some(format!("Track input update failed: {error}"));
                         this.push_mixer_snapshot_to_window(cx);
                     });
+                    return;
                 }
+                StudioLayout::defer_update(&owner_dirty, cx, |this, cx| {
+                    this.mark_dirty_view_only();
+                    this.push_mixer_snapshot_to_window(cx);
+                });
             });
 
+        let audio_engine_input = self.audio_bridge.engine.clone();
         let timeline_input = self.timeline.clone();
         let owner_dirty = owner.clone();
         let on_toggle_input: std::sync::Arc<
             dyn Fn(&String, &mut Window, &mut gpui::App) + 'static,
         > = std::sync::Arc::new(move |id: &String, _w, cx| {
             let id = id.clone();
+            let previous = timeline_input
+                .read(cx)
+                .state
+                .find_track(&id)
+                .map(|track| track.input_monitor);
             external_mixer_debug(&format!("mixer command dispatched toggle_input id={id}"));
             let changed = timeline_input.update(cx, |t, cx| {
                 let changed = t.state.cycle_track_input_monitor(&id);
@@ -1345,12 +1383,37 @@ impl StudioLayout {
                 }
                 changed
             });
-            if changed {
-                StudioLayout::defer_update(&owner_dirty, cx, |this, cx| {
-                    this.mark_dirty();
+            if !changed {
+                return;
+            }
+            let apply_error = audio_engine_input.as_ref().and_then(|engine| {
+                timeline_input
+                    .read(cx)
+                    .state
+                    .find_track(&id)
+                    .and_then(|track| apply_engine_track_input_state(engine, track).err())
+            });
+            if let Some(error) = apply_error {
+                if let Some(previous) = previous {
+                    timeline_input.update(cx, |t, cx| {
+                        if let Some(track) = t.state.tracks.iter_mut().find(|track| track.id == id)
+                        {
+                            track.input_monitor = previous;
+                        }
+                        cx.notify();
+                    });
+                }
+                StudioLayout::defer_update(&owner_dirty, cx, move |this, cx| {
+                    this.audio_bridge.last_error =
+                        Some(format!("Track input update failed: {error}"));
                     this.push_mixer_snapshot_to_window(cx);
                 });
+                return;
             }
+            StudioLayout::defer_update(&owner_dirty, cx, |this, cx| {
+                this.mark_dirty_view_only();
+                this.push_mixer_snapshot_to_window(cx);
+            });
         });
 
         let audio_engine = self.audio_bridge.engine.clone();

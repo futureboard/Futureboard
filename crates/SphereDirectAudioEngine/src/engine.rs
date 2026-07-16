@@ -41,14 +41,15 @@ use crate::latency_graph::apply_pdc_delay_block;
 use crate::recording::{self, RecordingSession};
 use crate::runtime::{
     ClipDspProcessor, RuntimeInsert, RuntimePreviewMode, RuntimeProject, RuntimeTrack,
+    RuntimeTrackInputSource,
 };
 use crate::tempo_map::{TempoMap, TempoPoint};
 use crate::transport::{self, RuntimeTransportSnapshot};
 use crate::types::{
-    EngineProjectSnapshot, EngineStatus, JsAudioDeviceInfo, JsDauxBackendInfo, JsDauxConfig,
-    JsDauxStatus, JsDeviceOpenConfig, JsEngineDebugInfo, JsMeterSnapshot,
-    JsPluginOutputMeterSnapshot, JsRecordingResult, JsRecordingStatus, JsSphereAudioStatus,
-    JsStartRecordingConfig, JsTrackMeterSnapshot,
+    EngineProjectSnapshot, EngineStatus, EngineTrackInputSourceSnapshot, JsAudioDeviceInfo,
+    JsDauxBackendInfo, JsDauxConfig, JsDauxStatus, JsDeviceOpenConfig, JsEngineDebugInfo,
+    JsMeterSnapshot, JsPluginOutputMeterSnapshot, JsRecordingResult, JsRecordingStatus,
+    JsSphereAudioStatus, JsStartRecordingConfig, JsTrackMeterSnapshot,
 };
 use crate::vst3_processor::RuntimeTransportContext;
 
@@ -664,6 +665,11 @@ pub struct EngineInner {
 
     // Last loaded project snapshot (optional, for reference/debugging).
     project: Mutex<Option<EngineProjectSnapshot>>,
+    // Incremented only after an incremental arm/monitor/route transaction
+    // commits. `load_project` uses this to merge a newer input edit that arrived
+    // while its graph was being prepared, then serializes the command ordering
+    // under `project` so stale graph loads cannot overwrite that edit.
+    input_state_revision: AtomicU64,
 
     // Prepared render graph shared with new streams and pushed to callbacks.
     runtime: Mutex<RuntimeProject>,
@@ -743,6 +749,7 @@ impl EngineInner {
             tracks: Mutex::new(Vec::new()),
             master: Mutex::new(MasterState::default()),
             project: Mutex::new(None),
+            input_state_revision: AtomicU64::new(0),
             runtime: Mutex::new(RuntimeProject::default()),
             plugin_bridge_sinks: Mutex::new(Default::default()),
             audio_cache: Mutex::new(HashMap::new()),
@@ -1576,6 +1583,130 @@ impl EngineInner {
         Ok(())
     }
 
+    pub fn update_track_input_state(
+        &self,
+        track_id: &str,
+        record_armed: bool,
+        monitor_enabled: bool,
+        input_source: EngineTrackInputSourceSnapshot,
+    ) -> Result<(), SphereAudioError> {
+        self.update_track_input_state_inner(
+            track_id,
+            record_armed,
+            monitor_enabled,
+            Some(input_source),
+        )
+    }
+
+    pub fn update_track_input_flags(
+        &self,
+        track_id: &str,
+        record_armed: bool,
+        monitor_enabled: bool,
+    ) -> Result<(), SphereAudioError> {
+        self.update_track_input_state_inner(track_id, record_armed, monitor_enabled, None)
+    }
+
+    fn update_track_input_state_inner(
+        &self,
+        track_id: &str,
+        record_armed: bool,
+        monitor_enabled: bool,
+        explicit_input_source: Option<EngineTrackInputSourceSnapshot>,
+    ) -> Result<(), SphereAudioError> {
+        // Serialize with start/stop recording. A non-ASIO take owns the only
+        // capture stream; route changes must never race it and open a second
+        // client. ASIO uses the same fail-closed policy for one predictable UI
+        // contract while a take is active.
+        let recording_guard = self.recording.lock();
+        if recording_guard.is_some() {
+            return Err(SphereAudioError::InvalidConfig(
+                "track input routing cannot change during an active recording".to_string(),
+            ));
+        }
+
+        let mut project = self.project.lock();
+        let snapshot = project
+            .as_mut()
+            .ok_or_else(|| SphereAudioError::InvalidConfig("no project is loaded".to_string()))?;
+        let track_index = snapshot
+            .tracks
+            .iter()
+            .position(|track| track.id == track_id)
+            .ok_or_else(|| {
+                SphereAudioError::InvalidConfig(format!("track '{track_id}' was not found"))
+            })?;
+        let input_source = explicit_input_source
+            .unwrap_or_else(|| snapshot.tracks[track_index].input_source.clone());
+        if input_source.channels.len() > 2 {
+            return Err(SphereAudioError::InvalidConfig(format!(
+                "track '{track_id}' input route has {} channels; only mono or stereo routes are supported",
+                input_source.channels.len()
+            )));
+        }
+        if matches!(input_source.channels.as_slice(), [left, right] if left == right) {
+            return Err(SphereAudioError::InvalidConfig(format!(
+                "track '{track_id}' stereo input route uses channel {} twice",
+                input_source.channels[0].saturating_add(1)
+            )));
+        }
+        #[cfg(all(target_os = "windows", feature = "asio"))]
+        if let Some(caps) = self.asio_caps.lock().clone() {
+            self.validate_asio_input_source(track_id, &input_source, &caps)?;
+        }
+
+        let old_armed = snapshot.tracks[track_index].armed;
+        let old_monitor = snapshot.tracks[track_index].input_monitor;
+        let old_source = snapshot.tracks[track_index].input_source.clone();
+        snapshot.tracks[track_index].armed = record_armed;
+        snapshot.tracks[track_index].input_monitor = monitor_enabled;
+        snapshot.tracks[track_index].input_source = input_source.clone();
+
+        if let Err(error) = self.sync_live_input_stream(snapshot) {
+            snapshot.tracks[track_index].armed = old_armed;
+            snapshot.tracks[track_index].input_monitor = old_monitor;
+            snapshot.tracks[track_index].input_source = old_source;
+            let _ = self.sync_live_input_stream(snapshot);
+            return Err(error);
+        }
+
+        let next_runtime_source = RuntimeTrackInputSource::from_channels(&input_source.channels);
+        self.runtime.lock().update_track_input_state(
+            track_index,
+            record_armed,
+            monitor_enabled,
+            next_runtime_source,
+        );
+        let command = EngineCommand::SetTrackInputState {
+            track_index,
+            record_armed,
+            monitor_enabled,
+            input_source: next_runtime_source,
+        };
+        let result = match self.send_command(command) {
+            Ok(()) | Err(SphereAudioError::EngineNotOpen) => {
+                self.input_state_revision.fetch_add(1, Ordering::Release);
+                Ok(())
+            }
+            Err(error) => {
+                snapshot.tracks[track_index].armed = old_armed;
+                snapshot.tracks[track_index].input_monitor = old_monitor;
+                snapshot.tracks[track_index].input_source = old_source.clone();
+                self.runtime.lock().update_track_input_state(
+                    track_index,
+                    old_armed,
+                    old_monitor,
+                    RuntimeTrackInputSource::from_channels(&old_source.channels),
+                );
+                let _ = self.sync_live_input_stream(snapshot);
+                Err(error)
+            }
+        };
+        drop(project);
+        drop(recording_guard);
+        result
+    }
+
     pub fn update_track_param(
         &self,
         track_id: &str,
@@ -1603,6 +1734,7 @@ impl EngineInner {
                 track_id: track_id.into(),
                 solo: value != 0.0,
             }),
+
             "previewMode" => self.send_command(EngineCommand::SetTrackPreviewMode {
                 track_id: track_id.into(),
                 value: value as f32,
@@ -1757,7 +1889,11 @@ impl EngineInner {
 
     // ── Project snapshot ───────────────────────────────────────────────────
 
-    pub fn load_project(&self, snapshot: EngineProjectSnapshot) -> Result<(), SphereAudioError> {
+    pub fn load_project(
+        &self,
+        mut snapshot: EngineProjectSnapshot,
+    ) -> Result<(), SphereAudioError> {
+        let input_state_revision_at_start = self.input_state_revision.load(Ordering::Acquire);
         let old_state = AudioEngineState::from_u8(
             self.shared
                 .engine_state
@@ -1823,7 +1959,7 @@ impl EngineInner {
             map
         };
 
-        let runtime = {
+        let mut runtime = {
             let mut audio_cache = self.audio_cache.lock();
             match RuntimeProject::build(
                 &snapshot,
@@ -1914,15 +2050,6 @@ impl EngineInner {
         }
         drop(tracks);
 
-        // Store snapshot for future reference.
-        if let Err(error) = self.sync_live_input_stream(&snapshot) {
-            let message = format!("Live input unavailable: {error}");
-            eprintln!("[SphereAudio] {message}");
-            self.status.lock().last_error = Some(message);
-        }
-        *self.project.lock() = Some(snapshot.clone());
-        *self.runtime.lock() = runtime.clone();
-
         for t in &snapshot.tracks {
             let track_clips = runtime.clips.iter().filter(|c| c.track_id == t.id).count();
             eprintln!(
@@ -1935,7 +2062,49 @@ impl EngineInner {
         // channel allocation + thread spawn on the audio thread.
         crate::graveyard::prime();
 
-        match self.send_command(EngineCommand::LoadProject(Box::new(runtime))) {
+        // Serialize the project store and callback command with incremental
+        // input edits. If one committed while this graph was being built, carry
+        // its newer arm/monitor/route fields into both the snapshot and runtime
+        // before `LoadProject` is enqueued.
+        let mut current_project = self.project.lock();
+        if self.input_state_revision.load(Ordering::Acquire) != input_state_revision_at_start {
+            if let Some(current) = current_project
+                .as_ref()
+                .filter(|current| current.project_id == snapshot.project_id)
+            {
+                for (track_index, next_track) in snapshot.tracks.iter_mut().enumerate() {
+                    let Some(current_track) = current
+                        .tracks
+                        .iter()
+                        .find(|track| track.id == next_track.id)
+                    else {
+                        continue;
+                    };
+                    next_track.armed = current_track.armed;
+                    next_track.input_monitor = current_track.input_monitor;
+                    next_track.input_source = current_track.input_source.clone();
+                    runtime.update_track_input_state(
+                        track_index,
+                        current_track.armed,
+                        current_track.input_monitor,
+                        RuntimeTrackInputSource::from_channels(
+                            &current_track.input_source.channels,
+                        ),
+                    );
+                }
+            }
+        }
+        if let Err(error) = self.sync_live_input_stream(&snapshot) {
+            let message = format!("Live input unavailable: {error}");
+            eprintln!("[SphereAudio] {message}");
+            self.status.lock().last_error = Some(message);
+        }
+        *self.runtime.lock() = runtime.clone();
+        *current_project = Some(snapshot.clone());
+        let load_result = self.send_command(EngineCommand::LoadProject(Box::new(runtime)));
+        drop(current_project);
+
+        match load_result {
             Ok(()) => eprintln!("[SphereAudio] LoadProject command sent to audio callback"),
             Err(SphereAudioError::EngineNotOpen) => {
                 eprintln!(
@@ -2234,10 +2403,7 @@ impl EngineInner {
                 .last_daux_error
                 .clone()
                 .unwrap_or_else(|| {
-                    format!(
-                        "ASIO driver '{}' has no usable input channels",
-                        caps.driver
-                    )
+                    format!("ASIO driver '{}' has no usable input channels", caps.driver)
                 });
             return Err(SphereAudioError::NativeError(detail));
         }
@@ -2824,6 +2990,55 @@ impl EngineInner {
         Ok(())
     }
 
+    #[cfg(all(target_os = "windows", feature = "asio"))]
+    fn validate_asio_input_source(
+        &self,
+        track_id: &str,
+        input_source: &EngineTrackInputSourceSnapshot,
+        caps: &crate::backend::AsioSessionCaps,
+    ) -> Result<(), SphereAudioError> {
+        if input_source.channels.is_empty() {
+            return Ok(());
+        }
+        let failure = if caps.input_channels == 0 {
+            Some(format!(
+                "ASIO driver '{}' has no usable input channels",
+                caps.driver
+            ))
+        } else if let Some(device_id) = input_source
+            .device_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+            .filter(|id| *id != caps.driver)
+        {
+            Some(format!(
+                "track '{track_id}' input device '{device_id}' is not the active ASIO driver '{}'",
+                caps.driver
+            ))
+        } else {
+            input_source
+                .channels
+                .iter()
+                .copied()
+                .find(|channel| *channel >= caps.input_channels)
+                .map(|channel| {
+                    format!(
+                        "track '{track_id}' input channel {} is unavailable on ASIO driver '{}' ({} input channel(s))",
+                        channel.saturating_add(1),
+                        caps.driver,
+                        caps.input_channels
+                    )
+                })
+        };
+        if let Some(message) = failure {
+            eprintln!("[DAUx ASIO] {message}");
+            self.status.lock().last_error = Some(message.clone());
+            return Err(SphereAudioError::InvalidConfig(message));
+        }
+        Ok(())
+    }
+
     /// Apply track input routing to the persistent ASIO session.
     ///
     /// Everything here is an atomic store into `SharedState` — the session's
@@ -2836,11 +3051,27 @@ impl EngineInner {
         snapshot: &EngineProjectSnapshot,
         caps: &crate::backend::AsioSessionCaps,
     ) -> Result<(), SphereAudioError> {
-        let desired_track = snapshot.tracks.iter().find(|track| {
-            track.track_type == "audio"
-                && (track.armed || track.input_monitor)
-                && !track.input_source.channels.is_empty()
-        });
+        let active_tracks = || {
+            snapshot.tracks.iter().filter(|track| {
+                track.track_type == "audio"
+                    && (track.armed || track.input_monitor)
+                    && !track.input_source.channels.is_empty()
+            })
+        };
+        for track in active_tracks() {
+            if let Err(error) =
+                self.validate_asio_input_source(&track.id, &track.input_source, caps)
+            {
+                self.stop_live_input_stream();
+                return Err(error);
+            }
+        }
+        // The shared monitor ring currently carries one pair. A monitored route
+        // must win over an armed-only route so record arm never changes what the
+        // user hears while per-track monitor buses are prepared separately.
+        let desired_track = active_tracks()
+            .find(|track| track.input_monitor)
+            .or_else(|| active_tracks().next());
         let monitor_any = snapshot.tracks.iter().any(|track| {
             track.track_type == "audio"
                 && track.input_monitor
@@ -2857,57 +3088,9 @@ impl EngineInner {
             return Ok(());
         };
 
-        if caps.input_channels == 0 {
-            self.stop_live_input_stream();
-            let message = format!(
-                "ASIO driver '{}' has no usable input channels; input routing disabled",
-                caps.driver
-            );
-            eprintln!("[DAUx ASIO] {message}");
-            self.status.lock().last_error = Some(message);
-            return Ok(());
-        }
-
-        // With ASIO the session driver is the only capture device. A track
-        // pinned to a different device name keeps its channel selection but is
-        // served by the session driver — surfaced, not silently ignored.
-        if let Some(device_id) = track
-            .input_source
-            .device_id
-            .as_deref()
-            .map(str::trim)
-            .filter(|id| !id.is_empty())
-        {
-            if device_id != caps.driver {
-                let message = format!(
-                    "track input device '{device_id}' is not the active ASIO driver '{}'; \
-                     using the active driver",
-                    caps.driver
-                );
-                eprintln!("[DAUx ASIO] {message}");
-                self.status.lock().last_error = Some(message);
-            }
-        }
-
         let channels = &track.input_source.channels;
         let left = channels.first().copied().unwrap_or(0);
         let right = channels.get(1).copied().unwrap_or(left);
-        if left >= caps.input_channels || right >= caps.input_channels {
-            // A previously selected channel no longer exists — fall back to
-            // "no input" safely and say why, instead of capturing the wrong
-            // channel.
-            self.stop_live_input_stream();
-            let message = format!(
-                "track input channel {} is unavailable on ASIO driver '{}' \
-                 ({} input channel(s)); input routing disabled",
-                left.max(right) + 1,
-                caps.driver,
-                caps.input_channels
-            );
-            eprintln!("[DAUx ASIO] {message}");
-            self.status.lock().last_error = Some(message);
-            return Ok(());
-        }
 
         self.shared.monitor_src_l.store(left, Ordering::Relaxed);
         self.shared.monitor_src_r.store(right, Ordering::Relaxed);
@@ -3292,6 +3475,7 @@ impl EngineInner {
                 EngineCommand::SetTrackPan { .. } => "SetTrackPan",
                 EngineCommand::SetTrackMute { .. } => "SetTrackMute",
                 EngineCommand::SetTrackSolo { .. } => "SetTrackSolo",
+                EngineCommand::SetTrackInputState { .. } => "SetTrackInputState",
                 EngineCommand::SetTrackPreviewMode { .. } => "SetTrackPreviewMode",
                 EngineCommand::SetInsertParam { .. } => "SetInsertParam",
                 EngineCommand::MidiPreviewNoteOn { .. } => "MidiPreviewNoteOn",
@@ -3800,6 +3984,17 @@ where
                             runtime.update_track_solo(&track_id, solo);
                             runtime.notes_off_for_inaudible_tracks("track_solo");
                         }
+                        EngineCommand::SetTrackInputState {
+                            track_index,
+                            record_armed,
+                            monitor_enabled,
+                            input_source,
+                        } => runtime.update_track_input_state(
+                            track_index,
+                            record_armed,
+                            monitor_enabled,
+                            input_source,
+                        ),
                         EngineCommand::SetTrackPreviewMode { track_id, value } => {
                             runtime.update_track_preview_mode(&track_id, RuntimePreviewMode::from_code(value));
                         }

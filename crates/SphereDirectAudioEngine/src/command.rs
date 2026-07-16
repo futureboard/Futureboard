@@ -19,6 +19,16 @@ pub enum EngineCommand {
     SetTrackMute { track_id: String, muted: bool },
     /// Solo or unsolo a track.
     SetTrackSolo { track_id: String, solo: bool },
+    /// Update record-arm, monitoring, and input-channel routing without
+    /// replacing the project graph. The control thread resolves the stable
+    /// track id to an index before enqueueing so the callback payload is fixed
+    /// size and owns no heap allocation.
+    SetTrackInputState {
+        track_index: usize,
+        record_armed: bool,
+        monitor_enabled: bool,
+        input_source: crate::runtime::RuntimeTrackInputSource,
+    },
     /// Set non-destructive stereo/mono/mid/side monitoring preview.
     SetTrackPreviewMode { track_id: String, value: f32 },
     /// Set a plugin/insert parameter.

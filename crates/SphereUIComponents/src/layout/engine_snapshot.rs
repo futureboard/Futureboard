@@ -111,7 +111,7 @@ fn vst3_controller_number(kind: MidiControllerKind) -> Option<u16> {
     }
 }
 
-fn build_engine_input_source(track: &TrackState) -> EngineTrackInputSourceSnapshot {
+pub(crate) fn build_engine_input_source(track: &TrackState) -> EngineTrackInputSourceSnapshot {
     use timeline_state::{TrackAudioFormat, TrackInputRouting};
 
     let format_channels = || match track.routing.audio_format {
@@ -124,25 +124,13 @@ fn build_engine_input_source(track: &TrackState) -> EngineTrackInputSourceSnapsh
             device_id: None,
             channels: Vec::new(),
         },
-        TrackInputRouting::None => {
-            // No explicit input route assigned. When the track is armed or
-            // monitoring we still want live input, so fall back to the default
-            // channels for the track's format on the globally-selected
-            // (preferred) input device. This is what makes pressing Record-Arm
-            // / Monitor on a fresh track actually capture signal — without it
-            // the engine sees empty channels and opens no input stream.
-            if track.armed || track.input_monitor.is_active(track.armed) {
-                EngineTrackInputSourceSnapshot {
-                    device_id: None,
-                    channels: format_channels(),
-                }
-            } else {
-                EngineTrackInputSourceSnapshot {
-                    device_id: None,
-                    channels: Vec::new(),
-                }
-            }
-        }
+        // Record-arm and monitoring are independent from route selection.
+        // Never reinterpret "No Input" as hardware channels 1-2: recording
+        // must fail clearly instead of capturing an unintended source.
+        TrackInputRouting::None => EngineTrackInputSourceSnapshot {
+            device_id: None,
+            channels: Vec::new(),
+        },
         TrackInputRouting::AllInputs => EngineTrackInputSourceSnapshot {
             device_id: None,
             channels: format_channels(),
@@ -161,6 +149,20 @@ fn build_engine_input_source(track: &TrackState) -> EngineTrackInputSourceSnapsh
             channels: channels.iter().copied().take(2).collect(),
         },
     }
+}
+
+pub(crate) fn apply_engine_track_input_state(
+    engine: &DirectAudio::native::AudioEngine,
+    track: &TrackState,
+) -> Result<(), String> {
+    engine
+        .update_track_input_state(
+            &track.id,
+            track.armed,
+            track.input_monitor.is_active(track.armed),
+            build_engine_input_source(track),
+        )
+        .map_err(|error| error.to_string())
 }
 
 /// Build the DirectAudio insert descriptors for one track's mixer insert chain
@@ -946,6 +948,44 @@ mod tests {
             Some(2.0),
         );
         (state, clip_id)
+    }
+
+    #[test]
+    fn armed_track_with_no_input_keeps_an_empty_engine_route() {
+        let (mut state, _) = audio_state_with_clip();
+        let track = state
+            .tracks
+            .iter_mut()
+            .find(|track| track.track_type == TrackType::Audio)
+            .expect("audio track");
+        track.armed = true;
+        track.input_monitor = timeline_state::InputMonitorMode::Always;
+        track.routing.input = timeline_state::TrackInputRouting::None;
+
+        let source = build_engine_input_source(track);
+        assert!(source.device_id.is_none());
+        assert!(
+            source.channels.is_empty(),
+            "No Input must not silently capture hardware channels 1-2"
+        );
+    }
+
+    #[test]
+    fn explicit_stereo_input_route_preserves_device_and_channel_identity() {
+        let (mut state, _) = audio_state_with_clip();
+        let track = state
+            .tracks
+            .iter_mut()
+            .find(|track| track.track_type == TrackType::Audio)
+            .expect("audio track");
+        track.routing.input = timeline_state::TrackInputRouting::AudioDeviceChannels {
+            device_id: "asio:{driver-clsid}".to_string(),
+            channels: vec![2, 3],
+        };
+
+        let source = build_engine_input_source(track);
+        assert_eq!(source.device_id.as_deref(), Some("asio:{driver-clsid}"));
+        assert_eq!(source.channels, vec![2, 3]);
     }
 
     #[test]

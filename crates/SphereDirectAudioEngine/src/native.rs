@@ -221,7 +221,6 @@ impl EngineDeviceInfo {
             backend: "DAUx WASAPI Exclusive".into(),
         }
     }
-
 }
 
 /// Lightweight status snapshot suitable for status-bar polling.
@@ -896,6 +895,33 @@ impl AudioEngine {
         value: f64,
     ) -> Result<(), SphereAudioError> {
         self.inner.update_track_param(track_id, param_id, value)
+    }
+
+    /// Apply only record-arm and effective monitor state while preserving the
+    /// track's existing input route. Used by timeline controls that do not own
+    /// the full route model.
+    pub fn update_track_input_flags(
+        &self,
+        track_id: &str,
+        record_armed: bool,
+        monitor_enabled: bool,
+    ) -> Result<(), SphereAudioError> {
+        self.inner
+            .update_track_input_flags(track_id, record_armed, monitor_enabled)
+    }
+
+    /// Apply an audio track's input route, arm state, and effective monitor state
+    /// through the lightweight control path. This never reloads the project graph
+    /// or restarts an already-open ASIO session.
+    pub fn update_track_input_state(
+        &self,
+        track_id: &str,
+        record_armed: bool,
+        monitor_enabled: bool,
+        input_source: crate::types::EngineTrackInputSourceSnapshot,
+    ) -> Result<(), SphereAudioError> {
+        self.inner
+            .update_track_input_state(track_id, record_armed, monitor_enabled, input_source)
     }
 
     pub fn set_insert_param(

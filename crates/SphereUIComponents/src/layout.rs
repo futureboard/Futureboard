@@ -1100,6 +1100,7 @@ impl StudioLayout {
     ) {
         let seek_engine = engine.clone();
         let param_engine = engine.clone();
+        let input_engine = engine.clone();
         let owner = cx.entity().clone();
         let _ = self.timeline.update(cx, |timeline, _cx| {
             timeline.set_native_audio_callbacks(
@@ -1140,6 +1141,11 @@ impl StudioLayout {
                             );
                         }
                     }
+                })),
+                Some(Arc::new(move |track_id, armed, monitor| {
+                    input_engine
+                        .update_track_input_flags(&track_id, armed, monitor)
+                        .map_err(|error| error.to_string())
                 })),
             );
             let owner_begin = owner.clone();
@@ -2315,70 +2321,8 @@ impl StudioLayout {
                                 stats.backend_name, stats.sample_rate, stats.buffer_size
                             );
 
-                            // Re-bind timeline callbacks
-                            let seek_engine = engine.clone();
-                            let param_engine = engine.clone();
-                            let owner = cx.entity().clone();
-                            let _ = self.timeline.update(cx, |timeline, _cx| {
-                                timeline.set_native_audio_callbacks(
-                                    Some(Arc::new(move |beats, bpm, reason| {
-                                        match reason {
-                                            SeekReason::UserDragging => {
-                                                let _ = seek_engine.set_metronome_suspended(true);
-                                            }
-                                            SeekReason::TimelineClick | SeekReason::Programmatic => {
-                                                let _ = seek_engine.set_metronome_suspended(false);
-                                            }
-                                            _ => {}
-                                        }
-                                        let seconds =
-                                            beats.max(0.0) as f64 * 60.0 / bpm.max(1.0) as f64;
-                                        if let Err(error) = seek_engine.seek(seconds) {
-                                            eprintln!("[audio] seek failed: {error}");
-                                        }
-                                    })),
-                                    Some(Arc::new(move |track_id, param_id, value| {
-                                        let engine_value = match param_id.as_str() {
-                                            "volume" => volume_norm_to_linear(value) as f64,
-                                            "muted" | "solo" => {
-                                                if value >= 0.5 {
-                                                    1.0
-                                                } else {
-                                                    0.0
-                                                }
-                                            }
-                                            _ => value as f64,
-                                        };
-                                        if let Err(error) = param_engine.update_track_param(
-                                            &track_id,
-                                            &param_id,
-                                            engine_value,
-                                        ) {
-                                            if !matches!(error, DirectAudio::SphereAudioError::EngineNotOpen)
-                                            {
-                                                eprintln!(
-                                                    "[audio] track param update failed: track={} param={} error={}",
-                                                    track_id, param_id, error
-                                                );
-                                            }
-                                        }
-                                    })),
-                                );
-                                let owner_begin = owner.clone();
-                                let owner_end = owner;
-                                timeline.set_playhead_scrub_callbacks(
-                                    Some(Arc::new(move |_, cx| {
-                                        StudioLayout::defer_update(&owner_begin, cx, |this, cx| {
-                                            this.set_playhead_scrub_active(true, cx);
-                                        });
-                                    })),
-                                    Some(Arc::new(move |_, cx| {
-                                        StudioLayout::defer_update(&owner_end, cx, |this, cx| {
-                                            this.set_playhead_scrub_active(false, cx);
-                                        });
-                                    })),
-                                );
-                            });
+                            // Re-bind timeline callbacks to the replacement engine.
+                            self.install_audio_callbacks(&engine, cx);
 
                             self.audio_bridge.engine = Some(engine);
                             self.audio_bridge.running = true;

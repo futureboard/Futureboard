@@ -118,14 +118,75 @@ impl Render for Timeline {
         });
 
         let on_toggle_arm = cx.listener(|this, track_id: &String, _window, cx| {
-            this.state.toggle_track_arm(track_id);
-            this.mark_project_changed(cx);
+            let previous = this
+                .state
+                .find_track(track_id)
+                .map(|track| (track.armed, track.input_monitor));
+            if !this.state.toggle_track_arm(track_id) {
+                return;
+            }
+            let next = this
+                .state
+                .find_track(track_id)
+                .map(|track| (track.armed, track.input_monitor.is_active(track.armed)));
+            let apply_error = next.and_then(|(armed, monitor)| {
+                this.on_track_input_state_change
+                    .as_ref()
+                    .and_then(|cb| cb(track_id.clone(), armed, monitor).err())
+            });
+            if let Some(error) = apply_error {
+                if let Some((armed, input_monitor)) = previous {
+                    if let Some(track) = this
+                        .state
+                        .tracks
+                        .iter_mut()
+                        .find(|track| track.id == *track_id)
+                    {
+                        track.armed = armed;
+                        track.input_monitor = input_monitor;
+                    }
+                }
+                eprintln!("[audio] track input update rejected: {error}");
+                cx.notify();
+                return;
+            }
+            this.mark_control_state_changed(cx);
             cx.notify();
         });
 
         let on_toggle_input = cx.listener(|this, track_id: &String, _window, cx| {
-            this.state.cycle_track_input_monitor(track_id);
-            this.mark_project_changed(cx);
+            let previous = this
+                .state
+                .find_track(track_id)
+                .map(|track| track.input_monitor);
+            if !this.state.cycle_track_input_monitor(track_id) {
+                return;
+            }
+            let next = this
+                .state
+                .find_track(track_id)
+                .map(|track| (track.armed, track.input_monitor.is_active(track.armed)));
+            let apply_error = next.and_then(|(armed, monitor)| {
+                this.on_track_input_state_change
+                    .as_ref()
+                    .and_then(|cb| cb(track_id.clone(), armed, monitor).err())
+            });
+            if let Some(error) = apply_error {
+                if let Some(input_monitor) = previous {
+                    if let Some(track) = this
+                        .state
+                        .tracks
+                        .iter_mut()
+                        .find(|track| track.id == *track_id)
+                    {
+                        track.input_monitor = input_monitor;
+                    }
+                }
+                eprintln!("[audio] track input update rejected: {error}");
+                cx.notify();
+                return;
+            }
+            this.mark_control_state_changed(cx);
             cx.notify();
         });
 

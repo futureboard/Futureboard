@@ -295,12 +295,40 @@ pub fn list_available_backends() -> Vec<BackendInfo> {
     list
 }
 
-/// Factory registered by the private edition module. Registration checks do
-/// not initialize ASIO drivers; the factory runs once (see [`asio_host`]) and
-/// driver loading happens later, on stream open.
-pub type AsioHostFactory = fn() -> Result<cpal::Host, String>;
+/// ASIO integration supplied by the separately linked edition crate.
+///
+/// `current_entitlement` must be a cheap, cached live capability check (for
+/// example, an atomic load). The engine calls it at every support, enumeration,
+/// and host-acquisition boundary; it must not perform license verification,
+/// filesystem access, network access, or other expensive work.
+pub struct AsioHostProvider {
+    #[allow(dead_code)] // Read only by Windows builds with the `asio` feature.
+    host_factory: fn() -> Result<cpal::Host, String>,
+    current_entitlement: fn() -> bool,
+}
 
-static ASIO_HOST_FACTORY: OnceLock<AsioHostFactory> = OnceLock::new();
+impl AsioHostProvider {
+    pub const fn new(
+        host_factory: fn() -> Result<cpal::Host, String>,
+        current_entitlement: fn() -> bool,
+    ) -> Self {
+        Self {
+            host_factory,
+            current_entitlement,
+        }
+    }
+
+    #[cfg(all(target_os = "windows", feature = "asio"))]
+    fn create_host(&self) -> Result<cpal::Host, String> {
+        (self.host_factory)()
+    }
+
+    fn has_current_entitlement(&self) -> bool {
+        (self.current_entitlement)()
+    }
+}
+
+static ASIO_HOST_PROVIDER: OnceLock<AsioHostProvider> = OnceLock::new();
 
 /// The one ASIO host for the whole process.
 ///
@@ -329,35 +357,83 @@ unsafe impl Sync for SharedAsioHost {}
 static ASIO_SHARED_HOST: OnceLock<SharedAsioHost> = OnceLock::new();
 
 /// Register the ASIO provider supplied by the separately linked edition crate.
-pub fn register_asio_host_factory(factory: AsioHostFactory) -> Result<(), String> {
-    ASIO_HOST_FACTORY
-        .set(factory)
+pub fn register_asio_host_provider(provider: AsioHostProvider) -> Result<(), String> {
+    ASIO_HOST_PROVIDER
+        .set(provider)
         .map_err(|_| "ASIO host provider is already registered".to_string())
+}
+
+fn asio_support_enabled_for(provider: Option<&AsioHostProvider>) -> bool {
+    cfg!(target_os = "windows")
+        && cfg!(feature = "asio")
+        && provider.is_some_and(AsioHostProvider::has_current_entitlement)
 }
 
 #[cfg(all(target_os = "windows", feature = "asio"))]
 pub(crate) fn asio_host() -> Result<&'static cpal::Host, SphereAudioError> {
+    let provider = ASIO_HOST_PROVIDER.get().ok_or_else(|| {
+        SphereAudioError::BackendUnavailable(
+            "DAUx ASIO requires a Futureboard Exclusive Edition provider".into(),
+        )
+    })?;
+    let require_entitlement = || {
+        if provider.has_current_entitlement() {
+            Ok(())
+        } else {
+            Err(SphereAudioError::BackendUnavailable(
+                "DAUx ASIO requires a current Exclusive Edition ASIO entitlement".into(),
+            ))
+        }
+    };
+
+    // Re-check before returning even a memoized host. Registration and host
+    // creation are process-lifetime operations; entitlement is deliberately
+    // live and may become false after either one.
+    require_entitlement()?;
     if let Some(host) = ASIO_SHARED_HOST.get() {
         return Ok(&host.0);
     }
-    let factory = ASIO_HOST_FACTORY.get().ok_or_else(|| {
-        SphereAudioError::BackendUnavailable(
-            "DAUx ASIO requires a Futureboard Exclusive Edition build".into(),
-        )
-    })?;
-    let host = factory().map_err(SphereAudioError::BackendUnavailable)?;
+
+    let host = provider
+        .create_host()
+        .map_err(SphereAudioError::BackendUnavailable)?;
+    require_entitlement()?;
+
     // A losing racer's fresh host is dropped unused — harmless, no driver has
     // been loaded through it.
-    Ok(&ASIO_SHARED_HOST.get_or_init(|| SharedAsioHost(host)).0)
+    let host = &ASIO_SHARED_HOST.get_or_init(|| SharedAsioHost(host)).0;
+    require_entitlement()?;
+    Ok(host)
 }
 
+/// Whether ASIO may currently be offered or enumerated.
+///
+/// Support requires all three conditions: a Windows target, the engine's
+/// `asio` feature, and a registered provider whose live entitlement is true.
 pub fn asio_support_enabled() -> bool {
-    cfg!(target_os = "windows") && ASIO_HOST_FACTORY.get().is_some()
+    asio_support_enabled_for(ASIO_HOST_PROVIDER.get())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::BackendKind;
+    use super::{AsioHostProvider, BackendKind};
+
+    #[cfg(all(target_os = "windows", feature = "asio"))]
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[cfg(all(target_os = "windows", feature = "asio"))]
+    static TEST_ASIO_ENTITLEMENT: AtomicBool = AtomicBool::new(false);
+
+    #[cfg(all(target_os = "windows", feature = "asio"))]
+    fn test_asio_host() -> Result<cpal::Host, String> {
+        cpal::host_from_id(cpal::HostId::Asio)
+            .map_err(|error| format!("ASIO host initialization failed: {error}"))
+    }
+
+    #[cfg(all(target_os = "windows", feature = "asio"))]
+    fn test_asio_entitlement() -> bool {
+        TEST_ASIO_ENTITLEMENT.load(Ordering::Acquire)
+    }
 
     #[test]
     fn asio_backend_id_round_trips() {
@@ -373,5 +449,42 @@ mod tests {
                 BackendKind::Auto
             );
         }
+    }
+
+    #[cfg(all(target_os = "windows", feature = "asio"))]
+    #[test]
+    fn asio_host_rechecks_true_to_false_entitlement() {
+        TEST_ASIO_ENTITLEMENT.store(true, Ordering::Release);
+        super::register_asio_host_provider(AsioHostProvider::new(
+            test_asio_host,
+            test_asio_entitlement,
+        ))
+        .expect("test ASIO provider should register once");
+
+        assert!(super::asio_support_enabled());
+        super::asio_host().expect("true entitlement should acquire the shared ASIO host");
+
+        TEST_ASIO_ENTITLEMENT.store(false, Ordering::Release);
+
+        assert!(!super::asio_support_enabled());
+        assert!(!BackendKind::allowed_for_current_platform().contains(&BackendKind::Asio));
+        assert!(
+            super::asio_host().is_err(),
+            "a cached host must not bypass a revoked entitlement"
+        );
+    }
+
+    #[cfg(not(all(target_os = "windows", feature = "asio")))]
+    #[test]
+    fn asio_support_stays_disabled_without_windows_asio_feature() {
+        fn unused_host_factory() -> Result<cpal::Host, String> {
+            Err("host factory must not run".into())
+        }
+        fn entitled() -> bool {
+            true
+        }
+
+        let provider = AsioHostProvider::new(unused_host_factory, entitled);
+        assert!(!super::asio_support_enabled_for(Some(&provider)));
     }
 }

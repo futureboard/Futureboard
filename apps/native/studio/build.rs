@@ -42,11 +42,11 @@ fn main() {
 /// inside the application's bridge module, so those comments become ordinary
 /// comments in the generated copies.
 fn stage_exclusive_sources() {
-    // The license signing key and activation endpoint are baked in via
-    // `option_env!`. Rebuild when either changes so a build never keeps a stale
-    // key, and never silently ships without one.
+    // The license signing key and API endpoint are baked in via `option_env!`.
+    // Rebuild when either changes so a build never keeps stale license config
+    // and never silently ships without it.
     println!("cargo:rerun-if-env-changed=FUTUREBOARD_LICENSE_PUBLIC_KEY");
-    println!("cargo:rerun-if-env-changed=FUTUREBOARD_LICENSE_ACTIVATION_URL");
+    println!("cargo:rerun-if-env-changed=FUTUREBOARD_LICENSE_API_URL");
     // Supabase auth config is baked from the repo `.env` (or the build
     // environment). Only the public URL and the *publishable* anon key are ever
     // read here — never the service secret key.

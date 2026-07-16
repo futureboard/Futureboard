@@ -55,6 +55,20 @@ pub use license_activation_dialog::{configured_license_activator, open_license_a
 
 use sphere_ui_components::account::{AccountAction, AccountSnapshot};
 
+#[cfg(target_os = "windows")]
+use std::sync::atomic::{AtomicBool, Ordering};
+
+/// Cached result of the existing signed-token verification path. The engine's
+/// provider callback is only an atomic load; it never verifies a token or does
+/// filesystem/network work on an audio-related path.
+#[cfg(target_os = "windows")]
+static ASIO_ENTITLEMENT: AtomicBool = AtomicBool::new(false);
+
+#[cfg(target_os = "windows")]
+fn current_asio_entitlement() -> bool {
+    ASIO_ENTITLEMENT.load(Ordering::Acquire)
+}
+
 /// Show the first-run EULA dialog when the current agreement version has not yet
 /// been accepted. Called once the first app surface is up, so it appears as a
 /// modal on top. Declining (or closing) the dialog quits the app.
@@ -67,25 +81,26 @@ pub fn show_eula_if_needed(cx: &mut gpui::App) {
 }
 
 /// Install the Exclusive Edition runtime providers that a verified license
-/// grants. Safe to call more than once: providers already installed in this
-/// process are left alone, so activating mid-session takes effect without a
-/// restart.
+/// grants. Safe to call more than once: provider registration is process-wide,
+/// while the cached live entitlement is refreshed on every call so activation,
+/// renewal, expiry, or entitlement changes take effect without a restart.
 ///
-/// An unlicensed machine is not an error — it installs nothing, and the audio
-/// backend list never offers ASIO.
+/// An unlicensed machine is not an error. Its cached capability is false, so
+/// the audio backend list and all future ASIO host acquisitions stay disabled.
 pub fn install_licensed_providers() -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
-        if DirectAudio::asio_support_enabled() {
+        let asio_entitled = license::active_license()
+            .is_some_and(|license| license.grants(license::ENTITLEMENT_ASIO));
+        ASIO_ENTITLEMENT.store(asio_entitled, Ordering::Release);
+
+        if !asio_entitled || DirectAudio::asio_support_enabled() {
             return Ok(());
         }
-        let Some(license) = license::active_license() else {
-            return Ok(());
-        };
-        if !license.grants(license::ENTITLEMENT_ASIO) {
-            return Ok(());
-        }
-        DirectAudio::backend::register_asio_host_factory(asio::host)?;
+
+        DirectAudio::backend::register_asio_host_provider(
+            DirectAudio::backend::AsioHostProvider::new(asio::host, current_asio_entitlement),
+        )?;
     }
 
     Ok(())

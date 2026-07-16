@@ -126,7 +126,7 @@ pub fn f32_load(v: u32) -> f32 {
 }
 
 #[inline]
-fn atomic_max_f32_bits(target: &AtomicU32, value: f32) {
+pub(crate) fn atomic_max_f32_bits(target: &AtomicU32, value: f32) {
     let value = value.max(0.0);
     let mut current = target.load(Ordering::Relaxed);
     loop {
@@ -366,6 +366,15 @@ pub struct SharedState {
     pub live_input_peak_r: AtomicU32,
 
     // ── Live monitoring / input bus (Layers 4, 6, 7) ──────────────────────
+    /// Source channel indices the monitor path taps from the capture stream.
+    /// WASAPI capture streams capture these at build time; the persistent ASIO
+    /// input callback re-reads them every block, which is what makes selecting
+    /// a different input a pure atomic store instead of a stream rebuild.
+    pub monitor_src_l: AtomicU32,
+    pub monitor_src_r: AtomicU32,
+    /// Max-hold input peak across *all* capture channels (ASIO session), reset
+    /// by the Settings input-test poll via `swap`.
+    pub session_input_peak: AtomicU32,
     /// Lock-free stereo bridge from the input callback to the output render
     /// callback. Carries the actual monitored samples (not just a peak).
     pub input_ring: crate::input_ring::InputRing,
@@ -470,6 +479,9 @@ impl Default for SharedState {
             live_input_r: AtomicU32::new(f32_store(0.0)),
             live_input_peak_l: AtomicU32::new(f32_store(0.0)),
             live_input_peak_r: AtomicU32::new(f32_store(0.0)),
+            monitor_src_l: AtomicU32::new(0),
+            monitor_src_r: AtomicU32::new(1),
+            session_input_peak: AtomicU32::new(f32_store(0.0)),
             input_ring: crate::input_ring::InputRing::default(),
             monitor_enabled_any: AtomicBool::new(false),
             monitor_gain: AtomicU32::new(f32_store(1.0)),
@@ -510,9 +522,12 @@ impl Default for SharedState {
 
 // ── Engine inner ───────────────────────────────────────────────────────────────
 
-/// Active stream variant — either a cpal-backed stream or a WASAPI exclusive thread.
+/// Active stream variant — cpal-backed, ASIO duplex session, or a raw
+/// Windows backend thread.
 enum ActiveStream {
     Cpal(CpalStreamHandle),
+    #[cfg(all(target_os = "windows", feature = "asio"))]
+    AsioDuplex(crate::backend::asio_session::AsioDuplexHandle),
     #[cfg(target_os = "windows")]
     WasapiExclusive(WasapiExclusiveHandle),
     #[cfg(target_os = "windows")]
@@ -523,6 +538,8 @@ impl ActiveStream {
     fn cmd_tx(&self) -> Option<&crossbeam_channel::Sender<EngineCommand>> {
         match self {
             ActiveStream::Cpal(h) => Some(&h.cmd_tx),
+            #[cfg(all(target_os = "windows", feature = "asio"))]
+            ActiveStream::AsioDuplex(h) => Some(&h.cmd_tx),
             #[cfg(target_os = "windows")]
             ActiveStream::WasapiExclusive(h) => Some(&h.cmd_tx),
             #[cfg(target_os = "windows")]
@@ -532,6 +549,8 @@ impl ActiveStream {
     fn play(&self) -> Result<(), String> {
         match self {
             ActiveStream::Cpal(h) => h.play(),
+            #[cfg(all(target_os = "windows", feature = "asio"))]
+            ActiveStream::AsioDuplex(h) => h.play(),
             #[cfg(target_os = "windows")]
             ActiveStream::WasapiExclusive(_) => Ok(()), // already playing from stream start
             #[cfg(target_os = "windows")]
@@ -541,16 +560,27 @@ impl ActiveStream {
     fn pause(&self) -> Result<(), String> {
         match self {
             ActiveStream::Cpal(h) => h.pause(),
+            #[cfg(all(target_os = "windows", feature = "asio"))]
+            ActiveStream::AsioDuplex(h) => h.pause(),
             #[cfg(target_os = "windows")]
             ActiveStream::WasapiExclusive(_) => Ok(()), // no pause in exclusive — caller mutes output
             #[cfg(target_os = "windows")]
             ActiveStream::WdmKs(_) => Ok(()), // no pause in low-level backend — caller mutes output
         }
     }
+    #[cfg(all(target_os = "windows", feature = "asio"))]
+    fn as_asio_duplex(&self) -> Option<&crate::backend::asio_session::AsioDuplexHandle> {
+        match self {
+            ActiveStream::AsioDuplex(h) => Some(h),
+            _ => None,
+        }
+    }
     #[allow(dead_code)]
     fn sample_rate(&self) -> u32 {
         match self {
             ActiveStream::Cpal(h) => h.sample_rate,
+            #[cfg(all(target_os = "windows", feature = "asio"))]
+            ActiveStream::AsioDuplex(h) => h.sample_rate,
             #[cfg(target_os = "windows")]
             ActiveStream::WasapiExclusive(h) => h.sample_rate,
             #[cfg(target_os = "windows")]
@@ -561,6 +591,8 @@ impl ActiveStream {
     fn buffer_size(&self) -> u32 {
         match self {
             ActiveStream::Cpal(h) => h.buffer_size,
+            #[cfg(all(target_os = "windows", feature = "asio"))]
+            ActiveStream::AsioDuplex(h) => h.buffer_size,
             #[cfg(target_os = "windows")]
             ActiveStream::WasapiExclusive(h) => h.buffer_size,
             #[cfg(target_os = "windows")]
@@ -571,6 +603,8 @@ impl ActiveStream {
     fn device_name(&self) -> &str {
         match self {
             ActiveStream::Cpal(h) => &h.device_name,
+            #[cfg(all(target_os = "windows", feature = "asio"))]
+            ActiveStream::AsioDuplex(h) => &h.device_name,
             #[cfg(target_os = "windows")]
             ActiveStream::WasapiExclusive(h) => &h.device_name,
             #[cfg(target_os = "windows")]
@@ -580,6 +614,8 @@ impl ActiveStream {
     fn backend_name(&self) -> &str {
         match self {
             ActiveStream::Cpal(h) => &h.backend_name,
+            #[cfg(all(target_os = "windows", feature = "asio"))]
+            ActiveStream::AsioDuplex(_) => "DAUx ASIO",
             #[cfg(target_os = "windows")]
             ActiveStream::WasapiExclusive(_) => "DAUx WASAPI Exclusive",
             #[cfg(target_os = "windows")]
@@ -651,6 +687,10 @@ pub struct EngineInner {
     // Capabilities of the open ASIO session (None otherwise). Set by
     // `open_daux`, cleared by `close_device_inner`.
     asio_caps: Mutex<Option<crate::backend::AsioSessionCaps>>,
+
+    // Settings input test reads the ASIO session peak instead of owning a
+    // stream (true only between start/stop_input_test on the ASIO backend).
+    input_test_uses_session: std::sync::atomic::AtomicBool,
 }
 
 #[derive(Clone)]
@@ -713,6 +753,7 @@ impl EngineInner {
             input_test: Mutex::new(None),
             live_input: Mutex::new(None),
             asio_caps: Mutex::new(None),
+            input_test_uses_session: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -2094,10 +2135,14 @@ impl EngineInner {
     ) -> Result<cpal::Device, SphereAudioError> {
         let backend = self.daux_config.lock().backend.clone();
         match backend {
-            BackendKind::Asio => {
-                let host = crate::backend::asio_host()?;
-                recording::find_input_device_for_host(host, device_id)
-            }
+            // An ASIO driver is one duplex session. Opening a second input
+            // stream would re-prepare the shared buffer set and kill the
+            // output side — capture always taps the session input callback.
+            BackendKind::Asio => Err(SphereAudioError::NativeError(
+                "ASIO input is captured by the active duplex session; \
+                 no separate input device is ever opened"
+                    .into(),
+            )),
             _ => recording::find_input_device(device_id),
         }
     }
@@ -2111,7 +2156,9 @@ impl EngineInner {
         self.asio_caps.lock().clone()
     }
 
-    /// Open an input stream and begin writing armed tracks to WAV files.
+    /// Begin writing armed tracks to disk. WASAPI-family backends open a
+    /// dedicated capture stream; the ASIO backend installs a record sink into
+    /// the already-running duplex session (the driver/stream is never touched).
     pub fn start_recording(&self, config: JsStartRecordingConfig) -> Result<(), SphereAudioError> {
         let mut guard = self.recording.lock();
         if guard.is_some() {
@@ -2120,6 +2167,12 @@ impl EngineInner {
             ));
         }
         let monitor_mix = config.monitor_mix;
+
+        #[cfg(all(target_os = "windows", feature = "asio"))]
+        if self.daux_config.lock().backend == BackendKind::Asio {
+            return self.start_recording_asio(config, monitor_mix, &mut guard);
+        }
+
         // Single-capture-stream invariant: the recording stream becomes the sole
         // input device client during a take (it feeds the monitor ring, preview
         // ring, and file writer). Stop the standalone monitor stream so two
@@ -2155,16 +2208,135 @@ impl EngineInner {
         }
     }
 
+    /// ASIO take: build the writer pipeline, then hand the record sink to the
+    /// session's input callback over its bounded command queue. Monitoring,
+    /// the stream, and the driver are untouched — recording never depends on
+    /// monitoring being enabled, and starting a take never recreates streams.
+    #[cfg(all(target_os = "windows", feature = "asio"))]
+    fn start_recording_asio(
+        &self,
+        config: JsStartRecordingConfig,
+        monitor_mix: bool,
+        guard: &mut Option<RecordingSession>,
+    ) -> Result<(), SphereAudioError> {
+        use crate::backend::asio_session::AsioInputCommand;
+
+        let caps = self.asio_caps.lock().clone().ok_or_else(|| {
+            SphereAudioError::NativeError(
+                "ASIO recording requires an open ASIO stream — apply the audio settings first"
+                    .into(),
+            )
+        })?;
+        if caps.input_channels == 0 {
+            let detail = self
+                .status
+                .lock()
+                .last_daux_error
+                .clone()
+                .unwrap_or_else(|| {
+                    format!(
+                        "ASIO driver '{}' has no usable input channels",
+                        caps.driver
+                    )
+                });
+            return Err(SphereAudioError::NativeError(detail));
+        }
+
+        let (session, sink) = recording::start_recording_asio_tap(
+            config,
+            Arc::clone(&self.shared),
+            monitor_mix,
+            caps.input_channels,
+            caps.sample_rate,
+            caps.buffer_size,
+        )?;
+
+        let install_result = {
+            let stream_guard = self.active_stream.lock();
+            match stream_guard.as_ref().and_then(|s| s.as_asio_duplex()) {
+                None => Err(SphereAudioError::NativeError(
+                    "ASIO session is not open".into(),
+                )),
+                Some(handle) => {
+                    // Dispose sinks from a previous take before installing.
+                    handle.drain_trashed_sinks();
+                    handle
+                        .input_cmd_tx
+                        .try_send(AsioInputCommand::SetRecordSink(Box::new(sink)))
+                        .map_err(|_| {
+                            SphereAudioError::NativeError(
+                                "ASIO input command queue is full; cannot start recording".into(),
+                            )
+                        })
+                }
+            }
+        };
+
+        if let Err(error) = install_result {
+            // Unwind the already-armed writer pipeline (finalizes and reports;
+            // results are discarded because the take never started).
+            let _ = recording::stop_recording(session);
+            return Err(error);
+        }
+
+        *guard = Some(session);
+        self.warm_output_for_monitoring();
+        Ok(())
+    }
+
     /// Stop the active recording, finalize WAV files, and return per-track results.
     pub fn stop_recording(&self) -> Result<Vec<JsRecordingResult>, SphereAudioError> {
         let session = self.recording.lock().take().ok_or_else(|| {
             SphereAudioError::NativeError("No active recording session".to_string())
         })?;
+
+        // ASIO tap: detach the record sink from the session input callback so
+        // the callback releases its channel senders on the next block. The
+        // writer additionally exits on the session's stop flag, so a stalled
+        // driver still finalizes the take.
+        #[cfg(all(target_os = "windows", feature = "asio"))]
+        let asio_tap = session.is_asio_tap();
+        #[cfg(all(target_os = "windows", feature = "asio"))]
+        if asio_tap {
+            if let Some(handle) = self
+                .active_stream
+                .lock()
+                .as_ref()
+                .and_then(|s| s.as_asio_duplex())
+            {
+                let _ = handle
+                    .input_cmd_tx
+                    .try_send(crate::backend::asio_session::AsioInputCommand::ClearRecordSink);
+            }
+        }
+
         let mut results = recording::stop_recording(session)?;
+
+        #[cfg(all(target_os = "windows", feature = "asio"))]
+        if asio_tap {
+            if let Some(handle) = self
+                .active_stream
+                .lock()
+                .as_ref()
+                .and_then(|s| s.as_asio_duplex())
+            {
+                handle.drain_trashed_sinks();
+            }
+        }
+
         let runtime = self.runtime.lock();
         let buffer_frames = self.status.lock().buffer_size;
         let sample_rate = runtime.sample_rate.max(1) as f64;
-        let round_trip_buffer = buffer_frames.saturating_mul(2);
+        // Round-trip compensation: driver-reported latencies when the ASIO
+        // session provides them, else the 2×buffer estimate.
+        let asio_round_trip = self.asio_caps.lock().as_ref().map(|caps| {
+            caps.input_latency_samples
+                .saturating_add(caps.output_latency_samples)
+        });
+        let round_trip_buffer = match asio_round_trip {
+            Some(latency) if latency > 0 => latency,
+            _ => buffer_frames.saturating_mul(2),
+        };
         for result in &mut results {
             let Some(track_idx) = runtime
                 .tracks
@@ -2253,6 +2425,11 @@ impl EngineInner {
 
         let initial_runtime = self.get_initial_runtime(None);
 
+        // Non-fatal open diagnostics (e.g. ASIO input degraded) applied after
+        // the generic error-clearing below so they stay visible in Settings.
+        #[allow(unused_mut)] // mutated only by the cfg-gated ASIO arm
+        let mut deferred_open_warning: Option<String> = None;
+
         let stream = match backend {
             #[cfg(target_os = "windows")]
             BackendKind::WasapiExclusive => {
@@ -2284,9 +2461,10 @@ impl EngineInner {
                 self.commit_stream_open(sr, bs, dev_name, "DAUx WDM-KS".into());
                 stream
             }
+            #[cfg(all(target_os = "windows", feature = "asio"))]
             BackendKind::Asio => {
                 let host = crate::backend::asio_host()?;
-                let handle = cpal_backend::open_on_host(
+                let handle = crate::backend::asio_session::open_duplex(
                     host,
                     &daux_cfg,
                     Arc::clone(&self.shared),
@@ -2296,9 +2474,17 @@ impl EngineInner {
                 let sr = handle.sample_rate;
                 let bs = handle.buffer_size;
                 let dev_name = handle.device_name.clone();
-                let stream = ActiveStream::Cpal(handle);
+                deferred_open_warning = handle.input_warning.clone();
+                *self.asio_caps.lock() = Some(handle.caps.clone());
+                let stream = ActiveStream::AsioDuplex(handle);
                 self.commit_stream_open(sr, bs, dev_name, "DAUx ASIO".into());
                 stream
+            }
+            #[cfg(not(all(target_os = "windows", feature = "asio")))]
+            BackendKind::Asio => {
+                return Err(SphereAudioError::BackendUnavailable(
+                    "this build does not include the DAUx ASIO backend".into(),
+                ));
             }
             #[cfg(not(target_os = "windows"))]
             BackendKind::WdmKs => {
@@ -2324,7 +2510,7 @@ impl EngineInner {
         };
 
         // Clear any previous error / device-lost flag on success.
-        self.status.lock().last_daux_error = None;
+        self.status.lock().last_daux_error = deferred_open_warning;
         self.shared.device_lost.store(false, Ordering::Relaxed);
 
         // Surface any divergence between the requested rate and the rate the
@@ -2340,6 +2526,19 @@ impl EngineInner {
         }
 
         *self.active_stream.lock() = Some(stream);
+
+        // A fresh ASIO session starts with default routing atomics; re-derive
+        // track input routing from the stored project so arm/monitor state
+        // survives a device reopen (atomics only — no reload).
+        #[cfg(all(target_os = "windows", feature = "asio"))]
+        if self.asio_caps.lock().is_some() {
+            if let Some(snapshot) = self.project.lock().clone() {
+                if let Err(error) = self.sync_live_input_stream(&snapshot) {
+                    eprintln!("[DAUx ASIO] input routing restore failed: {error}");
+                }
+            }
+        }
+
         Ok(())
     }
 
@@ -2446,6 +2645,17 @@ impl EngineInner {
         &self,
         snapshot: &EngineProjectSnapshot,
     ) -> Result<(), SphereAudioError> {
+        // ASIO: the duplex session's persistent input already feeds the ring.
+        // Route changes are atomic stores — never a stream open/close, which
+        // would dispose the shared buffer set and kill playback.
+        #[cfg(all(target_os = "windows", feature = "asio"))]
+        {
+            let caps = self.asio_caps.lock().clone();
+            if let Some(caps) = caps {
+                return self.sync_asio_input_routing(snapshot, &caps);
+            }
+        }
+
         // The first armed/monitored audio track with a routable input source
         // drives which device + channels the shared capture stream uses.
         let desired_track = snapshot.tracks.iter().find(|track| {
@@ -2614,6 +2824,104 @@ impl EngineInner {
         Ok(())
     }
 
+    /// Apply track input routing to the persistent ASIO session.
+    ///
+    /// Everything here is an atomic store into `SharedState` — the session's
+    /// input callback re-reads the monitor channel indices every block and the
+    /// ring's active flag gates the output-side monitor mix. No streams are
+    /// created, no buffers touched, no project reload issued.
+    #[cfg(all(target_os = "windows", feature = "asio"))]
+    fn sync_asio_input_routing(
+        &self,
+        snapshot: &EngineProjectSnapshot,
+        caps: &crate::backend::AsioSessionCaps,
+    ) -> Result<(), SphereAudioError> {
+        let desired_track = snapshot.tracks.iter().find(|track| {
+            track.track_type == "audio"
+                && (track.armed || track.input_monitor)
+                && !track.input_source.channels.is_empty()
+        });
+        let monitor_any = snapshot.tracks.iter().any(|track| {
+            track.track_type == "audio"
+                && track.input_monitor
+                && !track.input_source.channels.is_empty()
+        });
+        self.shared
+            .monitor_enabled_any
+            .store(monitor_any, Ordering::Relaxed);
+
+        let Some(track) = desired_track else {
+            // Nothing armed/monitored: deactivate the ring (input keeps
+            // running for meters) and clear the monitor meter state.
+            self.stop_live_input_stream();
+            return Ok(());
+        };
+
+        if caps.input_channels == 0 {
+            self.stop_live_input_stream();
+            let message = format!(
+                "ASIO driver '{}' has no usable input channels; input routing disabled",
+                caps.driver
+            );
+            eprintln!("[DAUx ASIO] {message}");
+            self.status.lock().last_error = Some(message);
+            return Ok(());
+        }
+
+        // With ASIO the session driver is the only capture device. A track
+        // pinned to a different device name keeps its channel selection but is
+        // served by the session driver — surfaced, not silently ignored.
+        if let Some(device_id) = track
+            .input_source
+            .device_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+        {
+            if device_id != caps.driver {
+                let message = format!(
+                    "track input device '{device_id}' is not the active ASIO driver '{}'; \
+                     using the active driver",
+                    caps.driver
+                );
+                eprintln!("[DAUx ASIO] {message}");
+                self.status.lock().last_error = Some(message);
+            }
+        }
+
+        let channels = &track.input_source.channels;
+        let left = channels.first().copied().unwrap_or(0);
+        let right = channels.get(1).copied().unwrap_or(left);
+        if left >= caps.input_channels || right >= caps.input_channels {
+            // A previously selected channel no longer exists — fall back to
+            // "no input" safely and say why, instead of capturing the wrong
+            // channel.
+            self.stop_live_input_stream();
+            let message = format!(
+                "track input channel {} is unavailable on ASIO driver '{}' \
+                 ({} input channel(s)); input routing disabled",
+                left.max(right) + 1,
+                caps.driver,
+                caps.input_channels
+            );
+            eprintln!("[DAUx ASIO] {message}");
+            self.status.lock().last_error = Some(message);
+            return Ok(());
+        }
+
+        self.shared.monitor_src_l.store(left, Ordering::Relaxed);
+        self.shared.monitor_src_r.store(right, Ordering::Relaxed);
+        self.shared
+            .monitor_enabled_any
+            .store(monitor_any, Ordering::Relaxed);
+        self.shared
+            .input_ring
+            .set_active(true, caps.input_channels, caps.sample_rate);
+        self.shared.live_input_active.store(true, Ordering::Relaxed);
+        self.warm_output_for_monitoring();
+        Ok(())
+    }
+
     /// Resume the (already-open) output stream so `fill_output_f32` runs while
     /// monitoring/armed, without advancing the transport. No-op when no stream
     /// is open yet — the next explicit `start()` will pick it up.
@@ -2665,6 +2973,31 @@ impl EngineInner {
     pub fn start_input_test(&self, device_id: Option<String>) -> Result<(), SphereAudioError> {
         // Replace any existing test stream.
         *self.input_test.lock() = None;
+        self.input_test_uses_session
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+
+        // ASIO: the session input is already running — the "test" is just a
+        // read of the session-wide peak. Never open a second stream.
+        if self.daux_config.lock().backend == BackendKind::Asio {
+            let caps = self.asio_caps.lock().clone();
+            return match caps {
+                Some(caps) if caps.input_channels > 0 => {
+                    self.shared
+                        .session_input_peak
+                        .store(f32_store(0.0), Ordering::Relaxed);
+                    self.input_test_uses_session
+                        .store(true, std::sync::atomic::Ordering::Relaxed);
+                    Ok(())
+                }
+                Some(caps) => Err(SphereAudioError::NativeError(format!(
+                    "ASIO driver '{}' has no usable input channels",
+                    caps.driver
+                ))),
+                None => Err(SphereAudioError::NativeError(
+                    "open the ASIO stream before testing its input".into(),
+                )),
+            };
+        }
 
         let device = self.find_input_device_for_active_backend(device_id.as_deref())?;
         let default_cfg = device.default_input_config().map_err(|e| {
@@ -2726,6 +3059,12 @@ impl EngineInner {
     /// Read (and reset) the peak input level since the last poll, `0.0..=1.0`.
     /// Returns `0.0` when no input test is active.
     pub fn get_input_test_level(&self) -> f32 {
+        if self
+            .input_test_uses_session
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            return f32::from_bits(self.shared.session_input_peak.swap(0, Ordering::Relaxed));
+        }
         self.input_test
             .lock()
             .as_ref()
@@ -2736,6 +3075,8 @@ impl EngineInner {
     /// Stop and release the input-level test stream.
     pub fn stop_input_test(&self) {
         *self.input_test.lock() = None;
+        self.input_test_uses_session
+            .store(false, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Aggregate latency report (Phase V — reporting only).

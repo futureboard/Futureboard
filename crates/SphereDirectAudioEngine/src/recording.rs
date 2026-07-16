@@ -69,11 +69,28 @@ pub struct RecordingResult {
     pub error: Option<String>,
 }
 
+/// Where the take's samples come from.
+pub(crate) enum CaptureSource {
+    /// A dedicated cpal input stream owned by this session (WASAPI & friends).
+    /// Dropping it stops capture and disconnects the audio channel. The field
+    /// is a pure keep-alive/drop guard — never read.
+    #[allow(dead_code)]
+    OwnStream(cpal::Stream),
+    /// The persistent ASIO session input callback feeds the take through an
+    /// installed [`crate::backend::asio_session::RecordSink`]. The engine
+    /// detaches the sink via `AsioInputCommand::ClearRecordSink`; the writer
+    /// additionally exits on `stop_flag` so a stalled driver can never wedge
+    /// finalization.
+    #[cfg(all(target_os = "windows", feature = "asio"))]
+    AsioSessionTap,
+}
+
 pub struct RecordingSession {
-    /// Dropping this stops input capture and disconnects the audio channel.
-    _input_stream: cpal::Stream,
+    pub(crate) capture: CaptureSource,
     /// Receives finalized per-track results from the disk writer thread.
     pub results_rx: std::sync::mpsc::Receiver<Vec<RecordingResult>>,
+    /// Tells the disk writer to finalize even if its senders are still alive.
+    pub stop_flag: Arc<AtomicBool>,
     pub start_beat: f64,
     pub sample_rate: u32,
     pub track_count: usize,
@@ -81,6 +98,20 @@ pub struct RecordingSession {
     pub dropped_blocks: Arc<AtomicU64>,
     pub started_at: std::time::Instant,
     pub shared: Arc<crate::engine::SharedState>,
+}
+
+impl RecordingSession {
+    /// Whether this take taps the persistent ASIO session input.
+    pub fn is_asio_tap(&self) -> bool {
+        #[cfg(all(target_os = "windows", feature = "asio"))]
+        {
+            matches!(self.capture, CaptureSource::AsioSessionTap)
+        }
+        #[cfg(not(all(target_os = "windows", feature = "asio")))]
+        {
+            false
+        }
+    }
 }
 
 // Safety: cpal::Stream is !Send due to a PhantomData marker on Windows (COM
@@ -171,10 +202,12 @@ pub(crate) fn find_input_device_for_host(
     host: &cpal::Host,
     device_id: Option<&str>,
 ) -> Result<cpal::Device, SphereAudioError> {
-    if crate::device::is_asio_host(host) {
-        return crate::device::resolve_duplex_device_for_host(host, device_id)
-            .map(|(device, _)| device)
-            .map_err(SphereAudioError::NativeError);
+    if host.id().name().eq_ignore_ascii_case("ASIO") {
+        // ASIO capture taps the duplex session's input callback; resolving a
+        // second device here would clobber the session's buffer set.
+        return Err(SphereAudioError::NativeError(
+            "ASIO input devices are never opened separately from the session".into(),
+        ));
     }
     if let Some(id) = device_id {
         if !id.is_empty() {
@@ -203,11 +236,24 @@ fn disk_writer_thread(
     input_ch: usize, // channels per interleaved input frame
     start_beat: f64,
     finalize_tx: std::sync::mpsc::Sender<Vec<RecordingResult>>,
+    stop_flag: Arc<AtomicBool>,
 ) {
     let mut total_frames = 0u64;
 
-    // Drain audio blocks until the sender (input stream) disconnects.
-    while let Ok(mut block) = audio_rx.recv() {
+    // Drain audio blocks until the sender disconnects (own-stream capture) or
+    // the stop flag is raised with no data pending (ASIO tap capture, where a
+    // stalled driver could otherwise keep the sender alive forever).
+    loop {
+        let mut block = match audio_rx.recv_timeout(std::time::Duration::from_millis(200)) {
+            Ok(block) => block,
+            Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
+                if stop_flag.load(Ordering::Relaxed) {
+                    break;
+                }
+                continue;
+            }
+            Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
+        };
         let frames = block.len().checked_div(input_ch).unwrap_or(0);
         if frames == 0 {
             block.clear();
@@ -514,7 +560,7 @@ fn build_f32_input_stream(
 }
 
 #[inline]
-fn f32_to_s32(sample: f32) -> i32 {
+pub(crate) fn f32_to_s32(sample: f32) -> i32 {
     let x = sample.clamp(-1.0, 1.0);
     if x >= 0.0 {
         (x * i32::MAX as f32) as i32
@@ -535,41 +581,29 @@ pub fn start_recording(
     start_recording_with_device(config, shared, monitor_mix, device)
 }
 
-pub(crate) fn start_recording_with_device(
-    config: JsStartRecordingConfig,
-    shared: Arc<crate::engine::SharedState>,
-    monitor_mix: bool,
-    device: cpal::Device,
-) -> Result<RecordingSession, SphereAudioError> {
+/// Create the `Recordings` folder and build one RAUF writer per armed track,
+/// validating each track's selected channels against `input_ch` (channels per
+/// interleaved capture frame). Shared by the own-stream and ASIO-tap paths.
+fn build_track_writers(
+    config: &JsStartRecordingConfig,
+    shared: &crate::engine::SharedState,
+    input_ch: usize,
+    sample_rate: u32,
+) -> Result<Vec<TrackWriterState>, SphereAudioError> {
     if config.tracks.is_empty() {
         return Err(SphereAudioError::NativeError(
             "No armed tracks — nothing to record".to_string(),
         ));
     }
 
-    let default_cfg = device
-        .default_input_config()
-        .map_err(|e| SphereAudioError::NativeError(format!("Input device config error: {e}")))?;
-
-    let input_ch = default_cfg.channels() as usize;
-    let sample_rate = default_cfg.sample_rate().0;
-
-    let stream_config = cpal::StreamConfig {
-        channels: default_cfg.channels(),
-        sample_rate: default_cfg.sample_rate(),
-        buffer_size: cpal::BufferSize::Default,
-    };
-
     // Ensure directory structure exists.
     let project_root = Path::new(&config.project_root);
     let recordings_dir = project_root.join("Recordings");
-
     std::fs::create_dir_all(&recordings_dir).map_err(|e| {
         SphereAudioError::NativeError(format!("Cannot create recordings folder: {e}"))
     })?;
     let project_start_sample = shared.position_samples.load(Ordering::Relaxed);
 
-    // Build per-track writer states.
     let mut track_writers: Vec<TrackWriterState> = Vec::new();
     for (track_index, track) in config.tracks.iter().enumerate() {
         let project_name = if config.project_name.trim().is_empty() {
@@ -641,22 +675,40 @@ pub(crate) fn start_recording_with_device(
             error: None,
         });
     }
+    Ok(track_writers)
+}
 
-    let track_count = track_writers.len();
+/// Block pool + bounded audio channel + disk-writer thread. `pool_block_samples`
+/// is the per-block capacity in interleaved samples; blocks are preallocated so
+/// the capture callback never grows one on the audio thread.
+struct RecordingPipeline {
+    audio_tx: crossbeam_channel::Sender<Vec<i32>>,
+    free_rx: crossbeam_channel::Receiver<Vec<i32>>,
+    free_tx: crossbeam_channel::Sender<Vec<i32>>,
+    finalize_rx: std::sync::mpsc::Receiver<Vec<RecordingResult>>,
+    stop_flag: Arc<AtomicBool>,
+}
 
+fn spawn_recording_pipeline(
+    track_writers: Vec<TrackWriterState>,
+    sample_rate: u32,
+    input_ch: usize,
+    start_beat: f64,
+    pool_block_samples: usize,
+    pool_blocks: usize,
+) -> RecordingPipeline {
     // Bounded channel: if the disk writer falls behind, `try_send` drops the
     // block rather than blocking the audio callback.
-    let (audio_tx, audio_rx) = bounded::<Vec<i32>>(512);
-    let (free_tx, free_rx) = bounded::<Vec<i32>>(512);
-    let max_record_block_samples = input_ch.saturating_mul(8192).max(input_ch.max(1));
-    for _ in 0..512 {
-        let _ = free_tx.try_send(Vec::with_capacity(max_record_block_samples));
+    let (audio_tx, audio_rx) = bounded::<Vec<i32>>(pool_blocks);
+    let (free_tx, free_rx) = bounded::<Vec<i32>>(pool_blocks);
+    for _ in 0..pool_blocks {
+        let _ = free_tx.try_send(Vec::with_capacity(pool_block_samples.max(1)));
     }
 
-    // Spawn disk writer — owns `audio_rx` and all file handles.
+    let stop_flag = Arc::new(AtomicBool::new(false));
     let (finalize_tx, finalize_rx) = std::sync::mpsc::channel();
-    let start_beat = config.start_beat;
     let writer_free_tx = free_tx.clone();
+    let writer_stop_flag = Arc::clone(&stop_flag);
     std::thread::spawn(move || {
         disk_writer_thread(
             audio_rx,
@@ -666,8 +718,58 @@ pub(crate) fn start_recording_with_device(
             input_ch,
             start_beat,
             finalize_tx,
+            writer_stop_flag,
         );
     });
+
+    RecordingPipeline {
+        audio_tx,
+        free_rx,
+        free_tx,
+        finalize_rx,
+        stop_flag,
+    }
+}
+
+pub(crate) fn start_recording_with_device(
+    config: JsStartRecordingConfig,
+    shared: Arc<crate::engine::SharedState>,
+    monitor_mix: bool,
+    device: cpal::Device,
+) -> Result<RecordingSession, SphereAudioError> {
+    let default_cfg = device
+        .default_input_config()
+        .map_err(|e| SphereAudioError::NativeError(format!("Input device config error: {e}")))?;
+
+    let input_ch = default_cfg.channels() as usize;
+    let sample_rate = default_cfg.sample_rate().0;
+
+    let stream_config = cpal::StreamConfig {
+        channels: default_cfg.channels(),
+        sample_rate: default_cfg.sample_rate(),
+        buffer_size: cpal::BufferSize::Default,
+    };
+
+    let track_writers = build_track_writers(&config, &shared, input_ch, sample_rate)?;
+    let track_count = track_writers.len();
+
+    let max_record_block_samples = input_ch.saturating_mul(8192).max(input_ch.max(1));
+    let pipeline = spawn_recording_pipeline(
+        track_writers,
+        sample_rate,
+        input_ch,
+        config.start_beat,
+        max_record_block_samples,
+        512,
+    );
+    let RecordingPipeline {
+        audio_tx,
+        free_rx,
+        free_tx,
+        finalize_rx,
+        stop_flag,
+    } = pipeline;
+    let start_beat = config.start_beat;
 
     // AtomicBool: the input callback checks this before sending.
     let recording_active = Arc::new(AtomicBool::new(true));
@@ -748,8 +850,9 @@ pub(crate) fn start_recording_with_device(
     );
 
     Ok(RecordingSession {
-        _input_stream: input_stream,
+        capture: CaptureSource::OwnStream(input_stream),
         results_rx: finalize_rx,
+        stop_flag,
         start_beat,
         sample_rate,
         track_count,
@@ -760,10 +863,107 @@ pub(crate) fn start_recording_with_device(
     })
 }
 
+/// Begin a take that taps the persistent ASIO session input instead of opening
+/// a stream. Builds the writers + disk pipeline and returns the session along
+/// with the [`RecordSink`] the engine must install into the session's input
+/// callback (`AsioInputCommand::SetRecordSink`).
+///
+/// The ring/monitor flags are deliberately *not* touched here — with ASIO they
+/// are owned by the engine's input-routing sync, and a take must not disturb
+/// monitoring state.
+#[cfg(all(target_os = "windows", feature = "asio"))]
+pub(crate) fn start_recording_asio_tap(
+    config: JsStartRecordingConfig,
+    shared: Arc<crate::engine::SharedState>,
+    monitor_mix: bool,
+    input_ch: u32,
+    sample_rate: u32,
+    buffer_frames: u32,
+) -> Result<(RecordingSession, crate::backend::asio_session::RecordSink), SphereAudioError> {
+    let input_ch = input_ch as usize;
+    let track_writers = build_track_writers(&config, &shared, input_ch, sample_rate)?;
+    let track_count = track_writers.len();
+
+    // Pool sizing: ASIO block size is fixed and known, so size blocks to the
+    // real callback length (with headroom) instead of the WASAPI worst case —
+    // keeps a 32-in interface from preallocating hundreds of megabytes.
+    let block_samples = input_ch
+        .saturating_mul((buffer_frames.max(1) as usize).saturating_mul(4).max(4096))
+        .max(input_ch.max(1));
+    let pipeline = spawn_recording_pipeline(
+        track_writers,
+        sample_rate,
+        input_ch,
+        config.start_beat,
+        block_samples,
+        256,
+    );
+
+    let recording_active = Arc::new(AtomicBool::new(true));
+    let dropped_blocks = Arc::new(AtomicU64::new(0));
+    shared.recording_active.store(true, Ordering::Relaxed);
+    shared
+        .recording_monitor_mix
+        .store(monitor_mix, Ordering::Relaxed);
+
+    // Realtime preview metadata (same contract as the own-stream path).
+    const PREVIEW_PEAKS_PER_SEC: u32 = 150;
+    let samples_per_bin = (sample_rate / PREVIEW_PEAKS_PER_SEC).max(1) as usize;
+    let preview_channels = config.monitor_channels.len().clamp(1, 2) as u32;
+    let start_sample = shared.position_samples.load(Ordering::Relaxed);
+    shared.preview_ring.reset();
+    shared.recording_preview_id.fetch_add(1, Ordering::Relaxed);
+    shared
+        .recording_preview_start_sample
+        .store(start_sample, Ordering::Relaxed);
+    shared
+        .recording_preview_sample_rate
+        .store(sample_rate, Ordering::Relaxed);
+    shared
+        .recording_preview_channels
+        .store(preview_channels, Ordering::Relaxed);
+    shared
+        .recording_preview_peaks_per_sec
+        .store(PREVIEW_PEAKS_PER_SEC, Ordering::Relaxed);
+    shared
+        .recording_preview_active
+        .store(true, Ordering::Relaxed);
+
+    let sink = crate::backend::asio_session::RecordSink {
+        audio_tx: pipeline.audio_tx,
+        free_rx: pipeline.free_rx,
+        free_tx: pipeline.free_tx,
+        samples_per_bin,
+        dropped_blocks: Arc::clone(&dropped_blocks),
+    };
+
+    eprintln!(
+        "[SphereAudio] Recording started (ASIO tap): {track_count} track(s), \
+         {input_ch}ch input @ {sample_rate} Hz"
+    );
+
+    Ok((
+        RecordingSession {
+            capture: CaptureSource::AsioSessionTap,
+            results_rx: pipeline.finalize_rx,
+            stop_flag: pipeline.stop_flag,
+            start_beat: config.start_beat,
+            sample_rate,
+            track_count,
+            recording_active,
+            dropped_blocks,
+            started_at: std::time::Instant::now(),
+            shared,
+        },
+        sink,
+    ))
+}
+
 /// Stop recording, finalize RAUF files, and return per-track results.
 pub fn stop_recording(
     session: RecordingSession,
 ) -> Result<Vec<JsRecordingResult>, SphereAudioError> {
+    let asio_tap = session.is_asio_tap();
     // Tell the callback to stop sending.
     session.recording_active.store(false, Ordering::Relaxed);
     session
@@ -778,16 +978,24 @@ pub fn stop_recording(
         .shared
         .recording_preview_active
         .store(false, Ordering::Relaxed);
-    session.shared.input_ring.set_active(false, 0, 0);
-    session
-        .shared
-        .monitor_enabled_any
-        .store(false, Ordering::Relaxed);
+    if !asio_tap {
+        // Own-stream capture doubled as the monitor source; releasing it must
+        // also release the ring. The ASIO session's ring/monitor state is
+        // owned by input-routing sync and survives the take.
+        session.shared.input_ring.set_active(false, 0, 0);
+        session
+            .shared
+            .monitor_enabled_any
+            .store(false, Ordering::Relaxed);
+    }
     let dropped_blocks = session.dropped_blocks.load(Ordering::Relaxed);
 
-    // Dropping the stream disconnects `audio_tx` (it lived inside the closure),
-    // which causes `audio_rx.recv()` in the disk writer to return Err → loop exits.
-    drop(session._input_stream);
+    // Raise the stop flag first (the ASIO tap writer exits on it even if the
+    // driver stalls), then drop the capture source: for an own stream this
+    // disconnects `audio_tx` (it lived inside the closure), which causes the
+    // disk writer's `recv` to return Disconnected → loop exits.
+    session.stop_flag.store(true, Ordering::Relaxed);
+    drop(session.capture);
 
     // Wait up to 60 s for the disk writer to flush and finalize.
     let mut results = session

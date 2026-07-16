@@ -99,14 +99,12 @@ pub fn resolve_output_device(id: Option<&str>) -> Result<(cpal::Device, String),
     resolve_output_device_for_host(&cpal::default_host(), id)
 }
 
-/// Resolve an output device against a specific CPAL host.
+/// Resolve an output device against a specific CPAL host. ASIO never routes
+/// through here — its duplex session resolves the driver itself.
 pub(crate) fn resolve_output_device_for_host(
     host: &cpal::Host,
     id: Option<&str>,
 ) -> Result<(cpal::Device, String), String> {
-    if is_asio_host(host) {
-        return resolve_duplex_device_for_host(host, id);
-    }
     match id {
         None => {
             let dev = host
@@ -128,32 +126,3 @@ pub(crate) fn resolve_output_device_for_host(
     }
 }
 
-pub(crate) fn is_asio_host(host: &cpal::Host) -> bool {
-    host.id().name().eq_ignore_ascii_case("ASIO")
-}
-
-/// Resolve a single duplex driver without CPAL's input/output capability
-/// filtering. Used only for ASIO, where one selected driver owns both sides.
-pub(crate) fn resolve_duplex_device_for_host(
-    host: &cpal::Host,
-    id: Option<&str>,
-) -> Result<(cpal::Device, String), String> {
-    let mut devices = host.devices().map_err(|error| error.to_string())?;
-    match id.map(str::trim).filter(|id| !id.is_empty()) {
-        Some(wanted) => devices
-            .find_map(|device| {
-                let name = device.name().ok()?;
-                (name == wanted).then_some((device, name))
-            })
-            .ok_or_else(|| format!("ASIO device '{wanted}' not found")),
-        None => devices
-            .next()
-            .map(|device| {
-                let name = device
-                    .name()
-                    .unwrap_or_else(|_| "Unknown ASIO device".into());
-                (device, name)
-            })
-            .ok_or_else(|| "No ASIO device found".to_string()),
-    }
-}

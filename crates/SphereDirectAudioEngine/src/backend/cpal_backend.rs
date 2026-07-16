@@ -168,7 +168,7 @@ pub(crate) fn open_on_host(
 // ── Stream builders ───────────────────────────────────────────────────────────
 
 #[allow(clippy::too_many_arguments)]
-fn build_typed_stream(
+pub(crate) fn build_typed_stream(
     device: &cpal::Device,
     config: &cpal::StreamConfig,
     sample_format: SampleFormat,

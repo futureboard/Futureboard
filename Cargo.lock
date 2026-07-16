@@ -3,6 +3,10 @@
 version = 4
 
 [[package]]
+name = "BuiltinAudioPlugins"
+version = "0.1.0"
+
+[[package]]
 name = "SphereDiscordRPC"
 version = "0.1.0"
 dependencies = [
@@ -6831,6 +6835,7 @@ dependencies = [
  "sphere-encoder",
  "symphonia",
  "windows 0.61.3",
+ "windows-registry 0.5.3",
 ]
 
 [[package]]

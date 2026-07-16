@@ -118,3 +118,8 @@ napi = [
 # Build example:
 #   cargo run -p sphere_directaudioengine --bin sphere-audio-test --features audio-test-bin
 audio-test-bin = []
+
+# Compile the Windows ASIO duplex session (Exclusive Edition toolchain).
+# This only compiles the code path — ASIO stays unusable until the edition
+# provider registers a host factory after license verification.
+asio = ["cpal/asio"]

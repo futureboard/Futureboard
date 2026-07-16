@@ -85,6 +85,8 @@ exclusive = [
     "dep:sha2",
     "dep:rand",
     "dep:windows-registry",
+    # The engine's full-duplex ASIO session rides the same toolchain switch.
+    "sphere_directaudioengine/asio",
 ]
 
 [build-dependencies]

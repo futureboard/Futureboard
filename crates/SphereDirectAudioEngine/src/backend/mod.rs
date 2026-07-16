@@ -16,8 +16,11 @@
 
 use std::sync::OnceLock;
 
+#[cfg(all(target_os = "windows", feature = "asio"))]
 use crate::error::SphereAudioError;
 
+#[cfg(all(target_os = "windows", feature = "asio"))]
+pub mod asio_session;
 pub mod cpal_backend;
 pub mod render;
 
@@ -308,6 +311,7 @@ static ASIO_HOST_FACTORY: OnceLock<AsioHostFactory> = OnceLock::new();
 /// runs `ASIOExit` + clears the global callback list — killing the active
 /// stream. Memoizing the first successfully created host removes that entire
 /// failure class: every enumeration/open/input path shares one `sys::Asio`.
+#[cfg(all(target_os = "windows", feature = "asio"))]
 struct SharedAsioHost(cpal::Host);
 
 // SAFETY: the stored host is always the ASIO variant produced by the edition
@@ -316,9 +320,12 @@ struct SharedAsioHost(cpal::Host);
 // `Host` enum lacks the auto-impl only because other variants are conservative
 // about COM thread affinity; we never store those variants here, and all
 // driver/stream operations still happen on the control thread.
+#[cfg(all(target_os = "windows", feature = "asio"))]
 unsafe impl Send for SharedAsioHost {}
+#[cfg(all(target_os = "windows", feature = "asio"))]
 unsafe impl Sync for SharedAsioHost {}
 
+#[cfg(all(target_os = "windows", feature = "asio"))]
 static ASIO_SHARED_HOST: OnceLock<SharedAsioHost> = OnceLock::new();
 
 /// Register the ASIO provider supplied by the separately linked edition crate.
@@ -328,6 +335,7 @@ pub fn register_asio_host_factory(factory: AsioHostFactory) -> Result<(), String
         .map_err(|_| "ASIO host provider is already registered".to_string())
 }
 
+#[cfg(all(target_os = "windows", feature = "asio"))]
 pub(crate) fn asio_host() -> Result<&'static cpal::Host, SphereAudioError> {
     if let Some(host) = ASIO_SHARED_HOST.get() {
         return Ok(&host.0);

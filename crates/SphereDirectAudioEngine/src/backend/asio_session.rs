@@ -20,9 +20,10 @@
 //! running while inputs are used.
 //!
 //! Realtime rules in the input callback: atomics, a bounded `try_recv` command
-//! drain, and preallocated block-pool sends only. Old record sinks are pushed
-//! to a trash channel and dropped on the control thread, never deallocated on
-//! the audio thread.
+//! drain, and preallocated block-pool sends only. Record sinks stay boxed while
+//! moving through the callback and trash channel, then are dropped on the
+//! control thread. A fixed retirement slot backpressures command draining if
+//! that channel is full or disconnected.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -41,8 +42,8 @@ use crate::runtime::RuntimeProject;
 /// Commands for the persistent input callback. Bounded and lock-free; the
 /// callback drains them at block start.
 pub enum AsioInputCommand {
-    /// Install the record fan-out for a take. A previously installed sink is
-    /// pushed to the trash channel for control-thread disposal.
+    /// Install the record fan-out for a take. Ownership stays boxed so neither
+    /// installation nor retirement deallocates on the callback.
     SetRecordSink(Box<RecordSink>),
     /// Remove the record fan-out (take stopped/cancelled).
     ClearRecordSink,
@@ -50,8 +51,9 @@ pub enum AsioInputCommand {
 
 /// Everything the input callback needs to feed one recording take. Created by
 /// `start_recording`, carried into the callback via [`AsioInputCommand`], and
-/// returned through the trash channel when replaced/cleared so the `Sender`
-/// disconnect (which finalizes the disk writer) happens off the audio thread.
+/// returned boxed through the trash channel when replaced/cleared so the
+/// `Sender` disconnect (which finalizes the disk writer) and the box
+/// deallocation both happen off the audio thread.
 pub struct RecordSink {
     pub audio_tx: Sender<Vec<i32>>,
     pub free_rx: Receiver<Vec<i32>>,
@@ -77,10 +79,15 @@ pub struct AsioDriverEventFlags {
 /// device — whose last driver handle runs `ASIOStop`/`ASIODisposeBuffers`/
 /// `ASIOExit` and fully unloads the driver.
 pub struct AsioDuplexHandle {
+    // Field order is teardown order. Deregister callbacks before disconnecting
+    // any channel endpoint they capture; keep the driver device until last.
+    input_stream: Option<cpal::Stream>,
+    output_stream: cpal::Stream,
+    _event_guard: AsioDriverEventGuard,
     pub cmd_tx: Sender<EngineCommand>,
     pub input_cmd_tx: Sender<AsioInputCommand>,
     /// Control-thread side of record-sink disposal (see [`RecordSink`]).
-    pub trash_rx: Receiver<RecordSink>,
+    pub trash_rx: Receiver<Box<RecordSink>>,
     pub events: Arc<AsioDriverEventFlags>,
     pub caps: AsioSessionCaps,
     pub device_name: String,
@@ -89,9 +96,6 @@ pub struct AsioDuplexHandle {
     /// Set when the driver has inputs but the input stream could not open —
     /// playback proceeds, and this is surfaced as a status-bar diagnostic.
     pub input_warning: Option<String>,
-    output_stream: cpal::Stream,
-    input_stream: Option<cpal::Stream>,
-    _event_guard: AsioDriverEventGuard,
     device: AsioDevice,
 }
 
@@ -271,7 +275,7 @@ pub(crate) fn open_duplex(
     shared.sample_rate.store(sample_rate, Ordering::Relaxed);
     let (cmd_tx, cmd_rx) = bounded::<EngineCommand>(512);
     let (input_cmd_tx, input_cmd_rx) = bounded::<AsioInputCommand>(8);
-    let (trash_tx, trash_rx) = bounded::<RecordSink>(8);
+    let (trash_tx, trash_rx) = bounded::<Box<RecordSink>>(8);
 
     let platform_device: cpal::Device = device.clone().into();
 
@@ -345,7 +349,11 @@ pub(crate) fn open_duplex(
         .map(|latencies| (latencies.input, latencies.output))
         .unwrap_or((0, 0));
 
-    let effective_in_channels = if input_stream.is_some() { in_channels } else { 0 };
+    let effective_in_channels = if input_stream.is_some() {
+        in_channels
+    } else {
+        0
+    };
     let channel_names = |is_input: bool, count: u32| -> Vec<String> {
         (0..count)
             .map(|index| {
@@ -399,6 +407,9 @@ pub(crate) fn open_duplex(
     );
 
     Ok(AsioDuplexHandle {
+        input_stream,
+        output_stream,
+        _event_guard: event_guard,
         cmd_tx,
         input_cmd_tx,
         trash_rx,
@@ -408,9 +419,6 @@ pub(crate) fn open_duplex(
         sample_rate,
         buffer_size: buffer_frames,
         input_warning,
-        output_stream,
-        input_stream,
-        _event_guard: event_guard,
         device,
     })
 }
@@ -474,7 +482,7 @@ fn build_input_fanout_stream(
     sample_format: cpal::SampleFormat,
     shared: Arc<SharedState>,
     input_cmd_rx: Receiver<AsioInputCommand>,
-    trash_tx: Sender<RecordSink>,
+    trash_tx: Sender<Box<RecordSink>>,
 ) -> Result<cpal::Stream, String> {
     match sample_format {
         cpal::SampleFormat::I16 => {
@@ -493,6 +501,49 @@ fn build_input_fanout_stream(
     }
 }
 
+/// Callback-owned record sink plus one fixed retirement slot. If retirement
+/// cannot reach the control thread, command draining pauses with every box
+/// still owned by the active slot, retirement slot, or bounded command queue.
+/// No sink or box is dropped/deallocated by [`drain_commands`].
+#[derive(Default)]
+struct CallbackRecordSinkState {
+    active: Option<Box<RecordSink>>,
+    pending_retirement: Option<Box<RecordSink>>,
+}
+
+impl CallbackRecordSinkState {
+    fn active(&self) -> Option<&RecordSink> {
+        self.active.as_deref()
+    }
+
+    fn drain_commands(
+        &mut self,
+        input_cmd_rx: &Receiver<AsioInputCommand>,
+        trash_tx: &Sender<Box<RecordSink>>,
+    ) {
+        if let Some(sink) = self.pending_retirement.take() {
+            if let Err(error) = trash_tx.try_send(sink) {
+                self.pending_retirement = Some(error.into_inner());
+            }
+        }
+
+        while self.pending_retirement.is_none() {
+            let Ok(command) = input_cmd_rx.try_recv() else {
+                break;
+            };
+            let retired = match command {
+                AsioInputCommand::SetRecordSink(sink) => self.active.replace(sink),
+                AsioInputCommand::ClearRecordSink => self.active.take(),
+            };
+            if let Some(sink) = retired {
+                if let Err(error) = trash_tx.try_send(sink) {
+                    self.pending_retirement = Some(error.into_inner());
+                }
+            }
+        }
+    }
+}
+
 /// One persistent input callback, four fan-out paths (mirrors the recording
 /// stream contract in `recording.rs`):
 ///   1. monitor  → `shared.input_ring` (drained by the output render callback)
@@ -501,21 +552,21 @@ fn build_input_fanout_stream(
 ///   4. record   → preallocated block pool → bounded channel → disk writer
 ///
 /// Realtime-safe: no allocation, no locks, no syscalls. Sink swaps arrive over
-/// a bounded channel; discarded sinks leave via `trash_tx` so their channel
-/// `Sender`s drop on the control thread.
+/// a bounded channel; discarded boxed sinks leave via `trash_tx` so their box
+/// allocation and channel `Sender`s drop on the control thread.
 fn build_input_fanout_typed<T: AsioInputSample>(
     device: &cpal::Device,
     config: &cpal::StreamConfig,
     shared: Arc<SharedState>,
     input_cmd_rx: Receiver<AsioInputCommand>,
-    trash_tx: Sender<RecordSink>,
+    trash_tx: Sender<Box<RecordSink>>,
 ) -> Result<cpal::Stream, String> {
     use crate::engine::atomic_max_f32_bits;
     use crate::input_ring::WaveformPeak;
 
     let channels = config.channels.max(1) as usize;
 
-    let mut record_sink: Option<RecordSink> = None;
+    let mut record_sink = CallbackRecordSinkState::default();
     // Preview accumulator — callback-local state, no allocation per block.
     let mut bin_min = f32::MAX;
     let mut bin_max = f32::MIN;
@@ -526,21 +577,9 @@ fn build_input_fanout_typed<T: AsioInputSample>(
         .build_input_stream::<T, _, _>(
             config,
             move |data: &[T], _info| {
-                // 1. Drain sink-swap commands (bounded, lock-free).
-                while let Ok(command) = input_cmd_rx.try_recv() {
-                    match command {
-                        AsioInputCommand::SetRecordSink(sink) => {
-                            if let Some(old) = record_sink.replace(*sink) {
-                                let _ = trash_tx.try_send(old);
-                            }
-                        }
-                        AsioInputCommand::ClearRecordSink => {
-                            if let Some(old) = record_sink.take() {
-                                let _ = trash_tx.try_send(old);
-                            }
-                        }
-                    }
-                }
+                // 1. Drain sink-swap commands (bounded, lock-free). A failed
+                // retirement is retained locally and backpressures this drain.
+                record_sink.drain_commands(&input_cmd_rx, &trash_tx);
 
                 let frames = data.len() / channels;
                 shared.input_cb_count.fetch_add(1, Ordering::Relaxed);
@@ -553,7 +592,7 @@ fn build_input_fanout_typed<T: AsioInputSample>(
                 let ring_active = shared.input_ring.is_active();
                 let preview_active = shared.recording_preview_active.load(Ordering::Relaxed);
                 let samples_per_bin = record_sink
-                    .as_ref()
+                    .active()
                     .map(|sink| sink.samples_per_bin)
                     .unwrap_or(0);
 
@@ -564,11 +603,7 @@ fn build_input_fanout_typed<T: AsioInputSample>(
                 let mut session_peak = 0.0f32;
 
                 for frame in data.chunks(channels) {
-                    let first = frame
-                        .first()
-                        .copied()
-                        .map(T::to_monitor_f32)
-                        .unwrap_or(0.0);
+                    let first = frame.first().copied().map(T::to_monitor_f32).unwrap_or(0.0);
                     let l = frame
                         .get(mon_l_ch)
                         .copied()
@@ -642,7 +677,7 @@ fn build_input_fanout_typed<T: AsioInputSample>(
 
                 // 4. Record fan-out → disk writer (only while a take is live).
                 if shared.recording_active.load(Ordering::Relaxed) {
-                    if let Some(sink) = record_sink.as_ref() {
+                    if let Some(sink) = record_sink.active() {
                         match sink.free_rx.try_recv() {
                             Ok(mut block) => {
                                 if block.capacity() < data.len() {
@@ -654,9 +689,7 @@ fn build_input_fanout_typed<T: AsioInputSample>(
                                     block.extend(data.iter().copied().map(T::to_record_i32));
                                     if let Err(error) = sink.audio_tx.try_send(block) {
                                         sink.dropped_blocks.fetch_add(1, Ordering::Relaxed);
-                                        shared
-                                            .record_ring_overruns
-                                            .fetch_add(1, Ordering::Relaxed);
+                                        shared.record_ring_overruns.fetch_add(1, Ordering::Relaxed);
                                         let _ = sink.free_tx.try_send(error.into_inner());
                                     }
                                 }
@@ -677,8 +710,11 @@ fn build_input_fanout_typed<T: AsioInputSample>(
 
 #[cfg(test)]
 mod tests {
-    use super::snap_buffer_size;
+    use super::{snap_buffer_size, AsioInputCommand, CallbackRecordSinkState, RecordSink};
     use cpal::platform::AsioBufferSizeInfo;
+    use crossbeam_channel::{bounded, Receiver, TryRecvError};
+    use std::sync::atomic::AtomicU64;
+    use std::sync::Arc;
 
     fn info(min: u32, max: u32, preferred: u32, granularity: i32) -> AsioBufferSizeInfo {
         AsioBufferSizeInfo {
@@ -687,6 +723,122 @@ mod tests {
             preferred,
             granularity,
         }
+    }
+
+    fn record_sink() -> (Box<RecordSink>, Receiver<Vec<i32>>) {
+        let (audio_tx, audio_rx) = bounded(1);
+        let (free_tx, free_rx) = bounded(1);
+        (
+            Box::new(RecordSink {
+                audio_tx,
+                free_rx,
+                free_tx,
+                samples_per_bin: 1,
+                dropped_blocks: Arc::new(AtomicU64::new(0)),
+            }),
+            audio_rx,
+        )
+    }
+
+    fn assert_sink_is_alive(audio_rx: &Receiver<Vec<i32>>) {
+        assert!(matches!(audio_rx.try_recv(), Err(TryRecvError::Empty)));
+    }
+
+    fn assert_sink_was_dropped(audio_rx: &Receiver<Vec<i32>>) {
+        assert!(matches!(
+            audio_rx.try_recv(),
+            Err(TryRecvError::Disconnected)
+        ));
+    }
+
+    #[test]
+    fn full_trash_queue_retains_sinks_and_backpressures_commands() {
+        let (input_cmd_tx, input_cmd_rx) = bounded(4);
+        let (trash_tx, trash_rx) = bounded(1);
+        let mut state = CallbackRecordSinkState::default();
+
+        let (blocker, blocker_audio_rx) = record_sink();
+        assert!(trash_tx.try_send(blocker).is_ok());
+
+        let (first, first_audio_rx) = record_sink();
+        assert!(input_cmd_tx
+            .try_send(AsioInputCommand::SetRecordSink(first))
+            .is_ok());
+        state.drain_commands(&input_cmd_rx, &trash_tx);
+        assert_sink_is_alive(&first_audio_rx);
+
+        let (second, second_audio_rx) = record_sink();
+        assert!(input_cmd_tx
+            .try_send(AsioInputCommand::SetRecordSink(second))
+            .is_ok());
+        state.drain_commands(&input_cmd_rx, &trash_tx);
+        assert!(state.active.is_some());
+        assert!(state.pending_retirement.is_some());
+        assert_sink_is_alive(&first_audio_rx);
+        assert_sink_is_alive(&second_audio_rx);
+
+        assert!(input_cmd_tx
+            .try_send(AsioInputCommand::ClearRecordSink)
+            .is_ok());
+        state.drain_commands(&input_cmd_rx, &trash_tx);
+        assert_eq!(input_cmd_rx.len(), 1);
+        assert_sink_is_alive(&first_audio_rx);
+        assert_sink_is_alive(&second_audio_rx);
+
+        drop(trash_rx.try_recv().expect("blocking sink must be queued"));
+        assert_sink_was_dropped(&blocker_audio_rx);
+
+        state.drain_commands(&input_cmd_rx, &trash_tx);
+        assert_eq!(input_cmd_rx.len(), 0);
+        assert!(state.active.is_none());
+        assert!(state.pending_retirement.is_some());
+        assert_sink_is_alive(&first_audio_rx);
+        assert_sink_is_alive(&second_audio_rx);
+
+        drop(trash_rx.try_recv().expect("first sink must retire first"));
+        assert_sink_was_dropped(&first_audio_rx);
+        state.drain_commands(&input_cmd_rx, &trash_tx);
+        assert!(state.pending_retirement.is_none());
+        drop(trash_rx.try_recv().expect("second sink must retire last"));
+        assert_sink_was_dropped(&second_audio_rx);
+    }
+
+    #[test]
+    fn disconnected_trash_queue_retains_sink_and_queued_command() {
+        let (input_cmd_tx, input_cmd_rx) = bounded(4);
+        let (trash_tx, trash_rx) = bounded(1);
+        let mut state = CallbackRecordSinkState::default();
+        drop(trash_rx);
+
+        let (first, first_audio_rx) = record_sink();
+        let (second, second_audio_rx) = record_sink();
+        assert!(input_cmd_tx
+            .try_send(AsioInputCommand::SetRecordSink(first))
+            .is_ok());
+        assert!(input_cmd_tx
+            .try_send(AsioInputCommand::ClearRecordSink)
+            .is_ok());
+        assert!(input_cmd_tx
+            .try_send(AsioInputCommand::SetRecordSink(second))
+            .is_ok());
+
+        state.drain_commands(&input_cmd_rx, &trash_tx);
+        assert_eq!(input_cmd_rx.len(), 1);
+        assert!(state.active.is_none());
+        assert!(state.pending_retirement.is_some());
+        assert_sink_is_alive(&first_audio_rx);
+        assert_sink_is_alive(&second_audio_rx);
+
+        state.drain_commands(&input_cmd_rx, &trash_tx);
+        assert_eq!(input_cmd_rx.len(), 1);
+        assert_sink_is_alive(&first_audio_rx);
+        assert_sink_is_alive(&second_audio_rx);
+
+        drop(state);
+        assert_sink_was_dropped(&first_audio_rx);
+        drop(input_cmd_tx);
+        drop(input_cmd_rx);
+        assert_sink_was_dropped(&second_audio_rx);
     }
 
     #[test]
@@ -698,7 +850,10 @@ mod tests {
     #[test]
     fn clamps_to_driver_range() {
         assert_eq!(snap_buffer_size(Some(16), &info(64, 2048, 512, -1)), 64);
-        assert_eq!(snap_buffer_size(Some(1 << 20), &info(64, 2048, 512, -1)), 2048);
+        assert_eq!(
+            snap_buffer_size(Some(1 << 20), &info(64, 2048, 512, -1)),
+            2048
+        );
     }
 
     #[test]

@@ -3,11 +3,13 @@
 //!
 //! The main app's audio callback (in `DirectAudio`) holds an `Arc<dyn PluginBridgeSink>`
 //! and calls these methods per block to read the host's produced output and
-//! request the next one. All methods are wait-free — they only touch the
-//! lock-free shared region (atomics + raw buffer copies), never allocate or lock.
+//! request the next one. Methods only touch the lock-free shared region
+//! (atomics + raw buffer copies), never allocate or lock. Output reads use a
+//! hard-bounded 1 ms handoff grace to absorb cross-process scheduler jitter.
 
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use DirectAudio::plugin_bridge::{PluginBridgeSink, SharedPluginBridgeSink};
 
@@ -50,6 +52,14 @@ pub struct SharedRegionSink {
     output_channel_peaks: [AtomicU32; MAX_CHANNELS],
 }
 
+/// Cross-process scheduling can publish the previous block a few microseconds
+/// after the device callback begins. A single non-blocking probe turned that
+/// harmless scheduler jitter into a full block of silence. Give the already
+/// requested block a small, hard-bounded grace period; this remains well below
+/// a 256-frame / 48 kHz ASIO period (5.33 ms), never replays stale output, and
+/// still returns immediately when the host met its deadline.
+const OUTPUT_HANDOFF_GRACE: Duration = Duration::from_millis(1);
+
 impl std::fmt::Debug for SharedRegionSink {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SharedRegionSink")
@@ -78,6 +88,31 @@ impl SharedRegionSink {
         kick: Option<Arc<BridgeKickEvent>>,
     ) -> SharedPluginBridgeSink {
         Arc::new(Self::with_kick(region, kick))
+    }
+
+    #[inline]
+    fn fresh_done_seq(&self) -> Option<u64> {
+        let bridge = self.region.bridge();
+        let last = self.last_read_seq.load(Ordering::Relaxed);
+        let mut done = bridge.done_seq.load(Ordering::Acquire);
+
+        // Request 0 means no host block has ever been kicked (startup), so
+        // there is nothing useful to wait for yet.
+        if done == last && bridge.request_seq.load(Ordering::Acquire) != 0 {
+            let deadline = Instant::now() + OUTPUT_HANDOFF_GRACE;
+            while done == last && Instant::now() < deadline {
+                std::hint::spin_loop();
+                done = bridge.done_seq.load(Ordering::Acquire);
+            }
+        }
+
+        if done == last {
+            bridge.xrun_count.fetch_add(1, Ordering::Relaxed);
+            None
+        } else {
+            self.last_read_seq.store(done, Ordering::Relaxed);
+            Some(done)
+        }
     }
 }
 
@@ -114,15 +149,12 @@ impl PluginBridgeSink for SharedRegionSink {
             enabled_channels
         };
         let bridge = self.region.bridge();
-        // Freshness guard: only hand a produced block to the engine once. When
-        // the host misses its deadline (editor open/close or plugin load holds
-        // its engine lock), `done_seq` stops advancing and we return 0 — the
-        // engine bypasses/silences the block. Never replay stale output.
-        let done = bridge.done_seq.load(Ordering::Acquire);
-        if done == self.last_read_seq.load(Ordering::Relaxed) {
+        // Freshness guard: only hand a produced block to the engine once. The
+        // bounded handoff absorbs scheduler jitter; a genuinely stalled host
+        // still returns 0 and is bypassed/silenced. Never replay stale output.
+        if self.fresh_done_seq().is_none() {
             return 0;
         }
-        self.last_read_seq.store(done, Ordering::Relaxed);
         let output_channels = bridge
             .plugin_output_channels()
             .min(crate::audio_bridge::MAX_CHANNELS as u32) as usize;
@@ -157,11 +189,9 @@ impl PluginBridgeSink for SharedRegionSink {
         // Same freshness guard as `read_output_for_channels`: hand a produced
         // block to the engine exactly once. The caller folds the main pair and
         // scatters child pairs from this single read.
-        let done = bridge.done_seq.load(Ordering::Acquire);
-        if done == self.last_read_seq.load(Ordering::Relaxed) {
+        if self.fresh_done_seq().is_none() {
             return (0, 0);
         }
-        self.last_read_seq.store(done, Ordering::Relaxed);
         let channels = bridge.plugin_output_channels().min(MAX_CHANNELS as u32) as usize;
         let frames = frames.min(crate::audio_bridge::MAX_BLOCK_FRAMES);
         let len = (frames * channels).min(out_interleaved.len());
@@ -319,6 +349,7 @@ mod tests {
         // a stalled host yields 0 (engine bypasses) instead of stale audio.
         let again = sink.read_output(&mut out_l[..frames], &mut out_r[..frames], frames);
         assert_eq!(again, 0);
+        assert_eq!(region.bridge().xrun_count.load(Ordering::Relaxed), 1);
         // Once the host produces the next block, reads resume.
         region.bridge().done_seq.store(2, Ordering::Release);
         let fresh = sink.read_output(&mut out_l[..frames], &mut out_r[..frames], frames);

@@ -631,7 +631,7 @@ impl Render for Timeline {
         let on_volume_drag_commit: std::sync::Arc<
             dyn Fn(&String, &mut gpui::Window, &mut gpui::App) + 'static,
         > = std::sync::Arc::new(on_volume_drag_commit);
-        let _on_pan_change: std::sync::Arc<
+        let on_pan_change: std::sync::Arc<
             dyn Fn(&(String, f32), &mut gpui::Window, &mut gpui::App) + 'static,
         > = std::sync::Arc::new(on_pan_change);
         let on_add_clip: std::sync::Arc<
@@ -984,6 +984,7 @@ impl Render for Timeline {
             on_volume_drag_start: on_volume_drag_start.clone(),
             on_volume_drag_preview: on_volume_drag_preview.clone(),
             on_volume_drag_commit: on_volume_drag_commit.clone(),
+            on_pan_change: on_pan_change.clone(),
             on_context_menu: on_track_context_menu.clone(),
         };
 

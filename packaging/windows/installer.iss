@@ -17,7 +17,7 @@
 #define MyAppMachineDir "{commonpf64}\Futureboard Studio\Studio"
 
 #ifndef MyAppVersion
-#define MyAppVersion "2026.6.17"
+#define MyAppVersion "2026.7.2"
 #endif
 
 [Setup]

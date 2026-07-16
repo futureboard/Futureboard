@@ -16,8 +16,8 @@
 //!   * The native facade adds no allocations on the audio thread.
 
 use std::path::Path;
-use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 
 use crate::audio_file;
 use crate::backend::{self, BackendKind};

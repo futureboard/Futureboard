@@ -1146,11 +1146,11 @@ pub fn render_project_block_interleaved_with_taps(
             out[1] = crate::dsp::gain::soft_limit(out[1] * master_volume);
         }
     }
-    {
+    if crate::forensic_trace::forensic_trace_enabled() {
         static MASTER_INPUT_LOG_SEQ: std::sync::atomic::AtomicU64 =
             std::sync::atomic::AtomicU64::new(0);
         let process_seq = MASTER_INPUT_LOG_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        if crate::forensic_trace::forensic_trace_enabled() || process_seq.is_multiple_of(30) {
+        if process_seq.is_multiple_of(30) {
             let mut peak_l = 0.0f32;
             let mut peak_r = 0.0f32;
             for i in 0..frames {
@@ -1783,6 +1783,10 @@ pub(crate) fn scatter_vsti_output_children(
     if frames == 0 || source_track_index >= runtime.tracks.len() {
         return;
     }
+    // This function runs on the device callback. Production routing must not
+    // allocate, format strings, scan peaks, or write stderr. The detailed bus
+    // trace remains available behind the explicit forensic flag.
+    let trace = crate::forensic_trace::forensic_trace_enabled();
     let insert_count = runtime.tracks[source_track_index].inserts.len();
     for ins in 0..insert_count {
         let child_count = runtime.tracks[source_track_index].inserts[ins]
@@ -1806,7 +1810,7 @@ pub(crate) fn scatter_vsti_output_children(
             continue;
         }
         for c in 0..child_count {
-            let (dest_idx, ch_l, ch_r, bus_index, channel_count, dest_track_id, insert_id) = {
+            let (dest_idx, ch_l, ch_r, bus_index, channel_count, trace_ids) = {
                 let child =
                     &runtime.tracks[source_track_index].inserts[ins].vsti_output_children[c];
                 let ch_l = child.channel_l as usize;
@@ -1820,8 +1824,12 @@ pub(crate) fn scatter_vsti_output_children(
                     ch_r,
                     child.bus_index,
                     child.channel_count,
-                    child.dest_track_id.clone(),
-                    runtime.tracks[source_track_index].inserts[ins].id.clone(),
+                    trace.then(|| {
+                        (
+                            child.dest_track_id.clone(),
+                            runtime.tracks[source_track_index].inserts[ins].id.clone(),
+                        )
+                    }),
                 )
             };
             let scratch_len = runtime.tracks[source_track_index].inserts[ins]
@@ -1831,11 +1839,11 @@ pub(crate) fn scatter_vsti_output_children(
             if n == 0 {
                 continue;
             }
-            let mut source_peak_l = 0.0f32;
-            let mut source_peak_r = 0.0f32;
-            let mut sum_l = 0.0f64;
-            let mut sum_r = 0.0f64;
-            {
+            let (source_peak_l, source_peak_r, sum_l, sum_r) = if trace {
+                let mut source_peak_l = 0.0f32;
+                let mut source_peak_r = 0.0f32;
+                let mut sum_l = 0.0f64;
+                let mut sum_r = 0.0f64;
                 let scratch = &runtime.tracks[source_track_index].inserts[ins].scratch_multi;
                 for i in 0..n {
                     let base = i * channels;
@@ -1846,16 +1854,23 @@ pub(crate) fn scatter_vsti_output_children(
                     sum_l += (l as f64) * (l as f64);
                     sum_r += (r as f64) * (r as f64);
                 }
-            }
-            let nonzero = source_peak_l.max(source_peak_r) > 0.0001;
-            let process_seq = {
+                (source_peak_l, source_peak_r, sum_l, sum_r)
+            } else {
+                (0.0, 0.0, 0.0, 0.0)
+            };
+            let nonzero = trace && source_peak_l.max(source_peak_r) > 0.0001;
+            let process_seq = if trace {
                 static BUS_AUDIO_ROUTE_SEQ: std::sync::atomic::AtomicU64 =
                     std::sync::atomic::AtomicU64::new(0);
                 BUS_AUDIO_ROUTE_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            } else {
+                0
             };
-            let route_log = crate::forensic_trace::forensic_trace_enabled()
-                || process_seq.is_multiple_of(30)
-                || nonzero;
+            let route_log = trace && (process_seq.is_multiple_of(30) || nonzero);
+            let (dest_track_id, insert_id) = trace_ids
+                .as_ref()
+                .map(|(dest, insert)| (dest.as_str(), insert.as_str()))
+                .unwrap_or(("", ""));
             if route_log {
                 let rms_l = (sum_l / n as f64).sqrt();
                 let rms_r = (sum_r / n as f64).sqrt();
@@ -1864,17 +1879,17 @@ pub(crate) fn scatter_vsti_output_children(
                 );
             }
             let Some(dest_idx) = dest_idx else {
-                if nonzero {
-                    let scratch = &runtime.tracks[source_track_index].inserts[ins].scratch_multi;
-                    add_bus_pair_to_master_output(
-                        scratch,
-                        channels,
-                        ch_l,
-                        ch_r,
-                        frames,
-                        output,
-                        output_channels,
-                    );
+                let scratch = &runtime.tracks[source_track_index].inserts[ins].scratch_multi;
+                add_bus_pair_to_master_output(
+                    scratch,
+                    channels,
+                    ch_l,
+                    ch_r,
+                    frames,
+                    output,
+                    output_channels,
+                );
+                if trace {
                     eprintln!(
                         "[ROUTING ERROR]\nplugin_instance_id={insert_id}\nbus_index={bus_index}\nreason=destination mixer channel does not exist\ndestination_mixer_channel_id={dest_track_id}\nfallback_downmix=true"
                     );
@@ -1887,58 +1902,6 @@ pub(crate) fn scatter_vsti_output_children(
                 continue;
             };
             if dest_idx >= runtime.tracks.len() || dest_idx == source_track_index {
-                if nonzero {
-                    let scratch = &runtime.tracks[source_track_index].inserts[ins].scratch_multi;
-                    add_bus_pair_to_master_output(
-                        scratch,
-                        channels,
-                        ch_l,
-                        ch_r,
-                        frames,
-                        output,
-                        output_channels,
-                    );
-                    eprintln!(
-                        "[ROUTING ERROR]\nplugin_instance_id={insert_id}\nbus_index={bus_index}\nreason=stale mixer channel index\ndestination_mixer_channel_id={dest_track_id}\nfallback_downmix=true"
-                    );
-                }
-                continue;
-            }
-            let route_to_master_exists = track_has_master_route(runtime, dest_idx);
-            let (write_peak_l, write_peak_r, mute, solo, gain) = {
-                let (src_track, dst_track) =
-                    two_mut(&mut runtime.tracks, source_track_index, dest_idx);
-                let scratch = &src_track.inserts[ins].scratch_multi;
-                let n = n.min(dst_track.recv_l.len()).min(dst_track.recv_r.len());
-                for i in 0..n {
-                    let base = i * channels;
-                    dst_track.recv_l[i] += scratch[base + ch_l - 1];
-                    dst_track.recv_r[i] += scratch[base + ch_r - 1];
-                }
-                let write_peak_l = dst_track.recv_l[..n]
-                    .iter()
-                    .fold(0.0f32, |peak, sample| peak.max(sample.abs()));
-                let write_peak_r = dst_track.recv_r[..n]
-                    .iter()
-                    .fold(0.0f32, |peak, sample| peak.max(sample.abs()));
-                (
-                    write_peak_l,
-                    write_peak_r,
-                    dst_track.muted,
-                    dst_track.solo,
-                    dst_track.volume,
-                )
-            };
-            if route_log {
-                eprintln!(
-                    "[BUS TO MIXER WRITE]\nplugin_instance_id={insert_id}\nbus_index={bus_index}\nsource_peak_l={source_peak_l:.6}\nsource_peak_r={source_peak_r:.6}\ndestination_mixer_channel_id={dest_track_id}\ndestination_exists=true\nsamples_written={}\nwrite_peak_l={write_peak_l:.6}\nwrite_peak_r={write_peak_r:.6}",
-                    write_peak_l.max(write_peak_r) > 0.0001
-                );
-                eprintln!(
-                    "[MIXER CHANNEL AFTER STRIP]\nmixer_channel_id={dest_track_id}\nroute_node_id={dest_track_id}\nbus_index={bus_index}\nmute={mute}\nsolo={solo}\ngain={gain:.6}\npost_strip_peak_l={write_peak_l:.6}\npost_strip_peak_r={write_peak_r:.6}\nroute_to_master_exists={route_to_master_exists}"
-                );
-            }
-            if nonzero && !route_to_master_exists {
                 let scratch = &runtime.tracks[source_track_index].inserts[ins].scratch_multi;
                 add_bus_pair_to_master_output(
                     scratch,
@@ -1949,8 +1912,60 @@ pub(crate) fn scatter_vsti_output_children(
                     output,
                     output_channels,
                 );
+                if trace {
+                    eprintln!(
+                        "[ROUTING ERROR]\nplugin_instance_id={insert_id}\nbus_index={bus_index}\nreason=stale mixer channel index\ndestination_mixer_channel_id={dest_track_id}\nfallback_downmix=true"
+                    );
+                }
+                continue;
+            }
+            let route_to_master_exists = track_has_master_route(runtime, dest_idx);
+            {
+                let (src_track, dst_track) =
+                    two_mut(&mut runtime.tracks, source_track_index, dest_idx);
+                let scratch = &src_track.inserts[ins].scratch_multi;
+                let n = n.min(dst_track.recv_l.len()).min(dst_track.recv_r.len());
+                for i in 0..n {
+                    let base = i * channels;
+                    dst_track.recv_l[i] += scratch[base + ch_l - 1];
+                    dst_track.recv_r[i] += scratch[base + ch_r - 1];
+                }
+            }
+            if !route_to_master_exists {
+                let scratch = &runtime.tracks[source_track_index].inserts[ins].scratch_multi;
+                add_bus_pair_to_master_output(
+                    scratch,
+                    channels,
+                    ch_l,
+                    ch_r,
+                    frames,
+                    output,
+                    output_channels,
+                );
+                if trace {
+                    eprintln!(
+                        "[ROUTING ERROR]\nplugin_instance_id={insert_id}\nbus_index={bus_index}\nreason=destination mixer channel has no route to master\ndestination_mixer_channel_id={dest_track_id}\nfallback_downmix=true"
+                    );
+                }
+            }
+            if route_log {
+                let dst_track = &runtime.tracks[dest_idx];
+                let n = n.min(dst_track.recv_l.len()).min(dst_track.recv_r.len());
+                let write_peak_l = dst_track.recv_l[..n]
+                    .iter()
+                    .fold(0.0f32, |peak, sample| peak.max(sample.abs()));
+                let write_peak_r = dst_track.recv_r[..n]
+                    .iter()
+                    .fold(0.0f32, |peak, sample| peak.max(sample.abs()));
+                let mute = dst_track.muted;
+                let solo = dst_track.solo;
+                let gain = dst_track.volume;
                 eprintln!(
-                    "[ROUTING ERROR]\nplugin_instance_id={insert_id}\nbus_index={bus_index}\nreason=destination mixer channel has no route to master\ndestination_mixer_channel_id={dest_track_id}\nfallback_downmix=true"
+                    "[BUS TO MIXER WRITE]\nplugin_instance_id={insert_id}\nbus_index={bus_index}\nsource_peak_l={source_peak_l:.6}\nsource_peak_r={source_peak_r:.6}\ndestination_mixer_channel_id={dest_track_id}\ndestination_exists=true\nsamples_written={}\nwrite_peak_l={write_peak_l:.6}\nwrite_peak_r={write_peak_r:.6}",
+                    write_peak_l.max(write_peak_r) > 0.0001
+                );
+                eprintln!(
+                    "[MIXER CHANNEL AFTER STRIP]\nmixer_channel_id={dest_track_id}\nroute_node_id={dest_track_id}\nbus_index={bus_index}\nmute={mute}\nsolo={solo}\ngain={gain:.6}\npost_strip_peak_l={write_peak_l:.6}\npost_strip_peak_r={write_peak_r:.6}\nroute_to_master_exists={route_to_master_exists}"
                 );
             }
             if route_log && nonzero {
@@ -2152,7 +2167,9 @@ pub fn apply_insert_block(
                 .unwrap_or("");
             eprintln!(
                 "[SphereAudio callback] insert={} format={} processorHandle=0x{:x} INVALID/DESTROYED bypass=true — insert bypassed to prevent use-after-free",
-                insert.id, format, vst3.handle_value()
+                insert.id,
+                format,
+                vst3.handle_value()
             );
         }
         return;

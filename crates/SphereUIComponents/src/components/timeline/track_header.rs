@@ -1,12 +1,12 @@
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    div, px, svg, AppContext, InteractiveElement, IntoElement, ParentElement, Render,
-    StatefulInteractiveElement, Styled, Window,
+    div, px, svg, AppContext, DragMoveEvent, InteractiveElement, IntoElement, ParentElement,
+    Render, StatefulInteractiveElement, Styled, Window,
 };
 
 use crate::assets;
 use crate::components::fader::{db_value_pill, horizontal_fader_with_drag_callbacks};
-use crate::components::knob::format_pan_label;
+use crate::components::knob::{format_pan_label, KnobDrag};
 use crate::components::timeline::timeline_state::{
     volume, TimelineState, TrackDragItem, TrackLaneMode, TrackState, TrackType, HEADER_WIDTH,
     TRACK_HEADER_CONTROLS_MIN_HEIGHT,
@@ -39,6 +39,7 @@ pub struct TrackHeaderCallbacks {
     pub on_volume_drag_start: VolumeCallback,
     pub on_volume_drag_preview: VolumeCallback,
     pub on_volume_drag_commit: VolumeCommitCallback,
+    pub on_pan_change: VolumeCallback,
     pub on_context_menu: Option<TrackContextCallback>,
 }
 
@@ -304,6 +305,10 @@ pub fn track_header(
             );
         }
     };
+    let pan_id = track_id.clone();
+    let pan_drag_key = format!("track-pan-{}", track.id);
+    let pan_drag_anchor = std::sync::Arc::new(std::sync::Mutex::new(None::<f32>));
+    let on_pan_change = callbacks.on_pan_change.clone();
     let context_id = track_id.clone();
     let on_context = callbacks.on_context_menu.clone();
     let drag_track_id = track_id.clone();
@@ -535,7 +540,8 @@ pub fn track_header(
                                 Some(on_volume_reset),
                             ))
                             // Pan readout — compact bordered label matching the
-                            // dB pill alongside it.
+                            // dB pill alongside it. Vertical drag scrubs pan;
+                            // Shift gives fine control and double-click resets C.
                             .child({
                                 let border = if is_selected {
                                     let mut c = track.color;
@@ -544,7 +550,16 @@ pub fn track_header(
                                 } else {
                                     Colors::border_default()
                                 };
+                                let drag_key = pan_drag_key.clone();
+                                let drag_anchor = pan_drag_anchor.clone();
+                                let drag_anchor_move = pan_drag_anchor.clone();
+                                let drag_cb = on_pan_change.clone();
+                                let drag_track_id = pan_id.clone();
+                                let reset_cb = on_pan_change.clone();
+                                let reset_track_id = pan_id.clone();
+                                let start_pan = track.pan;
                                 div()
+                                    .id(("track-pan-spinner", id_num))
                                     .flex()
                                     .items_center()
                                     .justify_center()
@@ -558,7 +573,55 @@ pub fn track_header(
                                     .text_size(px(9.0))
                                     .font_weight(gpui::FontWeight::SEMIBOLD)
                                     .text_color(Colors::text_secondary())
+                                    .cursor(gpui::CursorStyle::ResizeUpDown)
+                                    .hover(|style| {
+                                        style
+                                            .bg(Colors::surface_control_hover())
+                                            .border_color(Colors::border_strong())
+                                    })
                                     .child(format_pan_label(track.pan))
+                                    .on_drag(
+                                        KnobDrag {
+                                            id: drag_key.clone(),
+                                            start_y: 0.0,
+                                            start_value: start_pan,
+                                        },
+                                        move |drag, _offset, _window, cx| {
+                                            *drag_anchor
+                                                .lock()
+                                                .expect("track pan drag mutex poisoned") = None;
+                                            cx.new(|_| drag.clone())
+                                        },
+                                    )
+                                    .on_drag_move::<KnobDrag>(
+                                        move |event: &DragMoveEvent<KnobDrag>, window, cx| {
+                                            let drag = event.drag(cx);
+                                            if drag.id != drag_key {
+                                                return;
+                                            }
+                                            let current_y: f32 = event.event.position.y.into();
+                                            let mut anchor = drag_anchor_move
+                                                .lock()
+                                                .expect("track pan drag mutex poisoned");
+                                            let start_y = *anchor.get_or_insert(current_y);
+                                            let sensitivity = if event.event.modifiers.shift {
+                                                0.002
+                                            } else {
+                                                2.0 / 150.0
+                                            };
+                                            let next = (drag.start_value
+                                                + (start_y - current_y) * sensitivity)
+                                                .clamp(-1.0, 1.0);
+                                            let next = (next * 1000.0).round() / 1000.0;
+                                            drop(anchor);
+                                            drag_cb(&(drag_track_id.clone(), next), window, cx);
+                                        },
+                                    )
+                                    .on_click(move |event, window, cx| {
+                                        if event.click_count() >= 2 {
+                                            reset_cb(&(reset_track_id.clone(), 0.0), window, cx);
+                                        }
+                                    })
                             })
                             // Compact meter
                             .child(vu_meter_with_levels(

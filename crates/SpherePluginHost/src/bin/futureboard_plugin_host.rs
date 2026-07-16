@@ -370,6 +370,7 @@ fn service_audio_bridge(
     if req == done {
         return; // no new block requested
     }
+    let process_started = Instant::now();
     // No engine mutex on the block path: the voice list is an Arc snapshot the
     // engine republishes on load/unload only, so the IPC thread can hold the
     // engine lock across editor attach / plugin load for seconds without
@@ -490,6 +491,13 @@ fn service_audio_bridge(
             "[vst3-process] instance={plugin_instance_id} frames={frames} channels={produced_channels} midi_events={midi_count} output_peak_l={peak_l:.6} output_peak_r={peak_r:.6}",
         );
     }
+    let process_micros = process_started.elapsed().as_micros().min(u32::MAX as u128) as u32;
+    bridge
+        .last_process_micros
+        .store(process_micros, Ordering::Relaxed);
+    bridge
+        .max_process_micros
+        .fetch_max(process_micros, Ordering::Relaxed);
     bridge.done_seq.store(req, Ordering::Release);
 }
 
@@ -1032,9 +1040,12 @@ fn run_ipc_loop(mut out: io::Stdout, shutdown: Arc<AtomicBool>) {
                     let bridge = region.bridge();
                     let (peak_l, peak_r) = bridge.meters();
                     eprintln!(
-                        "[plugin-host-bridge] instance={instance_id} request_seq={} done_seq={} dsp_output={} peak_l={peak_l:.3} peak_r={peak_r:.3}",
+                        "[plugin-host-bridge] instance={instance_id} request_seq={} done_seq={} xruns={} process_us={} max_process_us={} dsp_output={} peak_l={peak_l:.3} peak_r={peak_r:.3}",
                         bridge.request_seq.load(Ordering::Relaxed),
                         bridge.done_seq.load(Ordering::Relaxed),
+                        bridge.xrun_count.load(Ordering::Relaxed),
+                        bridge.last_process_micros.load(Ordering::Relaxed),
+                        bridge.max_process_micros.load(Ordering::Relaxed),
                         if bridge.dsp_output_ready() {
                             "ready"
                         } else {
@@ -1550,7 +1561,9 @@ fn dispatch(
             {
                 let _ = region_slots;
                 let _ = &plugin_instance_id;
-                eprintln!("[plugin-host-bridge] AttachSharedAudio unsupported on this platform name={name}");
+                eprintln!(
+                    "[plugin-host-bridge] AttachSharedAudio unsupported on this platform name={name}"
+                );
                 let _ = ipc::write_frame(
                     out,
                     &HostEvent::SharedAudioAttached {
@@ -1876,7 +1889,10 @@ fn finalize_plugin_load(
     );
     eprintln!(
         "[PLUGIN LOAD READY]\nrequest_id={}\nplugin_instance_id={}\nplugin_name={}\nload_duration_ms={}\naudio_ready = true\neditor_created = false\nroute_ready = true\nmixer_channels_created=0\nselected_bus_mode=capability_detected\nui_responsive = true",
-        result.request_id, result.plugin_instance_id, result.name, result.elapsed.as_millis()
+        result.request_id,
+        result.plugin_instance_id,
+        result.name,
+        result.elapsed.as_millis()
     );
     let _ = ipc::write_frame(
         out,
@@ -1935,9 +1951,7 @@ fn expire_plugin_load_requests(
         );
         eprintln!(
             "[PLUGIN LOAD FAILURE]\nrequest_id={}\nplugin_name={}\nfailure_stage={}\nreason=plugin load timed out\ntimed_out = true\nplugin_instance_created=false\ncomponent_created=false\ncontroller_created=false\nroutes_created=false\nrollback_completed = true\napp_alive = true",
-            pending.request_id,
-            pending.name,
-            pending.stage
+            pending.request_id, pending.name, pending.stage
         );
         let _ = ipc::write_frame(
             out,
@@ -2122,8 +2136,12 @@ fn schedule_unified_editor_attach(
     }
     if !loaded.contains_key(plugin_instance_id) {
         eprintln!("[PluginHost] instance lookup result=not_found instance_id={plugin_instance_id}");
-        eprintln!("[editor-open] 06 instance_lookup fail insert_id={plugin_instance_id} reason=not_in_loaded_registry");
-        eprintln!("[editor-open] FAILED stage=instance_lookup reason=runtime_instance_not_loaded insert_id={plugin_instance_id}");
+        eprintln!(
+            "[editor-open] 06 instance_lookup fail insert_id={plugin_instance_id} reason=not_in_loaded_registry"
+        );
+        eprintln!(
+            "[editor-open] FAILED stage=instance_lookup reason=runtime_instance_not_loaded insert_id={plugin_instance_id}"
+        );
         emit_attach_failed(
             out,
             plugin_instance_id,
@@ -2133,8 +2151,12 @@ fn schedule_unified_editor_attach(
     }
     if !preview.lock().has_instance(plugin_instance_id) {
         eprintln!("[PluginHost] instance lookup result=not_found instance_id={plugin_instance_id}");
-        eprintln!("[editor-open] 06 instance_lookup fail insert_id={plugin_instance_id} reason=not_in_preview_engine");
-        eprintln!("[editor-open] FAILED stage=instance_lookup reason=plugin_not_loaded insert_id={plugin_instance_id}");
+        eprintln!(
+            "[editor-open] 06 instance_lookup fail insert_id={plugin_instance_id} reason=not_in_preview_engine"
+        );
+        eprintln!(
+            "[editor-open] FAILED stage=instance_lookup reason=plugin_not_loaded insert_id={plugin_instance_id}"
+        );
         emit_attach_failed(
             out,
             plugin_instance_id,
@@ -2147,7 +2169,9 @@ fn schedule_unified_editor_attach(
         "[editor-open] 06 instance_lookup ok insert_id={plugin_instance_id} plugin={display_title}"
     );
     if !platform::is_window(parent_hwnd) {
-        eprintln!("[editor-open] shell/parent invalid plugin={display_title} insert={plugin_instance_id} hwnd=0x{parent_hwnd:x} result=failed");
+        eprintln!(
+            "[editor-open] shell/parent invalid plugin={display_title} insert={plugin_instance_id} hwnd=0x{parent_hwnd:x} result=failed"
+        );
         emit_attach_failed(out, plugin_instance_id, "parent_hwnd is not a valid window");
         return;
     }
@@ -2177,8 +2201,12 @@ fn schedule_unified_editor_attach(
     );
     let processor = preview.lock().clone_processor_for(plugin_instance_id);
     let Some(processor) = processor else {
-        eprintln!("[editor-open] 07 controller_lookup fail insert_id={plugin_instance_id} reason=no_runtime_processor");
-        eprintln!("[editor-open] FAILED stage=controller_lookup reason=processor_unavailable insert_id={plugin_instance_id}");
+        eprintln!(
+            "[editor-open] 07 controller_lookup fail insert_id={plugin_instance_id} reason=no_runtime_processor"
+        );
+        eprintln!(
+            "[editor-open] FAILED stage=controller_lookup reason=processor_unavailable insert_id={plugin_instance_id}"
+        );
         emit_attach_failed(
             out,
             plugin_instance_id,
@@ -2221,7 +2249,9 @@ fn schedule_unified_editor_attach(
         processor.set_editor_title(display_title);
         eprintln!("[VST3Editor] createView instance_id={plugin_instance_id}");
         eprintln!("[plugin-editor] createView from existing controller (reuse loaded runtime)");
-        eprintln!("[editor-open] createView(editor) begin plugin={display_title} insert={plugin_instance_id} thread_id={thread_id}");
+        eprintln!(
+            "[editor-open] createView(editor) begin plugin={display_title} insert={plugin_instance_id} thread_id={thread_id}"
+        );
         eprintln!(
             "[VST3 ATTACH VIEW]\nplugin_instance_id={plugin_instance_id}\nparent_hwnd=0x{parent_hwnd:x}\nsize={w}x{h}\nresult=begin"
         );
@@ -2611,8 +2641,7 @@ fn expire_editor_attach_requests(
             .embed_set_waiting_stage(pending.stage);
         eprintln!(
             "[EDITOR HANG DETECTED]\nplugin_instance_id={}\nplugin_name=(unknown)\nstage={}\nelapsed_ms={elapsed_ms}\nui_thread_blocked=false\nipc_thread_blocked=false\naudio_thread_blocked=false\nlast_successful_step=resolve_instance\nlast_vst3_result=(pending)\nhost_process_alive=true",
-            pending.plugin_instance_id,
-            pending.stage
+            pending.plugin_instance_id, pending.stage
         );
         eprintln!(
             "[PluginHost] editor_state instance_id={} state=Failed title=\"{}\"",
@@ -2633,9 +2662,7 @@ fn expire_editor_attach_requests(
         let audio_alive = preview.lock().has_instance(&pending.plugin_instance_id);
         eprintln!(
             "[EDITOR WAITING SAFE STATE]\nplugin_instance_id={}\nfailure_stage={}\nplugin_audio_kept_alive = {}\neditor_state = waiting\napp_frozen = false\nloading_shell_alive = true",
-            pending.plugin_instance_id,
-            pending.stage,
-            audio_alive
+            pending.plugin_instance_id, pending.stage, audio_alive
         );
         let _ = out;
     }

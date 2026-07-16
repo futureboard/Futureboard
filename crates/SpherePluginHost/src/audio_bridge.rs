@@ -445,7 +445,9 @@ pub struct SharedAudioBridge {
     pub done_seq: AtomicU64,
     /// Frames in the current block (`<= max_block_size`).
     pub block_frames: AtomicU32,
-    pub _pad0: AtomicU32,
+    /// Duration of the most recently completed host DSP block in microseconds.
+    /// Reuses the old padding slot, so the shared-memory ABI size is unchanged.
+    pub last_process_micros: AtomicU32,
 
     // --- Status / latency / meters (atomics, both directions) ---
     /// [`DSP_OUTPUT_PENDING`] / [`DSP_OUTPUT_READY`].
@@ -457,7 +459,9 @@ pub struct SharedAudioBridge {
     pub meter_peak_r: AtomicU32,
     /// Count of dropped/late blocks (diagnostics).
     pub xrun_count: AtomicU32,
-    pub _pad1: AtomicU32,
+    /// Longest host DSP block observed since this region was created.
+    /// Reuses the old padding slot, so the shared-memory ABI size is unchanged.
+    pub max_process_micros: AtomicU32,
 
     // --- Transport / ProcessContext (engine → host, atomics) ---
     // Published by the engine each block alongside `request_seq`; read by the

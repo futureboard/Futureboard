@@ -15,7 +15,14 @@ members = [
     "crates/SpherePluginHost",
     "crates/SphereSoundfontPlayer",
     "crates/SphereUIComponents",
-    "crates/SphereWebAudioCore", "crates/SpherePackageInstaller", "apps/native/apakinstaller", "crates/SphereAudioProcessor", "crates/SphereMidiService", "crates/SphereDiscordRPC", "crates/SphereWebView", "crates/BuiltinAudioPlugins",
+    "crates/SphereWebAudioCore",
+    "crates/SpherePackageInstaller",
+    "apps/native/apakinstaller",
+    "crates/SphereAudioProcessor",
+    "crates/SphereMidiService",
+    "crates/SphereDiscordRPC",
+    "crates/SphereWebView",
+    "crates/BuiltinAudioPlugins",
 ]
 
 exclude = [

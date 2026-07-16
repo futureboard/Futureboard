@@ -36,7 +36,8 @@ pub enum AccountAction {
 }
 
 type AccountProvider = Arc<dyn Fn() -> AccountSnapshot + Send + Sync + 'static>;
-type AccountActionHandler = Arc<dyn Fn(AccountAction, &mut Window, &mut App) + Send + Sync + 'static>;
+type AccountActionHandler =
+    Arc<dyn Fn(AccountAction, &mut Window, &mut App) + Send + Sync + 'static>;
 
 fn provider_slot() -> &'static RwLock<Option<AccountProvider>> {
     static SLOT: OnceLock<RwLock<Option<AccountProvider>>> = OnceLock::new();

@@ -16,8 +16,8 @@
 //!   * The native facade adds no allocations on the audio thread.
 
 use std::path::Path;
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 use crate::audio_file;
 use crate::backend::{self, BackendKind};
@@ -288,6 +288,14 @@ pub struct EngineStats {
 pub struct AudioEngine {
     inner: Arc<EngineInner>,
     config: EngineConfig,
+    asio_devices: Arc<parking_lot::Mutex<AsioDeviceCache>>,
+}
+
+#[derive(Default)]
+struct AsioDeviceCache {
+    initialized: bool,
+    inputs: Vec<EngineDeviceInfo>,
+    outputs: Vec<EngineDeviceInfo>,
 }
 
 #[cfg(target_os = "windows")]
@@ -317,7 +325,36 @@ impl AudioEngine {
         Ok(Self {
             inner: Arc::new(EngineInner::new()),
             config,
+            asio_devices: Arc::new(parking_lot::Mutex::new(AsioDeviceCache::default())),
         })
+    }
+
+    /// ASIO drivers are commonly single-client. Enumerating a second ASIO host
+    /// after playback has started can unload/reset the active driver and drop
+    /// CPAL's callback (which disconnects the engine command receiver). Probe
+    /// the duplex device list once before opening the stream and serve later UI
+    /// reads from this cache.
+    fn ensure_asio_device_cache(&self) -> Result<(), SphereAudioError> {
+        if self.asio_devices.lock().initialized {
+            return Ok(());
+        }
+
+        let host = backend::asio_host()?;
+        let outputs = device::list_asio_devices_for_host(&host, "output")
+            .into_iter()
+            .map(EngineDeviceInfo::from_asio)
+            .collect();
+        let inputs = device::list_asio_devices_for_host(&host, "input")
+            .into_iter()
+            .map(EngineDeviceInfo::from_asio)
+            .collect();
+
+        *self.asio_devices.lock() = AsioDeviceCache {
+            initialized: true,
+            inputs,
+            outputs,
+        };
+        Ok(())
     }
 
     /// Borrow the configuration the engine was created with. The active
@@ -401,6 +438,9 @@ impl AudioEngine {
         if st.stream_open {
             return self.inner.start();
         }
+        if self.config.backend == AudioBackend::Asio {
+            self.ensure_asio_device_cache()?;
+        }
         let daux = Self::daux_config_from_engine_config(&self.config)?;
         self.inner.open_daux(daux)?;
         self.inner.start()
@@ -410,6 +450,9 @@ impl AudioEngine {
     /// same engine/runtime handle alive. This is a control-thread operation for
     /// Settings changes; it never runs on the realtime callback.
     pub fn reopen_with_config(&mut self, config: EngineConfig) -> Result<(), SphereAudioError> {
+        if config.backend == AudioBackend::Asio {
+            self.ensure_asio_device_cache()?;
+        }
         let daux = Self::daux_config_from_engine_config(&config)?;
         self.inner.open_daux_safe(daux)?;
         self.config = config;
@@ -648,12 +691,13 @@ impl AudioEngine {
                 .into_iter()
                 .map(EngineDeviceInfo::from_wasapi)
                 .collect(),
-            AudioBackend::Asio => backend::asio_host()
-                .map(|host| device::list_asio_devices_for_host(&host, "output"))
-                .unwrap_or_default()
-                .into_iter()
-                .map(EngineDeviceInfo::from_asio)
-                .collect(),
+            AudioBackend::Asio => {
+                if self.ensure_asio_device_cache().is_ok() {
+                    self.asio_devices.lock().outputs.clone()
+                } else {
+                    Vec::new()
+                }
+            }
             AudioBackend::Auto | AudioBackend::Cpal => device::list_output_devices()
                 .into_iter()
                 .map(EngineDeviceInfo::from_daux)
@@ -673,12 +717,13 @@ impl AudioEngine {
                 .into_iter()
                 .map(EngineDeviceInfo::from_wasapi)
                 .collect(),
-            AudioBackend::Asio => backend::asio_host()
-                .map(|host| device::list_asio_devices_for_host(&host, "input"))
-                .unwrap_or_default()
-                .into_iter()
-                .map(EngineDeviceInfo::from_asio)
-                .collect(),
+            AudioBackend::Asio => {
+                if self.ensure_asio_device_cache().is_ok() {
+                    self.asio_devices.lock().inputs.clone()
+                } else {
+                    Vec::new()
+                }
+            }
             AudioBackend::Auto | AudioBackend::Cpal => device::list_input_devices()
                 .into_iter()
                 .map(EngineDeviceInfo::from_daux)

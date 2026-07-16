@@ -281,10 +281,7 @@ pub fn external_window_titlebar_compact(
                 .occlude()
                 .on_click(move |_, window, cx| on_close(window, cx))
                 .child(
-                    svg()
-                        .path(assets::ICON_X_PATH)
-                        .w(px(11.0))
-                        .h(px(11.0))
+                    window_control_icon(WindowControlArea::Close, assets::ICON_X_PATH, "X")
                         .text_color(Colors::text_faint()),
                 ),
         )

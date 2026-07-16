@@ -303,7 +303,10 @@ pub(crate) fn about_section(edition: Option<crate::edition::EditionInfo>) -> imp
         .as_ref()
         .map(|info| info.app_version.clone())
         .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string());
-    let edition_name = edition.as_ref().map(|info| info.edition).unwrap_or("Community");
+    let edition_name = edition
+        .as_ref()
+        .map(|info| info.edition)
+        .unwrap_or("Community");
 
     let mut section = settings_section("Futureboard Studio")
         .child(settings_section_hint_text(format!(
@@ -325,10 +328,15 @@ pub(crate) fn about_section(edition: Option<crate::edition::EditionInfo>) -> imp
                 .map(str::trim)
                 .filter(|name| !name.is_empty())
             {
-                section =
-                    section.child(settings_row("Licensed To", settings_readout(licensee.to_string())));
+                section = section.child(settings_row(
+                    "Licensed To",
+                    settings_readout(licensee.to_string()),
+                ));
             }
-            section = section.child(settings_row("Expires", settings_readout(license_expiry_text(license))));
+            section = section.child(settings_row(
+                "Expires",
+                settings_readout(license_expiry_text(license)),
+            ));
             if !license.entitlements.is_empty() {
                 section = section.child(settings_row(
                     "Entitlements",

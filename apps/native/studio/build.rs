@@ -117,7 +117,12 @@ fn bake_supabase_config() {
     let resolve = |build_key: &str, dotenv_key: &str| -> Option<String> {
         std::env::var(build_key)
             .ok()
-            .or_else(|| dotenv.iter().find(|(k, _)| k == dotenv_key).map(|(_, v)| v.clone()))
+            .or_else(|| {
+                dotenv
+                    .iter()
+                    .find(|(k, _)| k == dotenv_key)
+                    .map(|(_, v)| v.clone())
+            })
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty())
     };

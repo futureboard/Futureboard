@@ -9,7 +9,10 @@ use gpui::{
     WindowHandle, WindowKind, WindowOptions,
 };
 
-use crate::embedded_assets::{splash_image_available, SPLASH_IMAGE_PATH};
+use crate::edition::{self, EditionInfo, LicenseDisplayState};
+use crate::embedded_assets::{
+    splash_image_available, SPLASH_CE_IMAGE_PATH, SPLASH_EXCLUSIVE_IMAGE_PATH, SPLASH_IMAGE_PATH,
+};
 use crate::theme::{self, Colors};
 use crate::window_position::centered_window_bounds;
 
@@ -18,21 +21,43 @@ pub const SPLASH_WIDTH: f32 = 670.0;
 pub const SPLASH_HEIGHT: f32 = 350.0;
 
 pub struct SplashWindow {
+    image_path: &'static str,
     image_available: bool,
 }
 
 impl SplashWindow {
     pub fn new() -> Self {
-        let image_available = splash_image_available();
+        let image_path = splash_image_path_for_edition(edition::current_edition_info().as_ref());
+        let (image_path, image_available) = if splash_image_available(image_path) {
+            (image_path, true)
+        } else {
+            (SPLASH_IMAGE_PATH, splash_image_available(SPLASH_IMAGE_PATH))
+        };
         if !image_available {
             static LOGGED: std::sync::Once = std::sync::Once::new();
             LOGGED.call_once(|| {
-                eprintln!(
-                    "[splash] missing splash asset at {SPLASH_IMAGE_PATH}; using fallback panel"
-                );
+                eprintln!("[splash] missing splash assets; using fallback panel");
             });
         }
-        Self { image_available }
+        Self {
+            image_path,
+            image_available,
+        }
+    }
+}
+
+/// Select the branded splash from the same verified license snapshot used by
+/// Settings. A compiled Exclusive feature alone never grants Exclusive branding:
+/// missing, invalid, or expired licenses all remain Community Edition.
+fn splash_image_path_for_edition(info: Option<&EditionInfo>) -> &'static str {
+    if info.is_some_and(|info| {
+        info.license
+            .as_ref()
+            .is_some_and(|license| license.state == LicenseDisplayState::Active)
+    }) {
+        SPLASH_EXCLUSIVE_IMAGE_PATH
+    } else {
+        SPLASH_CE_IMAGE_PATH
     }
 }
 
@@ -44,7 +69,7 @@ impl Render for SplashWindow {
                 .overflow_hidden()
                 .bg(gpui::transparent_black())
                 .child(
-                    img(SharedString::from(SPLASH_IMAGE_PATH))
+                    img(SharedString::from(self.image_path))
                         .w(px(SPLASH_WIDTH))
                         .h(px(SPLASH_HEIGHT))
                         .object_fit(ObjectFit::Contain),
@@ -65,6 +90,55 @@ impl Render for SplashWindow {
                         .child("Futureboard Studio"),
                 )
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::edition::LicenseDisplay;
+
+    fn edition_with_license(state: LicenseDisplayState) -> EditionInfo {
+        EditionInfo {
+            edition: "Exclusive",
+            app_version: "test".to_string(),
+            license: Some(LicenseDisplay {
+                state,
+                licensee: None,
+                entitlements: Vec::new(),
+                expires_at: None,
+            }),
+        }
+    }
+
+    #[test]
+    fn community_or_unlicensed_build_uses_ce_splash() {
+        assert_eq!(splash_image_path_for_edition(None), SPLASH_CE_IMAGE_PATH);
+
+        let unlicensed = EditionInfo {
+            edition: "Exclusive",
+            app_version: "test".to_string(),
+            license: None,
+        };
+        assert_eq!(
+            splash_image_path_for_edition(Some(&unlicensed)),
+            SPLASH_CE_IMAGE_PATH
+        );
+    }
+
+    #[test]
+    fn only_an_active_license_uses_exclusive_splash() {
+        let active = edition_with_license(LicenseDisplayState::Active);
+        assert_eq!(
+            splash_image_path_for_edition(Some(&active)),
+            SPLASH_EXCLUSIVE_IMAGE_PATH
+        );
+
+        let expired = edition_with_license(LicenseDisplayState::Expired);
+        assert_eq!(
+            splash_image_path_for_edition(Some(&expired)),
+            SPLASH_CE_IMAGE_PATH
+        );
     }
 }
 

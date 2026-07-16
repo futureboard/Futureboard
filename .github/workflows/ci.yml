@@ -1,9 +1,10 @@
 name: CI
 
 # Quality gates for the maintained desktop surface (Rust/GPUI native + audio
-# engine + plugin host). Build/packaging of release artifacts lives in
-# build-desktop.yml / daily-build.yml — this workflow only checks correctness,
-# on all three desktop targets (Windows / macOS / Linux).
+# engine + plugin host), built as the Community Edition via the *-ce cargo
+# aliases in .cargo/config.toml (target/community). Build/packaging of release
+# artifacts lives in build-desktop.yml / daily-build.yml — this workflow only
+# checks correctness, on all three desktop targets (Windows / macOS / Linux).
 
 on:
   push:
@@ -85,13 +86,13 @@ jobs:
           restore-keys: |
             ci-cargo-${{ runner.os }}-
 
-      - name: cargo clippy --workspace
-        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: cargo clippy (Community Edition)
+        run: cargo clippy-ce --all-targets -- -D warnings
 
       - name: cargo clippy N-API addons
         run: |
-          cargo clippy -p sphere_directaudioengine --lib --features napi -- -D warnings
-          cargo clippy -p sphere-plugin-host --lib --features napi -- -D warnings
+          cargo clippy -p sphere_directaudioengine --lib --features napi --target-dir target/community -- -D warnings
+          cargo clippy -p sphere-plugin-host --lib --features napi --target-dir target/community -- -D warnings
 
-      - name: cargo test --workspace
-        run: cargo test --workspace
+      - name: cargo test (Community Edition)
+        run: cargo test-ce

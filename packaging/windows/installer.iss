@@ -1,8 +1,9 @@
 ; Futureboard Studio Installer
 ; Generated for Inno Setup 6.x
-; Source build output:
-;   ..\..\target\release\*.exe
-;   ..\..\target\release\*.dll
+; Source build output (Community Edition by default; build-installer.ps1
+; overrides MySourceDir via /D for other editions):
+;   ..\..\target\community\release\*.exe
+;   ..\..\target\community\release\*.dll
 ;
 ; Install targets:
 ;   Per-user:  %LOCALAPPDATA%\Programs\Futureboard Studio\Studio
@@ -12,7 +13,9 @@
 #define MyAppPublisher "Futureboard"
 #define MyAppExeName "FutureboardNative.exe"
 #define MyAppIcon "..\..\packages\shared\app\icons\icon.ico"
-#define MySourceDir "..\..\target\release"
+#ifndef MySourceDir
+#define MySourceDir "..\..\target\community\release"
+#endif
 #define MyAppUserDir "{localappdata}\Programs\Futureboard Studio\Studio"
 #define MyAppMachineDir "{commonpf64}\Futureboard Studio\Studio"
 
@@ -56,8 +59,9 @@ Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription:
 Name: "fileassoc_apak"; Description: "Associate .apak packages with APAK Installer"; GroupDescription: "File associations:"; Flags: checkedonce
 
 [Files]
-; Main app + helper executables
-Source: "{#MySourceDir}\*.exe"; DestDir: "{app}"; Flags: ignoreversion
+; Main app + helper executables (xtask is the workspace task runner, not a
+; runtime binary)
+Source: "{#MySourceDir}\*.exe"; DestDir: "{app}"; Excludes: "xtask.exe"; Flags: ignoreversion
 
 ; Runtime / engine / bridge DLLs
 Source: "{#MySourceDir}\*.dll"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist

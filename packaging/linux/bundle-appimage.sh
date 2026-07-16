@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Bundle target/release/FutureboardNative into a portable Linux AppImage.
+# Bundle the Community Edition FutureboardNative into a portable Linux AppImage.
 #
 # Usage: bundle-appimage.sh [BIN] [OUT_DIR] [APP_VERSION]
 #   BIN         Path to the built native binary.
-#               Default: target/release/FutureboardNative
+#               Default: target/community/release/FutureboardNative
 #   OUT_DIR     Directory the finished .AppImage is written to.
 #               Default: target/appimage
 #   APP_VERSION Version string embedded in the AppImage filename.
@@ -12,7 +12,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 
-BIN="${1:-$ROOT/target/release/FutureboardNative}"
+BIN="${1:-$ROOT/target/community/release/FutureboardNative}"
 OUT_DIR="${2:-$ROOT/target/appimage}"
 APP_VERSION="${3:-}"
 
@@ -35,7 +35,7 @@ ICON_SRC="$ROOT/packages/shared/app/icons/app.png"
 APPDIR="$OUT_DIR/AppDir"
 
 if [[ ! -f "$BIN" ]]; then
-  echo "error: native binary not found: $BIN (run: cargo build --release -p futureboard_native)" >&2
+  echo "error: native binary not found: $BIN (run: cargo build-ce --release)" >&2
   exit 1
 fi
 for f in "$DESKTOP_SRC" "$APPRUN_SRC" "$MIME_SRC" "$ICON_SRC"; do
@@ -52,8 +52,9 @@ mkdir -p \
 
 install -m755 "$BIN" "$APPDIR/usr/bin/FutureboardNative"
 
-# Include every workspace runtime binary produced in target/release so helper
+# Include every workspace runtime binary produced next to BIN so helper
 # processes keep working from the AppImage without a separate download.
+# `xtask` is the workspace task runner, not a runtime binary.
 BIN_DIR="$(cd "$(dirname "$BIN")" && pwd)"
 while IFS= read -r helper; do
   helper_name="$(basename "$helper")"
@@ -63,7 +64,7 @@ while IFS= read -r helper; do
   install -m755 "$helper" "$APPDIR/usr/bin/$helper_name"
 done < <(
   find "$BIN_DIR" -maxdepth 1 -type f -perm -111 \
-    ! -name "*.*" \
+    ! -name "*.*" ! -name "xtask" \
     -print
 )
 

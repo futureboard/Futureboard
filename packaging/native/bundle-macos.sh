@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# Bundle target/release/FutureboardNative into a macOS .app using shared app assets.
+# Bundle the Community Edition FutureboardNative into a macOS .app using shared app assets.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 
-BIN="${1:-$ROOT/target/release/FutureboardNative}"
+BIN="${1:-$ROOT/target/community/release/FutureboardNative}"
 OUT="${2:-$ROOT/packaging/native/out}"
 
 APP_NAME="Futureboard Studio"
@@ -28,7 +28,7 @@ RESOURCES="$CONTENTS/Resources"
 FRAMEWORKS="$CONTENTS/Frameworks"
 
 if [[ ! -f "$BIN" ]]; then
-  echo "error: native binary not found: $BIN" >&2
+  echo "error: native binary not found: $BIN (run: cargo build-ce --release)" >&2
   exit 1
 fi
 
@@ -47,7 +47,7 @@ cp "$PLIST_SRC" "$CONTENTS/Info.plist"
 cp "$BIN" "$MACOS/$APP_EXECUTABLE_NAME"
 chmod +x "$MACOS/$APP_EXECUTABLE_NAME"
 
-# Other Mach-O helper binaries in target/release root.
+# Other Mach-O helper binaries in the build output root.
 # macOS binaries often have no extension, so copy executable files.
 while IFS= read -r helper; do
   helper_name="$(basename "$helper")"
@@ -56,9 +56,9 @@ while IFS= read -r helper; do
     continue
   fi
 
-  # Skip obvious non-runtime build files
+  # Skip obvious non-runtime build files and the workspace task runner.
   case "$helper_name" in
-    *.dylib|*.a|*.rlib|*.dSYM|*.rmeta|*.o|*.d)
+    xtask|*.dylib|*.a|*.rlib|*.dSYM|*.rmeta|*.o|*.d)
       continue
       ;;
   esac

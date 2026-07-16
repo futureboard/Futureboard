@@ -104,8 +104,8 @@ jobs:
           done
           echo "Shared app assets OK"
 
-      - name: Build workspace (release)
-        run: cargo build --release --workspace
+      - name: Build workspace (Community Edition, release)
+        run: cargo build-ce --release
 
       - name: Bundle native app (macOS)
         if: matrix.os == 'macos-latest'
@@ -130,9 +130,9 @@ jobs:
         run: bash packaging/linux/bundle-appimage.sh
 
       # Every workspace member's binaries/libraries land directly in
-      # `target/release/` (dependency artifacts stay under `deps/`), so a
-      # per-OS filter here is enough to grab "all" of them without needing to
-      # enumerate crate/bin names as they're added or removed:
+      # `target/community/release/` (dependency artifacts stay under `deps/`),
+      # so a per-OS filter here is enough to grab "all" of them without needing
+      # to enumerate crate/bin names as they're added or removed:
       #   win:   *.exe + *.dll
       #   linux: extension-less executables + *.so
       #   mac:   extension-less executables + *.dylib
@@ -143,18 +143,20 @@ jobs:
           mkdir -p dist-native
           case "${{ matrix.platform }}" in
             win)
-              cp target/release/*.exe dist-native/
-              cp target/release/*.dll dist-native/
+              cp target/community/release/*.exe dist-native/
+              cp target/community/release/*.dll dist-native/
               ;;
             linux)
-              find target/release -maxdepth 1 -type f -perm -111 ! -name "*.*" -exec cp {} dist-native/ \;
-              cp target/release/*.so dist-native/
+              find target/community/release -maxdepth 1 -type f -perm -111 ! -name "*.*" -exec cp {} dist-native/ \;
+              cp target/community/release/*.so dist-native/
               ;;
             mac)
-              find target/release -maxdepth 1 -type f -perm -111 ! -name "*.*" -exec cp {} dist-native/ \;
-              cp target/release/*.dylib dist-native/
+              find target/community/release -maxdepth 1 -type f -perm -111 ! -name "*.*" -exec cp {} dist-native/ \;
+              cp target/community/release/*.dylib dist-native/
               ;;
           esac
+          # The workspace task runner is a dev tool, not a runtime binary.
+          rm -f dist-native/xtask dist-native/xtask.exe
           echo "Staged native binaries:"
           ls -la dist-native/
 

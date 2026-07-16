@@ -1,8 +1,11 @@
-# Build the Windows installer with Inno Setup from target/release artifacts.
+# Build the Windows installer with Inno Setup from the built edition's
+# release artifacts (Community Edition, target\community\release, by default;
+# pass -SourceDir for another edition's target directory).
 param(
     [string]$Root = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path,
     [string]$Iscc = "",
-    [string]$AppVersion = ""
+    [string]$AppVersion = "",
+    [string]$SourceDir = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -42,19 +45,23 @@ if (-not $AppVersion) {
     $AppVersion = (Get-Content $versionJson -Raw | ConvertFrom-Json).version
 }
 
+if (-not $SourceDir) {
+    $SourceDir = Join-Path $Root "target\community\release"
+}
+
 $iss = Join-Path $PSScriptRoot "installer.iss"
-$exe = Join-Path $Root "target\release\FutureboardNative.exe"
+$exe = Join-Path $SourceDir "FutureboardNative.exe"
 
 if (-not (Test-Path $exe)) {
-    throw "Native binary not found: $exe (run: cargo build --release -p futureboard_native)"
+    throw "Native binary not found: $exe (run: cargo build-ce --release)"
 }
 
 if (-not $Iscc) {
     throw "Inno Setup compiler not found. Install Inno Setup 6/7 or pass -Iscc."
 }
 
-Write-Host "Building installer version: $AppVersion"
-& $Iscc $iss "/DMyAppVersion=$AppVersion"
+Write-Host "Building installer version: $AppVersion (source: $SourceDir)"
+& $Iscc $iss "/DMyAppVersion=$AppVersion" "/DMySourceDir=$SourceDir"
 if ($LASTEXITCODE -ne 0) {
     exit $LASTEXITCODE
 }

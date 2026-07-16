@@ -35,6 +35,20 @@ check-exclusive-win = [
     "target/exclusive",
 ]
 
+# Community Edition quality gates (CI uses these).
+clippy-ce = [
+    "clippy",
+    "--workspace",
+    "--target-dir",
+    "target/community",
+]
+test-ce = [
+    "test",
+    "--workspace",
+    "--target-dir",
+    "target/community",
+]
+
 # Cargo unifies features within one build graph, so each edition must use
 # a separate target directory to avoid overwriting or reusing app artifacts.
 # Aliases cannot chain commands, so cross-edition combos live in the xtask:

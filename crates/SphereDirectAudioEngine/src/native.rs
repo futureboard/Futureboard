@@ -222,18 +222,6 @@ impl EngineDeviceInfo {
         }
     }
 
-    fn from_asio(d: crate::types::JsAudioDeviceInfo) -> Self {
-        Self {
-            device_id: AudioDeviceId::AsioDevice(d.id.clone()),
-            id: d.id,
-            name: d.name,
-            kind: d.kind,
-            channels: d.channels,
-            default_sample_rate: d.default_sample_rate,
-            is_default: d.is_default,
-            backend: "DAUx ASIO".into(),
-        }
-    }
 }
 
 /// Lightweight status snapshot suitable for status-bar polling.
@@ -293,10 +281,15 @@ pub struct AudioEngine {
 
 #[derive(Default)]
 struct AsioDeviceCache {
-    initialized: bool,
+    refreshed_at: Option<std::time::Instant>,
     inputs: Vec<EngineDeviceInfo>,
     outputs: Vec<EngineDeviceInfo>,
 }
+
+/// How long a registry-derived ASIO driver list stays fresh before a device
+/// query re-reads the registry. Refreshing is registry-only (no COM, no driver
+/// loads), so it can never disturb a running stream.
+const ASIO_DEVICE_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(2);
 
 #[cfg(target_os = "windows")]
 fn list_wdm_ks_output_devices() -> Vec<EngineDeviceInfo> {
@@ -329,31 +322,87 @@ impl AudioEngine {
         })
     }
 
-    /// ASIO drivers are commonly single-client. Enumerating a second ASIO host
-    /// after playback has started can unload/reset the active driver and drop
-    /// CPAL's callback (which disconnects the engine command receiver). Probe
-    /// the duplex device list once before opening the stream and serve later UI
-    /// reads from this cache.
+    /// Populate/refresh the ASIO driver list from the Windows registry.
+    ///
+    /// Never instantiates a driver: an ASIO driver is one duplex device, and
+    /// COM-loading drivers just to list them is slow, can pop driver dialogs,
+    /// and can clobber the driver that is currently streaming. Channel counts
+    /// for the *active* driver are overlaid from the open session; drivers
+    /// that are merely installed report zero capabilities until opened (the
+    /// stream-open diagnostic is the real capability check).
+    ///
+    /// Fails closed: without a registered Exclusive Edition ASIO host, no
+    /// enumeration happens at all — a hand-edited settings file selecting
+    /// "asio" yields an error and an empty device list, not registry output.
     fn ensure_asio_device_cache(&self) -> Result<(), SphereAudioError> {
-        if self.asio_devices.lock().initialized {
-            return Ok(());
+        if !backend::asio_support_enabled() {
+            return Err(SphereAudioError::BackendUnavailable(
+                "DAUx ASIO requires a Futureboard Exclusive Edition build".into(),
+            ));
         }
 
-        let host = backend::asio_host()?;
-        let outputs = device::list_asio_devices_for_host(&host, "output")
-            .into_iter()
-            .map(EngineDeviceInfo::from_asio)
-            .collect();
-        let inputs = device::list_asio_devices_for_host(&host, "input")
-            .into_iter()
-            .map(EngineDeviceInfo::from_asio)
-            .collect();
+        {
+            let cache = self.asio_devices.lock();
+            if cache
+                .refreshed_at
+                .is_some_and(|at| at.elapsed() < ASIO_DEVICE_CACHE_TTL)
+            {
+                return Ok(());
+            }
+        }
 
-        *self.asio_devices.lock() = AsioDeviceCache {
-            initialized: true,
-            inputs,
-            outputs,
-        };
+        #[cfg(target_os = "windows")]
+        {
+            let session = self.inner.asio_session_caps();
+            let mut inputs = Vec::new();
+            let mut outputs = Vec::new();
+            for descriptor in crate::asio_registry::enumerate_asio_drivers() {
+                if !descriptor.is_loadable() {
+                    continue;
+                }
+                let active = session
+                    .as_ref()
+                    .filter(|caps| caps.driver == descriptor.stable_id);
+                let make = |kind: &str, channels: u32, sample_rate: u32| EngineDeviceInfo {
+                    id: descriptor.stable_id.clone(),
+                    device_id: AudioDeviceId::AsioDevice(descriptor.stable_id.clone()),
+                    name: descriptor.display_name.clone(),
+                    kind: kind.to_string(),
+                    channels,
+                    default_sample_rate: sample_rate,
+                    is_default: active.is_some(),
+                    backend: "DAUx ASIO".into(),
+                };
+                let (in_ch, out_ch, sr) = active
+                    .map(|caps| (caps.input_channels, caps.output_channels, caps.sample_rate))
+                    .unwrap_or((0, 0, 0));
+                inputs.push(make("input", in_ch, sr));
+                outputs.push(make("output", out_ch, sr));
+            }
+            // Without an open session, mark the first driver as the default so
+            // Settings has a deterministic pre-selection.
+            if session.is_none() {
+                if let Some(first) = inputs.first_mut() {
+                    first.is_default = true;
+                }
+                if let Some(first) = outputs.first_mut() {
+                    first.is_default = true;
+                }
+            }
+            *self.asio_devices.lock() = AsioDeviceCache {
+                refreshed_at: Some(std::time::Instant::now()),
+                inputs,
+                outputs,
+            };
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            *self.asio_devices.lock() = AsioDeviceCache {
+                refreshed_at: Some(std::time::Instant::now()),
+                inputs: Vec::new(),
+                outputs: Vec::new(),
+            };
+        }
         Ok(())
     }
 

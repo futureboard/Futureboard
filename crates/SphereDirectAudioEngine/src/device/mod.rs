@@ -56,55 +56,6 @@ pub(crate) fn list_output_devices_for_host(host: &cpal::Host) -> Vec<JsAudioDevi
     }
 }
 
-/// Enumerate ASIO drivers without CPAL's direction filter.
-///
-/// An ASIO driver is one duplex device. CPAL's default `input_devices()` /
-/// `output_devices()` helpers probe supported configs before yielding a device;
-/// a temporarily unavailable sample rate or channel probe can therefore hide a
-/// perfectly valid installed driver. Keep the driver visible and report zero
-/// capabilities when that optional probe fails so the user can still select it
-/// and receive the real stream-open diagnostic.
-pub(crate) fn list_asio_devices_for_host(
-    host: &cpal::Host,
-    direction: &str,
-) -> Vec<JsAudioDeviceInfo> {
-    let backend = host.id().name().to_string();
-    let devices = match host.devices() {
-        Ok(devices) => devices,
-        Err(error) => {
-            eprintln!("[SphereAudio] list ASIO devices error: {error}");
-            return Vec::new();
-        }
-    };
-
-    let mut list = Vec::new();
-    for device in devices {
-        let Ok(name) = device.name() else {
-            continue;
-        };
-        let config = if direction == "input" {
-            device.default_input_config()
-        } else {
-            device.default_output_config()
-        };
-        let (channels, default_sample_rate) = config
-            .map(|config| (config.channels() as u32, config.sample_rate().0))
-            .unwrap_or((0, 0));
-        list.push(JsAudioDeviceInfo {
-            id: name.clone(),
-            name,
-            kind: direction.to_string(),
-            channels,
-            default_sample_rate,
-            // ASIO has no system default; CPAL uses the first driver.
-            is_default: list.is_empty(),
-            backend: backend.clone(),
-        });
-    }
-    log_devices(direction, &list);
-    list
-}
-
 /// Enumerate all available input devices on the default host.
 pub fn list_input_devices() -> Vec<JsAudioDeviceInfo> {
     list_input_devices_for_host(&cpal::default_host())

@@ -647,6 +647,10 @@ pub struct EngineInner {
 
     // Engine-owned live input stream for armed/monitored track meters.
     live_input: Mutex<Option<LiveInputHandle>>,
+
+    // Capabilities of the open ASIO session (None otherwise). Set by
+    // `open_daux`, cleared by `close_device_inner`.
+    asio_caps: Mutex<Option<crate::backend::AsioSessionCaps>>,
 }
 
 #[derive(Clone)]
@@ -708,6 +712,7 @@ impl EngineInner {
             recording: Mutex::new(None),
             input_test: Mutex::new(None),
             live_input: Mutex::new(None),
+            asio_caps: Mutex::new(None),
         }
     }
 
@@ -925,6 +930,7 @@ impl EngineInner {
         // Drop legacy cpal stream path.
         *self.stream.lock() = None;
         *self.cmd_tx.lock() = None;
+        *self.asio_caps.lock() = None;
 
         let mut st = self.status.lock();
         st.stream_open = false;
@@ -2090,10 +2096,19 @@ impl EngineInner {
         match backend {
             BackendKind::Asio => {
                 let host = crate::backend::asio_host()?;
-                recording::find_input_device_for_host(&host, device_id)
+                recording::find_input_device_for_host(host, device_id)
             }
             _ => recording::find_input_device(device_id),
         }
+    }
+
+    /// Live capabilities of the open ASIO session (None for other backends or
+    /// while no stream is open). Device enumeration overlays these onto the
+    /// registry-derived driver list so only the *active* driver reports real
+    /// channel counts — installed-but-idle drivers are never instantiated just
+    /// to fill a dropdown.
+    pub fn asio_session_caps(&self) -> Option<crate::backend::AsioSessionCaps> {
+        self.asio_caps.lock().clone()
     }
 
     /// Open an input stream and begin writing armed tracks to WAV files.
@@ -2272,7 +2287,7 @@ impl EngineInner {
             BackendKind::Asio => {
                 let host = crate::backend::asio_host()?;
                 let handle = cpal_backend::open_on_host(
-                    &host,
+                    host,
                     &daux_cfg,
                     Arc::clone(&self.shared),
                     initial_runtime,

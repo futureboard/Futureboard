@@ -83,6 +83,9 @@ symphonia.workspace = true
 # ── Windows-only: raw WASAPI exclusive mode + MMCSS ──────────────────────────
 [target.'cfg(target_os = "windows")'.dependencies]
 windows.workspace = true
+# ASIO driver enumeration reads HKLM\SOFTWARE\ASIO instead of instantiating
+# drivers (see src/asio_registry.rs).
+windows-registry.workspace = true
 
 # ── Build dependencies ───────────────────────────────────────────────────────
 [build-dependencies]

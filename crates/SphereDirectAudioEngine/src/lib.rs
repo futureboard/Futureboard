@@ -19,6 +19,8 @@
 #![allow(clippy::needless_pass_by_value)] // napi-rs requires owned String args
 #![allow(non_snake_case)] // lib name "DirectAudio" is intentional branding
 
+#[cfg(target_os = "windows")]
+pub mod asio_registry;
 mod audio_file;
 mod audio_graph;
 mod audio_source;

@@ -157,6 +157,29 @@ pub struct DauxDeviceConfig {
     pub safe_mode: bool,
 }
 
+// ── ASIO session capabilities ─────────────────────────────────────────────────
+
+/// Live capabilities of the currently open ASIO session, published by the
+/// engine when the stream opens and cleared when it closes. Consumed by device
+/// enumeration (channel counts for the active driver) and the Inspector's
+/// input-channel model.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AsioSessionCaps {
+    /// asiolist-compatible driver name (the persisted stable id).
+    pub driver: String,
+    pub sample_rate: u32,
+    pub buffer_size: u32,
+    pub input_channels: u32,
+    pub output_channels: u32,
+    /// Driver-reported channel names, indexed by channel. May be shorter than
+    /// the channel count when a driver does not name its channels.
+    pub input_channel_names: Vec<String>,
+    pub output_channel_names: Vec<String>,
+    /// Driver-reported latencies in samples at `sample_rate` (input, output).
+    pub input_latency_samples: u32,
+    pub output_latency_samples: u32,
+}
+
 // ── Backend runtime status ─────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Default)]
@@ -270,10 +293,33 @@ pub fn list_available_backends() -> Vec<BackendInfo> {
 }
 
 /// Factory registered by the private edition module. Registration checks do
-/// not initialize ASIO drivers; device enumeration performs that work later.
+/// not initialize ASIO drivers; the factory runs once (see [`asio_host`]) and
+/// driver loading happens later, on stream open.
 pub type AsioHostFactory = fn() -> Result<cpal::Host, String>;
 
 static ASIO_HOST_FACTORY: OnceLock<AsioHostFactory> = OnceLock::new();
+
+/// The one ASIO host for the whole process.
+///
+/// asio-sys tracks "which driver is loaded" *per host instance*, but the
+/// underlying ASIO API is process-global (one loaded driver, one global
+/// buffer-callback list). A second host instance can therefore load a driver
+/// on top of the one that is streaming, and dropping its transient `Driver`
+/// runs `ASIOExit` + clears the global callback list — killing the active
+/// stream. Memoizing the first successfully created host removes that entire
+/// failure class: every enumeration/open/input path shares one `sys::Asio`.
+struct SharedAsioHost(cpal::Host);
+
+// SAFETY: the stored host is always the ASIO variant produced by the edition
+// factory. `cpal::host::asio::Host` wraps `Arc<asio_sys::Asio>`, whose only
+// state is `Mutex<Weak<DriverInner>>` — genuinely `Send + Sync`. The platform
+// `Host` enum lacks the auto-impl only because other variants are conservative
+// about COM thread affinity; we never store those variants here, and all
+// driver/stream operations still happen on the control thread.
+unsafe impl Send for SharedAsioHost {}
+unsafe impl Sync for SharedAsioHost {}
+
+static ASIO_SHARED_HOST: OnceLock<SharedAsioHost> = OnceLock::new();
 
 /// Register the ASIO provider supplied by the separately linked edition crate.
 pub fn register_asio_host_factory(factory: AsioHostFactory) -> Result<(), String> {
@@ -282,13 +328,19 @@ pub fn register_asio_host_factory(factory: AsioHostFactory) -> Result<(), String
         .map_err(|_| "ASIO host provider is already registered".to_string())
 }
 
-pub(crate) fn asio_host() -> Result<cpal::Host, SphereAudioError> {
+pub(crate) fn asio_host() -> Result<&'static cpal::Host, SphereAudioError> {
+    if let Some(host) = ASIO_SHARED_HOST.get() {
+        return Ok(&host.0);
+    }
     let factory = ASIO_HOST_FACTORY.get().ok_or_else(|| {
         SphereAudioError::BackendUnavailable(
             "DAUx ASIO requires a Futureboard Exclusive Edition build".into(),
         )
     })?;
-    factory().map_err(SphereAudioError::BackendUnavailable)
+    let host = factory().map_err(SphereAudioError::BackendUnavailable)?;
+    // A losing racer's fresh host is dropped unused — harmless, no driver has
+    // been loaded through it.
+    Ok(&ASIO_SHARED_HOST.get_or_init(|| SharedAsioHost(host)).0)
 }
 
 pub fn asio_support_enabled() -> bool {

@@ -44,8 +44,8 @@ rights in a third party's marks or in uses that applicable law does not protect.
 
 ## 3. Uses that do not require prior permission
 
-Subject to applicable law, you may use the Futureboard word marks, without
-altered logos or trade dress, when reasonably necessary to:
+Subject to applicable law, you may use the Futureboard word marks in plain
+text — without Futureboard logos or trade dress — when reasonably necessary to:
 
 - truthfully refer to the official Futureboard project or an unmodified
   official release;
@@ -149,8 +149,8 @@ Futureboard reserves all rights not expressly granted by this policy and may
 request correction, rebranding, or removal of uses that violate it. A failure
 to enforce this policy in one instance is not a waiver of rights in another.
 
-This policy may be updated to clarify permitted uses or respond to changes in
-the project. The version in the official repository is the controlling version.
+This policy may be updated to clarify permitted uses or to respond to changes
+in the project. The version in the official repository is the controlling version.
 
 For permission requests or questions, contact the repository owner through the
 official Futureboard organization or owner profile. Include the proposed name,

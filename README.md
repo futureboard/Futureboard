@@ -2,7 +2,7 @@
 
 <img width="2111" height="684" alt="Futureboard Studio banner" src="packages/assets/banner.png" />
 
-**A modern open-source Digital Audio Workstation Community Edition built with Rust, GPUI, TypeScript, WebAssembly, and native audio/plugin infrastructure.**
+**The Community Edition of a modern open-source Digital Audio Workstation, built with Rust, GPUI, TypeScript, WebAssembly, and native audio/plugin infrastructure.**
 
 [![CI](https://img.shields.io/github/actions/workflow/status/futureboard/Futureboard/ci.yml?branch=main&style=for-the-badge&label=CI&logo=github&logoColor=white&color=22c55e&labelColor=0f172a)](https://github.com/futureboard/Futureboard/actions/workflows/ci.yml)
 [![Status](https://img.shields.io/badge/status-pre--alpha-f59e0b?style=for-the-badge&labelColor=0f172a)](ARCHITECTURE.md)
@@ -68,8 +68,9 @@ client, or other separately licensed commercial components.
 
 Authorized private checkouts may add the Git-ignored
 `crates/ExclusiveEdition` source and use [build-private.ps1](build-private.ps1).
-The presence of shared extension hooks or an Exclusive build-feature name does
-not grant access to or redistribution rights in Exclusive Edition.
+The presence of shared extension hooks or the public `exclusive` build-feature
+name does not grant access to, a license for, or redistribution rights in
+Exclusive Edition.
 
 ```bash
 # Public Community Edition
@@ -92,22 +93,22 @@ python .\build-private-temporary.py --accept-asio-license --workspace
 
 ## Architectural Overview
 
-Futureboard Studio is a Digital Audio Workstation whose primary maintained surface is a **native Rust application built on [GPUI](https://www.gpui.rs)** (the rendering framework behind the Zed editor), driving an in-process Rust audio engine. Secondary **web** (WASM DSP) surfaces share layout and engine concepts, but the native app is the main development target.
+Futureboard Studio is a Digital Audio Workstation whose primary maintained surface is a **native Rust application built on [GPUI](https://www.gpui.rs)** (the rendering framework behind the Zed editor), driving an in-process Rust audio engine. A secondary **web** (WASM DSP) surface shares layout and engine concepts, but the native app is the main development target.
 
-| Surface | Path | Stack | Status |
-| --- | --- | --- | --- |
-| **Native** (primary) | `apps/native` | Rust · GPUI · direct audio engine | Main dev target |
-| Web | `apps/web` | React · TypeScript · Vite · WASM DSP | Tracks native, may lag |
+| Surface              | Path          | Stack                                | Status                 |
+| -------------------- | ------------- | ------------------------------------ | ---------------------- |
+| **Native** (primary) | `apps/native` | Rust · GPUI · direct audio engine    | Main dev target        |
+| Web                  | `apps/web`    | React · TypeScript · Vite · WASM DSP | Tracks native, may lag |
 
 ### Core crates
 
-| Crate | Purpose |
-| --- | --- |
-| `SphereDirectAudioEngine` | Native low-latency engine (WASAPI · CoreAudio · ALSA) |
-| `SphereWebAudioCore` | Web WASM audio core — transport, graph, mixer, meters, DSP |
-| `SphereUIComponents` | Native GPUI UI kit, styling, and layout primitives |
-| `SpherePluginHost` | Plugin scanning & hosting (VST3, CLAP, AU, VST2 legacy) |
-| `SphereAudioPlugins` | Built-in real-time DSP (EQ, compression, delay, …) |
+| Crate                     | Purpose                                                    |
+| ------------------------- | ---------------------------------------------------------- |
+| `SphereDirectAudioEngine` | Native low-latency engine (WASAPI · CoreAudio · ALSA)      |
+| `SphereWebAudioCore`      | Web WASM audio core — transport, graph, mixer, meters, DSP |
+| `SphereUIComponents`      | Native GPUI UI kit, styling, and layout primitives         |
+| `SpherePluginHost`        | Plugin scanning & hosting (VST3, CLAP, AU, VST2 legacy)    |
+| `SphereAudioPlugins`      | Built-in real-time DSP (EQ, compression, delay, …)         |
 
 Also: [`plugins/`](plugins/) (stock-plugin editors), [`modules/`](modules/) (noise removal, stem extraction), [`extensions/`](extensions/) (extension templates), [`packages/`](packages/) (shared fonts/icons/assets), [`external/`](external/) (vendored SDKs). See [ARCHITECTURE.md](ARCHITECTURE.md) for the full breakdown.
 
@@ -115,7 +116,7 @@ Also: [`plugins/`](plugins/) (stock-plugin editors), [`modules/`](modules/) (noi
 
 ## Getting Started
 
-**Prerequisites:** [Bun](https://bun.sh) · [Rust](https://rustup.rs) 1.78+ (edition 2024) with the `wasm32-unknown-unknown` target · [CMake](https://cmake.org) 3.20+ · a C++ toolchain (MSVC / Xcode CLT / GCC / Clang).
+**Prerequisites:** [Bun](https://bun.sh) · [Rust](https://rustup.rs) 1.85+ (edition 2024) with the `wasm32-unknown-unknown` target · [CMake](https://cmake.org) 3.20+ · a C++ toolchain (MSVC / Xcode CLT / GCC / Clang).
 
 > [!IMPORTANT]
 > Vendored SDKs (`external/vst3sdk`, `external/clap`, …) are **git submodules** — clone with `--recursive` (or run `git submodule update --init --recursive` afterwards).
@@ -159,38 +160,38 @@ bun run build:all               # all surfaces (WASM + native)
 
 ### Platform notes
 
-| Platform | Audio backend | Setup |
-| --- | --- | --- |
-| Windows | WASAPI (exclusive/MMCSS planned) | `rustup default stable-msvc` |
-| macOS | CoreAudio | `xcode-select --install` |
-| Linux | ALSA (PipeWire/JACK later) | `sudo apt install libasound2-dev` · `sudo pacman -S alsa-lib` |
+| Platform | Audio backend                           | Setup                                                         |
+| -------- | --------------------------------------- | ------------------------------------------------------------- |
+| Windows  | WASAPI (exclusive mode / MMCSS planned) | `rustup default stable-msvc`                                  |
+| macOS    | CoreAudio                               | `xcode-select --install`                                      |
+| Linux    | ALSA (PipeWire/JACK later)              | `sudo apt install libasound2-dev` · `sudo pacman -S alsa-lib` |
 
 ---
 
 ## Bun Scripts Reference
 
-| Script | Description |
-| --- | --- |
-| `dev:web` · `dev:native`| Run a surface in dev |
-| `build:web` · `build:wasm` · `build:native[:debug]` | Production / debug builds |
-| `build:audio:plugins` | Check stock plugin crate + extension template |
-| `bundle:native:mac[:dmg]` · `bundle:native:win` | Package distributables |
-| `cargo:check` · `cargo:build` · `cargo:release` · `cargo:test` · `cargo:clippy` | Rust workspace passthroughs |
-| `cargo:fmt[:check]` · `check` · `lint` · `fmt` | Format & combined checks |
+| Script                                                                          | Description                                   |
+| ------------------------------------------------------------------------------- | --------------------------------------------- |
+| `dev:web` · `dev:native` · `dev:server`                                         | Run a surface in dev                          |
+| `build:web` · `build:wasm` · `build:native[:debug]`                             | Production / debug builds                     |
+| `build:audio:plugins`                                                           | Check stock plugin crate + extension template |
+| `bundle:native:mac[:dmg]` · `bundle:native:win`                                 | Package distributables                        |
+| `cargo:check` · `cargo:build` · `cargo:release` · `cargo:test` · `cargo:clippy` | Rust workspace passthroughs                   |
+| `cargo:fmt[:check]` · `check` · `lint` · `fmt`                                  | Format & combined checks                      |
 
 ---
 
 ## Debugging & Diagnostics
 
-Several subsystems expose verbose logging through environment variables — set any to `1` to enable.
+Several subsystems expose verbose logging and debug behavior through environment variables — set the logging variables to `1` to enable them.
 
-| Variable | Logs |
-| --- | --- |
-| `FUTUREBOARD_PLUGIN_DEBUG` | Insert add/set/remove/bypass mutations + engine-sync details |
-| `FUTUREBOARD_PLUGIN_VIEW_DEBUG` | Native plugin editor lifecycle and view attachment |
-| `FUTUREBOARD_ROUTING_DEBUG` | Send, return, and bus routing graph diagnostics |
-| `GPUI_DISABLE_DIRECT_COMPOSITION` | Windows composition workaround for native plugin UI |
-| `FUTUREBOARD_PLUGIN_EDITOR_MODE` | Plugin editor mode selection |
+| Variable                          | Effect                                                       |
+| --------------------------------- | ------------------------------------------------------------ |
+| `FUTUREBOARD_PLUGIN_DEBUG`        | Insert add/set/remove/bypass mutations + engine-sync details |
+| `FUTUREBOARD_PLUGIN_VIEW_DEBUG`   | Native plugin editor lifecycle and view attachment           |
+| `FUTUREBOARD_ROUTING_DEBUG`       | Send, return, and bus routing graph diagnostics              |
+| `GPUI_DISABLE_DIRECT_COMPOSITION` | Windows composition workaround for native plugin UI          |
+| `FUTUREBOARD_PLUGIN_EDITOR_MODE`  | Plugin editor mode selection                                 |
 
 ```bash
 # bash
@@ -205,7 +206,7 @@ $env:FUTUREBOARD_PLUGIN_VIEW_DEBUG=1; cargo run -p futureboard_native
 
 ```text
 Futureboard
-├─ apps/         native · web 
+├─ apps/         native · web
 ├─ crates/       SphereDirectAudioEngine · SphereWebAudioCore · SphereUIComponents · SpherePluginHost · SphereAudioPlugins
 ├─ packages/     assets · shared
 ├─ plugins/      modules/      extensions/

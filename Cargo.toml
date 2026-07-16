@@ -23,6 +23,8 @@ members = [
     "crates/SphereDiscordRPC",
     "crates/SphereWebView",
     "crates/BuiltinAudioPlugins",
+
+    "xtask",
 ]
 
 exclude = [

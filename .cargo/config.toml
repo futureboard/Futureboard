@@ -1,4 +1,51 @@
+[alias]
+# Build the full workspace as Community Edition.
+build-ce = [
+    "build",
+    "--workspace",
+    "--target-dir",
+    "target/community",
+]
+
+# Build the Windows Exclusive Edition with ASIO.
+build-exclusive-win = [
+    "build",
+    "--workspace",
+    "--features",
+    "futureboard_native/exclusive,sphere_directaudioengine/asio",
+    "--target-dir",
+    "target/exclusive",
+]
+
+# Check Community Edition in its isolated target directory.
+check-ce = [
+    "check",
+    "--workspace",
+    "--target-dir",
+    "target/community",
+]
+
+# Check Windows Exclusive Edition in its isolated target directory.
+check-exclusive-win = [
+    "check",
+    "--workspace",
+    "--features",
+    "futureboard_native/exclusive,sphere_directaudioengine/asio",
+    "--target-dir",
+    "target/exclusive",
+]
+
+# Cargo unifies features within one build graph, so each edition must use
+# a separate target directory to avoid overwriting or reusing app artifacts.
+# Aliases cannot chain commands, so cross-edition combos live in the xtask:
+#   cargo xtask build-all [--release]   → build-ce, then build-exclusive-win
+#   cargo xtask check-all               → check-ce, then check-exclusive-win
+xtask = ["run", "--package", "xtask", "--"]
+
 [env]
-# cef-dll-sys reads CEF_PATH while compiling. `relative = true` anchors this at
-# the workspace root instead of whichever package Cargo is currently building.
+# bindgen, used by asio-sys, loads libclang.dll from this directory.
+LIBCLANG_PATH = { value = ".bin/bin", relative = true, force = false }
+
+# cef-dll-sys reads CEF_PATH during compilation.
+# relative = true anchors it at the workspace root.
 CEF_PATH = { value = "build/cef", relative = true, force = false }

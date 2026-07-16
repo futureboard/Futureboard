@@ -100,7 +100,7 @@ impl Render for StudioLayout {
         let audio_input_device = if self.overlay.inspector_routing_combo
             == Some(crate::components::panel::InspectorRoutingCombo::AudioInput)
         {
-            self.selected_input_device_channels(cx)
+            self.selected_input_device_model(cx)
         } else {
             None
         };

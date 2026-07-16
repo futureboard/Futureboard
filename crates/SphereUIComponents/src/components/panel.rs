@@ -789,36 +789,96 @@ fn audio_format_options() -> Vec<String> {
     ]
 }
 
-/// Build the Inspector audio-input options as `(label, routing)` pairs from the
-/// selected input device's channel count. Mono routes map to
-/// `AudioDeviceChannel`; stereo pairs and multi-channel routes map to
-/// `AudioDeviceChannels`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct InspectorAudioInputChannel {
+    pub index: u32,
+    pub name: String,
+    pub active: bool,
+    pub sample_format: String,
+    pub stereo_pair: Option<u32>,
+    pub label: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct InspectorAudioInputDevice {
+    pub id: String,
+    pub display_name: String,
+    pub backend: String,
+    pub channels: Vec<InspectorAudioInputChannel>,
+}
+
+/// Build the Inspector audio-input options from the active backend's real
+/// channel model. Routing identity is always the stable device id plus numeric
+/// hardware channel index; translated/driver labels are display-only.
 fn build_input_routing_options(
     track: &TrackState,
-    device: Option<&(String, u32)>,
+    device: Option<&InspectorAudioInputDevice>,
 ) -> Vec<(String, TrackInputRouting)> {
-    let mut out = vec![("None".to_string(), TrackInputRouting::None)];
-    if let Some((name, count)) = device {
-        for opt in crate::audio_routing::build_input_channel_options(*count) {
-            let compatible = match track.routing.audio_format {
-                TrackAudioFormat::Mono => opt.channels.len() == 1,
-                TrackAudioFormat::Stereo => opt.channels.len() == 2,
+    let mut out = vec![("No Input".to_string(), TrackInputRouting::None)];
+    if let Some(device) = device {
+        let device_label = format!("{} / {}", device.backend, device.display_name);
+        let channel_label = |channel: &InspectorAudioInputChannel| {
+            let base = if channel.label.trim().is_empty() {
+                channel.name.as_str()
+            } else {
+                channel.label.as_str()
             };
-            if !compatible {
-                continue;
+            if channel.sample_format == "Unknown" {
+                base.to_string()
+            } else {
+                format!("{base} [{}]", channel.sample_format)
             }
-            let routing = match opt.channels.as_slice() {
-                [ch] => TrackInputRouting::AudioDeviceChannel {
-                    device_id: name.clone(),
-                    channel: *ch,
-                },
-                channels if !channels.is_empty() => TrackInputRouting::AudioDeviceChannels {
-                    device_id: name.clone(),
-                    channels: channels.to_vec(),
-                },
-                _ => continue,
-            };
-            out.push((audio_input_combo_label(&routing), routing));
+        };
+        match track.routing.audio_format {
+            TrackAudioFormat::Mono => {
+                for channel in device.channels.iter().filter(|channel| channel.active) {
+                    out.push((
+                        format!(
+                            "{device_label} — Mono {} (Ch {})",
+                            channel_label(channel),
+                            channel.index.saturating_add(1)
+                        ),
+                        TrackInputRouting::AudioDeviceChannel {
+                            device_id: device.id.clone(),
+                            channel: channel.index,
+                        },
+                    ));
+                }
+            }
+            TrackAudioFormat::Stereo => {
+                let mut pair_ids = device
+                    .channels
+                    .iter()
+                    .filter(|channel| channel.active)
+                    .filter_map(|channel| channel.stereo_pair)
+                    .collect::<Vec<_>>();
+                pair_ids.sort_unstable();
+                pair_ids.dedup();
+                for pair_id in pair_ids {
+                    let mut pair = device
+                        .channels
+                        .iter()
+                        .filter(|channel| channel.active && channel.stereo_pair == Some(pair_id))
+                        .collect::<Vec<_>>();
+                    pair.sort_by_key(|channel| channel.index);
+                    let [left, right] = pair.as_slice() else {
+                        continue;
+                    };
+                    out.push((
+                        format!(
+                            "{device_label} — Stereo {} + {} (Ch {}+{})",
+                            channel_label(left),
+                            channel_label(right),
+                            left.index.saturating_add(1),
+                            right.index.saturating_add(1)
+                        ),
+                        TrackInputRouting::AudioDeviceChannels {
+                            device_id: device.id.clone(),
+                            channels: vec![left.index, right.index],
+                        },
+                    ));
+                }
+            }
         }
     }
     if !out.iter().any(|(_, r)| *r == track.routing.input) {
@@ -835,7 +895,7 @@ fn build_input_routing_options(
 
 fn audio_input_combo_label(routing: &TrackInputRouting) -> String {
     match routing {
-        TrackInputRouting::None => "None".to_string(),
+        TrackInputRouting::None => "No Input".to_string(),
         TrackInputRouting::AudioDeviceChannel { channel, .. } => {
             format!("Channel {}", channel + 1)
         }
@@ -1091,15 +1151,15 @@ type CloseRoutingComboCb = Arc<dyn Fn(&mut App) + 'static>;
 
 /// Dropdown overlay for Inspector MIDI routing ComboBoxes. Rendered above the
 /// main chrome so menus stay anchored to their trigger, not the mount point.
-pub fn inspector_routing_combo_overlay(
+pub(crate) fn inspector_routing_combo_overlay(
     track: &TrackState,
     open_combo: InspectorRoutingCombo,
     anchor: OverlayAnchor,
     window: &Window,
     callbacks: &InspectorCallbacks,
     on_close: CloseRoutingComboCb,
-    // Selected input device `(name, channel_count)` for the audio-input combo.
-    audio_input_device: Option<(String, u32)>,
+    // Active input device and its real backend channel topology.
+    audio_input_device: Option<InspectorAudioInputDevice>,
     // Available Bus/Return output targets as `(track_id, display_name)`.
     audio_output_buses: Vec<(String, String)>,
     // Selected output device `(name, channel_count)` for hardware output routes.
@@ -3223,6 +3283,143 @@ pub fn clip_type_label(clip_type: &ClipType) -> &'static str {
     match clip_type {
         ClipType::Audio { .. } => "Audio",
         ClipType::Midi { .. } => "MIDI",
+    }
+}
+
+#[cfg(test)]
+mod input_routing_tests {
+    use super::*;
+    use crate::components::timeline::timeline_state::{
+        CreateTrackOptions, InputMonitorMode, TimelineState,
+    };
+
+    fn audio_track(format: TrackAudioFormat) -> TrackState {
+        let mut state = TimelineState::default();
+        state.tracks.clear();
+        let id = state.create_track(CreateTrackOptions {
+            track_type: TrackType::Audio,
+            name: "Audio".to_string(),
+            color: gpui::Rgba {
+                r: 0.0,
+                g: 0.0,
+                b: 0.0,
+                a: 1.0,
+            },
+            volume: 1.0,
+            pan: 0.0,
+            armed: false,
+            input_monitor: InputMonitorMode::Off,
+        });
+        let track = state
+            .tracks
+            .iter_mut()
+            .find(|track| track.id == id)
+            .expect("audio track");
+        track.routing.audio_format = format;
+        track.clone()
+    }
+
+    fn channel(index: u32, active: bool, stereo_pair: Option<u32>) -> InspectorAudioInputChannel {
+        InspectorAudioInputChannel {
+            index,
+            name: format!("Analog {}", index + 1),
+            active,
+            sample_format: "I32".to_string(),
+            stereo_pair,
+            label: format!("Analog {}", index + 1),
+        }
+    }
+
+    fn device(channels: Vec<InspectorAudioInputChannel>) -> InspectorAudioInputDevice {
+        InspectorAudioInputDevice {
+            id: "asio:{driver-clsid}".to_string(),
+            display_name: "Interface ASIO".to_string(),
+            backend: "DAUx ASIO".to_string(),
+            channels,
+        }
+    }
+
+    #[test]
+    fn mono_routes_include_only_active_real_channels() {
+        let track = audio_track(TrackAudioFormat::Mono);
+        let device = device(vec![
+            channel(0, true, Some(0)),
+            channel(1, false, Some(0)),
+            channel(2, true, None),
+        ]);
+
+        let options = build_input_routing_options(&track, Some(&device));
+        assert_eq!(
+            options[0],
+            ("No Input".to_string(), TrackInputRouting::None)
+        );
+        assert_eq!(options.len(), 3);
+        assert!(options.iter().any(|(_, route)| {
+            matches!(
+                route,
+                TrackInputRouting::AudioDeviceChannel { device_id, channel: 2 }
+                    if device_id == "asio:{driver-clsid}"
+            )
+        }));
+        assert!(!options.iter().any(|(_, route)| {
+            matches!(
+                route,
+                TrackInputRouting::AudioDeviceChannel { channel: 1, .. }
+            )
+        }));
+    }
+
+    #[test]
+    fn duplicate_driver_channel_names_keep_unique_menu_identity() {
+        let track = audio_track(TrackAudioFormat::Mono);
+        let mut first = channel(0, true, None);
+        let mut second = channel(1, true, None);
+        first.name = "Mic".to_string();
+        first.label = "Mic".to_string();
+        second.name = "Mic".to_string();
+        second.label = "Mic".to_string();
+        let device = device(vec![first, second]);
+
+        let options = build_input_routing_options(&track, Some(&device));
+        let labels = options
+            .iter()
+            .map(|(label, _)| label)
+            .collect::<std::collections::HashSet<_>>();
+        assert_eq!(labels.len(), options.len());
+        assert!(options.iter().any(|(label, route)| {
+            label.contains("(Ch 2)")
+                && matches!(
+                    route,
+                    TrackInputRouting::AudioDeviceChannel { channel: 1, .. }
+                )
+        }));
+    }
+
+    #[test]
+    fn stereo_routes_require_two_active_channels_in_the_same_pair() {
+        let track = audio_track(TrackAudioFormat::Stereo);
+        let device = device(vec![
+            channel(0, true, Some(0)),
+            channel(1, true, Some(0)),
+            channel(2, true, Some(1)),
+            channel(3, false, Some(1)),
+            channel(4, true, None),
+        ]);
+
+        let options = build_input_routing_options(&track, Some(&device));
+        let stereo_routes = options
+            .iter()
+            .filter_map(|(_, route)| match route {
+                TrackInputRouting::AudioDeviceChannels {
+                    device_id,
+                    channels,
+                } => Some((device_id, channels)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(stereo_routes.len(), 1);
+        assert_eq!(stereo_routes[0].0, "asio:{driver-clsid}");
+        assert_eq!(stereo_routes[0].1.as_slice(), &[0, 1]);
     }
 }
 

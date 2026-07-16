@@ -162,6 +162,22 @@ pub struct DauxDeviceConfig {
 
 // ── ASIO session capabilities ─────────────────────────────────────────────────
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AsioChannelInfo {
+    /// Stable zero-based hardware channel index within the driver.
+    pub index: u32,
+    /// Driver-provided name, or a deterministic fallback when unavailable.
+    pub name: String,
+    /// Whether the driver reports the channel active in the current buffer set.
+    pub active: bool,
+    /// Native sample representation selected for this ASIO direction.
+    pub sample_format: String,
+    /// Adjacent active pair number when this channel can participate in a
+    /// conventional stereo route. `None` never implies that a mono channel is
+    /// unavailable.
+    pub stereo_pair: Option<u32>,
+}
+
 /// Live capabilities of the currently open ASIO session, published by the
 /// engine when the stream opens and cleared when it closes. Consumed by device
 /// enumeration (channel counts for the active driver) and the Inspector's
@@ -174,10 +190,8 @@ pub struct AsioSessionCaps {
     pub buffer_size: u32,
     pub input_channels: u32,
     pub output_channels: u32,
-    /// Driver-reported channel names, indexed by channel. May be shorter than
-    /// the channel count when a driver does not name its channels.
-    pub input_channel_names: Vec<String>,
-    pub output_channel_names: Vec<String>,
+    pub input_channel_info: Vec<AsioChannelInfo>,
+    pub output_channel_info: Vec<AsioChannelInfo>,
     /// Driver-reported latencies in samples at `sample_rate` (input, output).
     pub input_latency_samples: u32,
     pub output_latency_samples: u32,

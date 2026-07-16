@@ -161,6 +161,55 @@ impl Default for EngineConfig {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EngineAudioChannelInfo {
+    pub index: u32,
+    pub name: String,
+    pub direction: String,
+    pub active: bool,
+    pub sample_format: String,
+    pub stereo_pair: Option<u32>,
+    pub label: String,
+}
+
+fn generic_channel_info(kind: &str, count: u32) -> Vec<EngineAudioChannelInfo> {
+    (0..count)
+        .map(|index| {
+            let pair_start = index - (index % 2);
+            let stereo_pair = (pair_start + 1 < count).then_some(pair_start / 2);
+            let label = format!(
+                "{} {}",
+                if kind == "input" { "Input" } else { "Output" },
+                index + 1
+            );
+            EngineAudioChannelInfo {
+                index,
+                name: label.clone(),
+                direction: kind.to_string(),
+                active: true,
+                sample_format: "Unknown".to_string(),
+                stereo_pair,
+                label,
+            }
+        })
+        .collect()
+}
+
+fn asio_channel_info(
+    channel: &crate::backend::AsioChannelInfo,
+    direction: &str,
+) -> EngineAudioChannelInfo {
+    EngineAudioChannelInfo {
+        index: channel.index,
+        name: channel.name.clone(),
+        direction: direction.to_string(),
+        active: channel.active,
+        sample_format: channel.sample_format.clone(),
+        stereo_pair: channel.stereo_pair,
+        label: channel.name.clone(),
+    }
+}
+
 /// Plain-Rust audio device descriptor returned by
 /// [`AudioEngine::list_output_devices`] / [`AudioEngine::list_input_devices`].
 ///
@@ -173,6 +222,7 @@ pub struct EngineDeviceInfo {
     pub name: String,
     pub kind: String,
     pub channels: u32,
+    pub channel_info: Vec<EngineAudioChannelInfo>,
     pub default_sample_rate: u32,
     pub is_default: bool,
     pub backend: String,
@@ -181,6 +231,7 @@ pub struct EngineDeviceInfo {
 impl EngineDeviceInfo {
     #[cfg(target_os = "windows")]
     fn from_wdm_ks(d: crate::backend::wdm_ks::WdmKsDeviceInfo) -> Self {
+        let channel_info = generic_channel_info("output", d.channels);
         Self {
             id: d.filter_path.clone(),
             device_id: AudioDeviceId::WdmKsFilterPin {
@@ -190,6 +241,7 @@ impl EngineDeviceInfo {
             name: d.name,
             kind: "output".into(),
             channels: d.channels,
+            channel_info,
             default_sample_rate: d.default_sample_rate,
             is_default: false,
             backend: "DAUx WDM-KS".into(),
@@ -197,12 +249,14 @@ impl EngineDeviceInfo {
     }
 
     fn from_daux(d: crate::types::JsAudioDeviceInfo) -> Self {
+        let channel_info = generic_channel_info(&d.kind, d.channels);
         Self {
             device_id: AudioDeviceId::DauxEndpoint(d.id.clone()),
             id: d.id,
             name: d.name,
             kind: d.kind,
             channels: d.channels,
+            channel_info,
             default_sample_rate: d.default_sample_rate,
             is_default: d.is_default,
             backend: d.backend,
@@ -210,12 +264,14 @@ impl EngineDeviceInfo {
     }
 
     fn from_wasapi(d: crate::types::JsAudioDeviceInfo) -> Self {
+        let channel_info = generic_channel_info(&d.kind, d.channels);
         Self {
             device_id: AudioDeviceId::WasapiEndpoint(d.id.clone()),
             id: d.id,
             name: d.name,
             kind: d.kind,
             channels: d.channels,
+            channel_info,
             default_sample_rate: d.default_sample_rate,
             is_default: d.is_default,
             backend: "DAUx WASAPI Exclusive".into(),
@@ -281,6 +337,7 @@ pub struct AudioEngine {
 #[derive(Default)]
 struct AsioDeviceCache {
     refreshed_at: Option<std::time::Instant>,
+    active_session: Option<crate::backend::AsioSessionCaps>,
     inputs: Vec<EngineDeviceInfo>,
     outputs: Vec<EngineDeviceInfo>,
 }
@@ -340,11 +397,13 @@ impl AudioEngine {
             ));
         }
 
+        let session = self.inner.asio_session_caps();
         {
             let cache = self.asio_devices.lock();
             if cache
                 .refreshed_at
                 .is_some_and(|at| at.elapsed() < ASIO_DEVICE_CACHE_TTL)
+                && cache.active_session == session
             {
                 return Ok(());
             }
@@ -352,7 +411,6 @@ impl AudioEngine {
 
         #[cfg(target_os = "windows")]
         {
-            let session = self.inner.asio_session_caps();
             let mut inputs = Vec::new();
             let mut outputs = Vec::new();
             for descriptor in crate::asio_registry::enumerate_asio_drivers() {
@@ -362,21 +420,37 @@ impl AudioEngine {
                 let active = session
                     .as_ref()
                     .filter(|caps| caps.driver == descriptor.stable_id);
-                let make = |kind: &str, channels: u32, sample_rate: u32| EngineDeviceInfo {
+                let make = |kind: &str,
+                            channels: u32,
+                            channel_info: Vec<EngineAudioChannelInfo>,
+                            sample_rate: u32| EngineDeviceInfo {
                     id: descriptor.stable_id.clone(),
                     device_id: AudioDeviceId::AsioDevice(descriptor.stable_id.clone()),
                     name: descriptor.display_name.clone(),
                     kind: kind.to_string(),
                     channels,
+                    channel_info,
                     default_sample_rate: sample_rate,
                     is_default: active.is_some(),
                     backend: "DAUx ASIO".into(),
                 };
-                let (in_ch, out_ch, sr) = active
-                    .map(|caps| (caps.input_channels, caps.output_channels, caps.sample_rate))
-                    .unwrap_or((0, 0, 0));
-                inputs.push(make("input", in_ch, sr));
-                outputs.push(make("output", out_ch, sr));
+                let (input_info, output_info, sr) = active
+                    .map(|caps| {
+                        (
+                            caps.input_channel_info
+                                .iter()
+                                .map(|channel| asio_channel_info(channel, "input"))
+                                .collect::<Vec<_>>(),
+                            caps.output_channel_info
+                                .iter()
+                                .map(|channel| asio_channel_info(channel, "output"))
+                                .collect::<Vec<_>>(),
+                            caps.sample_rate,
+                        )
+                    })
+                    .unwrap_or_default();
+                inputs.push(make("input", input_info.len() as u32, input_info, sr));
+                outputs.push(make("output", output_info.len() as u32, output_info, sr));
             }
             // Without an open session, mark the first driver as the default so
             // Settings has a deterministic pre-selection.
@@ -390,6 +464,7 @@ impl AudioEngine {
             }
             *self.asio_devices.lock() = AsioDeviceCache {
                 refreshed_at: Some(std::time::Instant::now()),
+                active_session: session,
                 inputs,
                 outputs,
             };
@@ -398,6 +473,7 @@ impl AudioEngine {
         {
             *self.asio_devices.lock() = AsioDeviceCache {
                 refreshed_at: Some(std::time::Instant::now()),
+                active_session: session,
                 inputs: Vec::new(),
                 outputs: Vec::new(),
             };

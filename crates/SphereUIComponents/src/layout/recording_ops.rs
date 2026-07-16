@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::components::panel::{InspectorAudioInputChannel, InspectorAudioInputDevice};
 use crate::components::timeline::timeline_state::{
     AudioClipStretchState, AudioImportState, ClipState, ClipType, MidiControllerLane,
     MidiNoteState, TrackAudioFormat, TrackInputRouting, TrackState, TrackType, MIN_NOTE_BEATS,
@@ -836,14 +837,13 @@ fn close_all_recorded_midi_notes(track: &mut MidiRecordingTrack, end_beat: f32) 
 }
 
 impl StudioLayout {
-    /// `(device id, input channel count)` for the currently selected global
-    /// input device — used to populate the Inspector input-channel selector
-    /// (roadmap Phase E). Falls back to the default input device, then the first
-    /// enumerated input. `None` when the engine is unavailable or no inputs exist.
-    pub(super) fn selected_input_device_channels(
+    /// Real channel topology for the selected global input device. ASIO data is
+    /// sourced from the open duplex session; merely installed drivers remain at
+    /// zero channels until opened and are never instantiated by this query.
+    pub(super) fn selected_input_device_model(
         &self,
         cx: &Context<Self>,
-    ) -> Option<(String, u32)> {
+    ) -> Option<InspectorAudioInputDevice> {
         let engine = self.audio_bridge.engine.as_ref()?;
         let wanted = self
             .settings
@@ -854,16 +854,44 @@ impl StudioLayout {
             .device_in
             .clone();
         let devices = engine.list_input_devices();
-        if !wanted.trim().is_empty() {
-            if let Some(d) = devices.iter().find(|d| d.name == wanted || d.id == wanted) {
-                return Some((d.id.clone(), d.channels));
-            }
-        }
-        devices
-            .iter()
-            .find(|d| d.is_default)
-            .or_else(|| devices.first())
-            .map(|d| (d.id.clone(), d.channels))
+        let selected_index = (!wanted.trim().is_empty())
+            .then(|| {
+                devices
+                    .iter()
+                    .position(|device| device.name == wanted || device.id == wanted)
+            })
+            .flatten()
+            .or_else(|| devices.iter().position(|device| device.is_default))
+            .or_else(|| (!devices.is_empty()).then_some(0))?;
+        let device = devices.into_iter().nth(selected_index)?;
+        Some(InspectorAudioInputDevice {
+            id: device.id,
+            display_name: device.name,
+            backend: device.backend,
+            channels: device
+                .channel_info
+                .into_iter()
+                .map(|channel| InspectorAudioInputChannel {
+                    index: channel.index,
+                    name: channel.name,
+                    active: channel.active,
+                    sample_format: channel.sample_format,
+                    stereo_pair: channel.stereo_pair,
+                    label: channel.label,
+                })
+                .collect(),
+        })
+    }
+
+    /// Legacy Add Track dialog adapter. Inspector routing uses the richer model
+    /// above; this keeps the existing dialog contract until its channel picker
+    /// is migrated.
+    pub(super) fn selected_input_device_channels(
+        &self,
+        cx: &Context<Self>,
+    ) -> Option<(String, u32)> {
+        self.selected_input_device_model(cx)
+            .map(|device| (device.id, device.channels.len() as u32))
     }
 
     /// `(device name, output channel count)` for the currently selected global

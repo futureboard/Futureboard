@@ -33,7 +33,7 @@ use cpal::traits::{DeviceTrait, StreamTrait};
 use crossbeam_channel::{bounded, Receiver, Sender};
 
 use crate::backend::cpal_backend::build_typed_stream;
-use crate::backend::{AsioSessionCaps, DauxDeviceConfig};
+use crate::backend::{AsioChannelInfo, AsioSessionCaps, DauxDeviceConfig};
 use crate::command::EngineCommand;
 use crate::engine::{f32_store, SharedState};
 use crate::error::SphereAudioError;
@@ -280,11 +280,14 @@ pub(crate) fn open_duplex(
     let platform_device: cpal::Device = device.clone().into();
 
     let mut input_warning = None;
+    let mut input_sample_format = None;
     let input_stream = if in_channels > 0 {
         let input_result = device
             .default_input_config()
             .map_err(|error| format!("input format unsupported: {error}"))
             .and_then(|input_config| {
+                let sample_format = input_config.sample_format();
+                input_sample_format = Some(sample_format);
                 let stream_config = cpal::StreamConfig {
                     channels: in_channels.min(u16::MAX as u32) as u16,
                     sample_rate: cpal::SampleRate(sample_rate),
@@ -293,7 +296,7 @@ pub(crate) fn open_duplex(
                 build_input_fanout_stream(
                     &platform_device,
                     &stream_config,
-                    input_config.sample_format(),
+                    sample_format,
                     Arc::clone(&shared),
                     input_cmd_rx,
                     trash_tx,
@@ -354,22 +357,48 @@ pub(crate) fn open_duplex(
     } else {
         0
     };
-    let channel_names = |is_input: bool, count: u32| -> Vec<String> {
-        (0..count)
+    let channel_info = |is_input: bool,
+                        count: u32,
+                        sample_format: Option<cpal::SampleFormat>|
+     -> Vec<AsioChannelInfo> {
+        let mut channels: Vec<_> = (0..count)
             .map(|index| {
-                device
-                    .asio_channel_description(is_input, index)
-                    .map(|desc| desc.name)
+                let description = device.asio_channel_description(is_input, index);
+                let name = description
+                    .as_ref()
+                    .map(|desc| desc.name.trim())
                     .filter(|name| !name.is_empty())
+                    .map(str::to_owned)
                     .unwrap_or_else(|| {
                         format!(
                             "{} {}",
                             if is_input { "Input" } else { "Output" },
                             index + 1
                         )
-                    })
+                    });
+                AsioChannelInfo {
+                    index,
+                    name,
+                    active: description.map(|desc| desc.is_active).unwrap_or(true),
+                    sample_format: sample_format
+                        .map(|format| format!("{format:?}"))
+                        .unwrap_or_else(|| "Unknown".to_string()),
+                    stereo_pair: None,
+                }
             })
-            .collect()
+            .collect();
+        for pair_start in (0..channels.len()).step_by(2) {
+            let Some(pair_end) = pair_start.checked_add(1) else {
+                break;
+            };
+            if pair_end < channels.len() && channels[pair_start].active && channels[pair_end].active
+            {
+                let pair = (pair_start / 2) as u32;
+                channels[pair_start].stereo_pair = Some(pair);
+                channels[pair_end].stereo_pair = Some(pair);
+            }
+        }
+        channels
     };
 
     let caps = AsioSessionCaps {
@@ -378,8 +407,8 @@ pub(crate) fn open_duplex(
         buffer_size: buffer_frames,
         input_channels: effective_in_channels,
         output_channels: out_channels,
-        input_channel_names: channel_names(true, effective_in_channels),
-        output_channel_names: channel_names(false, out_channels),
+        input_channel_info: channel_info(true, effective_in_channels, input_sample_format),
+        output_channel_info: channel_info(false, out_channels, Some(output_format)),
         input_latency_samples: input_latency,
         output_latency_samples: output_latency,
     };

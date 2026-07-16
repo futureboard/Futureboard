@@ -224,7 +224,6 @@ where
     let ch = config.channels as usize;
     let mut runtime = initial_runtime;
     runtime.retarget_sample_rate(output_sample_rate);
-    let mut local = LocalAudioState::new(sr);
     #[cfg(target_os = "windows")]
     let mut mmcss_set = false;
     #[cfg(not(target_os = "windows"))]
@@ -237,6 +236,7 @@ where
         BufferSize::Fixed(frames) => frames as usize,
         BufferSize::Default => DEFAULT_SCRATCH_FRAMES,
     };
+    let mut local = LocalAudioState::with_monitor_capacity(sr, scratch_frames);
     let mut f32_scratch = vec![0.0f32; scratch_frames.saturating_mul(ch)];
 
     // Separate handle for the error callback (the data callback moves `shared`).

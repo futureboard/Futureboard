@@ -528,7 +528,9 @@ impl Default for SharedState {
 enum ActiveStream {
     Cpal(CpalStreamHandle),
     #[cfg(all(target_os = "windows", feature = "asio"))]
-    AsioDuplex(crate::backend::asio_session::AsioDuplexHandle),
+    // Boxed: the duplex handle (with its per-channel meter bank) is much
+    // larger than the other variants (clippy::large_enum_variant).
+    AsioDuplex(Box<crate::backend::asio_session::AsioDuplexHandle>),
     #[cfg(target_os = "windows")]
     WasapiExclusive(WasapiExclusiveHandle),
     #[cfg(target_os = "windows")]
@@ -572,7 +574,7 @@ impl ActiveStream {
     #[cfg(all(target_os = "windows", feature = "asio"))]
     fn as_asio_duplex(&self) -> Option<&crate::backend::asio_session::AsioDuplexHandle> {
         match self {
-            ActiveStream::AsioDuplex(h) => Some(h),
+            ActiveStream::AsioDuplex(h) => Some(h.as_ref()),
             _ => None,
         }
     }
@@ -1356,7 +1358,9 @@ impl EngineInner {
     // ── Meters ────────────────────────────────────────────────────────────
 
     pub fn get_meters(&self) -> JsMeterSnapshot {
-        let tracks = self
+        // `mut` is only exercised by the ASIO input-meter override below.
+        #[cfg_attr(not(all(target_os = "windows", feature = "asio")), allow(unused_mut))]
+        let mut tracks: Vec<_> = self
             .runtime
             .lock()
             .meter_snapshots()
@@ -1369,6 +1373,46 @@ impl EngineInner {
                 rms_r: meter.rms_r as f64,
             })
             .collect();
+
+        #[cfg(all(target_os = "windows", feature = "asio"))]
+        {
+            let input_peaks = self
+                .active_stream
+                .lock()
+                .as_ref()
+                .and_then(|stream| stream.as_asio_duplex())
+                .map(|handle| handle.take_input_channel_peaks());
+            if let (Some(input_peaks), Some(project)) = (input_peaks, self.project.lock().as_ref())
+            {
+                for meter in &mut tracks {
+                    let Some(track) = project.tracks.iter().find(|track| {
+                        track.id == meter.track_id
+                            && track.track_type == "audio"
+                            && (track.armed || track.input_monitor)
+                    }) else {
+                        continue;
+                    };
+                    match track.input_source.channels.as_slice() {
+                        [channel] => {
+                            meter.peak_l =
+                                input_peaks.get(*channel as usize).copied().unwrap_or(0.0) as f64;
+                            meter.peak_r = 0.0;
+                            meter.rms_l = 0.0;
+                            meter.rms_r = 0.0;
+                        }
+                        [left, right, ..] => {
+                            meter.peak_l =
+                                input_peaks.get(*left as usize).copied().unwrap_or(0.0) as f64;
+                            meter.peak_r =
+                                input_peaks.get(*right as usize).copied().unwrap_or(0.0) as f64;
+                            meter.rms_l = 0.0;
+                            meter.rms_r = 0.0;
+                        }
+                        [] => {}
+                    }
+                }
+            }
+        }
         let plugin_outputs = self
             .runtime
             .lock()
@@ -2642,7 +2686,7 @@ impl EngineInner {
                 let dev_name = handle.device_name.clone();
                 deferred_open_warning = handle.input_warning.clone();
                 *self.asio_caps.lock() = Some(handle.caps.clone());
-                let stream = ActiveStream::AsioDuplex(handle);
+                let stream = ActiveStream::AsioDuplex(Box::new(handle));
                 self.commit_stream_open(sr, bs, dev_name, "DAUx ASIO".into());
                 stream
             }
@@ -2811,6 +2855,26 @@ impl EngineInner {
         &self,
         snapshot: &EngineProjectSnapshot,
     ) -> Result<(), SphereAudioError> {
+        let mut monitored_route: Option<(&str, &EngineTrackInputSourceSnapshot)> = None;
+        for track in snapshot.tracks.iter().filter(|track| {
+            track.track_type == "audio"
+                && track.input_monitor
+                && !track.input_source.channels.is_empty()
+        }) {
+            if let Some((other_track_id, other_source)) = monitored_route {
+                if other_source.device_id != track.input_source.device_id
+                    || other_source.channels != track.input_source.channels
+                {
+                    return Err(SphereAudioError::InvalidConfig(format!(
+                        "software monitoring routes conflict: track '{}' and track '{}' use different hardware inputs",
+                        other_track_id, track.id
+                    )));
+                }
+            } else {
+                monitored_route = Some((track.id.as_str(), &track.input_source));
+            }
+        }
+
         // ASIO: the duplex session's persistent input already feeds the ring.
         // Route changes are atomic stores — never a stream open/close, which
         // would dispose the shared buffer set and kill playback.

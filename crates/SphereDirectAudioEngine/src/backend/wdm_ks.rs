@@ -674,7 +674,8 @@ unsafe fn run_rt_stream(
     // Realtime runtime + scratch (period-sized; the fill loop chunks by period).
     let mut runtime = initial_runtime;
     runtime.retarget_sample_rate(sample_rate);
-    let mut local = LocalAudioState::new(sample_rate as f64);
+    let mut local =
+        LocalAudioState::with_monitor_capacity(sample_rate as f64, stream.period_frames as usize);
     let mut scratch = vec![0.0f32; stream.period_frames as usize * channels.max(1)];
 
     // Pre-fill the whole buffer before RUN so the DMA engine starts on valid

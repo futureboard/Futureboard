@@ -226,7 +226,7 @@ pub fn resolve_descriptors(
         // Dedupe by identity (CLSID), not display name: the same driver is
         // sometimes registered under several subkeys.
         if clsid_state.is_none() {
-            if seen_clsids.iter().any(|seen| *seen == clsid) {
+            if seen_clsids.contains(&clsid) {
                 continue;
             }
             seen_clsids.push(clsid.clone());

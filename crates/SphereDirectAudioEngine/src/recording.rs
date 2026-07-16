@@ -228,6 +228,7 @@ pub(crate) fn find_input_device_for_host(
 
 // ── RAUF / disk writer thread ─────────────────────────────────────────────────
 
+#[allow(clippy::too_many_arguments)]
 fn disk_writer_thread(
     audio_rx: crossbeam_channel::Receiver<Vec<i32>>,
     free_tx: crossbeam_channel::Sender<Vec<i32>>,

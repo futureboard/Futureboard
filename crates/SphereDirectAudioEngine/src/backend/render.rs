@@ -17,7 +17,10 @@ use crate::runtime::{RuntimePreviewMode, RuntimeProject};
 use crate::transport;
 
 // Re-export helpers so wasapi_exclusive.rs can use them through render.
-pub use crate::engine::{render_project_block_interleaved, render_project_sample};
+pub use crate::engine::{
+    render_project_block_interleaved, render_project_block_interleaved_with_live_input,
+    render_project_sample,
+};
 
 fn command_debug_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
@@ -91,6 +94,10 @@ pub struct LocalAudioState {
     /// Smoothed input-bus peaks for diagnostics (Layer 4 verification).
     pub prev_input_bus_l: f32,
     pub prev_input_bus_r: f32,
+    /// Preallocated live-input block injected into monitored track buffers before
+    /// the normal graph pass. Never resized from the callback.
+    pub monitor_input_l: Vec<f32>,
+    pub monitor_input_r: Vec<f32>,
     pub render_path_logged: bool,
     /// Samples of instrument processing still owed after the last preview note
     /// went off, so the plugin's release tail renders out instead of being cut
@@ -125,6 +132,10 @@ pub struct LocalAudioState {
 
 impl LocalAudioState {
     pub fn new(sample_rate: f64) -> Self {
+        Self::with_monitor_capacity(sample_rate, 0)
+    }
+
+    pub fn with_monitor_capacity(sample_rate: f64, monitor_capacity: usize) -> Self {
         Self {
             osc_l: SineOscillator::new(440.0, sample_rate),
             osc_r: SineOscillator::new(440.0, sample_rate),
@@ -136,6 +147,8 @@ impl LocalAudioState {
             input_read_frames: 0,
             prev_input_bus_l: 0.0,
             prev_input_bus_r: 0.0,
+            monitor_input_l: vec![0.0; monitor_capacity],
+            monitor_input_r: vec![0.0; monitor_capacity],
             render_path_logged: false,
             preview_tail_samples: 0,
             stop_tail_samples: 0,
@@ -832,6 +845,9 @@ fn fill_output_f32_inner(
     // over from a graph swap must never drive rendering while Paused.
     let transport_playing =
         local.playing_local && matches!(engine_state, crate::engine::AudioEngineState::Running);
+    let software_monitoring = shared.monitor_enabled_any.load(Ordering::Relaxed)
+        && shared.live_input_active.load(Ordering::Relaxed)
+        && shared.input_ring.is_active();
     if engine_state.outputs_silence() {
         // Paused still services MIDI preview, the post-panic bridge flush, and
         // open plugin editors: those need the block/handshake loop alive so
@@ -845,6 +861,7 @@ fn fill_output_f32_inner(
                 || runtime.has_bridge_editor_active()
                 || local.preview_tail_samples > 0
                 || local.stop_tail_samples > 0
+                || software_monitoring
                 || runtime
                     .tracks
                     .iter()
@@ -912,10 +929,6 @@ fn fill_output_f32_inner(
         local.reset_metronome_schedule(base_sample, runtime.sample_rate);
     }
 
-    let mut peak_l = 0.0f32;
-    let mut peak_r = 0.0f32;
-    let mut sum_sq_l = 0.0f32;
-    let mut sum_sq_r = 0.0f32;
     let mut frames = 0u64;
     runtime.begin_meter_block();
 
@@ -976,7 +989,8 @@ fn fill_output_f32_inner(
         || bridge_editor_wakeup
         || local.preview_tail_samples > 0
         || local.stop_tail_samples > 0
-        || audition_active;
+        || audition_active
+        || software_monitoring;
     if preview_render_active
         && !transport_playing
         && (has_preview || pending_midi || local.preview_tail_samples > 0)
@@ -1022,18 +1036,45 @@ fn fill_output_f32_inner(
         local.stop_tail_samples = local.stop_tail_samples.saturating_sub(frames_in_block);
     }
 
+    let monitor_input_ready = if shared.live_input_active.load(Ordering::Relaxed) {
+        // Per-track input meters from the latest captured sample (Layer 6).
+        let input_l = f32_load(shared.live_input_l.load(Ordering::Relaxed));
+        let input_r = f32_load(shared.live_input_r.load(Ordering::Relaxed));
+        runtime.accumulate_live_input_meters(input_l, input_r);
+        read_monitor_input(frames_in_block as usize, shared, local)
+    } else {
+        clear_input_bus_meter(shared, local);
+        false
+    };
+
     if channels >= 2 && (transport_playing || preview_render_active) {
-        frames = render_project_block_interleaved(
-            runtime,
-            base_sample,
-            master_vol,
-            data,
-            channels,
-            transport_playing,
-            shared.time_sig_num.load(Ordering::Relaxed),
-            shared.time_sig_den.load(Ordering::Relaxed),
-            loop_bounds,
-        );
+        frames = if software_monitoring && monitor_input_ready {
+            render_project_block_interleaved_with_live_input(
+                runtime,
+                base_sample,
+                master_vol,
+                data,
+                channels,
+                transport_playing,
+                shared.time_sig_num.load(Ordering::Relaxed),
+                shared.time_sig_den.load(Ordering::Relaxed),
+                loop_bounds,
+                &local.monitor_input_l[..frames_in_block as usize],
+                &local.monitor_input_r[..frames_in_block as usize],
+            )
+        } else {
+            render_project_block_interleaved(
+                runtime,
+                base_sample,
+                master_vol,
+                data,
+                channels,
+                transport_playing,
+                shared.time_sig_num.load(Ordering::Relaxed),
+                shared.time_sig_den.load(Ordering::Relaxed),
+                loop_bounds,
+            )
+        };
         let audition_finished = local
             .audition
             .as_mut()
@@ -1102,17 +1143,10 @@ fn fill_output_f32_inner(
         // Live monitoring is mixed below via the input ring (single, clean
         // path) — the old per-block sample-and-hold monitor was removed because
         // it held one input sample across the whole output block (warble).
-        for frame in data.chunks(channels) {
-            let l = frame[0];
-            let r = frame[1];
-            peak_l = peak_l.max(l.abs());
-            peak_r = peak_r.max(r.abs());
-            sum_sq_l += l * l;
-            sum_sq_r += r * r;
-        }
+
         if !transport_playing
             && runtime.bridge_preview_tail_samples > 0
-            && peak_l.max(peak_r) > 0.00001
+            && data.iter().any(|sample| sample.abs() > 0.00001)
         {
             runtime.bridge_preview_tail_samples = post_stop_tail_samples(runtime.sample_rate);
         }
@@ -1149,10 +1183,6 @@ fn fill_output_f32_inner(
             for extra in frame.iter_mut().skip(2) {
                 *extra = 0.0;
             }
-            peak_l = peak_l.max(l.abs());
-            peak_r = peak_r.max(r.abs());
-            sum_sq_l += l * l;
-            sum_sq_r += r * r;
             frames += 1;
         }
     } else if channels == 1 {
@@ -1179,44 +1209,31 @@ fn fill_output_f32_inner(
             ) * master_vol;
             let v = (tone + (proj_l + proj_r) * 0.5 + click).clamp(-1.0, 1.0);
             *sample = v;
-            peak_l = peak_l.max(v.abs());
-            sum_sq_l += v * v;
             frames += 1;
         }
-    }
-
-    if shared.live_input_active.load(Ordering::Relaxed) {
-        // Per-track input meters from the latest captured sample (Layer 6).
-        let input_l = f32_load(shared.live_input_l.load(Ordering::Relaxed));
-        let input_r = f32_load(shared.live_input_r.load(Ordering::Relaxed));
-        runtime.accumulate_live_input_meters(input_l, input_r);
-
-        // Live monitoring: drain the input ring and mix it into the output
-        // (Layers 4 + 7). Runs whether or not the transport is playing so the
-        // user hears input as soon as Monitor is enabled.
-        let (mon_peak_l, mon_peak_r) = mix_monitor_input(data, channels, shared, local, master_vol);
-        // Fold the monitored signal into the master peak so the master meter
-        // reflects what is actually leaving the device.
-        peak_l = peak_l.max(mon_peak_l);
-        peak_r = peak_r.max(mon_peak_r);
-    } else {
-        // No live input — clear the input-bus peak so diagnostics decay to 0.
-        shared
-            .input_bus_peak_l
-            .store(f32_store(0.0), Ordering::Relaxed);
-        shared
-            .input_bus_peak_r
-            .store(f32_store(0.0), Ordering::Relaxed);
-        local.prev_input_bus_l = 0.0;
-        local.prev_input_bus_r = 0.0;
     }
 
     // Legacy master-bus bridge fallback (disabled by default — per-track routing
     // through external-bridge-plugin inserts is the normal path).
     if plugin_bridge_master_fallback_enabled() {
-        let (bridge_peak_l, bridge_peak_r) = mix_plugin_bridge(data, channels, runtime, master_vol);
-        peak_l = peak_l.max(bridge_peak_l);
-        peak_r = peak_r.max(bridge_peak_r);
+        let _ = mix_plugin_bridge(data, channels, runtime, master_vol);
+    }
+
+    // Meter the final output after playback, software monitoring, and bridge
+    // contributions have all been summed. This avoids under-reporting monitor
+    // gain and catches clipping caused by the actual final mix.
+    let mut peak_l = 0.0f32;
+    let mut peak_r = 0.0f32;
+    let mut sum_sq_l = 0.0f32;
+    let mut sum_sq_r = 0.0f32;
+    frames = (data.len() / channels.max(1)) as u64;
+    for frame in data.chunks(channels.max(1)) {
+        let l = frame.first().copied().unwrap_or(0.0);
+        let r = frame.get(1).copied().unwrap_or(l);
+        peak_l = peak_l.max(l.abs());
+        peak_r = peak_r.max(r.abs());
+        sum_sq_l += l * l;
+        sum_sq_r += r * r;
     }
 
     // Update meters.
@@ -1339,32 +1356,37 @@ fn mix_plugin_bridge(
     (peak_l, peak_r)
 }
 
-/// Drain the shared input ring into the output buffer (Layers 4 + 7).
+/// Drain the shared input ring into the preallocated monitor-input block
+/// (Layers 4 + 7).
 ///
 /// Always advances the read cursor — even when monitoring is off — so the
-/// input-bus peak stays live for diagnostics and the monitor mix never replays
-/// stale audio when it is toggled on. Returns the *post-gain* monitor peak so
-/// the caller can fold it into the master meter.
+/// input-bus peak stays live for diagnostics and the monitor path never
+/// replays stale audio when it is toggled on. The staged block is injected
+/// into the monitored tracks' buffers before the normal graph pass, so plugin
+/// state, PDC, sends, and master DSP all apply exactly once.
+///
+/// Returns true when a full block of post-gain input is staged in
+/// `local.monitor_input_l/r` (underruns are padded with silence, never stale
+/// samples).
 ///
 /// Realtime-safe: atomics + arithmetic only, no allocation or locking.
-fn mix_monitor_input(
-    data: &mut [f32],
-    channels: usize,
+fn read_monitor_input(
+    frames: usize,
     shared: &Arc<SharedState>,
     local: &mut LocalAudioState,
-    master_vol: f32,
-) -> (f32, f32) {
+) -> bool {
     let ring = &shared.input_ring;
-    if !ring.is_active() || channels == 0 {
-        return (0.0, 0.0);
+    if !ring.is_active() || frames == 0 {
+        return false;
     }
-    let frames = data.len() / channels;
-    if frames == 0 {
-        return (0.0, 0.0);
+    // The staging buffers are preallocated by the backend; never grow them on
+    // the callback. A backend that did not size them cannot stage monitoring.
+    if local.monitor_input_l.len() < frames || local.monitor_input_r.len() < frames {
+        return false;
     }
     let head = ring.write_head();
     if head == 0 {
-        return (0.0, 0.0);
+        return false;
     }
     let frames64 = frames as u64;
 
@@ -1406,12 +1428,11 @@ fn mix_monitor_input(
 
     let mut bus_peak_l = 0.0f32;
     let mut bus_peak_r = 0.0f32;
-    let mut out_peak_l = 0.0f32;
-    let mut out_peak_r = 0.0f32;
+    let mut staged_peak = 0.0f32;
     let mut read = local.input_read_frames;
     let mut consumed = 0u64;
 
-    for frame in data.chunks_mut(channels) {
+    for frame_index in 0..frames {
         let (in_l, in_r) = if read < head {
             let s = ring.read_frame(read);
             read += 1;
@@ -1423,22 +1444,20 @@ fn mix_monitor_input(
         };
         bus_peak_l = bus_peak_l.max(in_l.abs());
         bus_peak_r = bus_peak_r.max(in_r.abs());
-        if monitor_on && channels >= 2 {
-            let m_l = in_l * mon_gain * master_vol;
-            let m_r = in_r * mon_gain * master_vol;
-            frame[0] = (frame[0] + m_l).clamp(-1.0, 1.0);
-            frame[1] = (frame[1] + m_r).clamp(-1.0, 1.0);
-            out_peak_l = out_peak_l.max(m_l.abs());
-            out_peak_r = out_peak_r.max(m_r.abs());
-        }
+        let staged_l = in_l * mon_gain;
+        let staged_r = in_r * mon_gain;
+        local.monitor_input_l[frame_index] = staged_l;
+        local.monitor_input_r[frame_index] = staged_r;
+        staged_peak = staged_peak.max(staged_l.abs()).max(staged_r.abs());
     }
     local.input_read_frames = read;
     shared
         .monitor_frames_consumed
         .fetch_add(consumed, Ordering::Relaxed);
 
-    // Smooth + publish the input-bus peak (pre-master) and monitor-output peak
-    // for diagnostics.
+    // Smooth + publish the input-bus peak (pre-gain) and the staged monitor
+    // level (post-gain, pre-fader — the graph applies the rest) for
+    // diagnostics.
     local.prev_input_bus_l = smooth_peak(local.prev_input_bus_l, bus_peak_l, PEAK_DECAY);
     local.prev_input_bus_r = smooth_peak(local.prev_input_bus_r, bus_peak_r, PEAK_DECAY);
     shared
@@ -1447,11 +1466,24 @@ fn mix_monitor_input(
     shared
         .input_bus_peak_r
         .store(f32_store(local.prev_input_bus_r), Ordering::Relaxed);
-    shared
-        .monitor_output_peak
-        .store(f32_store(out_peak_l.max(out_peak_r)), Ordering::Relaxed);
+    shared.monitor_output_peak.store(
+        f32_store(if monitor_on { staged_peak } else { 0.0 }),
+        Ordering::Relaxed,
+    );
 
-    (out_peak_l, out_peak_r)
+    true
+}
+
+/// No live input — clear the input-bus peak so diagnostics decay to 0.
+fn clear_input_bus_meter(shared: &Arc<SharedState>, local: &mut LocalAudioState) {
+    shared
+        .input_bus_peak_l
+        .store(f32_store(0.0), Ordering::Relaxed);
+    shared
+        .input_bus_peak_r
+        .store(f32_store(0.0), Ordering::Relaxed);
+    local.prev_input_bus_l = 0.0;
+    local.prev_input_bus_r = 0.0;
 }
 
 #[cfg(test)]

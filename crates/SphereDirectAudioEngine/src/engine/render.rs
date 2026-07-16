@@ -714,7 +714,7 @@ pub fn render_project_block_interleaved(
     time_sig_den: u32,
     loop_bounds: Option<crate::transport::LoopBounds>,
 ) -> u64 {
-    render_project_block_interleaved_with_taps(
+    render_project_block_interleaved_core(
         runtime,
         base_sample,
         master_volume,
@@ -724,6 +724,39 @@ pub fn render_project_block_interleaved(
         time_sig_num,
         time_sig_den,
         loop_bounds,
+        None,
+        None,
+    )
+}
+
+/// Realtime variant that injects the selected live-input block into every
+/// software-monitored source track before Pass 1. The normal graph then runs
+/// exactly once, preserving plugin state, PDC, sends, buses, and master DSP.
+#[allow(clippy::too_many_arguments)]
+pub fn render_project_block_interleaved_with_live_input(
+    runtime: &mut RuntimeProject,
+    base_sample: u64,
+    master_volume: f32,
+    output: &mut [f32],
+    channels: usize,
+    transport_active: bool,
+    time_sig_num: u32,
+    time_sig_den: u32,
+    loop_bounds: Option<crate::transport::LoopBounds>,
+    input_l: &[f32],
+    input_r: &[f32],
+) -> u64 {
+    render_project_block_interleaved_core(
+        runtime,
+        base_sample,
+        master_volume,
+        output,
+        channels,
+        transport_active,
+        time_sig_num,
+        time_sig_den,
+        loop_bounds,
+        Some((input_l, input_r)),
         None,
     )
 }
@@ -742,6 +775,35 @@ pub fn render_project_block_interleaved_with_taps(
     time_sig_num: u32,
     time_sig_den: u32,
     loop_bounds: Option<crate::transport::LoopBounds>,
+    track_taps: Option<&mut [Vec<f32>]>,
+) -> u64 {
+    render_project_block_interleaved_core(
+        runtime,
+        base_sample,
+        master_volume,
+        output,
+        channels,
+        transport_active,
+        time_sig_num,
+        time_sig_den,
+        loop_bounds,
+        None,
+        track_taps,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_project_block_interleaved_core(
+    runtime: &mut RuntimeProject,
+    base_sample: u64,
+    master_volume: f32,
+    output: &mut [f32],
+    channels: usize,
+    transport_active: bool,
+    time_sig_num: u32,
+    time_sig_den: u32,
+    loop_bounds: Option<crate::transport::LoopBounds>,
+    live_input: Option<(&[f32], &[f32])>,
     mut track_taps: Option<&mut [Vec<f32>]>,
 ) -> u64 {
     if channels < 2 {
@@ -800,6 +862,18 @@ pub fn render_project_block_interleaved_with_taps(
         track.block_r[..frames].fill(0.0);
         track.recv_l[..frames].fill(0.0);
         track.recv_r[..frames].fill(0.0);
+    }
+
+    if let Some((input_l, input_r)) = live_input {
+        let input_frames = frames.min(input_l.len()).min(input_r.len());
+        for track in runtime.tracks.iter_mut().filter(|track| {
+            track.track_type == "audio" && track.monitor_enabled && track.input_source.is_routable()
+        }) {
+            for frame in 0..input_frames {
+                track.block_l[frame] += input_l[frame];
+                track.block_r[frame] += input_r[frame];
+            }
+        }
     }
 
     let master_index = runtime.audio_graph.master_index;
@@ -1120,6 +1194,11 @@ pub fn render_project_block_interleaved_with_taps(
                     tap[frame * 2] = master.block_l[frame];
                     tap[frame * 2 + 1] = master.block_r[frame];
                 }
+            }
+        } else {
+            for frame in output.chunks_mut(channels) {
+                frame[0] = 0.0;
+                frame[1] = 0.0;
             }
         }
     }
@@ -2253,6 +2332,127 @@ pub fn pan_gains(pan: f32) -> (f32, f32) {
         (1.0, 1.0 + pan)
     } else {
         (1.0 - pan, 1.0)
+    }
+}
+
+#[cfg(test)]
+mod live_input_monitor_tests {
+    use super::render_project_block_interleaved_with_live_input;
+    use crate::runtime::RuntimeProject;
+    use crate::types::{
+        EngineProjectSnapshot, EngineRoutingSnapshot, EngineTrackInputSourceSnapshot,
+        EngineTrackSnapshot,
+    };
+    use std::collections::HashMap;
+
+    fn track(id: &str, track_type: &str) -> EngineTrackSnapshot {
+        EngineTrackSnapshot {
+            id: id.to_string(),
+            track_type: track_type.to_string(),
+            volume: 1.0,
+            pan: 0.0,
+            muted: false,
+            solo: false,
+            armed: false,
+            input_monitor: track_type == "audio",
+            input_source: if track_type == "audio" {
+                EngineTrackInputSourceSnapshot {
+                    device_id: Some("asio:test".to_string()),
+                    channels: vec![0, 1],
+                }
+            } else {
+                Default::default()
+            },
+            preview_mode: "stereo".to_string(),
+            output_track_id: None,
+            inserts: Vec::new(),
+            sends: Vec::new(),
+            automation_lanes: Vec::new(),
+            builtin_soundfont_player: false,
+            soundfont_path: None,
+            soundfont_preset_bank: None,
+            soundfont_preset_patch: None,
+            soundfont_volume: 1.0,
+            soundfont_reverb_chorus: true,
+            soundfont_polyphony: 64,
+        }
+    }
+
+    fn runtime() -> RuntimeProject {
+        let snapshot = EngineProjectSnapshot {
+            project_id: "monitor-test".to_string(),
+            project_root: None,
+            preferred_input_device: None,
+            bpm: 120.0,
+            tempo_points: Vec::new(),
+            time_signature: [4, 4],
+            sample_rate: 48_000,
+            tracks: vec![track("audio-1", "audio"), track("master", "master")],
+            clips: Vec::new(),
+            midi_clips: Vec::new(),
+            pdc_enabled: true,
+            latency_graph_version: 1,
+            routing: EngineRoutingSnapshot {
+                master_output_device: None,
+                sample_rate: 48_000,
+                buffer_size: 256,
+            },
+        };
+        RuntimeProject::build(&snapshot, 48_000, &mut HashMap::new(), None, true)
+            .expect("monitor runtime")
+    }
+
+    const FRAMES: usize = 64;
+
+    fn render_monitored_block(runtime: &mut RuntimeProject, base_sample: u64) -> (f32, f32) {
+        let input = [0.5f32; FRAMES];
+        let mut output = [0.0f32; FRAMES * 2];
+        render_project_block_interleaved_with_live_input(
+            runtime,
+            base_sample,
+            1.0,
+            &mut output,
+            2,
+            false,
+            4,
+            4,
+            None,
+            &input,
+            &input,
+        );
+        let mut peak_l = 0.0f32;
+        let mut peak_r = 0.0f32;
+        for frame in output.chunks(2) {
+            peak_l = peak_l.max(frame[0].abs());
+            peak_r = peak_r.max(frame[1].abs());
+        }
+        (peak_l, peak_r)
+    }
+
+    #[test]
+    fn monitored_input_obeys_track_pan_and_mute() {
+        let mut runtime = runtime();
+        // Exact per-block gains (no first-block ramp) so pan asserts are strict.
+        runtime.fader_smoothing = false;
+        runtime.tracks[0].pan = -1.0;
+        let (left, right) = render_monitored_block(&mut runtime, 0);
+        assert!(left > 0.0);
+        assert!(right.abs() < 1.0e-6);
+
+        runtime.tracks[0].muted = true;
+        let (muted_l, muted_r) = render_monitored_block(&mut runtime, FRAMES as u64);
+        assert!(muted_l.abs() < 1.0e-6);
+        assert!(muted_r.abs() < 1.0e-6);
+    }
+
+    #[test]
+    fn unmonitored_track_receives_no_live_input() {
+        let mut runtime = runtime();
+        runtime.fader_smoothing = false;
+        runtime.tracks[0].monitor_enabled = false;
+        let (left, right) = render_monitored_block(&mut runtime, 0);
+        assert!(left.abs() < 1.0e-6);
+        assert!(right.abs() < 1.0e-6);
     }
 }
 

@@ -65,6 +65,52 @@ pub struct RecordSink {
     pub dropped_blocks: Arc<AtomicU64>,
 }
 
+/// Per-hardware-channel input peaks. Storage is allocated when the session
+/// opens; the ASIO callback only updates atomics from a preallocated scratch
+/// block, and the control thread consumes/reset peaks for track meters.
+pub struct AsioInputMeterBank {
+    peaks: Box<[std::sync::atomic::AtomicU32]>,
+}
+
+impl AsioInputMeterBank {
+    fn new(channels: usize) -> Self {
+        Self {
+            peaks: (0..channels)
+                .map(|_| std::sync::atomic::AtomicU32::new(0))
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
+        }
+    }
+
+    fn publish(&self, block_peaks: &[f32]) {
+        for (peak, value) in self.peaks.iter().zip(block_peaks.iter().copied()) {
+            let mut current = peak.load(Ordering::Relaxed);
+            loop {
+                let current_value = f32::from_bits(current);
+                if current_value >= value {
+                    break;
+                }
+                match peak.compare_exchange_weak(
+                    current,
+                    value.to_bits(),
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
+                ) {
+                    Ok(_) => break,
+                    Err(next) => current = next,
+                }
+            }
+        }
+    }
+
+    pub fn take_peaks(&self) -> Vec<f32> {
+        self.peaks
+            .iter()
+            .map(|peak| f32::from_bits(peak.swap(0, Ordering::Relaxed)))
+            .collect()
+    }
+}
+
 /// Driver lifecycle notifications, converted to flags the control thread
 /// polls. Duplicate reset requests coalesce into one pending flag.
 #[derive(Default)]
@@ -88,6 +134,7 @@ pub struct AsioDuplexHandle {
     pub input_cmd_tx: Sender<AsioInputCommand>,
     /// Control-thread side of record-sink disposal (see [`RecordSink`]).
     pub trash_rx: Receiver<Box<RecordSink>>,
+    pub input_meters: Arc<AsioInputMeterBank>,
     pub events: Arc<AsioDriverEventFlags>,
     pub caps: AsioSessionCaps,
     pub device_name: String,
@@ -152,6 +199,10 @@ impl AsioDuplexHandle {
             drained += 1;
         }
         drained
+    }
+
+    pub fn take_input_channel_peaks(&self) -> Vec<f32> {
+        self.input_meters.take_peaks()
     }
 }
 
@@ -276,6 +327,7 @@ pub(crate) fn open_duplex(
     let (cmd_tx, cmd_rx) = bounded::<EngineCommand>(512);
     let (input_cmd_tx, input_cmd_rx) = bounded::<AsioInputCommand>(8);
     let (trash_tx, trash_rx) = bounded::<Box<RecordSink>>(8);
+    let input_meters = Arc::new(AsioInputMeterBank::new(in_channels as usize));
 
     let platform_device: cpal::Device = device.clone().into();
 
@@ -298,6 +350,7 @@ pub(crate) fn open_duplex(
                     &stream_config,
                     sample_format,
                     Arc::clone(&shared),
+                    Arc::clone(&input_meters),
                     input_cmd_rx,
                     trash_tx,
                 )
@@ -442,6 +495,7 @@ pub(crate) fn open_duplex(
         cmd_tx,
         input_cmd_tx,
         trash_rx,
+        input_meters,
         events,
         caps,
         device_name: driver_name,
@@ -510,22 +564,43 @@ fn build_input_fanout_stream(
     config: &cpal::StreamConfig,
     sample_format: cpal::SampleFormat,
     shared: Arc<SharedState>,
+    input_meters: Arc<AsioInputMeterBank>,
     input_cmd_rx: Receiver<AsioInputCommand>,
     trash_tx: Sender<Box<RecordSink>>,
 ) -> Result<cpal::Stream, String> {
     match sample_format {
-        cpal::SampleFormat::I16 => {
-            build_input_fanout_typed::<i16>(device, config, shared, input_cmd_rx, trash_tx)
-        }
-        cpal::SampleFormat::I32 => {
-            build_input_fanout_typed::<i32>(device, config, shared, input_cmd_rx, trash_tx)
-        }
-        cpal::SampleFormat::F32 => {
-            build_input_fanout_typed::<f32>(device, config, shared, input_cmd_rx, trash_tx)
-        }
-        cpal::SampleFormat::F64 => {
-            build_input_fanout_typed::<f64>(device, config, shared, input_cmd_rx, trash_tx)
-        }
+        cpal::SampleFormat::I16 => build_input_fanout_typed::<i16>(
+            device,
+            config,
+            shared,
+            input_meters,
+            input_cmd_rx,
+            trash_tx,
+        ),
+        cpal::SampleFormat::I32 => build_input_fanout_typed::<i32>(
+            device,
+            config,
+            shared,
+            input_meters,
+            input_cmd_rx,
+            trash_tx,
+        ),
+        cpal::SampleFormat::F32 => build_input_fanout_typed::<f32>(
+            device,
+            config,
+            shared,
+            input_meters,
+            input_cmd_rx,
+            trash_tx,
+        ),
+        cpal::SampleFormat::F64 => build_input_fanout_typed::<f64>(
+            device,
+            config,
+            shared,
+            input_meters,
+            input_cmd_rx,
+            trash_tx,
+        ),
         other => Err(format!("unsupported ASIO input sample format {other}")),
     }
 }
@@ -587,6 +662,7 @@ fn build_input_fanout_typed<T: AsioInputSample>(
     device: &cpal::Device,
     config: &cpal::StreamConfig,
     shared: Arc<SharedState>,
+    input_meters: Arc<AsioInputMeterBank>,
     input_cmd_rx: Receiver<AsioInputCommand>,
     trash_tx: Sender<Box<RecordSink>>,
 ) -> Result<cpal::Stream, String> {
@@ -601,6 +677,7 @@ fn build_input_fanout_typed<T: AsioInputSample>(
     let mut bin_max = f32::MIN;
     let mut bin_sumsq = 0.0f32;
     let mut bin_count = 0usize;
+    let mut channel_peaks = vec![0.0f32; channels];
 
     device
         .build_input_stream::<T, _, _>(
@@ -630,6 +707,7 @@ fn build_input_fanout_typed<T: AsioInputSample>(
                 let mut last_l = 0.0f32;
                 let mut last_r = 0.0f32;
                 let mut session_peak = 0.0f32;
+                channel_peaks.fill(0.0);
 
                 for frame in data.chunks(channels) {
                     let first = frame.first().copied().map(T::to_monitor_f32).unwrap_or(0.0);
@@ -686,10 +764,13 @@ fn build_input_fanout_typed<T: AsioInputSample>(
 
                     // Session-wide input peak across all channels (Settings
                     // input test + diagnostics).
-                    for &sample in frame {
-                        session_peak = session_peak.max(T::to_monitor_f32(sample).abs());
+                    for (channel, &sample) in frame.iter().enumerate() {
+                        let value = T::to_monitor_f32(sample).abs();
+                        session_peak = session_peak.max(value);
+                        channel_peaks[channel] = channel_peaks[channel].max(value);
                     }
                 }
+                input_meters.publish(&channel_peaks);
 
                 shared
                     .live_input_l
@@ -700,6 +781,9 @@ fn build_input_fanout_typed<T: AsioInputSample>(
                 atomic_max_f32_bits(&shared.live_input_peak_l, raw_peak_l);
                 atomic_max_f32_bits(&shared.live_input_peak_r, raw_peak_r);
                 atomic_max_f32_bits(&shared.session_input_peak, session_peak);
+                if shared.recording_active.load(Ordering::Relaxed) {
+                    atomic_max_f32_bits(&shared.record_peak, session_peak);
+                }
                 if ring_active {
                     shared.live_input_active.store(true, Ordering::Relaxed);
                 }
@@ -739,7 +823,9 @@ fn build_input_fanout_typed<T: AsioInputSample>(
 
 #[cfg(test)]
 mod tests {
-    use super::{snap_buffer_size, AsioInputCommand, CallbackRecordSinkState, RecordSink};
+    use super::{
+        snap_buffer_size, AsioInputCommand, AsioInputMeterBank, CallbackRecordSinkState, RecordSink,
+    };
     use cpal::platform::AsioBufferSizeInfo;
     use crossbeam_channel::{bounded, Receiver, TryRecvError};
     use std::sync::atomic::AtomicU64;
@@ -778,6 +864,16 @@ mod tests {
             audio_rx.try_recv(),
             Err(TryRecvError::Disconnected)
         ));
+    }
+
+    #[test]
+    fn input_meter_bank_keeps_channels_independent_and_resets_on_read() {
+        let meters = AsioInputMeterBank::new(3);
+        meters.publish(&[0.25, 0.75, 0.5]);
+        meters.publish(&[0.5, 0.25, 1.0]);
+
+        assert_eq!(meters.take_peaks(), vec![0.5, 0.75, 1.0]);
+        assert_eq!(meters.take_peaks(), vec![0.0, 0.0, 0.0]);
     }
 
     #[test]

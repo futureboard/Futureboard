@@ -467,7 +467,7 @@ unsafe fn open_exclusive_stream(
     // ── Runtime ───────────────────────────────────────────────────────────────
     let mut runtime = initial_runtime;
     runtime.retarget_sample_rate(sample_rate);
-    let mut local = LocalAudioState::new(sample_rate as f64);
+    let mut local = LocalAudioState::with_monitor_capacity(sample_rate as f64, actual_buf as usize);
     let mut scratch = vec![0.0f32; actual_buf as usize * device_ch];
 
     // ── Render loop ───────────────────────────────────────────────────────────

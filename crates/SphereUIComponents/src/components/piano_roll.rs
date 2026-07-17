@@ -39,6 +39,7 @@ use crate::components::timeline::timeline_state::{
 use crate::theme::Colors;
 
 // ── Layout constants (CSS px) ───────────────────────────────────────────────
+mod articulation_lane;
 mod cc_lane;
 mod render;
 
@@ -188,17 +189,19 @@ pub enum PianoTool {
 /// What the single unified controller lane currently shows and edits. Replaces
 /// the old always-on stacked velocity + CC lanes — exactly one is shown at a
 /// time. `Velocity` edits note-owned velocity; `Controller` edits a controller
-/// automation lane (CC / pitch-bend / pressure) by [`MidiControllerKind`].
+/// automation lane (CC / pitch-bend / pressure) by [`MidiControllerKind`];
+/// `Articulations` edits the clip's direction articulation events.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ControllerLaneKind {
     Velocity,
     Controller(MidiControllerKind),
+    Articulations,
 }
 
 /// Lane choices presented by the selector / cycled by the keyboard commands,
 /// in display order. Custom CC numbers (not in this list) are reachable via the
 /// selector's stepper and are preserved as data either way.
-const LANE_CYCLE: [ControllerLaneKind; 9] = [
+const LANE_CYCLE: [ControllerLaneKind; 10] = [
     ControllerLaneKind::Velocity,
     ControllerLaneKind::Controller(MidiControllerKind::CC(1)),
     ControllerLaneKind::Controller(MidiControllerKind::CC(7)),
@@ -208,6 +211,7 @@ const LANE_CYCLE: [ControllerLaneKind; 9] = [
     ControllerLaneKind::Controller(MidiControllerKind::PitchBend),
     ControllerLaneKind::Controller(MidiControllerKind::ChannelPressure),
     ControllerLaneKind::Controller(MidiControllerKind::PolyPressure),
+    ControllerLaneKind::Articulations,
 ];
 
 /// Grid resolution in beats-per-step. Mirrors the WebUI dropdown.
@@ -301,6 +305,18 @@ enum PianoSelectMenu {
     ScaleRoot,
     ScaleKind,
     Lane,
+    /// Articulation palette for the lane's insert tool (which articulation a
+    /// lane click inserts).
+    Articulation,
+}
+
+/// Which of the three unified-lane views is active. `Controller` shows/edits
+/// the [`PianoRoll::active_cc`] controller lane.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PianoLaneView {
+    Velocity,
+    Controller,
+    Articulations,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -425,6 +441,11 @@ enum PianoDrag {
         anchor_beat: f32,
         anchor_value: f32,
     },
+    /// Drag a direction articulation event (by transient id) to a new beat.
+    /// Pre-drag events are snapshotted in `art_edit_prev`; one undo on release.
+    ArtMove {
+        id: u64,
+    },
     /// Dragging the bar/beat ruler to seek the project playhead.
     RulerSeek,
 }
@@ -472,9 +493,17 @@ pub struct PianoRoll {
     /// mode. Also remembered while velocity is shown, so switching back restores
     /// the last controller. Switching the lane never touches hidden lane data.
     active_cc: MidiControllerKind,
-    /// `true` when the unified lane shows note velocities; `false` shows the
-    /// `active_cc` controller lane. Default: velocity.
-    lane_shows_velocity: bool,
+    /// Which view the unified lane shows: note velocities, the `active_cc`
+    /// controller lane, or the articulation lane. Default: velocity.
+    lane_view: PianoLaneView,
+    /// Selected direction articulation event (transient id) in the lane.
+    selected_articulation: Option<u64>,
+    /// Articulation the lane's insert click places. Changed via the lane's
+    /// palette dropdown.
+    insert_articulation: ArticulationId,
+    /// Clip articulation events snapshotted when a lane gesture begins
+    /// (undo prev), mirroring `cc_edit_prev`.
+    art_edit_prev: Option<Vec<MidiArticulationEvent>>,
     /// `false` collapses the controller lane entirely (grid uses the full
     /// height). Toggled from the selector / commands.
     lane_visible: bool,
@@ -543,7 +572,10 @@ impl PianoRoll {
             grid_bounds: Rc::new(Cell::new(None)),
             ruler_bounds: Rc::new(Cell::new(None)),
             active_cc: MidiControllerKind::CC(1),
-            lane_shows_velocity: true,
+            lane_view: PianoLaneView::Velocity,
+            selected_articulation: None,
+            insert_articulation: ArticulationId::Staccato,
+            art_edit_prev: None,
             lane_visible: true,
             open_select_menu: None,
             custom_cc: 74,
@@ -582,6 +614,8 @@ impl PianoRoll {
             self.erase_preview_ids.clear();
             self.drag = PianoDrag::None;
             self.cc_edit_prev = None;
+            self.art_edit_prev = None;
+            self.selected_articulation = None;
             self.hover_beat = None;
             self.hover_pitch = None;
             self.hover_note_status = None;
@@ -603,6 +637,17 @@ impl PianoRoll {
             .retain(|id| valid_note_ids.contains(id));
         self.erase_preview_ids
             .retain(|id| valid_note_ids.contains(id));
+        if let Some(selected) = self.selected_articulation {
+            let still_exists = self
+                .timeline
+                .read(cx)
+                .state
+                .midi_clip_articulations(clip_id)
+                .is_some_and(|events| events.iter().any(|e| e.id == selected));
+            if !still_exists {
+                self.selected_articulation = None;
+            }
+        }
 
         let drag_is_stale = match &mut self.drag {
             PianoDrag::None
@@ -611,6 +656,7 @@ impl PianoRoll {
             | PianoDrag::CcPaint { .. }
             | PianoDrag::CcMove { .. }
             | PianoDrag::CcLine { .. }
+            | PianoDrag::ArtMove { .. }
             | PianoDrag::RulerSeek => false,
             PianoDrag::Move { prev, .. } => {
                 prev.retain(|(id, _, _)| valid_note_ids.contains(id));
@@ -698,6 +744,10 @@ impl PianoRoll {
                 .drag_value_status
                 .clone()
                 .unwrap_or_else(|| "CC line".to_string()),
+            PianoDrag::ArtMove { .. } => self
+                .drag_value_status
+                .clone()
+                .unwrap_or_else(|| "Articulation move".to_string()),
             PianoDrag::RulerSeek => self
                 .drag_value_status
                 .clone()
@@ -720,26 +770,29 @@ impl PianoRoll {
     // ── Unified controller lane selection ────────────────────────────────
     /// What the single bottom lane currently shows/edits.
     fn current_lane(&self) -> ControllerLaneKind {
-        if self.lane_shows_velocity {
-            ControllerLaneKind::Velocity
-        } else {
-            ControllerLaneKind::Controller(self.active_cc)
+        match self.lane_view {
+            PianoLaneView::Velocity => ControllerLaneKind::Velocity,
+            PianoLaneView::Controller => ControllerLaneKind::Controller(self.active_cc),
+            PianoLaneView::Articulations => ControllerLaneKind::Articulations,
         }
     }
 
     /// Switch which controller the unified lane shows. Only changes what is
     /// displayed/edited — hidden lane data (velocity stays on notes, CC points
-    /// stay in their lanes) is never touched. Always makes the lane visible.
+    /// stay in their lanes, articulation events stay on the clip) is never
+    /// touched. Always makes the lane visible.
     fn set_lane(&mut self, kind: ControllerLaneKind, cx: &mut Context<Self>) {
         match kind {
-            ControllerLaneKind::Velocity => self.lane_shows_velocity = true,
+            ControllerLaneKind::Velocity => self.lane_view = PianoLaneView::Velocity,
             ControllerLaneKind::Controller(k) => {
-                self.lane_shows_velocity = false;
+                self.lane_view = PianoLaneView::Controller;
                 self.active_cc = k;
             }
+            ControllerLaneKind::Articulations => self.lane_view = PianoLaneView::Articulations,
         }
         self.lane_visible = true;
         self.open_select_menu = None;
+        self.selected_articulation = None;
         // Geometry of the active lane may differ; force a fresh bounds capture.
         self.cc_bounds.set(None);
         cx.notify();
@@ -765,6 +818,7 @@ impl PianoRoll {
         match self.current_lane() {
             ControllerLaneKind::Velocity => "Velocity".to_string(),
             ControllerLaneKind::Controller(k) => cc_kind_label(k),
+            ControllerLaneKind::Articulations => "Articulations".to_string(),
         }
     }
 
@@ -774,6 +828,7 @@ impl PianoRoll {
             ControllerLaneKind::Velocity => "1–127",
             ControllerLaneKind::Controller(MidiControllerKind::PitchBend) => "-8192..8191",
             ControllerLaneKind::Controller(_) => "0–127",
+            ControllerLaneKind::Articulations => "Direction",
         }
     }
 
@@ -810,7 +865,39 @@ impl PianoRoll {
             "midi:lane-prev" => self.cycle_lane(-1, cx),
             "midi:lane-velocity" => self.set_lane(ControllerLaneKind::Velocity, cx),
             "midi:lane-cc" => self.set_lane(ControllerLaneKind::Controller(self.active_cc), cx),
+            "midi:lane-articulations" => self.set_lane(ControllerLaneKind::Articulations, cx),
             "midi:lane-toggle" => self.toggle_lane_visible(cx),
+            // Selected-note articulation assignment (menu / context commands).
+            "midi:articulation-none" => self.set_selection_articulation(None, cx),
+            "midi:articulation-sustain" => {
+                self.set_selection_articulation(Some(ArticulationId::Sustain), cx)
+            }
+            "midi:articulation-staccato" => {
+                self.set_selection_articulation(Some(ArticulationId::Staccato), cx)
+            }
+            "midi:articulation-staccatissimo" => {
+                self.set_selection_articulation(Some(ArticulationId::Staccatissimo), cx)
+            }
+            "midi:articulation-legato" => {
+                self.set_selection_articulation(Some(ArticulationId::Legato), cx)
+            }
+            "midi:articulation-tenuto" => {
+                self.set_selection_articulation(Some(ArticulationId::Tenuto), cx)
+            }
+            "midi:articulation-accent" => {
+                self.set_selection_articulation(Some(ArticulationId::Accent), cx)
+            }
+            "midi:articulation-marcato" => {
+                self.set_selection_articulation(Some(ArticulationId::Marcato), cx)
+            }
+            // Insert the palette articulation as a direction event at the
+            // playhead (clip-local, snapped).
+            "midi:articulation-insert" => {
+                if let Some(clip_id) = self.editing_clip_id(cx) {
+                    let beat = self.playhead_paste_anchor(cx, &clip_id);
+                    self.insert_articulation_at(&clip_id, beat, cx);
+                }
+            }
             _ => {}
         }
     }
@@ -1204,9 +1291,23 @@ impl PianoRoll {
         if matches!(self.drag, PianoDrag::MarqueeSelect { .. }) {
             self.cancel_marquee_select(cx);
         } else if !matches!(self.drag, PianoDrag::None) {
+            // A cancelled articulation drag restores the pre-gesture events
+            // (live moves were applied to state, so undo them without a
+            // history entry).
+            if matches!(self.drag, PianoDrag::ArtMove { .. }) {
+                if let (Some(prev), Some(clip_id)) =
+                    (self.art_edit_prev.take(), self.editing_clip_id(cx))
+                {
+                    self.timeline.update(cx, |tl, tcx| {
+                        tl.state.set_midi_articulations(&clip_id, prev);
+                        tcx.notify();
+                    });
+                }
+            }
             self.drag = PianoDrag::None;
             self.erase_preview_ids.clear();
             self.cc_edit_prev = None;
+            self.art_edit_prev = None;
             self.drag_value_status = None;
             cx.notify();
         }
@@ -1932,6 +2033,12 @@ impl PianoRoll {
                 }
                 return;
             }
+            PianoDrag::ArtMove { id } => {
+                if let Some((lx, _ly)) = self.cc_local(event.position) {
+                    self.articulation_move_to(id, lx, cx);
+                }
+                return;
+            }
             _ => {}
         }
         if event.pressed_button == Some(MouseButton::Right) {
@@ -2069,7 +2176,10 @@ impl PianoRoll {
             }
             PianoDrag::MarqueeSelect { .. } => {}
             PianoDrag::DrawNote { .. } | PianoDrag::EraseNotes { .. } => {}
-            PianoDrag::CcPaint { .. } | PianoDrag::CcMove { .. } | PianoDrag::CcLine { .. } => {}
+            PianoDrag::CcPaint { .. }
+            | PianoDrag::CcMove { .. }
+            | PianoDrag::CcLine { .. }
+            | PianoDrag::ArtMove { .. } => {}
             PianoDrag::RulerSeek => {}
         }
     }
@@ -2163,6 +2273,12 @@ impl PianoRoll {
             self.commit_cc_edit(cx);
             return;
         }
+        if matches!(self.drag, PianoDrag::ArtMove { .. }) {
+            self.drag = PianoDrag::None;
+            self.drag_value_status = None;
+            self.commit_articulation_edit(cx);
+            return;
+        }
         if matches!(self.drag, PianoDrag::RulerSeek) {
             self.drag = PianoDrag::None;
             self.drag_value_status = None;
@@ -2238,6 +2354,7 @@ impl PianoRoll {
                             );
                             note.muted = source.muted;
                             note.channel = source.channel;
+                            note.articulation = source.articulation;
                             Some(note)
                         })
                         .collect();
@@ -2295,7 +2412,10 @@ impl PianoRoll {
             }
             PianoDrag::MarqueeSelect { .. } => {}
             PianoDrag::DrawNote { .. } | PianoDrag::EraseNotes { .. } => {}
-            PianoDrag::CcPaint { .. } | PianoDrag::CcMove { .. } | PianoDrag::CcLine { .. } => {}
+            PianoDrag::CcPaint { .. }
+            | PianoDrag::CcMove { .. }
+            | PianoDrag::CcLine { .. }
+            | PianoDrag::ArtMove { .. } => {}
             PianoDrag::RulerSeek => {}
         }
     }
@@ -2315,6 +2435,15 @@ impl PianoRoll {
             "down" if !ctrl && !self.selection.is_empty() => {
                 cx.stop_propagation();
                 self.transpose_selection(if shift { -12 } else { -1 }, cx);
+            }
+            // Articulation lane focus: Delete removes the selected direction
+            // event; notes keep their own Delete handling below.
+            "delete" | "backspace"
+                if self.lane_view == PianoLaneView::Articulations
+                    && self.selected_articulation.is_some() =>
+            {
+                cx.stop_propagation();
+                self.delete_selected_articulation(cx);
             }
             "delete" | "backspace" if !self.selection.is_empty() => {
                 cx.stop_propagation();
@@ -2874,6 +3003,53 @@ impl PianoRoll {
         cx.notify();
     }
 
+    // ── Articulation ops (selection + lane) ───────────────────────────────
+
+    /// Assign (or clear, with `None`) a per-note articulation on every
+    /// selected note, as one undoable `EditMidiNotes` command. Never touches
+    /// note timing/velocity — articulation is playback-only metadata.
+    pub(super) fn set_selection_articulation(
+        &mut self,
+        articulation: Option<ArticulationId>,
+        cx: &mut Context<Self>,
+    ) {
+        let ids = self.selected_note_ids();
+        if ids.is_empty() {
+            return;
+        }
+        let target = ids.clone();
+        self.commit_note_transform(cx, &ids, move |state, cid| {
+            state.set_midi_notes_articulation(cid, &target, articulation);
+        });
+        cx.notify();
+    }
+
+    /// Delete the selected direction articulation event (lane Delete key /
+    /// lane context action) as one undoable command.
+    pub(super) fn delete_selected_articulation(&mut self, cx: &mut Context<Self>) {
+        let Some(id) = self.selected_articulation.take() else {
+            return;
+        };
+        let Some(clip_id) = self.editing_clip_id(cx) else {
+            return;
+        };
+        let prev = self.timeline.read(cx).state.articulations_snapshot(&clip_id);
+        if !prev.iter().any(|e| e.id == id) {
+            return;
+        }
+        let next: Vec<MidiArticulationEvent> =
+            prev.iter().filter(|e| e.id != id).cloned().collect();
+        self.run_edit_command(
+            EditCommand::SetMidiArticulations {
+                clip_id,
+                prev,
+                next,
+            },
+            cx,
+        );
+        cx.notify();
+    }
+
     fn note_inspector_snapshot(&self, cx: &Context<Self>, clip_id: &str) -> NoteInspectorSnapshot {
         let selected = self
             .timeline
@@ -3147,6 +3323,19 @@ impl NoteInspectorSnapshot {
         uniform_u8(&self.selected, |n| n.channel.raw())
             .map(|raw| MidiChannel::from_raw(raw).label())
             .unwrap_or_else(|| "Mixed".to_string())
+    }
+
+    /// "None" / articulation name when uniform across the selection, else
+    /// "Mixed" (per-note assignment only; the direction lane is separate).
+    fn articulation_label(&self) -> String {
+        uniform_u8(&self.selected, |n| {
+            n.articulation.map(|a| a.to_tag()).unwrap_or(0)
+        })
+        .map(|tag| match ArticulationId::from_tag(tag) {
+            Some(articulation) => articulation.name().to_string(),
+            None => "None".to_string(),
+        })
+        .unwrap_or_else(|| "Mixed".to_string())
     }
 
     fn end_label(&self) -> String {

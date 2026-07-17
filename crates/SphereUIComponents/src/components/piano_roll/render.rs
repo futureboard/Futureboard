@@ -440,6 +440,16 @@ impl PianoRoll {
             MidiControllerKind::PolyPressure => 202,
         });
 
+        let articulation_lane_has_data = self
+            .editing_clip_id(cx)
+            .and_then(|clip_id| {
+                let tl = self.timeline.read(cx);
+                tl.state
+                    .midi_clip_articulations(&clip_id)
+                    .map(|events| !events.is_empty())
+            })
+            .unwrap_or(false);
+
         let mut dropdown: Option<gpui::AnyElement> = None;
         if open {
             let mut panel = div()
@@ -464,10 +474,12 @@ impl PianoRoll {
                 let text = match kind {
                     ControllerLaneKind::Velocity => "Velocity".to_string(),
                     ControllerLaneKind::Controller(k) => cc_kind_label(k),
+                    ControllerLaneKind::Articulations => "Articulations".to_string(),
                 };
                 let lane_has_data = match kind {
                     ControllerLaneKind::Velocity => false,
                     ControllerLaneKind::Controller(k) => has_data(k),
+                    ControllerLaneKind::Articulations => articulation_lane_has_data,
                 };
                 panel = panel.child(
                     div()
@@ -1245,7 +1257,12 @@ impl PianoRoll {
         });
         let lane_body: Option<gpui::AnyElement> = if !self.lane_visible {
             None
-        } else if self.lane_shows_velocity {
+        } else if self.lane_view == PianoLaneView::Articulations {
+            Some(
+                self.render_articulation_lane(cx, clip_id, start_beat, end_beat, bpb)
+                    .into_any_element(),
+            )
+        } else if self.lane_view == PianoLaneView::Velocity {
             let vel_grid = self.build_velocity_grid(start_beat, end_beat, bpb);
             let vel_bars = self.build_velocity_bars(cx, clip_id, track_color);
             let velocity_bounds = self.cc_bounds.clone();
@@ -1496,6 +1513,47 @@ impl PianoRoll {
         bars
     }
 
+    /// Articulation assignment buttons for the selected notes: one compact
+    /// button per built-in articulation plus "None". Wraps across rows via
+    /// `note_button_row`. Applies to the whole selection as one undo entry.
+    fn articulation_assign_row(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        fn button_id(articulation: Option<ArticulationId>) -> &'static str {
+            match articulation {
+                None => "pr-art-assign-none",
+                Some(ArticulationId::Sustain) => "pr-art-assign-sustain",
+                Some(ArticulationId::Staccato) => "pr-art-assign-staccato",
+                Some(ArticulationId::Staccatissimo) => "pr-art-assign-staccatissimo",
+                Some(ArticulationId::Legato) => "pr-art-assign-legato",
+                Some(ArticulationId::Tenuto) => "pr-art-assign-tenuto",
+                Some(ArticulationId::Accent) => "pr-art-assign-accent",
+                Some(ArticulationId::Marcato) => "pr-art-assign-marcato",
+            }
+        }
+        let mut buttons: Vec<gpui::AnyElement> = ArticulationId::ALL
+            .iter()
+            .map(|articulation| {
+                let articulation = *articulation;
+                note_action_button(
+                    button_id(Some(articulation)),
+                    articulation.short_name(),
+                    cx.listener(move |this, _, _w, cx| {
+                        this.set_selection_articulation(Some(articulation), cx)
+                    }),
+                )
+                .into_any_element()
+            })
+            .collect();
+        buttons.push(
+            note_action_button(
+                button_id(None),
+                "None",
+                cx.listener(|this, _, _w, cx| this.set_selection_articulation(None, cx)),
+            )
+            .into_any_element(),
+        );
+        note_button_row(buttons).into_any_element()
+    }
+
     pub(super) fn render_note_inspector(
         &self,
         cx: &mut Context<Self>,
@@ -1528,6 +1586,10 @@ impl PianoRoll {
             );
             content.push(note_value_row("Velocity", note.velocity.to_string()).into_any_element());
             content.push(note_value_row("Channel", note.channel.label()).into_any_element());
+            content.push(
+                note_value_row("Artic.", snapshot.articulation_label()).into_any_element(),
+            );
+            content.push(self.articulation_assign_row(cx));
             content.push(
                 note_button_row(vec![
                     note_action_button(
@@ -1635,6 +1697,10 @@ impl PianoRoll {
             content.push(note_value_row("Length", snapshot.length_label()).into_any_element());
             content.push(note_value_row("Velocity", snapshot.velocity_label()).into_any_element());
             content.push(note_value_row("Channel", snapshot.channel_label()).into_any_element());
+            content.push(
+                note_value_row("Artic.", snapshot.articulation_label()).into_any_element(),
+            );
+            content.push(self.articulation_assign_row(cx));
             content.push(
                 note_button_row(vec![
                     note_action_button(
@@ -2211,7 +2277,21 @@ impl PianoRoll {
         let (view_w, view_h) = self.grid_view_size();
         // Collect owned geometry first so the timeline read borrow is released
         // before we build per-note listeners (which borrow `cx` mutably).
-        let geos: Vec<(u64, u8, f32, f32, f32, f32, f32, u8, bool, bool, bool)> = {
+        #[allow(clippy::type_complexity)]
+        let geos: Vec<(
+            u64,
+            u8,
+            f32,
+            f32,
+            f32,
+            f32,
+            f32,
+            u8,
+            bool,
+            bool,
+            bool,
+            Option<&'static str>,
+        )> = {
             let tl = self.timeline.read(cx);
             let Some(notes) = tl.state.midi_clip_notes(clip_id) else {
                 return Vec::new();
@@ -2240,6 +2320,7 @@ impl PianoRoll {
                         self.selection.contains(&d.id),
                         self.erase_preview_ids.contains(&d.id),
                         n.muted,
+                        n.articulation.map(|a| a.short_name()),
                     ))
                 })
                 .collect()
@@ -2247,7 +2328,20 @@ impl PianoRoll {
 
         geos.into_iter()
             .map(
-                |(id, pitch, start, duration, x, y, w, velocity, selected, erase_target, muted)| {
+                |(
+                    id,
+                    pitch,
+                    start,
+                    duration,
+                    x,
+                    y,
+                    w,
+                    velocity,
+                    selected,
+                    erase_target,
+                    muted,
+                    articulation,
+                )| {
                     let mut fill = track_color;
                     fill.a = if erase_target {
                         0.45
@@ -2342,6 +2436,34 @@ impl PianoRoll {
                                 .text_color(label_color)
                                 .child(note_name(pitch as i32)),
                         );
+                    }
+                    // Per-note articulation badge, right-aligned on the block
+                    // (clear of the left note-name label), only when wide
+                    // enough to stay readable in dense clips.
+                    if let Some(short) = articulation {
+                        if w >= 46.0 && ROW_H >= 11.0 {
+                            note = note.child(
+                                div()
+                                    .absolute()
+                                    .right(px(RESIZE_ZONE + 2.0))
+                                    .top_0()
+                                    .bottom_0()
+                                    .flex()
+                                    .items_center()
+                                    .child(
+                                        div()
+                                            .px(px(2.0))
+                                            .rounded(px(2.0))
+                                            .bg(Colors::with_alpha(
+                                                Colors::accent_primary(),
+                                                0.85,
+                                            ))
+                                            .text_size(px(7.0))
+                                            .text_color(Colors::text_primary())
+                                            .child(short),
+                                    ),
+                            );
+                        }
                     }
                     // Right-edge resize handle (only when the note is wide enough to
                     // leave room for a separate move/resize zone).

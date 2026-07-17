@@ -941,6 +941,21 @@ impl StudioLayout {
                 }
                 if is_midi {
                     entries.push(menu_item_enabled("Quantize", "midi:quantize", exists));
+                    // Applies to the notes selected in the MIDI editor.
+                    entries.push(ContextMenuEntry::Separator);
+                    entries.push(ContextMenuEntry::Header("Articulation".to_string()));
+                    for (label, command) in [
+                        ("Sustain", "midi:articulation-sustain"),
+                        ("Staccato", "midi:articulation-staccato"),
+                        ("Staccatissimo", "midi:articulation-staccatissimo"),
+                        ("Legato", "midi:articulation-legato"),
+                        ("Tenuto", "midi:articulation-tenuto"),
+                        ("Accent", "midi:articulation-accent"),
+                        ("Marcato", "midi:articulation-marcato"),
+                        ("None", "midi:articulation-none"),
+                    ] {
+                        entries.push(menu_item_enabled(label, command, exists));
+                    }
                 }
                 entries.push(ContextMenuEntry::Separator);
                 entries.push(menu_item_enabled(

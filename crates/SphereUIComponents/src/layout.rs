@@ -2040,6 +2040,11 @@ impl StudioLayout {
             "midi:select-all" | "midi:delete-selected" | "midi:quantize" | "midi:fit-notes" => {
                 self.dispatch_midi_editor_menu_command(command_id, cx)
             }
+            // Articulation assignment / lane commands route to whichever MIDI
+            // editor (docked or floating) is active, like the entries above.
+            cmd if cmd.starts_with("midi:articulation-") || cmd.starts_with("midi:lane-") => {
+                self.dispatch_midi_editor_menu_command(command_id, cx)
+            }
 
             // ── Transport extras (shared menu IDs) ───────────────────────
             "transport:go-to-end" => {

@@ -54,6 +54,8 @@ pub struct TimelineState {
     pub active_tool: TimelineTool,
     pub snap_to_grid: bool,
     pub grid_division: SnapDivision,
+    /// Straight / dotted / triplet shaping applied on top of [`Self::grid_division`].
+    pub snap_shape: SnapShape,
     pub dragging_track_id: Option<TrackId>,
     pub drag_origin_index: Option<usize>,
     pub drag_current_y: f32,
@@ -91,7 +93,11 @@ pub struct TimelineState {
     /// arrangement track headers and mixer strips render from this cache so they
     /// stay visually locked during a drag.
     pub track_volume_previews: std::collections::HashMap<TrackId, f32>,
+    /// Base volume captured at fader pointer-down so commit can emit one undo entry.
+    pub track_volume_gesture_origin: std::collections::HashMap<TrackId, f32>,
     pub master_volume_preview: Option<f32>,
+    /// Base master volume captured at fader pointer-down for one undo entry.
+    pub master_volume_gesture_origin: Option<f32>,
 }
 
 impl Default for TimelineState {
@@ -146,6 +152,7 @@ impl Default for TimelineState {
             active_tool: TimelineTool::Pointer,
             snap_to_grid: true,
             grid_division: SnapDivision::Div1_16,
+            snap_shape: SnapShape::Straight,
             dragging_track_id: None,
             drag_origin_index: None,
             drag_current_y: 0.0,
@@ -165,7 +172,9 @@ impl Default for TimelineState {
             last_touched_plugin_param: None,
             mixer_tree: MixerTreeViewState::default(),
             track_volume_previews: std::collections::HashMap::new(),
+            track_volume_gesture_origin: std::collections::HashMap::new(),
             master_volume_preview: None,
+            master_volume_gesture_origin: None,
         }
     }
 }

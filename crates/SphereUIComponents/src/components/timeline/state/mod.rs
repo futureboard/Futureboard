@@ -24,6 +24,7 @@ mod midi_controller;
 mod midi_scale;
 mod mixer;
 mod mixer_tree_state;
+mod musical_snap;
 mod plugin_chain;
 mod recording;
 mod routing;
@@ -57,6 +58,10 @@ pub use midi_controller::*;
 pub use midi_scale::*;
 pub use mixer::*;
 pub use mixer_tree_state::*;
+pub use musical_snap::{
+    beats_to_ticks, multi_select_move_delta, snap_beat_with_grab_offset, snap_relative_delta,
+    snap_resize_edge, ticks_to_beats, MusicalSnap, SnapShape, TICKS_PER_QUARTER,
+};
 pub use plugin_chain::*;
 pub use routing::*;
 pub use selection::*;

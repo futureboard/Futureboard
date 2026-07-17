@@ -9,18 +9,9 @@ pub fn x_to_beat(x: f32, viewport: &TimelineViewport) -> f64 {
 }
 
 pub fn snap_beat(beat: f64, snap: SnapSettings) -> f64 {
-    if !snap.enabled || snap.division == SnapDivision::Off {
-        return beat.max(0.0);
-    }
-    let step = match snap.division {
-        SnapDivision::Auto => snap.auto_step_beats,
-        SnapDivision::Bar1 => snap.beats_per_bar,
-        other => other.step_beats(snap.beats_per_bar as f32) as f64,
-    };
-    if step <= 0.0 {
-        return beat.max(0.0);
-    }
-    ((beat / step).round() * step).max(0.0)
+    // Arrangement clips historically clamp to ≥ 0; pre-roll-capable callers
+    // should use [`super::musical_snap::snap_beat`] directly.
+    super::musical_snap::snap_beat(beat, snap.to_musical(), false).max(0.0)
 }
 
 pub fn track_at_y(y: f32, layout: &TrackLayout) -> Option<TrackId> {
@@ -103,8 +94,13 @@ impl TimelineState {
 
     /// Snap a beat value to the current grid (or return it unchanged when snap is off).
     pub fn snap_beats(&self, beats: f32) -> f32 {
+        self.snap_beats_with_bypass(beats, false)
+    }
+
+    /// Snap a beat value, optionally bypassing the grid (Shift held during drag).
+    pub fn snap_beats_with_bypass(&self, beats: f32, bypass: bool) -> f32 {
         let mut snap = SnapSettings::from_timeline(self);
         snap.beats_per_bar = self.beats_per_bar_at_beat(beats as f64);
-        snap_beat(beats as f64, snap) as f32
+        super::musical_snap::snap_beat(beats as f64, snap.to_musical(), bypass) as f32
     }
 }

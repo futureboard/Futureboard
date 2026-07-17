@@ -225,7 +225,7 @@ pub fn timeline_ruler(
                                 .on_click(move |_, window, cx| {
                                     on_cycle_grid_clone(&(), window, cx);
                                 })
-                                .child(state.grid_division.label()),
+                                .child(state.grid_division.label_with_shape(state.snap_shape)),
                         ),
                 ),
         )

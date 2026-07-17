@@ -238,6 +238,7 @@ impl TimelineState {
             active_tool: TimelineTool::Pointer,
             snap_to_grid: true,
             grid_division: SnapDivision::Div1_16,
+            snap_shape: SnapShape::Straight,
             dragging_track_id: None,
             drag_origin_index: None,
             drag_current_y: 0.0,
@@ -257,7 +258,9 @@ impl TimelineState {
             last_touched_plugin_param: None,
             mixer_tree: MixerTreeViewState::default(),
             track_volume_previews: std::collections::HashMap::new(),
+            track_volume_gesture_origin: std::collections::HashMap::new(),
             master_volume_preview: None,
+            master_volume_gesture_origin: None,
         }
     }
 

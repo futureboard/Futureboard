@@ -108,6 +108,7 @@ impl TrackLayout {
 pub struct SnapSettings {
     pub enabled: bool,
     pub division: SnapDivision,
+    pub shape: SnapShape,
     pub beats_per_bar: f64,
     pub auto_step_beats: f64,
 }
@@ -117,8 +118,19 @@ impl SnapSettings {
         Self {
             enabled: state.snap_to_grid,
             division: state.grid_division,
+            shape: state.snap_shape,
             beats_per_bar: state.beats_per_bar() as f64,
             auto_step_beats: state.get_grid_sub_beats(state.pixels_per_beat()) as f64,
+        }
+    }
+
+    pub fn to_musical(self) -> MusicalSnap {
+        MusicalSnap {
+            enabled: self.enabled,
+            division: self.division,
+            shape: self.shape,
+            beats_per_bar: self.beats_per_bar,
+            auto_step_beats: self.auto_step_beats,
         }
     }
 }
@@ -150,6 +162,16 @@ impl SnapDivision {
             SnapDivision::Div1_16 => "1/16",
             SnapDivision::Div1_32 => "1/32",
             SnapDivision::Div1_64 => "1/64",
+        }
+    }
+
+    /// Label including straight / dotted / triplet shaping.
+    pub fn label_with_shape(&self, shape: SnapShape) -> String {
+        let base = self.label();
+        match shape {
+            SnapShape::Straight => base.to_string(),
+            SnapShape::Dotted => format!("{base}."),
+            SnapShape::Triplet => format!("{base}T"),
         }
     }
 

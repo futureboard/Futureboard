@@ -234,11 +234,22 @@ impl Render for Timeline {
                 }
             });
         let on_volume_drag_commit = cx.listener(|this, track_id: &String, _window, cx| {
-            if let Some(volume) = this.state.commit_track_volume_preview(track_id) {
+            if let Some((prev, next)) = this.state.commit_track_volume_preview(track_id) {
                 crate::perf::count("fader_drag_commit_count", 1);
-                this.mark_project_changed(cx);
+                if (prev - next).abs() > 1.0e-5 {
+                    this.record_executed_command(
+                        EditCommand::SetTrackVolume {
+                            track_id: track_id.clone(),
+                            prev,
+                            next,
+                        },
+                        cx,
+                    );
+                } else {
+                    this.mark_project_changed(cx);
+                }
                 if let Some(cb) = this.on_track_param_change.as_ref() {
-                    cb(track_id.clone(), "volume".to_string(), volume);
+                    cb(track_id.clone(), "volume".to_string(), next);
                 }
                 cx.notify();
             }
@@ -294,9 +305,8 @@ impl Render for Timeline {
                             // plain click; the Pointer tool's empty-lane-creates
                             // gesture only commits on a drag or a double-click so
                             // marquee-style single clicks stay a no-op.
-                            let commit_on_click = this.state.active_tool
-                                == TimelineTool::Pen
-                                || *click_count >= 2;
+                            let commit_on_click =
+                                this.state.active_tool == TimelineTool::Pen || *click_count >= 2;
                             this.pen_clip_draw = Some(ClipDrawPreview {
                                 track_id: track_id.clone(),
                                 start_beat: start,
@@ -616,18 +626,33 @@ impl Render for Timeline {
         });
 
         let on_cycle_grid = cx.listener(|this, _: &(), _window, cx| {
-            this.state.grid_division = match this.state.grid_division {
-                SnapDivision::Auto => SnapDivision::Off,
-                SnapDivision::Off => SnapDivision::Bar1,
-                SnapDivision::Bar1 => SnapDivision::Div1_1,
-                SnapDivision::Div1_1 => SnapDivision::Div1_2,
-                SnapDivision::Div1_2 => SnapDivision::Div1_4,
-                SnapDivision::Div1_4 => SnapDivision::Div1_8,
-                SnapDivision::Div1_8 => SnapDivision::Div1_16,
-                SnapDivision::Div1_16 => SnapDivision::Div1_32,
-                SnapDivision::Div1_32 => SnapDivision::Div1_64,
-                SnapDivision::Div1_64 => SnapDivision::Auto,
-            };
+            // Cycle shape (Straight → Dotted → Triplet) before advancing the
+            // base division so arrangement shares the same snap surface as the
+            // piano roll without a separate control.
+            use crate::components::timeline::timeline_state::SnapShape;
+            match this.state.snap_shape {
+                SnapShape::Straight => {
+                    this.state.snap_shape = SnapShape::Dotted;
+                }
+                SnapShape::Dotted => {
+                    this.state.snap_shape = SnapShape::Triplet;
+                }
+                SnapShape::Triplet => {
+                    this.state.snap_shape = SnapShape::Straight;
+                    this.state.grid_division = match this.state.grid_division {
+                        SnapDivision::Auto => SnapDivision::Off,
+                        SnapDivision::Off => SnapDivision::Bar1,
+                        SnapDivision::Bar1 => SnapDivision::Div1_1,
+                        SnapDivision::Div1_1 => SnapDivision::Div1_2,
+                        SnapDivision::Div1_2 => SnapDivision::Div1_4,
+                        SnapDivision::Div1_4 => SnapDivision::Div1_8,
+                        SnapDivision::Div1_8 => SnapDivision::Div1_16,
+                        SnapDivision::Div1_16 => SnapDivision::Div1_32,
+                        SnapDivision::Div1_32 => SnapDivision::Div1_64,
+                        SnapDivision::Div1_64 => SnapDivision::Auto,
+                    };
+                }
+            }
             cx.notify();
         });
 
@@ -1173,12 +1198,17 @@ impl Render for Timeline {
         let on_clip_drag_move = cx.listener(
             |this, event: &gpui::DragMoveEvent<ClipDragItem>, window, cx| {
                 let drag = event.drag(cx).clone();
+                let bypass_snap = event.event.modifiers.shift;
                 this.last_drag_position = Some(event.event.position);
                 this.file_drop_hint = None;
                 if this.clip_clone_drag_id.as_deref() == Some(drag.clip_id.as_str()) {
                     let origin = *this.clip_drag_origin.get_or_insert(event.event.position);
-                    let (target_index, start_beat) =
-                        this.resolve_clip_drag_target(&drag, origin, event.event.position);
+                    let (target_index, start_beat) = this.resolve_clip_drag_target_with_bypass(
+                        &drag,
+                        origin,
+                        event.event.position,
+                        bypass_snap,
+                    );
                     this.clip_drag_target_track_index = Some(target_index);
                     this.clip_clone_hint = Some(ClipCloneHint {
                         clip_id: drag.clip_id.clone(),
@@ -1187,7 +1217,12 @@ impl Render for Timeline {
                     });
                 } else {
                     this.clip_clone_hint = None;
-                    this.move_dragged_clip_to_position(&drag, event.event.position, window);
+                    this.move_dragged_clip_to_position_with_bypass(
+                        &drag,
+                        event.event.position,
+                        window,
+                        bypass_snap,
+                    );
                 }
                 cx.notify();
             },

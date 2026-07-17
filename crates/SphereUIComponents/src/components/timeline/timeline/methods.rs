@@ -1264,8 +1264,19 @@ impl Timeline {
         position: gpui::Point<gpui::Pixels>,
         window: &Window,
     ) {
+        self.move_dragged_clip_to_position_with_bypass(drag, position, window, false)
+    }
+
+    pub(super) fn move_dragged_clip_to_position_with_bypass(
+        &mut self,
+        drag: &ClipDragItem,
+        position: gpui::Point<gpui::Pixels>,
+        window: &Window,
+        bypass_snap: bool,
+    ) {
         let origin = *self.clip_drag_origin.get_or_insert(position);
-        let (target_index, snapped) = self.resolve_clip_drag_target(drag, origin, position);
+        let (target_index, snapped) =
+            self.resolve_clip_drag_target_with_bypass(drag, origin, position, bypass_snap);
         self.clip_drag_target_track_index = Some(target_index);
 
         let Some((current_drag_track_id, current_drag_start)) = self
@@ -1291,8 +1302,9 @@ impl Timeline {
             } else {
                 (start_beat + beat_delta).max(0.0)
             };
+            // Anchor already snapped (or Shift-bypassed); peers keep relative spacing.
             self.state
-                .move_clip_to_track(clip_id, &track_id, next_start);
+                .move_clip_to_track_with_options(clip_id, &track_id, next_start, false);
         }
         self.restore_clip_drag_selection(&drag.clip_id, drag_ids, Some(current_drag_track_id));
 
@@ -1349,10 +1361,23 @@ impl Timeline {
         origin: gpui::Point<gpui::Pixels>,
         position: gpui::Point<gpui::Pixels>,
     ) -> (usize, f32) {
+        self.resolve_clip_drag_target_with_bypass(drag, origin, position, false)
+    }
+
+    pub(super) fn resolve_clip_drag_target_with_bypass(
+        &self,
+        drag: &ClipDragItem,
+        origin: gpui::Point<gpui::Pixels>,
+        position: gpui::Point<gpui::Pixels>,
+        bypass_snap: bool,
+    ) -> (usize, f32) {
         let dx: f32 = (position.x - origin.x).into();
         let ppb = self.state.viewport.pixels_per_second * self.state.seconds_per_beat();
         let new_start = (drag.start_beat + dx / ppb.max(1.0)).max(0.0);
-        let snapped = self.state.snap_beats(new_start).max(0.0);
+        let snapped = self
+            .state
+            .snap_beats_with_bypass(new_start, bypass_snap)
+            .max(0.0);
 
         let source_index = self
             .state

@@ -5,7 +5,7 @@ use std::time::Duration;
 use gpui::prelude::FluentBuilder;
 use gpui::{
     div, img, px, svg, App, Context, FocusHandle, InteractiveElement, IntoElement, KeyDownEvent,
-    ParentElement, Render, SharedString, StatefulInteractiveElement, Styled, Window,
+    MouseButton, ParentElement, Render, SharedString, StatefulInteractiveElement, Styled, Window,
     WindowControlArea,
 };
 use serde::Deserialize;
@@ -408,6 +408,18 @@ impl Render for WelcomeWindow {
             .size_full()
             .font(theme::ui_font())
             .bg(Colors::surface_window())
+            .cursor(gpui::CursorStyle::Arrow)
+            // Swallow the platform's default click-drag gesture on the Welcome
+            // root so static labels/rows never render as "selected" while the
+            // user drags across them (GPUI has no CSS `user-select`). Rows and
+            // buttons register their own `on_mouse_down` deeper in the tree and
+            // fire first (bubble order), so clicks are unaffected. `TextInputState`
+            // calls `cx.stop_propagation()` on its own mouse-down, so this never
+            // reaches (and never affects) the project-name field, which keeps its
+            // own IBeam cursor and drag-to-select behavior.
+            .on_mouse_down(MouseButton::Left, |_event, window, _cx| {
+                window.prevent_default();
+            })
             .child(startup_titlebar(window))
             .child(self.render_welcome(window, cx))
     }

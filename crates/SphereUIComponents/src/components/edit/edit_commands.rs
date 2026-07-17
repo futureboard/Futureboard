@@ -3,8 +3,8 @@
 use std::collections::VecDeque;
 
 use crate::components::timeline::timeline_state::{
-    AudioClipStretchState, ClipState, MidiControllerKind, MidiControllerPoint, MidiNoteState,
-    TimelineState, TrackState,
+    AudioClipStretchState, ClipState, MidiArticulationEvent, MidiControllerKind,
+    MidiControllerPoint, MidiNoteState, TimelineState, TrackState,
 };
 
 /// Snapshot of a clip plus its owning track for undo/redo.
@@ -115,6 +115,14 @@ pub enum EditCommand {
         prev: Vec<MidiControllerPoint>,
         next: Vec<MidiControllerPoint>,
     },
+    /// Replace a clip's direction articulation events (insert / move / delete
+    /// gesture). One entry per gesture; `prev`/`next` are full event snapshots
+    /// of the clip's articulation lane, mirroring `SetControllerPoints`.
+    SetMidiArticulations {
+        clip_id: String,
+        prev: Vec<MidiArticulationEvent>,
+        next: Vec<MidiArticulationEvent>,
+    },
     /// Split one note into `parts` (two or more contiguous notes). Atomic so a
     /// single undo restores the original note and removes every part.
     SplitMidiNote {
@@ -181,6 +189,7 @@ impl EditCommand {
             }
             EditCommand::EditMidiNotes { .. } => "Edit MIDI Notes",
             EditCommand::SetControllerPoints { .. } => "Edit CC Lane",
+            EditCommand::SetMidiArticulations { .. } => "Edit Articulations",
             EditCommand::SplitMidiNote { .. } => "Split MIDI Note",
             EditCommand::SetClipStretch { .. } => "Edit Stretch",
             EditCommand::ReorderFxSlot { .. } => "Reorder FX",
@@ -283,6 +292,9 @@ impl EditCommand {
                 ..
             } => {
                 state.set_controller_lane_points(clip_id, *kind, next.clone());
+            }
+            EditCommand::SetMidiArticulations { clip_id, next, .. } => {
+                state.set_midi_articulations(clip_id, next.clone());
             }
             EditCommand::SplitMidiNote {
                 clip_id,
@@ -396,6 +408,9 @@ impl EditCommand {
                 ..
             } => {
                 state.set_controller_lane_points(clip_id, *kind, prev.clone());
+            }
+            EditCommand::SetMidiArticulations { clip_id, prev, .. } => {
+                state.set_midi_articulations(clip_id, prev.clone());
             }
             EditCommand::SplitMidiNote {
                 clip_id,
@@ -523,6 +538,74 @@ mod stretch_command_tests {
         assert!(history.redo(&mut state));
         assert!(history.redo(&mut state));
         assert!(!history.redo(&mut state));
+    }
+}
+
+#[cfg(test)]
+mod articulation_command_tests {
+    use super::*;
+    use crate::components::timeline::timeline_state::{ArticulationId, MidiArticulationEvent};
+
+    fn midi_state() -> (TimelineState, String) {
+        let mut state = TimelineState::default();
+        state.tracks.clear();
+        let track_id = state.create_midi_track();
+        let clip_id = state.create_midi_clip(&track_id, 0.0, 8.0).expect("clip");
+        (state, clip_id)
+    }
+
+    #[test]
+    fn set_midi_articulations_executes_undoes_and_redoes() {
+        let (mut state, clip_id) = midi_state();
+        let prev = state.articulations_snapshot(&clip_id);
+        assert!(prev.is_empty());
+        let next = vec![
+            MidiArticulationEvent::new(0.0, ArticulationId::Sustain),
+            MidiArticulationEvent::new(4.0, ArticulationId::Legato),
+        ];
+        let cmd = EditCommand::SetMidiArticulations {
+            clip_id: clip_id.clone(),
+            prev: prev.clone(),
+            next: next.clone(),
+        };
+        assert_eq!(cmd.label(), "Edit Articulations");
+
+        cmd.execute(&mut state);
+        assert_eq!(state.articulations_snapshot(&clip_id), next);
+        cmd.undo(&mut state);
+        assert!(state.articulations_snapshot(&clip_id).is_empty());
+        cmd.execute(&mut state);
+        assert_eq!(state.articulations_snapshot(&clip_id), next);
+    }
+
+    #[test]
+    fn edit_midi_notes_round_trips_per_note_articulation() {
+        let (mut state, clip_id) = midi_state();
+        let id = state.add_midi_note(&clip_id, 60, 0.0, 1.0, 100).unwrap();
+        let prev = vec![state.midi_clip_notes(&clip_id).unwrap()[0].clone()];
+        let mut next = prev.clone();
+        next[0].articulation = Some(ArticulationId::Staccato);
+
+        let cmd = EditCommand::EditMidiNotes {
+            clip_id: clip_id.clone(),
+            prev,
+            next,
+        };
+        cmd.execute(&mut state);
+        let articulation_of = |state: &TimelineState| {
+            state
+                .midi_clip_notes(&clip_id)
+                .unwrap()
+                .iter()
+                .find(|n| n.id == id)
+                .unwrap()
+                .articulation
+        };
+        assert_eq!(articulation_of(&state), Some(ArticulationId::Staccato));
+        cmd.undo(&mut state);
+        assert_eq!(articulation_of(&state), None);
+        cmd.execute(&mut state);
+        assert_eq!(articulation_of(&state), Some(ArticulationId::Staccato));
     }
 }
 

@@ -1,7 +1,8 @@
 use super::{
     AutomationLane, AutomationPoint, AutomationTargetDesc, ClipSource, FutureboardProject,
-    InputMonitorMode, MidiControllerKind, MidiControllerLane, MidiControllerPoint, MidiNote,
-    MidiSysExEvent, MidiSysExKind, PluginFormat, PluginStateBlob, ProjectAsset, ProjectClip,
+    InputMonitorMode, MidiArticulation, MidiControllerKind, MidiControllerLane,
+    MidiControllerPoint, MidiNote, MidiSysExEvent, MidiSysExKind, PluginFormat, PluginStateBlob,
+    ProjectAsset, ProjectClip,
     ProjectInsert, ProjectMixer, ProjectPluginInstance, ProjectSend, ProjectSongTextCue,
     ProjectTempoPoint, ProjectTimelineMarker, ProjectTimelineRegion, ProjectTrack,
     ProjectTrackAudioFormat, ProjectTrackInputRouting, ProjectTrackMidiInputRouting,
@@ -40,7 +41,10 @@ pub const PROJECT_MAGIC: &[u8; 8] = b"FBSTUD1\0";
 /// default to `false`, matching the pre-existing fixed-channel behavior).
 /// v23 preserves imported MIDI SysEx events on MIDI clips.
 /// v24 adds project-owned chord and lyric cues.
-pub const PROJECT_VERSION: u32 = 24;
+/// v25 adds MIDI articulations: a per-note articulation tag (0 = none) and a
+/// per-clip direction articulation event list. Pre-v25 data loads with no
+/// articulations; unknown tags from newer files degrade to "none" on load.
+pub const PROJECT_VERSION: u32 = 25;
 
 /// Minimum on-disk header size: magic (8) + version (4) + reserved (4) + body_len (4).
 pub const PROJECT_HEADER_SIZE: usize = 20;
@@ -489,6 +493,7 @@ fn encode_midi_note(w: &mut FbWriter, n: &MidiNote) {
     w.write_u8(n.velocity);
     w.write_bool(n.muted); // v4
     w.write_u8(n.channel.clamp(1, 16)); // v22
+    w.write_u8(n.articulation); // v25 (0 = none)
 }
 
 /// v5: controller kind tag. CC carries its number; the rest are tag-only.
@@ -604,6 +609,7 @@ fn encode_clip(w: &mut FbWriter, c: &ProjectClip) {
             notes,
             controller_lanes,
             sysex_events,
+            articulations,
         } => {
             w.write_u8(2);
             w.write_u32(notes.len() as u32);
@@ -619,6 +625,12 @@ fn encode_clip(w: &mut FbWriter, c: &ProjectClip) {
             w.write_u32(sysex_events.len() as u32);
             for event in sysex_events {
                 encode_sysex_event(w, event);
+            }
+            // v25: direction articulation events follow the SysEx block.
+            w.write_u32(articulations.len() as u32);
+            for event in articulations {
+                w.write_f32(event.beat);
+                w.write_u8(event.articulation);
             }
         }
     }
@@ -1036,6 +1048,8 @@ fn decode_midi_note(r: &mut FbReader, version: u32) -> Result<MidiNote, ProjectE
         } else {
             1
         },
+        // v25 added the per-note articulation tag; older files have none.
+        articulation: if version >= 25 { r.read_u8()? } else { 0 },
     })
 }
 
@@ -1209,10 +1223,25 @@ fn decode_clip(r: &mut FbReader, version: u32) -> Result<ProjectClip, ProjectErr
             } else {
                 Vec::new()
             };
+            // v25: direction articulation events; older files have none.
+            let articulations = if version >= 25 {
+                let event_count = r.read_u32()? as usize;
+                let mut events = Vec::with_capacity(event_count);
+                for _ in 0..event_count {
+                    events.push(MidiArticulation {
+                        beat: r.read_f32()?,
+                        articulation: r.read_u8()?,
+                    });
+                }
+                events
+            } else {
+                Vec::new()
+            };
             ClipSource::Midi {
                 notes,
                 controller_lanes,
                 sysex_events,
+                articulations,
             }
         }
         t => {
@@ -1801,7 +1830,89 @@ mod tests {
             velocity: 90,
             muted,
             channel: 1,
+            articulation: 0,
         }
+    }
+
+    #[test]
+    fn midi_note_articulation_roundtrips_v25() {
+        let mut w = FbWriter::new();
+        let mut n = note(60, false);
+        n.articulation = 2; // Staccato tag
+        encode_midi_note(&mut w, &n);
+        encode_midi_note(&mut w, &note(64, false)); // articulation 0 = none
+        let bytes = w.into_bytes();
+        let mut r = FbReader::new(&bytes);
+        let a = decode_midi_note(&mut r, PROJECT_VERSION).unwrap();
+        let b = decode_midi_note(&mut r, PROJECT_VERSION).unwrap();
+        assert_eq!(a.articulation, 2);
+        assert_eq!(b.articulation, 0);
+    }
+
+    #[test]
+    fn pre_v25_midi_note_decodes_with_no_articulation() {
+        // v24 and earlier wrote no articulation byte.
+        let mut w = FbWriter::new();
+        w.write_u8(60);
+        w.write_f32(1.5);
+        w.write_f32(0.5);
+        w.write_u8(90);
+        w.write_bool(false); // muted (v4)
+        w.write_u8(1); // channel (v22)
+        let bytes = w.into_bytes();
+        let mut r = FbReader::new(&bytes);
+        let got = decode_midi_note(&mut r, 24).unwrap();
+        assert_eq!(got.articulation, 0);
+    }
+
+    #[test]
+    fn midi_clip_articulation_events_roundtrip_v25() {
+        let clip = ProjectClip {
+            id: "clip-1".to_string(),
+            name: "MIDI".to_string(),
+            start_beat: 0.0,
+            duration_beats: 8.0,
+            offset_beats: 0.0,
+            gain: 1.0,
+            muted: false,
+            source: ClipSource::Midi {
+                notes: vec![note(60, false)],
+                controller_lanes: Vec::new(),
+                sysex_events: Vec::new(),
+                articulations: vec![
+                    MidiArticulation {
+                        beat: 0.0,
+                        articulation: 1,
+                    },
+                    MidiArticulation {
+                        beat: 4.0,
+                        articulation: 4,
+                    },
+                ],
+            },
+            stretch: AudioClipStretchState::default(),
+        };
+        let mut w = FbWriter::new();
+        encode_clip(&mut w, &clip);
+        let bytes = w.into_bytes();
+        let mut r = FbReader::new(&bytes);
+        let decoded = decode_clip(&mut r, PROJECT_VERSION).unwrap();
+        let ClipSource::Midi { articulations, .. } = decoded.source else {
+            panic!("expected midi source");
+        };
+        assert_eq!(
+            articulations,
+            vec![
+                MidiArticulation {
+                    beat: 0.0,
+                    articulation: 1
+                },
+                MidiArticulation {
+                    beat: 4.0,
+                    articulation: 4
+                },
+            ]
+        );
     }
 
     #[test]

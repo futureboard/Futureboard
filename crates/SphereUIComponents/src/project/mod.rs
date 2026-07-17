@@ -107,6 +107,8 @@ pub enum ClipSource {
         notes: Vec<MidiNote>,
         controller_lanes: Vec<MidiControllerLane>,
         sysex_events: Vec<MidiSysExEvent>,
+        /// Direction articulation events (v25+). Older projects have none.
+        articulations: Vec<MidiArticulation>,
     },
     Empty,
 }
@@ -121,6 +123,20 @@ pub struct MidiNote {
     /// UI-facing channel number, 1..=16. Older projects have no per-note
     /// channel data and default to 1 on load.
     pub channel: u8,
+    /// Per-note articulation tag ([`ArticulationId::to_tag`]); `0` = none.
+    /// Older projects (< v25) have no articulation data and default to `0`.
+    pub articulation: u8,
+}
+
+/// Serialized direction articulation event. Mirrors
+/// [`timeline_state::MidiArticulationEvent`] minus the transient editor id
+/// (fresh ids are minted on load, like MIDI note ids).
+#[derive(Debug, Clone, PartialEq)]
+pub struct MidiArticulation {
+    /// Beats relative to the clip start.
+    pub beat: f32,
+    /// [`ArticulationId::to_tag`] value; always a valid non-zero tag on save.
+    pub articulation: u8,
 }
 
 /// Serialized MIDI controller stream selector. Mirrors
@@ -771,6 +787,7 @@ impl From<&TimelineState> for FutureboardProject {
                                 notes,
                                 controller_lanes,
                                 sysex_events,
+                                articulations,
                             } => ClipSource::Midi {
                                 notes: notes
                                     .iter()
@@ -781,6 +798,10 @@ impl From<&TimelineState> for FutureboardProject {
                                         velocity: n.velocity,
                                         muted: n.muted,
                                         channel: n.channel.ui(),
+                                        articulation: n
+                                            .articulation
+                                            .map(|a| a.to_tag())
+                                            .unwrap_or(0),
                                     })
                                     .collect(),
                                 controller_lanes: controller_lanes
@@ -814,6 +835,13 @@ impl From<&TimelineState> for FutureboardProject {
                                         tick: event.tick,
                                         beat: event.beat,
                                         data: event.data.clone(),
+                                    })
+                                    .collect(),
+                                articulations: articulations
+                                    .iter()
+                                    .map(|event| MidiArticulation {
+                                        beat: event.beat,
+                                        articulation: event.articulation.to_tag(),
                                     })
                                     .collect(),
                             },
@@ -1127,6 +1155,7 @@ pub fn apply_to_timeline(project: &FutureboardProject, tl: &mut TimelineState) {
                             notes,
                             controller_lanes,
                             sysex_events,
+                            articulations,
                         } => ClipType::Midi {
                             notes: notes
                                 .iter()
@@ -1139,6 +1168,10 @@ pub fn apply_to_timeline(project: &FutureboardProject, tl: &mut TimelineState) {
                                     );
                                     note.muted = n.muted;
                                     note.channel = MidiChannel::from_ui(n.channel);
+                                    note.articulation =
+                                        crate::components::timeline::timeline_state::ArticulationId::from_tag(
+                                            n.articulation,
+                                        );
                                     note
                                 })
                                 .collect(),
@@ -1168,11 +1201,28 @@ pub fn apply_to_timeline(project: &FutureboardProject, tl: &mut TimelineState) {
                                     data: event.data.clone(),
                                 })
                                 .collect(),
+                            // Fresh transient event ids on load, like note ids.
+                            // Unknown tags from newer files degrade to "none".
+                            articulations: articulations
+                                .iter()
+                                .filter_map(|event| {
+                                    crate::components::timeline::timeline_state::ArticulationId::from_tag(
+                                        event.articulation,
+                                    )
+                                    .map(|articulation| {
+                                        crate::components::timeline::timeline_state::MidiArticulationEvent::new(
+                                            event.beat,
+                                            articulation,
+                                        )
+                                    })
+                                })
+                                .collect(),
                         },
                         ClipSource::Empty => ClipType::Midi {
                             notes: Vec::new(),
                             controller_lanes: Vec::new(),
                             sysex_events: Vec::new(),
+                            articulations: Vec::new(),
                         },
                     };
                     ClipState {
@@ -1499,6 +1549,53 @@ fn desc_to_target(
                 T::TrackVolume
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod articulation_persistence_tests {
+    use super::*;
+    use crate::components::timeline::timeline_state::{ArticulationId, TimelineState};
+
+    /// Per-note articulations and the clip's direction articulation lane must
+    /// survive save → binary encode/decode → load. Event ids are transient and
+    /// re-minted on load; beats and articulation identities are what persist.
+    #[test]
+    fn midi_articulations_survive_save_and_reload() {
+        let mut state = TimelineState::default();
+        state.tracks.clear();
+        let track_id = state.create_midi_track();
+        let clip_id = state.create_midi_clip(&track_id, 0.0, 8.0).expect("clip");
+        let plain = state.add_midi_note(&clip_id, 60, 0.0, 1.0, 100).expect("note");
+        let accented = state.add_midi_note(&clip_id, 64, 1.0, 1.0, 100).expect("note");
+        state.set_midi_notes_articulation(&clip_id, &[accented], Some(ArticulationId::Accent));
+        state.add_midi_articulation(&clip_id, 0.0, ArticulationId::Sustain);
+        state.add_midi_articulation(&clip_id, 4.0, ArticulationId::Staccato);
+        let _ = plain;
+
+        let project = FutureboardProject::from(&state);
+        let bytes = encode_project(&project);
+        let decoded = decode_project(&bytes).expect("decode");
+        let mut restored = TimelineState::default();
+        apply_to_timeline(&decoded, &mut restored);
+
+        let notes = restored.midi_clip_notes(&clip_id).expect("notes restored");
+        assert_eq!(notes.len(), 2);
+        let by_pitch = |p: u8| notes.iter().find(|n| n.pitch == p).expect("pitch");
+        assert_eq!(by_pitch(60).articulation, None);
+        assert_eq!(by_pitch(64).articulation, Some(ArticulationId::Accent));
+        // Restored notes keep raw duration/velocity (playback-only modifiers).
+        assert_eq!(by_pitch(64).duration, 1.0);
+        assert_eq!(by_pitch(64).velocity, 100);
+
+        let events = restored
+            .midi_clip_articulations(&clip_id)
+            .expect("articulation lane restored");
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].beat, 0.0);
+        assert_eq!(events[0].articulation, ArticulationId::Sustain);
+        assert_eq!(events[1].beat, 4.0);
+        assert_eq!(events[1].articulation, ArticulationId::Staccato);
     }
 }
 

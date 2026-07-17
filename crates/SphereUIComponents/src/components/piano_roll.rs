@@ -32,8 +32,9 @@ use crate::assets;
 use crate::components::edit::{normalize_range, EditCommand};
 use crate::components::timeline::timeline::Timeline;
 use crate::components::timeline::timeline_state::{
-    midi_debug_enabled, MidiChannel, MidiChannelMask, MidiControllerKind, MidiControllerPoint,
-    MidiNoteState, PitchTransformContext, ScaleKind, ScaleRoot, TimelineState, MIN_NOTE_BEATS,
+    midi_debug_enabled, ArticulationId, MidiArticulationEvent, MidiChannel, MidiChannelMask,
+    MidiControllerKind, MidiControllerPoint, MidiNoteState, PitchTransformContext, ScaleKind,
+    ScaleRoot, TimelineState, MIN_NOTE_BEATS,
 };
 use crate::theme::Colors;
 
@@ -102,14 +103,15 @@ struct ClipboardNote {
     velocity: u8,
     muted: bool,
     channel: MidiChannel,
+    articulation: Option<ArticulationId>,
 }
 
 /// Internal clipboard format version. Bumped if [`ClipboardNote`] layout or
 /// semantics change so a paste can reject data it doesn't understand instead of
 /// mis-reading it. The clipboard is process-local today, but versioning keeps
 /// the contract explicit for a future cross-process / serialized clipboard.
-/// v2 added the per-note MIDI channel.
-const MIDI_CLIPBOARD_VERSION: u32 = 2;
+/// v2 added the per-note MIDI channel. v3 added the per-note articulation.
+const MIDI_CLIPBOARD_VERSION: u32 = 3;
 
 /// Versioned clipboard payload — a version tag plus the copied notes.
 #[derive(Clone)]
@@ -2661,9 +2663,11 @@ impl PianoRoll {
             MidiNoteState::new(original.pitch, original.start, left_len, original.velocity);
         left.muted = original.muted;
         left.channel = original.channel;
+        left.articulation = original.articulation;
         let mut right = MidiNoteState::new(original.pitch, cut, right_len, original.velocity);
         right.muted = original.muted;
         right.channel = original.channel;
+        right.articulation = original.articulation;
         let new_ids = [left.id, right.id];
         self.run_edit_command(
             EditCommand::SplitMidiNote {
@@ -2722,6 +2726,7 @@ impl PianoRoll {
                 velocity: n.velocity,
                 muted: n.muted,
                 channel: n.channel,
+                articulation: n.articulation,
             })
             .collect();
         MIDI_NOTE_CLIPBOARD.with(|cb| {
@@ -2757,6 +2762,7 @@ impl PianoRoll {
                     );
                     note.muted = c.muted;
                     note.channel = c.channel;
+                    note.articulation = c.articulation;
                     note
                 })
                 .collect()
@@ -2851,6 +2857,7 @@ impl PianoRoll {
                     MidiNoteState::new(n.pitch, n.start + offset, n.duration, n.velocity);
                 note.muted = n.muted;
                 note.channel = n.channel;
+                note.articulation = n.articulation;
                 note
             })
             .collect();

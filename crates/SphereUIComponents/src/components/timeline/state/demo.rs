@@ -170,6 +170,7 @@ impl TimelineState {
                     ],
                     controller_lanes: Vec::new(),
                     sysex_events: Vec::new(),
+                    articulations: Vec::new(),
                 },
                 muted: false,
                 audio_import: AudioImportState::default(),

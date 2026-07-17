@@ -74,6 +74,7 @@ impl TimelineState {
                 notes: Vec::new(),
                 controller_lanes: Vec::new(),
                 sysex_events: Vec::new(),
+                articulations: Vec::new(),
             },
             muted: false,
             audio_import: AudioImportState::default(),

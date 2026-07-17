@@ -4,6 +4,7 @@
 //! re-exported flat so existing `timeline_state::*` imports keep working through
 //! the shim at `super::timeline_state`.
 
+mod articulation;
 mod audio;
 mod automation;
 mod clip;
@@ -38,6 +39,7 @@ mod viewport;
 #[cfg(test)]
 mod tests;
 
+pub use articulation::*;
 pub use automation::*;
 pub use clip::*;
 pub use core::*;

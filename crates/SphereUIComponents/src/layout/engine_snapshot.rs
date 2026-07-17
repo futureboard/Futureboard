@@ -15,6 +15,76 @@ use DirectAudio::types::{
     EngineWarpMarkerSnapshot,
 };
 
+/// Per-channel `(start, pitch)` of every unmuted note in a clip, sorted by
+/// start beat. Built once per clip at snapshot time so legato can find "the
+/// next note on this channel" with a binary search instead of an O(n²) scan.
+struct ArticulationLegatoIndex {
+    /// `by_channel[ch]` = sorted `(start_beats, pitch)` for engine channel `ch`.
+    by_channel: [Vec<(f32, u8)>; 16],
+}
+
+impl ArticulationLegatoIndex {
+    fn build(
+        notes: &[timeline_state::MidiNoteState],
+        output_mode: timeline_state::MidiOutputChannelMode,
+    ) -> Self {
+        let mut by_channel: [Vec<(f32, u8)>; 16] = Default::default();
+        for note in notes.iter().filter(|n| !n.muted) {
+            let channel = output_mode.resolve(note.channel).raw().min(15) as usize;
+            by_channel[channel].push((note.start.max(0.0), note.pitch.min(127)));
+        }
+        for list in &mut by_channel {
+            list.sort_by(|a, b| a.0.total_cmp(&b.0));
+        }
+        Self { by_channel }
+    }
+
+    /// The first note on `channel` starting strictly after `start` (chord
+    /// members at the same beat are not "next"). Returns `(start, pitch)`.
+    fn next_note_after(&self, channel: u8, start: f32) -> Option<(f32, u8)> {
+        const EPS: f32 = 1.0e-4;
+        let list = &self.by_channel[channel.min(15) as usize];
+        let idx = list.partition_point(|(s, _)| *s <= start + EPS);
+        list.get(idx).copied()
+    }
+}
+
+/// Resolve and apply a note's articulation for scheduling: per-note wins,
+/// otherwise the clip's direction lane is chased at the note start. Returns
+/// the `(length_beats, velocity)` to schedule; the stored note is untouched.
+/// Legato onto the *same* pitch clamps the gate to exactly the next note's
+/// start (no overlap): the runtime sorts NoteOff before NoteOn at the same
+/// sample, so the retrigger stays clean instead of the off killing the new
+/// voice.
+fn articulated_note_playback(
+    note: &timeline_state::MidiNoteState,
+    articulations: &[timeline_state::MidiArticulationEvent],
+    channel: u8,
+    legato_index: &ArticulationLegatoIndex,
+) -> (f32, u8) {
+    let velocity = note.velocity.clamp(1, 127);
+    let Some(articulation) = timeline_state::resolve_note_articulation(note, articulations) else {
+        return (note.duration, velocity);
+    };
+    let next = legato_index.next_note_after(channel, note.start.max(0.0));
+    let (mut length, velocity) = timeline_state::apply_articulation_playback(
+        note.start.max(0.0),
+        note.duration,
+        velocity,
+        articulation,
+        next.map(|(start, _)| start),
+    );
+    if let Some((next_start, next_pitch)) = next {
+        if next_pitch == note.pitch.min(127) {
+            // Same-pitch neighbor: never let the gate cross its NoteOn.
+            let to_next = (next_start - note.start.max(0.0))
+                .max(timeline_state::MIN_NOTE_BEATS);
+            length = length.min(to_next);
+        }
+    }
+    (length, velocity)
+}
+
 /// Canonical engine `mode` key for a clip's stretch mode (matches
 /// `runtime::resolve_clip_processor`).
 fn stretch_mode_key(mode: StretchMode) -> &'static str {
@@ -725,6 +795,7 @@ fn build_engine_project_snapshot_inner(
                 let ClipType::Midi {
                     notes,
                     controller_lanes,
+                    articulations,
                     ..
                 } = &clip.clip_type
                 else {
@@ -739,6 +810,12 @@ fn build_engine_project_snapshot_inner(
                 let lane_channel = output_mode
                     .resolve(track.routing.default_note_channel())
                     .raw();
+                // Articulations are applied here — and only here — so realtime
+                // playback and offline export (same builder) stay equivalent
+                // and the stored note data is never rewritten. Direction
+                // chasing is a pure beat lookup over the clip's event list, so
+                // it is independent of where the transport starts/seeks/loops.
+                let legato_index = ArticulationLegatoIndex::build(notes, output_mode);
                 Some(EngineMidiClipSnapshot {
                     id: clip.id.clone(),
                     track_id: track_id.clone(),
@@ -748,13 +825,22 @@ fn build_engine_project_snapshot_inner(
                         .iter()
                         // Muted notes stay in the clip but emit no runtime event.
                         .filter(|n| !n.muted)
-                        .map(|n| EngineMidiNoteSnapshot {
-                            id: n.id,
-                            pitch: n.pitch.min(127),
-                            start_beat: n.start.max(0.0) as f64,
-                            length_beats: n.duration.max(0.0) as f64,
-                            velocity: n.velocity.clamp(1, 127),
-                            channel: output_mode.resolve(n.channel).raw(),
+                        .map(|n| {
+                            let channel = output_mode.resolve(n.channel).raw();
+                            let (length_beats, velocity) = articulated_note_playback(
+                                n,
+                                articulations,
+                                channel,
+                                &legato_index,
+                            );
+                            EngineMidiNoteSnapshot {
+                                id: n.id,
+                                pitch: n.pitch.min(127),
+                                start_beat: n.start.max(0.0) as f64,
+                                length_beats: length_beats.max(0.0) as f64,
+                                velocity,
+                                channel,
+                            }
                         })
                         .collect(),
                     controllers: controller_lanes
@@ -1021,6 +1107,178 @@ mod tests {
             .expect("CC11 lane");
         assert_eq!(cc11.points.len(), 2);
         assert!(clip.controllers.iter().any(|l| l.controller == 129));
+    }
+
+    // ── MIDI articulation playback (non-destructive snapshot modifiers) ──
+
+    fn snapshot_note(
+        snap: &EngineProjectSnapshot,
+        clip_id: &str,
+        note_id: u64,
+    ) -> EngineMidiNoteSnapshot {
+        snap.midi_clips
+            .iter()
+            .find(|c| c.id == clip_id)
+            .expect("midi clip in snapshot")
+            .notes
+            .iter()
+            .find(|n| n.id == note_id)
+            .expect("note in snapshot")
+            .clone()
+    }
+
+    #[test]
+    fn staccato_shortens_scheduled_gate_without_touching_note_data() {
+        use crate::components::timeline::timeline_state::ArticulationId;
+        let (mut state, clip_id) = instrument_state_with_clip();
+        let id = state.add_midi_note(&clip_id, 60, 0.0, 2.0, 100).unwrap();
+        state.set_midi_notes_articulation(&clip_id, &[id], Some(ArticulationId::Staccato));
+
+        let snap = build_engine_project_snapshot(&state, 48_000, None, None);
+        let scheduled = snapshot_note(&snap, &clip_id, id);
+        let gate = ArticulationId::Staccato.definition().playback.gate_ratio as f64;
+        assert!((scheduled.length_beats - 2.0 * gate).abs() < 1e-6);
+        assert_eq!(scheduled.velocity, 100);
+
+        // Non-destructive: the stored note keeps its full duration/velocity.
+        let note = state.midi_clip_notes(&clip_id).unwrap()[0].clone();
+        assert_eq!(note.duration, 2.0);
+        assert_eq!(note.velocity, 100);
+    }
+
+    #[test]
+    fn accent_and_marcato_velocities_clamp_to_midi_range() {
+        use crate::components::timeline::timeline_state::ArticulationId;
+        let (mut state, clip_id) = instrument_state_with_clip();
+        let hot = state.add_midi_note(&clip_id, 60, 0.0, 1.0, 120).unwrap();
+        let soft = state.add_midi_note(&clip_id, 64, 1.0, 1.0, 40).unwrap();
+        state.set_midi_notes_articulation(&clip_id, &[hot], Some(ArticulationId::Accent));
+        state.set_midi_notes_articulation(&clip_id, &[soft], Some(ArticulationId::Marcato));
+
+        let snap = build_engine_project_snapshot(&state, 48_000, None, None);
+        assert_eq!(
+            snapshot_note(&snap, &clip_id, hot).velocity,
+            127,
+            "accent on velocity 120 must clamp at 127"
+        );
+        let marcato_delta =
+            ArticulationId::Marcato.definition().playback.velocity_delta as i32;
+        assert_eq!(
+            snapshot_note(&snap, &clip_id, soft).velocity as i32,
+            40 + marcato_delta
+        );
+        // Stored velocities unchanged.
+        let notes = state.midi_clip_notes(&clip_id).unwrap();
+        assert!(notes.iter().any(|n| n.velocity == 120));
+        assert!(notes.iter().any(|n| n.velocity == 40));
+    }
+
+    #[test]
+    fn legato_overlaps_next_note_and_clamps_on_same_pitch() {
+        use crate::components::timeline::timeline_state::{
+            ArticulationId, LEGATO_OVERLAP_BEATS,
+        };
+        let (mut state, clip_id) = instrument_state_with_clip();
+        // a (60) → b (64): different pitch, overlap allowed.
+        let a = state.add_midi_note(&clip_id, 60, 0.0, 0.5, 100).unwrap();
+        let b = state.add_midi_note(&clip_id, 64, 1.0, 0.5, 100).unwrap();
+        // c (64) → d (64): same pitch — gate must stop exactly at d's start.
+        let c = state.add_midi_note(&clip_id, 64, 2.0, 0.5, 100).unwrap();
+        let _d = state.add_midi_note(&clip_id, 64, 3.0, 0.5, 100).unwrap();
+        state.set_midi_notes_articulation(
+            &clip_id,
+            &[a, b, c],
+            Some(ArticulationId::Legato),
+        );
+
+        let snap = build_engine_project_snapshot(&state, 48_000, None, None);
+        let a_len = snapshot_note(&snap, &clip_id, a).length_beats;
+        assert!(
+            (a_len - (1.0 + LEGATO_OVERLAP_BEATS as f64)).abs() < 1e-6,
+            "legato must reach the next note plus the overlap (got {a_len})"
+        );
+        let c_len = snapshot_note(&snap, &clip_id, c).length_beats;
+        assert!(
+            (c_len - 1.0).abs() < 1e-6,
+            "same-pitch legato must clamp to the next note start (got {c_len})"
+        );
+        // b (64) is followed by c (also 64): same-pitch clamp applies to it too.
+        let b_len = snapshot_note(&snap, &clip_id, b).length_beats;
+        assert!((b_len - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn legato_without_following_note_keeps_plain_gate() {
+        use crate::components::timeline::timeline_state::ArticulationId;
+        let (mut state, clip_id) = instrument_state_with_clip();
+        let only = state.add_midi_note(&clip_id, 60, 0.0, 1.5, 100).unwrap();
+        state.set_midi_notes_articulation(&clip_id, &[only], Some(ArticulationId::Legato));
+
+        let snap = build_engine_project_snapshot(&state, 48_000, None, None);
+        let len = snapshot_note(&snap, &clip_id, only).length_beats;
+        assert!(
+            (len - 1.5).abs() < 1e-6,
+            "last legato note must not grow an unbounded tail (got {len})"
+        );
+    }
+
+    #[test]
+    fn direction_articulation_is_chased_per_note_start() {
+        use crate::components::timeline::timeline_state::ArticulationId;
+        let (mut state, clip_id) = instrument_state_with_clip();
+        let before = state.add_midi_note(&clip_id, 60, 0.0, 1.0, 100).unwrap();
+        let after = state.add_midi_note(&clip_id, 62, 2.0, 1.0, 100).unwrap();
+        let later = state.add_midi_note(&clip_id, 64, 3.0, 1.0, 100).unwrap();
+        // Staccato direction starting at beat 2; nothing before it.
+        state.add_midi_articulation(&clip_id, 2.0, ArticulationId::Staccato);
+
+        let snap = build_engine_project_snapshot(&state, 48_000, None, None);
+        let gate = ArticulationId::Staccato.definition().playback.gate_ratio as f64;
+        assert!(
+            (snapshot_note(&snap, &clip_id, before).length_beats - 1.0).abs() < 1e-6,
+            "note before the direction event must be unaffected"
+        );
+        // Both notes at/after the event chase the same direction — including
+        // `later`, which starts after the event with no event of its own
+        // (equivalent to starting playback mid-clip).
+        assert!((snapshot_note(&snap, &clip_id, after).length_beats - gate).abs() < 1e-6);
+        assert!((snapshot_note(&snap, &clip_id, later).length_beats - gate).abs() < 1e-6);
+    }
+
+    #[test]
+    fn per_note_articulation_overrides_direction_lane() {
+        use crate::components::timeline::timeline_state::ArticulationId;
+        let (mut state, clip_id) = instrument_state_with_clip();
+        let id = state.add_midi_note(&clip_id, 60, 1.0, 1.0, 100).unwrap();
+        state.add_midi_articulation(&clip_id, 0.0, ArticulationId::Staccato);
+        state.set_midi_notes_articulation(&clip_id, &[id], Some(ArticulationId::Tenuto));
+
+        let snap = build_engine_project_snapshot(&state, 48_000, None, None);
+        let len = snapshot_note(&snap, &clip_id, id).length_beats;
+        assert!(
+            (len - 1.0).abs() < 1e-6,
+            "per-note tenuto (gate 1.0) must override the staccato direction"
+        );
+    }
+
+    #[test]
+    fn offline_export_snapshot_applies_identical_articulation() {
+        use crate::components::timeline::timeline_state::ArticulationId;
+        let (mut state, clip_id) = instrument_state_with_clip();
+        let a = state.add_midi_note(&clip_id, 60, 0.0, 1.0, 100).unwrap();
+        let b = state.add_midi_note(&clip_id, 64, 1.0, 1.0, 100).unwrap();
+        state.set_midi_notes_articulation(&clip_id, &[a], Some(ArticulationId::Legato));
+        state.add_midi_articulation(&clip_id, 0.0, ArticulationId::Marcato);
+
+        let live = build_engine_project_snapshot(&state, 48_000, None, None);
+        let export = build_engine_project_snapshot_for_export(&state, 48_000, None, None, true, 0);
+        for id in [a, b] {
+            let l = snapshot_note(&live, &clip_id, id);
+            let e = snapshot_note(&export, &clip_id, id);
+            assert_eq!(l.length_beats, e.length_beats);
+            assert_eq!(l.velocity, e.velocity);
+            assert_eq!(l.start_beat, e.start_beat);
+        }
     }
 
     #[test]

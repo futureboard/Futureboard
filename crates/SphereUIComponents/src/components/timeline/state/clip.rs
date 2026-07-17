@@ -31,6 +31,9 @@ pub enum ClipType {
         /// TODO(midi-export/playback): carry these through the engine/export
         /// snapshot once Futureboard has an explicit SysEx scheduling path.
         sysex_events: Vec<MidiSysExEvent>,
+        /// Direction articulation events (timeline-based; active until the
+        /// next event). Per-note articulations live on [`MidiNoteState`].
+        articulations: Vec<MidiArticulationEvent>,
     },
 }
 
@@ -349,6 +352,7 @@ impl TimelineState {
                 notes,
                 controller_lanes,
                 sysex_events,
+                articulations,
             } => ClipType::Midi {
                 notes: notes
                     .iter()
@@ -360,6 +364,7 @@ impl TimelineState {
                             note.velocity,
                         );
                         cloned.muted = note.muted;
+                        cloned.articulation = note.articulation;
                         cloned
                     })
                     .collect(),
@@ -378,6 +383,11 @@ impl TimelineState {
                     })
                     .collect(),
                 sysex_events: sysex_events.clone(),
+                // Fresh transient ids for the duplicate — never reuse source ids.
+                articulations: articulations
+                    .iter()
+                    .map(|event| MidiArticulationEvent::new(event.beat, event.articulation))
+                    .collect(),
             },
         };
         cloned

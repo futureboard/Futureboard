@@ -34,6 +34,12 @@ pub struct MidiNoteState {
     /// [`MidiOutputChannelMode`] is `PerNote`; ignored (but preserved) when
     /// the track forces a `Fixed` channel. Defaults to channel 1.
     pub channel: MidiChannel,
+    /// Per-note articulation. `None` falls back to the clip's direction
+    /// articulation lane at the note start. Playback-only metadata: it never
+    /// alters the stored start/duration/velocity (modifiers apply at engine
+    /// snapshot build time). Travels with the note through move / copy /
+    /// split / delete because it lives on the note itself.
+    pub articulation: Option<ArticulationId>,
 }
 
 impl MidiNoteState {
@@ -49,6 +55,7 @@ impl MidiNoteState {
             velocity: velocity.clamp(1, 127),
             muted: false,
             channel: MidiChannel::default(),
+            articulation: None,
         }
     }
 }
@@ -231,6 +238,7 @@ impl TimelineState {
                 notes: Vec::new(),
                 controller_lanes: Vec::new(),
                 sysex_events: Vec::new(),
+                articulations: Vec::new(),
             },
             muted: false,
             audio_import: AudioImportState::default(),
@@ -281,6 +289,7 @@ impl TimelineState {
                         data: event.data,
                     })
                     .collect(),
+                articulations: Vec::new(),
             },
             muted: false,
             audio_import: AudioImportState::default(),
@@ -466,6 +475,7 @@ impl TimelineState {
                     note.velocity = s.velocity;
                     note.muted = s.muted;
                     note.channel = s.channel;
+                    note.articulation = s.articulation;
                 }
             }
         }

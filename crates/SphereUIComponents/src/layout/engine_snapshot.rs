@@ -77,8 +77,7 @@ fn articulated_note_playback(
     if let Some((next_start, next_pitch)) = next {
         if next_pitch == note.pitch.min(127) {
             // Same-pitch neighbor: never let the gate cross its NoteOn.
-            let to_next = (next_start - note.start.max(0.0))
-                .max(timeline_state::MIN_NOTE_BEATS);
+            let to_next = (next_start - note.start.max(0.0)).max(timeline_state::MIN_NOTE_BEATS);
             length = length.min(to_next);
         }
     }
@@ -827,12 +826,8 @@ fn build_engine_project_snapshot_inner(
                         .filter(|n| !n.muted)
                         .map(|n| {
                             let channel = output_mode.resolve(n.channel).raw();
-                            let (length_beats, velocity) = articulated_note_playback(
-                                n,
-                                articulations,
-                                channel,
-                                &legato_index,
-                            );
+                            let (length_beats, velocity) =
+                                articulated_note_playback(n, articulations, channel, &legato_index);
                             EngineMidiNoteSnapshot {
                                 id: n.id,
                                 pitch: n.pitch.min(127),
@@ -1161,8 +1156,7 @@ mod tests {
             127,
             "accent on velocity 120 must clamp at 127"
         );
-        let marcato_delta =
-            ArticulationId::Marcato.definition().playback.velocity_delta as i32;
+        let marcato_delta = ArticulationId::Marcato.definition().playback.velocity_delta as i32;
         assert_eq!(
             snapshot_note(&snap, &clip_id, soft).velocity as i32,
             40 + marcato_delta
@@ -1175,9 +1169,7 @@ mod tests {
 
     #[test]
     fn legato_overlaps_next_note_and_clamps_on_same_pitch() {
-        use crate::components::timeline::timeline_state::{
-            ArticulationId, LEGATO_OVERLAP_BEATS,
-        };
+        use crate::components::timeline::timeline_state::{ArticulationId, LEGATO_OVERLAP_BEATS};
         let (mut state, clip_id) = instrument_state_with_clip();
         // a (60) → b (64): different pitch, overlap allowed.
         let a = state.add_midi_note(&clip_id, 60, 0.0, 0.5, 100).unwrap();
@@ -1185,11 +1177,7 @@ mod tests {
         // c (64) → d (64): same pitch — gate must stop exactly at d's start.
         let c = state.add_midi_note(&clip_id, 64, 2.0, 0.5, 100).unwrap();
         let _d = state.add_midi_note(&clip_id, 64, 3.0, 0.5, 100).unwrap();
-        state.set_midi_notes_articulation(
-            &clip_id,
-            &[a, b, c],
-            Some(ArticulationId::Legato),
-        );
+        state.set_midi_notes_articulation(&clip_id, &[a, b, c], Some(ArticulationId::Legato));
 
         let snap = build_engine_project_snapshot(&state, 48_000, None, None);
         let a_len = snapshot_note(&snap, &clip_id, a).length_beats;

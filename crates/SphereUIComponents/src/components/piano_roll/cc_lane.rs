@@ -242,12 +242,20 @@ impl PianoRoll {
             let hi = selected.iter().map(|p| p.beat).fold(0.0_f32, f32::max);
             let from = selected
                 .iter()
-                .min_by(|a, b| a.beat.partial_cmp(&b.beat).unwrap_or(std::cmp::Ordering::Equal))
+                .min_by(|a, b| {
+                    a.beat
+                        .partial_cmp(&b.beat)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
                 .map(|p| p.value)
                 .unwrap_or(0.0);
             let to = selected
                 .iter()
-                .max_by(|a, b| a.beat.partial_cmp(&b.beat).unwrap_or(std::cmp::Ordering::Equal))
+                .max_by(|a, b| {
+                    a.beat
+                        .partial_cmp(&b.beat)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
                 .map(|p| p.value)
                 .unwrap_or(1.0);
             (lo, hi.max(lo + step), from, to)
@@ -267,7 +275,9 @@ impl PianoRoll {
             .collect();
 
         if kind == CcCurveKind::Humanize {
-            for p in prev.iter().filter(|p| p.beat >= lo_beat - 1.0e-4 && p.beat <= hi_beat + 1.0e-4)
+            for p in prev
+                .iter()
+                .filter(|p| p.beat >= lo_beat - 1.0e-4 && p.beat <= hi_beat + 1.0e-4)
             {
                 let jitter = (CcCurveKind::Humanize.sample(p.beat.fract(), 0.0, 1.0) - 0.5) * 0.12;
                 points.push(MidiControllerPoint::new(
@@ -616,8 +626,7 @@ impl PianoRoll {
                         // multi-selection. Empty click clears selection and paints.
                         if let Some(cid) = this.editing_clip_id(cx) {
                             if let Some(id) = this.cc_point_at(cx, &cid, lx, ly) {
-                                let additive =
-                                    ev.modifiers.control || ev.modifiers.platform;
+                                let additive = ev.modifiers.control || ev.modifiers.platform;
                                 if additive {
                                     if this.cc_selection.contains(&id) {
                                         this.cc_selection.remove(&id);

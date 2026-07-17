@@ -28,9 +28,7 @@ impl PianoRoll {
         let articulation = self.insert_articulation;
         let prev = self.timeline.read(cx).state.articulations_snapshot(clip_id);
         let new_id = self.timeline.update(cx, |tl, tcx| {
-            let id = tl
-                .state
-                .add_midi_articulation(clip_id, beat, articulation);
+            let id = tl.state.add_midi_articulation(clip_id, beat, articulation);
             tcx.notify();
             id
         });
@@ -83,7 +81,12 @@ impl PianoRoll {
         let Some(clip_id) = self.editing_clip_id(cx) else {
             return;
         };
-        self.art_edit_prev = Some(self.timeline.read(cx).state.articulations_snapshot(&clip_id));
+        self.art_edit_prev = Some(
+            self.timeline
+                .read(cx)
+                .state
+                .articulations_snapshot(&clip_id),
+        );
         self.selected_articulation = Some(id);
         self.drag = PianoDrag::ArtMove { id };
         cx.notify();
@@ -120,7 +123,11 @@ impl PianoRoll {
         let Some(clip_id) = self.editing_clip_id(cx) else {
             return;
         };
-        let next = self.timeline.read(cx).state.articulations_snapshot(&clip_id);
+        let next = self
+            .timeline
+            .read(cx)
+            .state
+            .articulations_snapshot(&clip_id);
         if prev == next {
             return;
         }
@@ -143,7 +150,11 @@ impl PianoRoll {
         let Some(clip_id) = self.editing_clip_id(cx) else {
             return;
         };
-        let prev = self.timeline.read(cx).state.articulations_snapshot(&clip_id);
+        let prev = self
+            .timeline
+            .read(cx)
+            .state
+            .articulations_snapshot(&clip_id);
         let next: Vec<MidiArticulationEvent> =
             prev.iter().filter(|e| e.id != id).cloned().collect();
         if prev.len() == next.len() {
@@ -209,7 +220,10 @@ impl PianoRoll {
                     .top(px(ART_PALETTE_H))
                     .bottom_0()
                     .w(px(region_w))
-                    .bg(Colors::with_alpha(accent, if is_selected { 0.16 } else { 0.08 }))
+                    .bg(Colors::with_alpha(
+                        accent,
+                        if is_selected { 0.16 } else { 0.08 },
+                    ))
                     .border_l(px(2.0))
                     .border_color(if is_selected {
                         accent
@@ -231,7 +245,10 @@ impl PianoRoll {
                         .flex()
                         .items_center()
                         .rounded(px(3.0))
-                        .bg(Colors::with_alpha(accent, if is_selected { 0.9 } else { 0.55 }))
+                        .bg(Colors::with_alpha(
+                            accent,
+                            if is_selected { 0.9 } else { 0.55 },
+                        ))
                         .text_size(px(9.0))
                         .text_color(Colors::text_primary())
                         .overflow_hidden()

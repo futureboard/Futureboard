@@ -288,11 +288,13 @@ impl PianoRoll {
                 .absolute()
                 .top(px(26.0))
                 .left_0()
-                .w(px(if menu == PianoSelectMenu::Grid || menu == PianoSelectMenu::Channel {
-                    160.0
-                } else {
-                    148.0
-                }))
+                .w(px(
+                    if menu == PianoSelectMenu::Grid || menu == PianoSelectMenu::Channel {
+                        160.0
+                    } else {
+                        148.0
+                    },
+                ))
                 .max_h(px(280.0))
                 .id(("pr-select-menu-scroll", menu as u32))
                 .overflow_y_scroll()
@@ -1644,9 +1646,8 @@ impl PianoRoll {
             );
             content.push(note_value_row("Velocity", note.velocity.to_string()).into_any_element());
             content.push(note_value_row("Channel", note.channel.label()).into_any_element());
-            content.push(
-                note_value_row("Artic.", snapshot.articulation_label()).into_any_element(),
-            );
+            content
+                .push(note_value_row("Artic.", snapshot.articulation_label()).into_any_element());
             content.push(self.articulation_assign_row(cx));
             content.push(
                 note_button_row(vec![
@@ -1755,9 +1756,8 @@ impl PianoRoll {
             content.push(note_value_row("Length", snapshot.length_label()).into_any_element());
             content.push(note_value_row("Velocity", snapshot.velocity_label()).into_any_element());
             content.push(note_value_row("Channel", snapshot.channel_label()).into_any_element());
-            content.push(
-                note_value_row("Artic.", snapshot.articulation_label()).into_any_element(),
-            );
+            content
+                .push(note_value_row("Artic.", snapshot.articulation_label()).into_any_element());
             content.push(self.articulation_assign_row(cx));
             content.push(
                 note_button_row(vec![
@@ -2515,10 +2515,7 @@ impl PianoRoll {
                                         div()
                                             .px(px(2.0))
                                             .rounded(px(2.0))
-                                            .bg(Colors::with_alpha(
-                                                Colors::accent_primary(),
-                                                0.85,
-                                            ))
+                                            .bg(Colors::with_alpha(Colors::accent_primary(), 0.85))
                                             .text_size(px(7.0))
                                             .text_color(Colors::text_primary())
                                             .child(short),

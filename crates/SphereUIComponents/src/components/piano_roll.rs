@@ -1655,8 +1655,7 @@ impl PianoRoll {
     fn scroll_to_pitch(&mut self, pitch: u8) {
         let (_, view_h) = self.grid_view_size();
         let row_h = self.note_row_h();
-        let target =
-            ((PITCH_CNT - 1) as f32 - pitch as f32) * row_h - view_h * 0.5 + row_h * 0.5;
+        let target = ((PITCH_CNT - 1) as f32 - pitch as f32) * row_h - view_h * 0.5 + row_h * 0.5;
         self.scroll_y = target.clamp(0.0, self.max_scroll_y());
     }
 
@@ -1693,8 +1692,7 @@ impl PianoRoll {
 
         let mid = (min_p as f32 + max_p as f32) * 0.5;
         let row_h = self.note_row_h();
-        let target_scroll =
-            ((PITCH_CNT - 1) as f32 - mid) * row_h - view_h * 0.5 + row_h * 0.5;
+        let target_scroll = ((PITCH_CNT - 1) as f32 - mid) * row_h - view_h * 0.5 + row_h * 0.5;
         self.scroll_y = target_scroll.clamp(0.0, self.max_scroll_y());
 
         let (_, clip_len) = self.clip_meta(cx, clip_id);
@@ -2194,11 +2192,7 @@ impl PianoRoll {
             let v = (prev[0].1 as i32 + delta).clamp(1, 127) as u8;
             format!("Velocity: {v}")
         } else {
-            format!(
-                "Velocity Δ{:+} · {} notes",
-                delta,
-                prev.len()
-            )
+            format!("Velocity Δ{:+} · {} notes", delta, prev.len())
         });
         if let Some(clip_id) = self.editing_clip_id(cx) {
             self.with_timeline_silent(cx, |tl, _| {
@@ -3370,7 +3364,11 @@ impl PianoRoll {
         let Some(clip_id) = self.editing_clip_id(cx) else {
             return;
         };
-        let prev = self.timeline.read(cx).state.articulations_snapshot(&clip_id);
+        let prev = self
+            .timeline
+            .read(cx)
+            .state
+            .articulations_snapshot(&clip_id);
         if !prev.iter().any(|e| e.id == id) {
             return;
         }
@@ -3546,8 +3544,7 @@ impl PianoRoll {
         let (_, view_h) = self.grid_view_size();
         let anchor_y = view_h * 0.5;
         let old_row = self.note_row_h();
-        let anchor_pitch_f =
-            (PITCH_CNT as f32 - 1.0) - ((anchor_y + self.scroll_y) / old_row);
+        let anchor_pitch_f = (PITCH_CNT as f32 - 1.0) - ((anchor_y + self.scroll_y) / old_row);
         self.row_h = DEFAULT_ROW_H;
         let new_row = self.note_row_h();
         self.scroll_y = (((PITCH_CNT as f32 - 1.0) - anchor_pitch_f) * new_row - anchor_y)

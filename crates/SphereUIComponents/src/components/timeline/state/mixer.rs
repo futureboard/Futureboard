@@ -98,6 +98,16 @@ impl TimelineState {
 
     pub fn begin_track_volume_preview(&mut self, track_id: &str, norm: f32) {
         let v = norm.clamp(0.0, 1.0);
+        if !self.track_volume_gesture_origin.contains_key(track_id) {
+            let origin = self
+                .tracks
+                .iter()
+                .find(|t| t.id == track_id)
+                .map(|t| t.volume)
+                .unwrap_or(v);
+            self.track_volume_gesture_origin
+                .insert(track_id.to_string(), origin);
+        }
         self.track_volume_previews.insert(track_id.to_string(), v);
         if Self::fader_debug_enabled() {
             eprintln!("[fader] drag start track={track_id} norm={v:.4}");
@@ -117,17 +127,24 @@ impl TimelineState {
         changed
     }
 
-    pub fn commit_track_volume_preview(&mut self, track_id: &str) -> Option<f32> {
-        let v = self.track_volume_previews.remove(track_id)?;
-        self.set_track_volume(track_id, v);
+    /// Commit a fader drag. Returns `(prev, next)` when a preview existed so
+    /// the caller can record one undo entry for the whole gesture.
+    pub fn commit_track_volume_preview(&mut self, track_id: &str) -> Option<(f32, f32)> {
+        let next = self.track_volume_previews.remove(track_id)?;
+        let prev = self
+            .track_volume_gesture_origin
+            .remove(track_id)
+            .unwrap_or(next);
+        self.set_track_volume(track_id, next);
         if Self::fader_debug_enabled() {
-            eprintln!("[fader] commit track={track_id} norm={v:.4}");
+            eprintln!("[fader] commit track={track_id} prev={prev:.4} next={next:.4}");
         }
-        Some(v)
+        Some((prev, next))
     }
 
     pub fn clear_track_volume_preview(&mut self, track_id: &str) {
         self.track_volume_previews.remove(track_id);
+        self.track_volume_gesture_origin.remove(track_id);
     }
 
     pub fn apply_volume_previews_to_snapshot(

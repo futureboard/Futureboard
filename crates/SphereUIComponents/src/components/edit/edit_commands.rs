@@ -165,6 +165,18 @@ pub enum EditCommand {
         prev: Vec<(String, f32)>,
         next: Vec<(String, f32)>,
     },
+    /// One fader gesture (preview → commit). Never reloads the project/graph.
+    SetTrackVolume {
+        track_id: String,
+        prev: f32,
+        next: f32,
+    },
+    /// One pan knob gesture. Never reloads the project/graph.
+    SetTrackPan {
+        track_id: String,
+        prev: f32,
+        next: f32,
+    },
 }
 
 impl EditCommand {
@@ -195,6 +207,8 @@ impl EditCommand {
             EditCommand::ReorderFxSlot { .. } => "Reorder FX",
             EditCommand::ReorderSendSlot { .. } => "Reorder Sends",
             EditCommand::SetTrackHeights { .. } => "Resize Track Height",
+            EditCommand::SetTrackVolume { .. } => "Set Volume",
+            EditCommand::SetTrackPan { .. } => "Set Pan",
         }
     }
 
@@ -337,6 +351,12 @@ impl EditCommand {
             EditCommand::SetTrackHeights { next, .. } => {
                 apply_track_heights_snapshot(state, next);
             }
+            EditCommand::SetTrackVolume { track_id, next, .. } => {
+                state.set_track_volume(track_id, *next);
+            }
+            EditCommand::SetTrackPan { track_id, next, .. } => {
+                state.set_track_pan(track_id, *next);
+            }
         }
     }
 
@@ -451,6 +471,12 @@ impl EditCommand {
             }
             EditCommand::SetTrackHeights { prev, .. } => {
                 apply_track_heights_snapshot(state, prev);
+            }
+            EditCommand::SetTrackVolume { track_id, prev, .. } => {
+                state.set_track_volume(track_id, *prev);
+            }
+            EditCommand::SetTrackPan { track_id, prev, .. } => {
+                state.set_track_pan(track_id, *prev);
             }
         }
     }

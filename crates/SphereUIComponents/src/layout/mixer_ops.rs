@@ -1092,12 +1092,24 @@ impl StudioLayout {
             let id = id.clone();
             let committed = timeline_vol_commit.update(cx, |t, cx| {
                 let committed = t.state.commit_track_volume_preview(&id);
-                if committed.is_some() {
-                    cx.notify();
+                if let Some((prev, next)) = committed {
+                    if (prev - next).abs() > 1.0e-5 {
+                        // Volume already applied by commit; record one undo entry.
+                        t.record_executed_command(
+                            EditCommand::SetTrackVolume {
+                                track_id: id.clone(),
+                                prev,
+                                next,
+                            },
+                            cx,
+                        );
+                    } else {
+                        cx.notify();
+                    }
                 }
                 committed
             });
-            let Some(v) = committed else {
+            let Some((_prev, v)) = committed else {
                 return;
             };
             crate::perf::count("fader_drag_commit_count", 1);

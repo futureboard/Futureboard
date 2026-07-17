@@ -30,6 +30,10 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          # Format does not need submodule contents, but keep .gitmodules
+          # available for path-aware tooling.
+          fetch-depth: 1
 
       - name: Setup Rust (rustfmt)
         uses: dtolnay/rust-toolchain@stable
@@ -51,6 +55,11 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          # Submodules are pulled explicitly below (shallow + selective) so we
+          # do not pay for a full recursive clone of VST3 docs/history.
+          submodules: false
 
       - name: Initialize submodules (audio SDKs + shared icons)
         shell: bash

@@ -52,8 +52,12 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          submodules: false
 
       - name: Initialize submodules (audio SDKs + shared icons)
+        shell: bash
         run: bash .github/workflows/submodules-init.sh
 
       - name: Sync nightly version

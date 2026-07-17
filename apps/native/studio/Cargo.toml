@@ -32,6 +32,7 @@ sphere_ui_components = { workspace = true, features = ["gpu-renderer", "native-d
 # symbols. Electron can enable N-API from its own crate/build path instead.
 sphere_directaudioengine.workspace = true
 sphere-discord-rpc.workspace = true
+sphere-platform.workspace = true
 # Exclusive Edition license client + offline token verification. All optional so
 # the Community manifest stays valid with the private source tree absent.
 reqwest = { workspace = true, optional = true, features = ["blocking", "json"] }
@@ -72,6 +73,9 @@ gpui_linux = { workspace = true, features = ["wayland", "x11"] }
 [features]
 default = ["gpu-renderer"]
 gpu-renderer = ["sphere_ui_components/gpu-renderer"]
+# Developer builds only: allow Studio to start when elevated. Never enable for
+# Community or Exclusive production/distribution builds.
+allow_elevated_for_testing = ["sphere-platform/allow_elevated_for_testing"]
 # Compile the private Exclusive Edition module and its Windows ASIO toolchain.
 # This feature is not an entitlement: providers stay uninstalled until a signed
 # license token verifies for the running machine.

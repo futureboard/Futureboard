@@ -1,0 +1,23 @@
+[package]
+name = "SpherePlatform"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Cross-platform OS helpers for Futureboard (privilege detection, native dialogs)"
+
+[lib]
+name = "sphere_platform"
+path = "src/lib.rs"
+
+[features]
+default = []
+# Developer builds only. When enabled, elevated privileges log a warning but do
+# not abort startup. Disabled in all production Community / Exclusive builds.
+allow_elevated_for_testing = []
+
+[target.'cfg(windows)'.dependencies]
+windows = { workspace = true }
+
+[lints]
+workspace = true

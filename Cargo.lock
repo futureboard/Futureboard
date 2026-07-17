@@ -29,6 +29,13 @@ name = "SphereNotationEngine"
 version = "0.1.0"
 
 [[package]]
+name = "SpherePlatform"
+version = "0.1.0"
+dependencies = [
+ "windows 0.61.3",
+]
+
+[[package]]
 name = "SphereSoundfontPlayer"
 version = "0.1.0"
 dependencies = [
@@ -1756,6 +1763,7 @@ dependencies = [
 [[package]]
 name = "cpal"
 version = "0.15.3"
+source = "git+https://github.com/futureboard/cpal#113dc59b39c6bb5256c1f1177a148acecbb3d400"
 dependencies = [
  "alsa 0.9.1",
  "asio-sys",
@@ -2681,6 +2689,7 @@ name = "futureboard_native"
 version = "2026.7.2"
 dependencies = [
  "SphereDiscordRPC",
+ "SpherePlatform",
  "base64",
  "cpal",
  "ed25519-dalek",

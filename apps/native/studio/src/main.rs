@@ -7,10 +7,16 @@ mod window;
 #[cfg(feature = "exclusive")]
 mod exclusive_edition;
 
+use sphere_platform::platform;
 use sphere_ui_components::boot;
 use sphere_ui_components::embedded_assets::EmbeddedAssets;
 
 fn main() {
+    // Privilege safety — must run before audio, plugins, settings, or project I/O.
+    // Community and Exclusive Edition both block elevated launches. Developer
+    // builds may opt in with `--features allow_elevated_for_testing`.
+    platform::abort_if_elevated();
+
     #[cfg(feature = "exclusive")]
     exclusive_edition::install().expect("failed to install Exclusive Edition providers");
 

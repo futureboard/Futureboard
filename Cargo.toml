@@ -21,6 +21,7 @@ members = [
     "crates/SphereAudioProcessor",
     "crates/SphereMidiService",
     "crates/SphereDiscordRPC",
+    "crates/SpherePlatform",
     "crates/SphereWebView",
     "crates/BuiltinAudioPlugins",
 
@@ -71,6 +72,7 @@ sphere-midi-service = { path = "crates/SphereMidiService", package = "SphereMidi
 sphere-plugin-host = { path = "crates/SpherePluginHost", default-features = false }
 sphere-soundfont-player = { path = "crates/SphereSoundfontPlayer", package = "SphereSoundfontPlayer" }
 sphere-discord-rpc = { path = "crates/SphereDiscordRPC", package = "SphereDiscordRPC" }
+sphere-platform = { path = "crates/SpherePlatform", package = "SpherePlatform" }
 sphere-webview = { path = "crates/SphereWebView", package = "SphereWebView" }
 
 # CEF 150.0.11 bindings have not reached crates.io yet. Keep the exact upstream
@@ -459,7 +461,7 @@ nonminimal_bool = "allow"
 [patch.crates-io]
 async-task = { git = "https://github.com/smol-rs/async-task.git", rev = "b4486cd71e4e94fbda54ce6302444de14f4d190e" }
 calloop = { git = "https://github.com/zed-industries/calloop" }
-cpal = { path = "external/cpal" }
+cpal = { git = "https://github.com/futureboard/cpal" }
 
 
 # =============================================================================

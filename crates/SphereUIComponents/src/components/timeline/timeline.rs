@@ -57,6 +57,12 @@ struct ClipDrawPreview {
     /// `true` once the cursor has moved past the start — distinguishes a plain
     /// click (default-length clip) from a drag (sized clip).
     dragging: bool,
+    /// Whether a plain click (no drag) should still commit a default-length
+    /// clip. Always `true` for the Pen tool. For the Pointer tool's
+    /// empty-lane-creates-a-clip gesture, a plain single click is a no-op
+    /// (matches modern DAW marquee-vs-create conventions) — only a drag or a
+    /// double-click (`click_count >= 2`) commits.
+    commit_on_click: bool,
 }
 
 #[derive(Clone, Debug)]

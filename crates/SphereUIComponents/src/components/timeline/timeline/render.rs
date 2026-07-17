@@ -253,51 +253,64 @@ impl Render for Timeline {
             cx.notify();
         });
 
-        let on_add_clip = cx.listener(|this, (track_id, beat): &(String, f32), _window, cx| {
-            let track_type = this
-                .state
-                .tracks
-                .iter()
-                .find(|t| t.id == *track_id)
-                .map(|t| t.track_type);
-            match track_type {
-                Some(TrackType::Audio) => {
-                    if this.state.active_tool == TimelineTool::Pen {
-                        let source_id = this
-                            .state
-                            .selection
-                            .selected_clip_ids
-                            .iter()
-                            .find(|id| {
-                                this.state
-                                    .find_clip(id)
-                                    .map(|(_, clip)| {
-                                        matches!(clip.clip_type, ClipType::Audio { .. })
-                                    })
-                                    .unwrap_or(false)
-                            })
-                            .cloned();
-                        if let Some(source_id) = source_id {
-                            let start = this.snap_beat(*beat);
-                            this.create_clip_clone_at(&source_id, track_id, start, cx);
+        let on_add_clip = cx.listener(
+            |this, (track_id, beat, click_count): &(String, f32, u32), _window, cx| {
+                let track_type = this
+                    .state
+                    .tracks
+                    .iter()
+                    .find(|t| t.id == *track_id)
+                    .map(|t| t.track_type);
+                match track_type {
+                    Some(TrackType::Audio) => {
+                        if this.state.active_tool == TimelineTool::Pen {
+                            let source_id = this
+                                .state
+                                .selection
+                                .selected_clip_ids
+                                .iter()
+                                .find(|id| {
+                                    this.state
+                                        .find_clip(id)
+                                        .map(|(_, clip)| {
+                                            matches!(clip.clip_type, ClipType::Audio { .. })
+                                        })
+                                        .unwrap_or(false)
+                                })
+                                .cloned();
+                            if let Some(source_id) = source_id {
+                                let start = this.snap_beat(*beat);
+                                this.create_clip_clone_at(&source_id, track_id, start, cx);
+                            }
                         }
                     }
-                }
-                Some(TrackType::Midi | TrackType::Instrument) => {
-                    if this.state.active_tool == TimelineTool::Pen {
-                        let start = this.snap_beat(*beat);
-                        this.pen_clip_draw = Some(ClipDrawPreview {
-                            track_id: track_id.clone(),
-                            start_beat: start,
-                            current_beat: start,
-                            dragging: false,
-                        });
+                    Some(TrackType::Midi | TrackType::Instrument) => {
+                        if matches!(
+                            this.state.active_tool,
+                            TimelineTool::Pen | TimelineTool::Pointer
+                        ) {
+                            let start = this.snap_beat(*beat);
+                            // Pen tool always commits a default-length clip on a
+                            // plain click; the Pointer tool's empty-lane-creates
+                            // gesture only commits on a drag or a double-click so
+                            // marquee-style single clicks stay a no-op.
+                            let commit_on_click = this.state.active_tool
+                                == TimelineTool::Pen
+                                || *click_count >= 2;
+                            this.pen_clip_draw = Some(ClipDrawPreview {
+                                track_id: track_id.clone(),
+                                start_beat: start,
+                                current_beat: start,
+                                dragging: false,
+                                commit_on_click,
+                            });
+                        }
                     }
+                    Some(TrackType::Bus | TrackType::Return | TrackType::Master) | None => {}
                 }
-                Some(TrackType::Bus | TrackType::Return | TrackType::Master) | None => {}
-            }
-            cx.notify();
-        });
+                cx.notify();
+            },
+        );
 
         let on_audio_clip_process_preview = cx.listener(
             |this,
@@ -508,12 +521,14 @@ impl Render for Timeline {
                 }
                 cx.notify();
             } else if event.pressed_button == Some(gpui::MouseButton::Left)
-                && this.state.active_tool == TimelineTool::Pen
                 && this.pen_clip_draw.is_some()
             {
                 // Live MIDI clip draw: track the snapped cursor beat so the ghost
                 // preview expands/shrinks in real time. No project mutation —
-                // the real clip is created once on release.
+                // the real clip is created once on release. `pen_clip_draw` is
+                // only ever populated for the tool/lane combos that should draw
+                // (Pen on any MIDI/Instrument lane, or Pointer on an empty one),
+                // so no extra tool check is needed here.
                 let beat = this.snap_beat(this.beat_from_window_x(event.position.x.into()));
                 if let Some(preview) = this.pen_clip_draw.as_mut() {
                     if (beat - preview.current_beat).abs() > f32::EPSILON {
@@ -538,11 +553,9 @@ impl Render for Timeline {
             let finished_automation = this.finish_automation_interaction(cx);
             if !finished_tempo && !finished_ts && !finished_automation {
                 let beat = this.snap_beat(this.beat_from_window_x(event.position.x.into()));
-                if this.state.active_tool == TimelineTool::Pen && this.pen_clip_draw.is_some() {
+                if this.pen_clip_draw.is_some() {
                     this.finish_pen_midi_clip(beat, cx);
-                } else if this.state.active_tool == TimelineTool::Pointer
-                    && this.range_select_drag.is_some()
-                {
+                } else if this.range_select_drag.is_some() {
                     this.finish_range_select(beat, cx);
                 } else if this.erase_clip_drag.is_some() {
                     this.finish_erase_clip_drag(cx);
@@ -563,11 +576,9 @@ impl Render for Timeline {
             let finished_automation = this.finish_automation_interaction(cx);
             if !finished_tempo && !finished_ts && !finished_automation {
                 let beat = this.snap_beat(this.beat_from_window_x(event.position.x.into()));
-                if this.state.active_tool == TimelineTool::Pen && this.pen_clip_draw.is_some() {
+                if this.pen_clip_draw.is_some() {
                     this.finish_pen_midi_clip(beat, cx);
-                } else if this.state.active_tool == TimelineTool::Pointer
-                    && this.range_select_drag.is_some()
-                {
+                } else if this.range_select_drag.is_some() {
                     this.finish_range_select(beat, cx);
                 } else if this.erase_clip_drag.is_some() {
                     this.finish_erase_clip_drag(cx);
@@ -696,7 +707,7 @@ impl Render for Timeline {
             dyn Fn(&(String, f32), &mut gpui::Window, &mut gpui::App) + 'static,
         > = std::sync::Arc::new(on_pan_change);
         let on_add_clip: std::sync::Arc<
-            dyn Fn(&(String, f32), &mut gpui::Window, &mut gpui::App) + 'static,
+            dyn Fn(&(String, f32, u32), &mut gpui::Window, &mut gpui::App) + 'static,
         > = std::sync::Arc::new(on_add_clip);
         let on_audio_clip_process_preview:
             crate::components::timeline::audio_clip::AudioClipProcessPreviewCb =

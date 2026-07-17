@@ -425,6 +425,11 @@ impl Timeline {
         let Some(preview) = self.pen_clip_draw.take() else {
             return;
         };
+        // Pointer empty-lane: plain single-click (no drag) is a no-op so it
+        // doesn't fight track selection. Drag or double-click still commits.
+        if !preview.dragging && !preview.commit_on_click {
+            return;
+        }
         let track_id = preview.track_id;
         let track_type = self
             .state

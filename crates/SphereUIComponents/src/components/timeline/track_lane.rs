@@ -4,7 +4,7 @@ use crate::components::timeline::audio_clip::{
 };
 use crate::components::timeline::midi_clip::midi_clip;
 use crate::components::timeline::timeline_state::{
-    ClipState, ClipType, TimelineState, TimelineTool, TrackState, HEADER_WIDTH,
+    ClipState, ClipType, TimelineState, TimelineTool, TrackState, TrackType, HEADER_WIDTH,
 };
 use crate::{custom_cursors, theme::Colors};
 use gpui::prelude::FluentBuilder;
@@ -20,7 +20,7 @@ pub fn track_lane(
         dyn Fn(&(String, bool, bool), &mut gpui::Window, &mut gpui::App) + 'static,
     >,
     on_add_clip: std::sync::Arc<
-        dyn Fn(&(String, f32), &mut gpui::Window, &mut gpui::App) + 'static,
+        dyn Fn(&(String, f32, u32), &mut gpui::Window, &mut gpui::App) + 'static,
     >,
     on_track_context_menu: Option<
         std::sync::Arc<dyn Fn(&(String, f32, f32), &mut gpui::Window, &mut gpui::App) + 'static>,
@@ -129,6 +129,8 @@ pub fn track_lane(
     }
 
     let active_tool = state.active_tool;
+    let track_type = track.track_type;
+    let midi_lane = matches!(track_type, TrackType::Midi | TrackType::Instrument);
     let lane_cursor = custom_cursors::timeline_tool(active_tool);
     let state_ref = state.clone();
     let id_num = {
@@ -156,9 +158,24 @@ pub fn track_lane(
                 let click_beat = state_ref.x_to_beats(click_x);
                 let snapped_sec = state_ref.snap_time(click_beat * state_ref.seconds_per_beat());
                 let snapped_beat = snapped_sec / state_ref.seconds_per_beat();
+                let click_count = event.click_count as u32;
 
                 if active_tool == TimelineTool::Pen {
-                    on_add(&(track_id_add.clone(), snapped_beat), window, cx);
+                    on_add(
+                        &(track_id_add.clone(), snapped_beat, click_count),
+                        window,
+                        cx,
+                    );
+                } else if active_tool == TimelineTool::Pointer && midi_lane {
+                    // Instant MIDI clip creation without switching tools:
+                    // empty-lane drag / double-click creates a clip; plain
+                    // single-click stays a no-op (see ClipDrawPreview::commit_on_click).
+                    on_select(&track_id_select, window, cx);
+                    on_add(
+                        &(track_id_add.clone(), snapped_beat, click_count),
+                        window,
+                        cx,
+                    );
                 } else if active_tool == TimelineTool::Pointer {
                     let additive = event.modifiers.control || event.modifiers.platform;
                     if !additive {

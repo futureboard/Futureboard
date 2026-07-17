@@ -14,7 +14,7 @@ use crate::components::settings_dialog::{
 };
 use crate::components::timeline::timeline_state::{
     self, ClipType, CreateTrackOptions, InsertPluginFormat, TrackAudioFormat, TrackInputRouting,
-    TrackOutputRouting, TrackType,
+    TrackMidiInputRouting, TrackOutputRouting, TrackType,
 };
 use crate::components::{external_mixer_debug, open_mixer_window};
 use crate::window_position::resolve_owner_bounds_with_preferred;
@@ -91,6 +91,38 @@ fn dialog_audio_output_routing(label: &str) -> TrackOutputRouting {
         "None" => TrackOutputRouting::None,
         _ => TrackOutputRouting::Main,
     }
+}
+
+fn dialog_midi_input_routing(label: &str) -> TrackMidiInputRouting {
+    match label {
+        "All MIDI Inputs" => TrackMidiInputRouting::AllInputs,
+        "None" => TrackMidiInputRouting::None,
+        device => TrackMidiInputRouting::MidiDevice {
+            device_id: device.to_string(),
+        },
+    }
+}
+
+/// Real, enabled MIDI input device names for the Add Track dialog's
+/// Instrument/MIDI routing selects — the same cached registry + Preferences
+/// enable-state resolution Settings and the Inspector routing combo use
+/// (`device_registry` + `resolve_midi_devices`), not a mocked list.
+fn add_track_midi_input_devices(schema: &crate::settings::SettingsSchema) -> Vec<String> {
+    let saved = schema.hardware.midi.devices.clone();
+    let detected = crate::device_registry::cached_midi_devices();
+    let resolved = sphere_midi_service::resolve_midi_devices(&saved, &detected);
+    resolved
+        .iter()
+        .filter(|d| {
+            d.enabled
+                && matches!(
+                    d.direction,
+                    crate::settings::MidiDeviceDirection::Input
+                        | crate::settings::MidiDeviceDirection::InputOutput
+                )
+        })
+        .map(|d| d.name.clone())
+        .collect()
 }
 
 /// Studio-window / app-integration hooks — this workspace's own window handle,
@@ -285,12 +317,20 @@ impl StudioLayout {
             .recording
             .default_monitor_mode
             .add_track_value();
+        // Real MIDI input devices scanned fresh on every open so a device
+        // plugged/unplugged since the last open (or since Preferences was
+        // touched) is reflected immediately — cheap, non-destructive scan
+        // (see `device_registry::scan_midi`), never done per paint.
+        crate::device_registry::scan_midi();
+        let midi_input_devices = add_track_midi_input_devices(&self.settings.read(cx).current);
+
         if let Some(handle) = self.external_windows.add_track.clone() {
             if handle
                 .update(cx, |win, window, cx| {
                     win.set_instrument_plugins(add_track_instrument_plugins_from_catalog(
                         &self.plugin_catalog,
                     ));
+                    win.set_midi_input_devices(midi_input_devices.clone());
                     win.set_context(kind, track_count, has_master_track, default_monitor_mode);
                     window.activate_window();
                     cx.notify();
@@ -373,6 +413,12 @@ impl StudioLayout {
                                     _ => timeline_state::InputMonitorMode::Off,
                                 },
                             });
+                            if dialog.selected_kind == AddTrackKind::Instrument
+                                || dialog.selected_kind == AddTrackKind::Midi
+                            {
+                                let midi_input = dialog_midi_input_routing(&dialog.input_label);
+                                timeline.state.set_track_midi_input(&id, midi_input);
+                            }
                             if dialog.selected_kind == AddTrackKind::Audio {
                                 let audio_format = dialog_audio_format(dialog.audio_format);
                                 let input = dialog_audio_input_routing(
@@ -495,6 +541,7 @@ impl StudioLayout {
             default_monitor_mode,
             language,
             instrument_plugins,
+            midi_input_devices,
             on_confirm_request,
             cx,
         ) {
@@ -625,6 +672,20 @@ impl StudioLayout {
             });
         });
 
+        // "Open Keyboard Shortcuts…" (Settings > Shortcuts) reuses the exact
+        // window `help:keyboard-shortcuts` opens — only the studio window
+        // holds the live `KeymapManager`, so Settings calls back into it
+        // instead of duplicating the editor.
+        let keymap_owner = cx.entity().clone();
+        let on_open_keyboard_shortcuts: Option<
+            crate::components::settings_dialog::OnOpenKeyboardShortcuts,
+        > = Some(Arc::new(move |window, cx| {
+            let owner_bounds = Some(window.bounds());
+            let _ = keymap_owner.update(cx, |this, cx| {
+                this.open_keymap_window(owner_bounds, cx);
+            });
+        }));
+
         let engine_for_latency = self.audio_bridge.engine.clone();
         let deferred_rate = self.audio_bridge.sample_rate_deferred_target.clone();
         let latency_provider: crate::components::settings_dialog::AudioLatencySnapshotProvider =
@@ -677,6 +738,7 @@ impl StudioLayout {
             input_test_stop,
             input_test_level,
             on_update,
+            on_open_keyboard_shortcuts,
             cx,
         ) {
             Ok(handle) => self.external_windows.settings = Some(handle),

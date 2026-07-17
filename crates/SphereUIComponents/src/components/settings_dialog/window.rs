@@ -17,6 +17,7 @@ impl SettingsWindow {
         input_test_stop: Option<InputTestStopFn>,
         input_test_level: Option<InputTestLevelFn>,
         on_update: OnSettingUpdate,
+        on_open_keyboard_shortcuts: Option<OnOpenKeyboardShortcuts>,
         cx: &mut Context<Self>,
     ) -> Self {
         let search_input = TextInputState::new("settings-search", cx.focus_handle())
@@ -63,6 +64,7 @@ impl SettingsWindow {
             hardware_combo_anchor: None,
             midi_refresh_nonce: 0,
             on_update,
+            on_open_keyboard_shortcuts,
             focus_handle: cx.focus_handle(),
         };
         // Keep Driver Status live without per-frame polling.
@@ -382,6 +384,7 @@ impl Render for SettingsWindow {
                     });
                 }
             })),
+            on_open_keyboard_shortcuts: self.on_open_keyboard_shortcuts.clone(),
         };
 
         let search_callbacks = TextInputCallbacks {
@@ -599,6 +602,7 @@ pub fn open_settings_window(
     input_test_stop: Option<InputTestStopFn>,
     input_test_level: Option<InputTestLevelFn>,
     on_update: OnSettingUpdate,
+    on_open_keyboard_shortcuts: Option<OnOpenKeyboardShortcuts>,
     cx: &mut App,
 ) -> Result<WindowHandle<SettingsWindow>, String> {
     let window_bounds = centered_window_bounds(
@@ -631,6 +635,7 @@ pub fn open_settings_window(
                 input_test_stop,
                 input_test_level,
                 on_update,
+                on_open_keyboard_shortcuts,
                 cx,
             )
         })

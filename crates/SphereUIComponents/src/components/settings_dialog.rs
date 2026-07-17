@@ -205,6 +205,11 @@ pub type InputTestStopFn = Arc<dyn Fn() + Send + Sync + 'static>;
 pub type InputTestLevelFn = Arc<dyn Fn() -> f32 + Send + Sync + 'static>;
 pub type AudioDeviceListsProvider =
     Arc<dyn Fn(&str) -> SettingsAudioDeviceLists + Send + Sync + 'static>;
+/// Opens the real keyboard-shortcuts editor ([`crate::components::keymap_window::KeymapWindow`])
+/// from within the Settings window — the same window the `help:keyboard-shortcuts`
+/// menu command opens. Owned by the studio window that opened Settings, since
+/// only it holds the live `KeymapManager`.
+pub type OnOpenKeyboardShortcuts = Arc<dyn Fn(&mut Window, &mut App) + 'static>;
 
 #[derive(Debug, Clone, Default)]
 pub struct SettingsAudioDeviceLists {
@@ -379,6 +384,9 @@ pub struct SettingsDialogCallbacks {
     /// Toggle expansion of the full Driver Status diagnostic text. `None` for
     /// surfaces that don't expose a live driver status (legacy embedded dialog).
     pub on_toggle_driver_details: Option<Arc<dyn Fn(&mut Window, &mut App) + 'static>>,
+    /// Opens the real Keyboard Shortcuts editor window. `None` for surfaces
+    /// that don't have a studio window to own the `KeymapManager`.
+    pub on_open_keyboard_shortcuts: Option<OnOpenKeyboardShortcuts>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2062,38 +2070,22 @@ fn build_settings_content(
             .push(advanced_section(schema, callbacks.on_update_setting.clone()).into_any_element());
     }
 
+    // Shortcuts Panel — entry point into the real keyboard-shortcuts editor.
+    if (state.active_tab == SettingsTab::Shortcuts && query.is_empty())
+        || (!query.is_empty()
+            && is_match(
+                "Keyboard Shortcuts",
+                &["shortcuts", "keymap", "hotkeys", "keybindings"],
+            ))
+    {
+        sections.push(shortcuts_section(callbacks).into_any_element());
+    }
+
     // About Panel
     if (state.active_tab == SettingsTab::About && query.is_empty())
         || (!query.is_empty() && (is_match("Version About", &["version", "credits", "about"])))
     {
         sections.push(about_section(crate::edition::current_edition_info()).into_any_element());
-    }
-
-    // Placeholder panel for categories not yet fully wired.
-    if sections.is_empty() && query.is_empty() {
-        let hint = match state.active_tab {
-            SettingsTab::Shortcuts => {
-                "Search, edit, and reset keyboard commands grouped by workflow area."
-            }
-            _ => "",
-        };
-        if !hint.is_empty() {
-            sections.push(
-                settings_section_card()
-                    .child(settings_section_title(
-                        i18n.tr(state.active_tab.label_key()),
-                    ))
-                    .child(settings_section_hint(hint))
-                    .child(
-                        div()
-                            .pt(px(6.0))
-                            .text_size(px(10.0))
-                            .text_color(Colors::text_muted())
-                            .child("This section is scaffolded for future settings."),
-                    )
-                    .into_any_element(),
-            );
-        }
     }
 
     if sections.is_empty() {
@@ -2319,6 +2311,7 @@ pub struct SettingsWindow {
     hardware_combo_anchor: Option<OverlayAnchor>,
     midi_refresh_nonce: u64,
     on_update: OnSettingUpdate,
+    on_open_keyboard_shortcuts: Option<OnOpenKeyboardShortcuts>,
     focus_handle: FocusHandle,
 }
 

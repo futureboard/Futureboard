@@ -253,6 +253,30 @@ pub(crate) fn files_media_section() -> impl IntoElement {
         ))
 }
 
+/// Real keyboard-shortcuts entry point. The editor itself (search, per-command
+/// rebinding, conflict detection, reset, persistence) already exists as
+/// `KeymapWindow` — opened via the same path as the Help menu's
+/// `help:keyboard-shortcuts` command. This section just gives Settings a
+/// button into that window instead of duplicating it.
+pub(crate) fn shortcuts_section(callbacks: &SettingsDialogCallbacks) -> impl IntoElement {
+    let open = callbacks.on_open_keyboard_shortcuts.clone();
+    settings_section("Keyboard Shortcuts")
+        .child(settings_section_hint_text(
+            "Search, edit, and reset keyboard commands grouped by workflow area.",
+        ))
+        .child(div().pt(px(4.0)).child(fb_button(
+            "settings-open-keyboard-shortcuts",
+            "Open Keyboard Shortcuts…",
+            FbButtonKind::Primary,
+            open.is_some(),
+            move |_, window, cx| {
+                if let Some(open) = open.as_ref() {
+                    open(window, cx);
+                }
+            },
+        )))
+}
+
 pub(crate) fn advanced_section(
     schema: &SettingsSchema,
     on_update: Arc<dyn Fn(UpdateSettingFn, &mut Window, &mut App) + 'static>,

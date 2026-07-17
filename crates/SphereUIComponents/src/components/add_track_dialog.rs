@@ -453,6 +453,22 @@ fn select_options(values: &[&'static str]) -> Vec<SelectOption> {
         .collect()
 }
 
+/// MIDI input options for the Instrument/MIDI routing selects: real detected
+/// input devices (from `device_registry::cached_midi_devices`, resolved
+/// against Preferences → MIDI enable state) sandwiched between the two
+/// synthetic entries every track kind supports. Empty `devices` (no hardware,
+/// or everything disconnected/disabled) still yields a usable All/None list.
+fn midi_input_select_options(devices: &[String]) -> Vec<SelectOption> {
+    let mut options = vec![SelectOption::new("All MIDI Inputs", "All MIDI Inputs")];
+    options.extend(
+        devices
+            .iter()
+            .map(|name| SelectOption::new(name.clone(), name.clone())),
+    );
+    options.push(SelectOption::new("None", "None"));
+    options
+}
+
 fn plugin_format_label(format: PluginFormat) -> &'static str {
     match format {
         PluginFormat::Vst3 => "VST3",
@@ -1088,6 +1104,7 @@ fn type_fields(
     open_select: Option<AddTrackSelectId>,
     instrument_plugins: &[RegistryPlugin],
     instrument_plugin_query: &str,
+    midi_input_devices: &[String],
     i18n: I18n,
 ) -> gpui::AnyElement {
     let show_asc = state.count > 1;
@@ -1246,12 +1263,7 @@ fn type_fields(
                         "add-track-instrument-input-select",
                         Some(state.input_label.as_str()),
                         "Select MIDI input...",
-                        select_options(&[
-                            "All MIDI Inputs",
-                            "MIDI Input 1",
-                            "MIDI Input 2",
-                            "None",
-                        ]),
+                        midi_input_select_options(midi_input_devices),
                         add_track_select_open(open_select, AddTrackSelectId::Input),
                         SelectMenuPlacement::Below,
                         Arc::new(move |_, w, cx| toggle_input(&AddTrackSelectId::Input, w, cx)),
@@ -1302,12 +1314,7 @@ fn type_fields(
                         "add-track-midi-input-select",
                         Some(state.input_label.as_str()),
                         "Select MIDI input...",
-                        select_options(&[
-                            "All MIDI Inputs",
-                            "MIDI Input 1",
-                            "MIDI Input 2",
-                            "None",
-                        ]),
+                        midi_input_select_options(midi_input_devices),
                         add_track_select_open(open_select, AddTrackSelectId::Input),
                         SelectMenuPlacement::Below,
                         Arc::new(move |_, w, cx| toggle_input(&AddTrackSelectId::Input, w, cx)),
@@ -1434,6 +1441,7 @@ pub fn add_track_dialog_body(
     open_select: Option<AddTrackSelectId>,
     instrument_plugins: &[RegistryPlugin],
     instrument_plugin_query: &str,
+    midi_input_devices: &[String],
     color_ui: AddTrackColorUi,
     callbacks: AddTrackDialogCallbacks,
     i18n: I18n,
@@ -1505,6 +1513,7 @@ pub fn add_track_dialog_body(
                     open_select,
                     instrument_plugins,
                     instrument_plugin_query,
+                    midi_input_devices,
                     i18n,
                 ))),
         )
@@ -1572,6 +1581,9 @@ pub struct AddTrackWindow {
     open_select: Option<AddTrackSelectId>,
     instrument_plugin_query: String,
     instrument_plugins: Vec<RegistryPlugin>,
+    /// Real detected MIDI input device names (Preferences → MIDI enabled
+    /// inputs), refreshed whenever the dialog opens or devices change.
+    midi_input_devices: Vec<String>,
     focus_handle: FocusHandle,
     /// Called when the user confirms (creates tracks).
     on_confirm_request: Arc<dyn Fn(AddTrackDialogState, String, &mut App) + 'static>,
@@ -1582,6 +1594,7 @@ impl AddTrackWindow {
         initial_state: AddTrackDialogState,
         language: impl Into<String>,
         instrument_plugins: Vec<RegistryPlugin>,
+        midi_input_devices: Vec<String>,
         on_confirm_request: Arc<dyn Fn(AddTrackDialogState, String, &mut App) + 'static>,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -1608,6 +1621,7 @@ impl AddTrackWindow {
             open_select: None,
             instrument_plugin_query: String::new(),
             instrument_plugins,
+            midi_input_devices,
             focus_handle: cx.focus_handle(),
             on_confirm_request,
         }
@@ -1650,6 +1664,13 @@ impl AddTrackWindow {
 
     pub fn set_instrument_plugins(&mut self, instrument_plugins: Vec<RegistryPlugin>) {
         self.instrument_plugins = instrument_plugins;
+    }
+
+    /// Refresh the real MIDI input device list rendered in the Instrument/MIDI
+    /// routing selects. Called whenever the dialog opens/reactivates and on
+    /// Preferences MIDI device changes, mirroring `set_instrument_plugins`.
+    pub fn set_midi_input_devices(&mut self, midi_input_devices: Vec<String>) {
+        self.midi_input_devices = midi_input_devices;
     }
 
     /// Push the picker's current selection back into the dialog state so the
@@ -2400,6 +2421,7 @@ impl Render for AddTrackWindow {
                 self.open_select,
                 &self.instrument_plugins,
                 &self.instrument_plugin_query,
+                &self.midi_input_devices,
                 color_ui,
                 callbacks,
                 i18n,
@@ -2417,6 +2439,7 @@ pub fn open_add_track_window(
     default_monitor_mode: &'static str,
     language: impl Into<String>,
     instrument_plugins: Vec<RegistryPlugin>,
+    midi_input_devices: Vec<String>,
     on_confirm_request: Arc<dyn Fn(AddTrackDialogState, String, &mut App) + 'static>,
     cx: &mut App,
 ) -> Result<WindowHandle<AddTrackWindow>, String> {
@@ -2456,7 +2479,14 @@ pub fn open_add_track_window(
 
     cx.open_window(options, |_window, cx| {
         cx.new(|cx| {
-            AddTrackWindow::new(state, language, instrument_plugins, on_confirm_request, cx)
+            AddTrackWindow::new(
+                state,
+                language,
+                instrument_plugins,
+                midi_input_devices,
+                on_confirm_request,
+                cx,
+            )
         })
     })
     .map_err(|e| e.to_string())

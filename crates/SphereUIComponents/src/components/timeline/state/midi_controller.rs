@@ -16,7 +16,8 @@ pub enum MidiControllerKind {
 /// state; the UI maps it to the controller's display range (e.g. 0..127 for CC).
 #[derive(Debug, Clone, PartialEq)]
 pub struct MidiControllerPoint {
-    /// Transient identity (not serialized) for editor selection / drag targets.
+    /// Stable identity. Persisted in the project file (v26+) so selection and
+    /// drag targets survive save/load. Moves keep this id; copies mint a new one.
     pub id: u64,
     /// Beats relative to the clip start.
     pub beat: f32,
@@ -25,11 +26,27 @@ pub struct MidiControllerPoint {
 }
 
 impl MidiControllerPoint {
-    /// Construct a point with a freshly minted transient id. `beat` clamps to
+    /// Construct a point with a freshly minted stable id. `beat` clamps to
     /// `>= 0`, `value` to `0.0..=1.0`.
     pub fn new(beat: f32, value: f32) -> Self {
         Self {
             id: next_controller_point_id(),
+            beat: beat.max(0.0),
+            value: value.clamp(0.0, 1.0),
+        }
+    }
+
+    /// Restore a point from persisted project data, observing the id so later
+    /// mints cannot collide.
+    pub fn from_persisted(id: u64, beat: f32, value: f32) -> Self {
+        let id = if id == 0 {
+            next_controller_point_id()
+        } else {
+            observe_controller_point_id(id);
+            id
+        };
+        Self {
+            id,
             beat: beat.max(0.0),
             value: value.clamp(0.0, 1.0),
         }

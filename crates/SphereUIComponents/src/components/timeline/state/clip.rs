@@ -304,19 +304,10 @@ impl TimelineState {
     }
 
     pub fn build_clip_duplicate_after(&self, clip_id: &str) -> Option<(String, ClipState)> {
-        let snap_step = if self.snap_to_grid && self.grid_division != SnapDivision::Off {
-            Some((self.grid_division.step_beats(self.beats_per_bar())).max(0.0))
-        } else {
-            None
-        };
         for track in &self.tracks {
             if let Some(clip) = track.clips.iter().find(|clip| clip.id == clip_id) {
                 let raw_start = clip.start_beat + clip.duration_beats;
-                let start_beat = snap_step
-                    .filter(|step| *step > 0.0)
-                    .map(|step| (raw_start / step).round() * step)
-                    .unwrap_or(raw_start)
-                    .max(0.0);
+                let start_beat = self.snap_beats(raw_start).max(0.0);
                 let duplicate = self.clone_clip_for_insert(
                     clip,
                     self.next_clip_id(),
@@ -363,7 +354,9 @@ impl TimelineState {
                             note.duration,
                             note.velocity,
                         );
+                        cloned.release_velocity = note.release_velocity;
                         cloned.muted = note.muted;
+                        cloned.channel = note.channel;
                         cloned.articulation = note.articulation;
                         cloned
                     })
@@ -394,7 +387,23 @@ impl TimelineState {
     }
 
     pub fn move_clip_to_track(&mut self, clip_id: &str, target_track_id: &str, start_beat: f32) {
-        let start_beat = self.snap_beats(start_beat).max(0.0);
+        self.move_clip_to_track_with_options(clip_id, target_track_id, start_beat, true)
+    }
+
+    /// Move a clip. When `snap` is false the provided `start_beat` is used as-is
+    /// (Shift-bypass and multi-selection peers that already share one anchor delta).
+    pub fn move_clip_to_track_with_options(
+        &mut self,
+        clip_id: &str,
+        target_track_id: &str,
+        start_beat: f32,
+        snap: bool,
+    ) {
+        let start_beat = if snap {
+            self.snap_beats(start_beat).max(0.0)
+        } else {
+            start_beat.max(0.0)
+        };
         let mut moved_clip = None;
         let mut source_track_id = None;
 

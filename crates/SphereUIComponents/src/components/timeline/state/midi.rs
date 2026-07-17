@@ -20,14 +20,18 @@ fn snap_up_beats(value: f32, step: f32) -> f32 {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct MidiNoteState {
-    /// Transient identity (not serialized). Used by the piano-roll editor to
-    /// track selection and in-flight drag targets.
+    /// Stable identity. Persisted in the project file (v26+) so selection,
+    /// undo, and clipboard targets survive save/load. Moves keep this id;
+    /// copies / duplicates / splits mint a new one via [`MidiNoteState::new`].
     pub id: u64,
     pub pitch: u8,
     pub start: f32,    // beats relative to clip start
     pub duration: f32, // beats
     /// MIDI velocity in 1..=127.
     pub velocity: u8,
+    /// Optional Note Off velocity (1..=127). `None` means the host/engine
+    /// should use its default release velocity.
+    pub release_velocity: Option<u8>,
     /// Muted notes remain in clip data but emit no runtime note event.
     pub muted: bool,
     /// Output channel this note plays back on when the owning track's
@@ -43,9 +47,9 @@ pub struct MidiNoteState {
 }
 
 impl MidiNoteState {
-    /// Construct a note with a freshly minted transient id. `pitch` is clamped
+    /// Construct a note with a freshly minted stable id. `pitch` is clamped
     /// to 0..=127, `velocity` to 1..=127, and `duration` to at least
-    /// [`MIN_NOTE_BEATS`]. The note is created unmuted.
+    /// [`MIN_NOTE_BEATS`]. The note is created unmuted with no release velocity.
     pub fn new(pitch: u8, start: f32, duration: f32, velocity: u8) -> Self {
         Self {
             id: next_midi_note_id(),
@@ -53,6 +57,36 @@ impl MidiNoteState {
             start: start.max(0.0),
             duration: duration.max(MIN_NOTE_BEATS),
             velocity: velocity.clamp(1, 127),
+            release_velocity: None,
+            muted: false,
+            channel: MidiChannel::default(),
+            articulation: None,
+        }
+    }
+
+    /// Restore a note from persisted project data, observing the id so later
+    /// mints cannot collide.
+    pub fn from_persisted(
+        id: u64,
+        pitch: u8,
+        start: f32,
+        duration: f32,
+        velocity: u8,
+        release_velocity: Option<u8>,
+    ) -> Self {
+        let id = if id == 0 {
+            next_midi_note_id()
+        } else {
+            observe_midi_note_id(id);
+            id
+        };
+        Self {
+            id,
+            pitch: pitch.min(127),
+            start: start.max(0.0),
+            duration: duration.max(MIN_NOTE_BEATS),
+            velocity: velocity.clamp(1, 127),
+            release_velocity: release_velocity.map(|v| v.clamp(1, 127)).filter(|&v| v > 0),
             muted: false,
             channel: MidiChannel::default(),
             articulation: None,

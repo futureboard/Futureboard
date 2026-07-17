@@ -115,10 +115,14 @@ pub enum ClipSource {
 
 #[derive(Debug, Clone)]
 pub struct MidiNote {
+    /// Stable note identity (v26+). `0` on older files means "mint on load".
+    pub id: u64,
     pub pitch: u8,
     pub start_beats: f32,
     pub duration_beats: f32,
     pub velocity: u8,
+    /// Note Off velocity 1..=127, or `0` when unset (v26+).
+    pub release_velocity: u8,
     pub muted: bool,
     /// UI-facing channel number, 1..=16. Older projects have no per-note
     /// channel data and default to 1 on load.
@@ -151,6 +155,8 @@ pub enum MidiControllerKind {
 
 #[derive(Debug, Clone)]
 pub struct MidiControllerPoint {
+    /// Stable point identity (v26+). `0` on older files means "mint on load".
+    pub id: u64,
     pub beat: f32,
     /// Normalized `0.0..=1.0`.
     pub value: f32,
@@ -792,10 +798,12 @@ impl From<&TimelineState> for FutureboardProject {
                                 notes: notes
                                     .iter()
                                     .map(|n| MidiNote {
+                                        id: n.id,
                                         pitch: n.pitch,
                                         start_beats: n.start,
                                         duration_beats: n.duration,
                                         velocity: n.velocity,
+                                        release_velocity: n.release_velocity.unwrap_or(0),
                                         muted: n.muted,
                                         channel: n.channel.ui(),
                                         articulation: n
@@ -812,6 +820,7 @@ impl From<&TimelineState> for FutureboardProject {
                                             .points
                                             .iter()
                                             .map(|p| MidiControllerPoint {
+                                                id: p.id,
                                                 beat: p.beat,
                                                 value: p.value,
                                             })
@@ -1160,11 +1169,17 @@ pub fn apply_to_timeline(project: &FutureboardProject, tl: &mut TimelineState) {
                             notes: notes
                                 .iter()
                                 .map(|n| {
-                                    let mut note = MidiNoteState::new(
+                                    let mut note = MidiNoteState::from_persisted(
+                                        n.id,
                                         n.pitch,
                                         n.start_beats,
                                         n.duration_beats,
                                         n.velocity,
+                                        if n.release_velocity == 0 {
+                                            None
+                                        } else {
+                                            Some(n.release_velocity)
+                                        },
                                     );
                                     note.muted = n.muted;
                                     note.channel = MidiChannel::from_ui(n.channel);
@@ -1182,7 +1197,9 @@ pub fn apply_to_timeline(project: &FutureboardProject, tl: &mut TimelineState) {
                                     points: lane
                                         .points
                                         .iter()
-                                        .map(|p| TlControllerPoint::new(p.beat, p.value))
+                                        .map(|p| {
+                                            TlControllerPoint::from_persisted(p.id, p.beat, p.value)
+                                        })
                                         .collect(),
                                     visible: lane.visible,
                                     height: lane.height,
@@ -1566,8 +1583,12 @@ mod articulation_persistence_tests {
         state.tracks.clear();
         let track_id = state.create_midi_track();
         let clip_id = state.create_midi_clip(&track_id, 0.0, 8.0).expect("clip");
-        let plain = state.add_midi_note(&clip_id, 60, 0.0, 1.0, 100).expect("note");
-        let accented = state.add_midi_note(&clip_id, 64, 1.0, 1.0, 100).expect("note");
+        let plain = state
+            .add_midi_note(&clip_id, 60, 0.0, 1.0, 100)
+            .expect("note");
+        let accented = state
+            .add_midi_note(&clip_id, 64, 1.0, 1.0, 100)
+            .expect("note");
         state.set_midi_notes_articulation(&clip_id, &[accented], Some(ArticulationId::Accent));
         state.add_midi_articulation(&clip_id, 0.0, ArticulationId::Sustain);
         state.add_midi_articulation(&clip_id, 4.0, ArticulationId::Staccato);

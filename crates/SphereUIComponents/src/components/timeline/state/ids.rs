@@ -1,30 +1,77 @@
 use super::*;
 
-/// Monotonic source of transient automation-point identities. Like MIDI note
-/// ids these are NOT persisted — they only let the lane editor track selection
-/// and in-flight drag targets across edits. Fresh ids are minted on create and
-/// on project load.
+/// Raise a monotonic id counter so the next mint is strictly greater than `seen`.
+fn observe_counter(counter: &std::sync::atomic::AtomicU64, seen: u64) {
+    use std::sync::atomic::Ordering;
+    if seen == 0 {
+        return;
+    }
+    let mut current = counter.load(Ordering::Relaxed);
+    while current <= seen {
+        match counter.compare_exchange_weak(current, seen + 1, Ordering::Relaxed, Ordering::Relaxed)
+        {
+            Ok(_) => break,
+            Err(actual) => current = actual,
+        }
+    }
+}
+
+fn mint_counter(counter: &std::sync::atomic::AtomicU64) -> u64 {
+    use std::sync::atomic::Ordering;
+    counter.fetch_add(1, Ordering::Relaxed)
+}
+
+fn counter_midi_note() -> &'static std::sync::atomic::AtomicU64 {
+    use std::sync::atomic::AtomicU64;
+    static COUNTER: AtomicU64 = AtomicU64::new(1);
+    &COUNTER
+}
+
+fn counter_controller_point() -> &'static std::sync::atomic::AtomicU64 {
+    use std::sync::atomic::AtomicU64;
+    static COUNTER: AtomicU64 = AtomicU64::new(1);
+    &COUNTER
+}
+
+fn counter_automation_point() -> &'static std::sync::atomic::AtomicU64 {
+    use std::sync::atomic::AtomicU64;
+    static COUNTER: AtomicU64 = AtomicU64::new(1);
+    &COUNTER
+}
+
+/// Monotonic source of automation-point identities. Persisted from project
+/// format v26 onward; older files mint fresh ids on load.
 pub fn next_automation_point_id() -> u64 {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static COUNTER: AtomicU64 = AtomicU64::new(1);
-    COUNTER.fetch_add(1, Ordering::Relaxed)
+    mint_counter(counter_automation_point())
 }
 
-/// Monotonic source of transient note identities. Note ids are NOT persisted —
-/// they exist only so the piano-roll editor can track selection / drag targets
-/// across edits. Fresh ids are minted on create and on project load.
+/// Ensure subsequent automation-point mints do not collide with a loaded id.
+pub fn observe_automation_point_id(id: u64) {
+    observe_counter(counter_automation_point(), id);
+}
+
+/// Monotonic source of MIDI note identities. Persisted from project format v26
+/// onward so selection, undo, and clipboard targets survive save/load. Copies
+/// and duplicates must call [`next_midi_note_id`] for a new identity; moves
+/// keep the existing id.
 pub fn next_midi_note_id() -> u64 {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static COUNTER: AtomicU64 = AtomicU64::new(1);
-    COUNTER.fetch_add(1, Ordering::Relaxed)
+    mint_counter(counter_midi_note())
 }
 
-/// Source of transient identities for controller points (not serialized;
-/// minted fresh on create and on project load, like [`next_midi_note_id`]).
+/// Ensure subsequent note mints do not collide with a loaded id.
+pub fn observe_midi_note_id(id: u64) {
+    observe_counter(counter_midi_note(), id);
+}
+
+/// Monotonic source of controller-point identities. Persisted from project
+/// format v26 onward (same lifecycle as note ids).
 pub fn next_controller_point_id() -> u64 {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static COUNTER: AtomicU64 = AtomicU64::new(1);
-    COUNTER.fetch_add(1, Ordering::Relaxed)
+    mint_counter(counter_controller_point())
+}
+
+/// Ensure subsequent controller-point mints do not collide with a loaded id.
+pub fn observe_controller_point_id(id: u64) {
+    observe_counter(counter_controller_point(), id);
 }
 
 /// Monotonic source of stable tempo-point identities. Persisted in project

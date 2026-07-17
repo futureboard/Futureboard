@@ -52,7 +52,7 @@ impl PianoRoll {
         let x = self.beat_to_x(note.start);
         let w = (note.duration * self.ppb).max(3.0);
         let y = self.pitch_to_y(note.pitch) + 1.0;
-        let h = ROW_H - 2.0;
+        let h = self.note_row_h() - 2.0;
         (x, y, x + w, y + h)
     }
 
@@ -93,13 +93,14 @@ impl PianoRoll {
         let x = self.beat_to_x(lo);
         let w = (duration * self.ppb).max(3.0);
         let y = self.pitch_to_y(*pitch);
+        let h = self.note_row_h() - 2.0;
         Some(
             div()
                 .absolute()
                 .left(px(x))
                 .top(px(y + 1.0))
                 .w(px(w))
-                .h(px(ROW_H - 2.0))
+                .h(px(h))
                 .rounded(px(2.0))
                 .bg(Colors::with_alpha(Colors::accent_primary(), 0.35))
                 .border(px(1.0))
@@ -257,6 +258,14 @@ impl Render for PianoRoll {
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_up))
             .on_mouse_up(MouseButton::Right, cx.listener(Self::on_up))
             .on_mouse_up_out(MouseButton::Right, cx.listener(Self::on_up))
+            .on_mouse_down(
+                MouseButton::Middle,
+                cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                    this.begin_pan(event, window, cx);
+                }),
+            )
+            .on_mouse_up(MouseButton::Middle, cx.listener(Self::on_up))
+            .on_mouse_up_out(MouseButton::Middle, cx.listener(Self::on_up))
             .on_scroll_wheel(cx.listener(Self::on_wheel))
             .child(toolbar)
             .child(body)
@@ -279,7 +288,14 @@ impl PianoRoll {
                 .absolute()
                 .top(px(26.0))
                 .left_0()
-                .w(px(148.0))
+                .w(px(if menu == PianoSelectMenu::Grid || menu == PianoSelectMenu::Channel {
+                    160.0
+                } else {
+                    148.0
+                }))
+                .max_h(px(280.0))
+                .id(("pr-select-menu-scroll", menu as u32))
+                .overflow_y_scroll()
                 .flex()
                 .flex_col()
                 .p(px(3.0))
@@ -786,6 +802,8 @@ impl PianoRoll {
                         .on_click(cx.listener(move |this, _ev, _w, cx| {
                             cx.stop_propagation();
                             this.grid_res = res;
+                            // Free mode turns snapping off; other modes re-enable it.
+                            this.snap_on = !res.is_free();
                             this.open_select_menu = None;
                             cx.notify();
                         }))
@@ -793,6 +811,44 @@ impl PianoRoll {
                 )
             })
             .collect();
+        let channel_options = {
+            let mut opts = Vec::with_capacity(17);
+            opts.push((
+                "All Channels".to_string(),
+                self.channel_view.is_all(),
+                div()
+                    .id("pr-channel-choice-all")
+                    .size_full()
+                    .flex()
+                    .items_center()
+                    .child("All Channels")
+                    .on_click(cx.listener(|this, _ev, _w, cx| {
+                        cx.stop_propagation();
+                        this.set_channel_view(MidiChannelMask::ALL, cx);
+                    }))
+                    .into_any_element(),
+            ));
+            for (idx, ch) in MidiChannel::all().enumerate() {
+                let selected = self.channel_view == MidiChannelMask::single(ch);
+                let label = format!("Channel {}", ch.ui());
+                opts.push((
+                    label.clone(),
+                    selected,
+                    div()
+                        .id(("pr-channel-choice", idx))
+                        .size_full()
+                        .flex()
+                        .items_center()
+                        .child(label)
+                        .on_click(cx.listener(move |this, _ev, _w, cx| {
+                            cx.stop_propagation();
+                            this.set_channel_view(MidiChannelMask::single(ch), cx);
+                        }))
+                        .into_any_element(),
+                ));
+            }
+            opts
+        };
         let root_options = ScaleRoot::ALL
             .iter()
             .enumerate()
@@ -959,11 +1015,12 @@ impl PianoRoll {
             )
             .child(
                 toolbar_group("Channel")
-                    .child(tool_btn(
+                    .child(self.render_select_menu(
+                        PianoSelectMenu::Channel,
                         "pr-channel-view",
-                        &self.channel_view_label(),
-                        !self.channel_view.is_all(),
-                        cx.listener(|this, _, _w, cx| this.cycle_channel_view(cx)),
+                        self.channel_view_label(),
+                        channel_options,
+                        cx,
                     ))
                     .child(tool_btn(
                         "pr-channel-apply",
@@ -1139,7 +1196,8 @@ impl PianoRoll {
         // Label policy: show every note name when each row has enough vertical
         // room (>= 14 px), otherwise fall back to C-only labels so the lane
         // stays readable.
-        let show_all_labels = ROW_H >= 14.0;
+        let row_h = self.note_row_h();
+        let show_all_labels = row_h >= 14.0;
         let pressed_pitch = self.key_lane_pressed_pitch;
         let keys: Vec<_> = (first_pitch..=last_pitch)
             .map(|p| {
@@ -1160,7 +1218,7 @@ impl PianoRoll {
                     .top(px(y))
                     .left_0()
                     .w_full()
-                    .h(px(ROW_H))
+                    .h(px(row_h))
                     // Pressed/auditioned key reads with the accent fill (both black
                     // and white keys); otherwise the usual black/white surface.
                     .bg(if pressed {
@@ -2023,6 +2081,7 @@ impl PianoRoll {
     ) -> Vec<gpui::AnyElement> {
         let mut out: Vec<gpui::AnyElement> = Vec::new();
 
+        let row_h = self.note_row_h();
         // ── Pitch row backgrounds: shade black-key rows, highlight C rows ──
         for p in first_pitch..=last_pitch {
             let y = self.pitch_to_y(p as u8);
@@ -2033,7 +2092,7 @@ impl PianoRoll {
                         .top(px(y))
                         .left_0()
                         .w(px(view_w))
-                        .h(px(ROW_H))
+                        .h(px(row_h))
                         .bg(Colors::with_alpha(Colors::surface_base(), 0.45))
                         .into_any_element(),
                 );
@@ -2045,7 +2104,7 @@ impl PianoRoll {
                         .top(px(y))
                         .left_0()
                         .w(px(view_w))
-                        .h(px(ROW_H))
+                        .h(px(row_h))
                         .bg(Colors::with_alpha(Colors::text_primary(), 0.03))
                         .into_any_element(),
                 );
@@ -2233,6 +2292,7 @@ impl PianoRoll {
         let step = self.quantize_res.beats().max(MIN_NOTE_BEATS);
         let only_selected = !self.selection.is_empty();
         let accent = Colors::accent_primary();
+        let row_h = self.note_row_h();
         let tl = self.timeline.read(cx);
         let Some(notes) = tl.state.midi_clip_notes(clip_id) else {
             return Vec::new();
@@ -2248,7 +2308,7 @@ impl PianoRoll {
                 let x = self.beat_to_x(q_start);
                 let w = (n.duration * self.ppb).max(3.0);
                 let y = self.pitch_to_y(n.pitch);
-                if x + w < 0.0 || x > view_w || y + ROW_H < 0.0 || y > view_h {
+                if x + w < 0.0 || x > view_w || y + row_h < 0.0 || y > view_h {
                     return None;
                 }
                 Some(
@@ -2257,7 +2317,7 @@ impl PianoRoll {
                         .left(px(x))
                         .top(px(y + 1.0))
                         .w(px(w))
-                        .h(px(ROW_H - 2.0))
+                        .h(px(row_h - 2.0))
                         .rounded(px(2.0))
                         .border(px(1.0))
                         .border_color(Colors::with_alpha(accent, 0.9))
@@ -2275,6 +2335,7 @@ impl PianoRoll {
         track_color: gpui::Rgba,
     ) -> Vec<gpui::AnyElement> {
         let (view_w, view_h) = self.grid_view_size();
+        let row_h = self.note_row_h();
         // Collect owned geometry first so the timeline read borrow is released
         // before we build per-note listeners (which borrow `cx` mutably).
         #[allow(clippy::type_complexity)]
@@ -2305,7 +2366,7 @@ impl PianoRoll {
                     let w = (d.duration * self.ppb).max(5.0);
                     let y = self.pitch_to_y(d.pitch);
                     // Cull off-screen notes.
-                    if x + w < 0.0 || x > view_w || y + ROW_H < 0.0 || y > view_h {
+                    if x + w < 0.0 || x > view_w || y + row_h < 0.0 || y > view_h {
                         return None;
                     }
                     Some((
@@ -2369,7 +2430,7 @@ impl PianoRoll {
                         .left(px(x))
                         .top(px(y + 1.0))
                         .w(px(w))
-                        .h(px(ROW_H - 2.0))
+                        .h(px(row_h - 2.0))
                         .rounded(px(2.0))
                         .bg(fill)
                         .border(px(1.0))
@@ -2416,7 +2477,7 @@ impl PianoRoll {
                         );
                     // Note-name label, shown only when the block is large enough to
                     // read so dense clips stay clean.
-                    if w >= 22.0 && ROW_H >= 11.0 {
+                    if w >= 22.0 && row_h >= 11.0 {
                         let label_color = if muted {
                             Colors::with_alpha(Colors::text_muted(), 0.8)
                         } else if selected {
@@ -2441,7 +2502,7 @@ impl PianoRoll {
                     // (clear of the left note-name label), only when wide
                     // enough to stay readable in dense clips.
                     if let Some(short) = articulation {
-                        if w >= 46.0 && ROW_H >= 11.0 {
+                        if w >= 46.0 && row_h >= 11.0 {
                             note = note.child(
                                 div()
                                     .absolute()

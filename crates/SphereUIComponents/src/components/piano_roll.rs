@@ -9,7 +9,8 @@
 //! Coordinate model (matches WebUI):
 //! - notes are stored in beats relative to the clip start
 //! - the grid maps beats → x with `ppb` (pixels per beat) and a horizontal
-//!   scroll offset; pitch → y with a fixed [`ROW_H`] and a vertical scroll
+//!   scroll offset; pitch → y with independent `row_h` (px/semitone) and a
+//!   vertical scroll. Zoom X (`ppb`) and Zoom Y (`row_h`) are independent.
 //!
 //! Interaction state (tool, selection, zoom, snap, drag) lives on this entity
 //! — never recomputed in render. Note geometry is only built for the visible
@@ -43,9 +44,17 @@ mod articulation_lane;
 mod cc_lane;
 mod render;
 
-const ROW_H: f32 = 14.0; // px per semitone
+/// Default note-row height (px per semitone). Reset-zoom restores this value so
+/// note height matches the editor's default density after Zoom Y changes.
+const DEFAULT_ROW_H: f32 = 14.0;
+/// Legacy alias used by unit tests and denser-zoom comparisons that still mean
+/// "the default row height".
+const ROW_H: f32 = DEFAULT_ROW_H;
 const PITCH_CNT: i32 = 128;
-const TOTAL_H: f32 = PITCH_CNT as f32 * ROW_H;
+/// Vertical zoom clamps (px/semitone). Floor keeps notes hittable; ceiling
+/// stops rows from becoming a handful of oversized slabs.
+const PIANO_ROLL_MIN_ROW_H: f32 = 6.0;
+const PIANO_ROLL_MAX_ROW_H: f32 = 48.0;
 /// Horizontal overview zoom floor for long MIDI clips. 1 px/beat lets a
 /// 200-bar/800-beat song fit in an ~800px editor while preserving interactions.
 const PIANO_ROLL_MIN_PPB: f32 = 1.0;
@@ -64,8 +73,10 @@ const PIANO_ROLL_FIT_PAD_PX: f32 = 48.0;
 /// of truth for "which row is which pitch" — the keys and the grid both go
 /// through it (via [`PianoRoll::y_to_pitch`]) so they can never drift apart.
 /// Out-of-lane detection is layered on top in [`PianoRoll::key_lane_pitch_at`].
-fn local_y_to_pitch(local_y: f32, scroll_y: f32) -> u8 {
-    let row = ((local_y + scroll_y) / ROW_H).floor() as i32;
+/// `row_h` is the current Zoom Y (px/semitone).
+fn local_y_to_pitch(local_y: f32, scroll_y: f32, row_h: f32) -> u8 {
+    let row_h = row_h.max(0.0001);
+    let row = ((local_y + scroll_y) / row_h).floor() as i32;
     (PITCH_CNT - 1 - row).clamp(0, PITCH_CNT - 1) as u8
 }
 
@@ -214,15 +225,26 @@ const LANE_CYCLE: [ControllerLaneKind; 10] = [
     ControllerLaneKind::Articulations,
 ];
 
-/// Grid resolution in beats-per-step. Mirrors the WebUI dropdown.
+/// Grid / snap resolution for the piano roll.
+///
+/// `Free` disables snapping (same as the Snap toolbar toggle off). `Adaptive`
+/// picks a subdivision from the current Zoom X (`ppb`) so the grid stays usable
+/// when zoomed out. Triplet variants use 2/3 of the straight-note step.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GridRes {
+    Free,
+    Adaptive,
+    Bar,
     Whole,
     Half,
     Quarter,
     Eighth,
     Sixteenth,
     ThirtySecond,
+    SixtyFourth,
+    QuarterTriplet,
+    EighthTriplet,
+    SixteenthTriplet,
 }
 
 #[derive(Debug, Clone)]
@@ -258,44 +280,83 @@ impl UiMidiPreviewCommand {
 }
 
 impl GridRes {
-    const ALL: [GridRes; 6] = [
+    const ALL: [GridRes; 13] = [
+        GridRes::Free,
+        GridRes::Adaptive,
+        GridRes::Bar,
         GridRes::Whole,
         GridRes::Half,
         GridRes::Quarter,
         GridRes::Eighth,
         GridRes::Sixteenth,
         GridRes::ThirtySecond,
+        GridRes::SixtyFourth,
+        GridRes::QuarterTriplet,
+        GridRes::EighthTriplet,
+        GridRes::SixteenthTriplet,
     ];
 
-    fn beats(self) -> f32 {
+    /// Fixed step in beats for non-adaptive modes. `Adaptive` / `Free` return 0
+    /// — callers must resolve via [`PianoRoll::step_beats`].
+    fn fixed_beats(self) -> f32 {
         match self {
-            GridRes::Whole => 4.0,
+            GridRes::Free | GridRes::Adaptive => 0.0,
+            GridRes::Bar | GridRes::Whole => 4.0,
             GridRes::Half => 2.0,
             GridRes::Quarter => 1.0,
             GridRes::Eighth => 0.5,
             GridRes::Sixteenth => 0.25,
             GridRes::ThirtySecond => 0.125,
+            GridRes::SixtyFourth => 0.0625,
+            // Triplet of a quarter / eighth / sixteenth note (3 in the time of 2).
+            GridRes::QuarterTriplet => 2.0 / 3.0,
+            GridRes::EighthTriplet => 1.0 / 3.0,
+            GridRes::SixteenthTriplet => 1.0 / 6.0,
         }
     }
+
+    fn beats(self) -> f32 {
+        self.fixed_beats()
+    }
+
     fn label(self) -> &'static str {
         match self {
-            GridRes::Whole => "1",
+            GridRes::Free => "Free",
+            GridRes::Adaptive => "Adaptive",
+            GridRes::Bar => "1 Bar",
+            GridRes::Whole => "1/1",
             GridRes::Half => "1/2",
             GridRes::Quarter => "1/4",
             GridRes::Eighth => "1/8",
             GridRes::Sixteenth => "1/16",
             GridRes::ThirtySecond => "1/32",
+            GridRes::SixtyFourth => "1/64",
+            GridRes::QuarterTriplet => "1/4T",
+            GridRes::EighthTriplet => "1/8T",
+            GridRes::SixteenthTriplet => "1/16T",
         }
     }
+
     fn cycle(self) -> Self {
         match self {
+            GridRes::Free => GridRes::Adaptive,
+            GridRes::Adaptive => GridRes::Bar,
+            GridRes::Bar => GridRes::Whole,
             GridRes::Whole => GridRes::Half,
             GridRes::Half => GridRes::Quarter,
             GridRes::Quarter => GridRes::Eighth,
             GridRes::Eighth => GridRes::Sixteenth,
             GridRes::Sixteenth => GridRes::ThirtySecond,
-            GridRes::ThirtySecond => GridRes::Whole,
+            GridRes::ThirtySecond => GridRes::SixtyFourth,
+            GridRes::SixtyFourth => GridRes::QuarterTriplet,
+            GridRes::QuarterTriplet => GridRes::EighthTriplet,
+            GridRes::EighthTriplet => GridRes::SixteenthTriplet,
+            GridRes::SixteenthTriplet => GridRes::Free,
         }
+    }
+
+    fn is_free(self) -> bool {
+        matches!(self, GridRes::Free)
     }
 }
 
@@ -305,6 +366,8 @@ enum PianoSelectMenu {
     ScaleRoot,
     ScaleKind,
     Lane,
+    /// Channel view filter (All Channels / Channel 1–16).
+    Channel,
     /// Articulation palette for the lane's insert tool (which articulation a
     /// lane click inserts).
     Articulation,
@@ -387,11 +450,19 @@ enum PianoDrag {
         unsnap: bool,
     },
     /// Drag a velocity bar. When the grabbed note is part of a multi-selection,
-    /// every selected note moves by the same delta. `prev` snapshots each
-    /// affected note's `(id, orig_velocity)` so the live delta is reproducible
-    /// and undo can restore exact values.
+    /// every selected note moves by the same *relative* delta from its snapshot
+    /// velocity (differences preserved). `prev` is `(id, orig_velocity)`.
+    /// `anchor_orig` is the grabbed note's original velocity used to derive the
+    /// live delta from the cursor. Absolute (force-all-equal) mode is deferred.
     Velocity {
         prev: Vec<(u64, u8)>,
+        anchor_orig: u8,
+    },
+    /// Middle-mouse grab-pan of the note grid (scroll_x / scroll_y). Mutually
+    /// exclusive with note editing — started only from Middle button down.
+    Pan {
+        last_x: f32,
+        last_y: f32,
     },
     /// Rectangular marquee selection on the note grid (local grid px).
     MarqueeSelect {
@@ -429,10 +500,15 @@ enum PianoDrag {
     CcPaint {
         erase: bool,
     },
-    /// Drag an existing CC point (by id) to a new beat/value. Pre-drag points
-    /// are snapshotted in `cc_edit_prev`; one undo entry on release.
+    /// Drag one or more selected CC points. `prev` snapshots `(id, beat, value)`
+    /// at drag start; each point moves by the same Δbeat/Δvalue from the grabbed
+    /// anchor so relative offsets are preserved. One undo entry on release.
     CcMove {
-        id: u64,
+        ids: Vec<u64>,
+        prev: Vec<(u64, f32, f32)>,
+        anchor_beat: f32,
+        anchor_value: f32,
+        unsnap: bool,
     },
     /// Shift+drag a straight ramp across the active CC lane. Replaces points in
     /// the spanned beat range with an evenly-spaced line from the gesture anchor
@@ -459,7 +535,11 @@ pub struct PianoRoll {
     on_midi_preview:
         Option<std::sync::Arc<dyn Fn(UiMidiPreviewCommand, &mut gpui::App) + Send + Sync>>,
     tool: PianoTool,
+    /// Horizontal zoom: pixels per beat (Zoom X).
     ppb: f32,
+    /// Vertical zoom: pixels per semitone / note-row height (Zoom Y).
+    /// Independent of [`Self::ppb`]. Reset restores [`DEFAULT_ROW_H`].
+    row_h: f32,
     snap_on: bool,
     grid_res: GridRes,
     /// Quantize strength resolution, independent of the visual grid.
@@ -516,6 +596,10 @@ pub struct PianoRoll {
     cc_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
     /// Lane points snapshotted when a CC paint/erase gesture begins (undo prev).
     cc_edit_prev: Option<Vec<MidiControllerPoint>>,
+    /// Selected CC point ids in the active controller lane (multi-edit).
+    cc_selection: HashSet<u64>,
+    /// Right-click CC curve context menu (local strip px of the click).
+    open_cc_curve_menu: Option<(f32, f32)>,
     /// Last clip the editor rendered — used to emit the `open_editor` debug log
     /// exactly once when the edited clip changes (not every frame).
     last_editing_clip: Option<String>,
@@ -540,9 +624,133 @@ pub struct PianoRoll {
     pitch_ctx: PitchTransformContext,
     /// Channel view/edit filter: `ALL` (default) renders and allows editing
     /// every note unchanged; narrowed to a single channel via the toolbar
-    /// cycle button, notes on other channels are hidden (and therefore not
+    /// dropdown, notes on other channels are hidden (and therefore not
     /// reachable by mouse gestures — no separate editability check needed).
     channel_view: MidiChannelMask,
+}
+
+/// CC curve generators available from the controller-lane context menu.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CcCurveKind {
+    Linear,
+    EaseIn,
+    EaseOut,
+    EaseInOut,
+    SCurve,
+    Exponential,
+    Logarithmic,
+    Ramp,
+    Flat,
+    Triangle,
+    Saw,
+    Square,
+    Random,
+    Humanize,
+}
+
+impl CcCurveKind {
+    const ALL: [CcCurveKind; 14] = [
+        CcCurveKind::Linear,
+        CcCurveKind::EaseIn,
+        CcCurveKind::EaseOut,
+        CcCurveKind::EaseInOut,
+        CcCurveKind::SCurve,
+        CcCurveKind::Exponential,
+        CcCurveKind::Logarithmic,
+        CcCurveKind::Ramp,
+        CcCurveKind::Flat,
+        CcCurveKind::Triangle,
+        CcCurveKind::Saw,
+        CcCurveKind::Square,
+        CcCurveKind::Random,
+        CcCurveKind::Humanize,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            CcCurveKind::Linear => "Linear",
+            CcCurveKind::EaseIn => "Ease In",
+            CcCurveKind::EaseOut => "Ease Out",
+            CcCurveKind::EaseInOut => "Ease In Out",
+            CcCurveKind::SCurve => "S Curve",
+            CcCurveKind::Exponential => "Exponential",
+            CcCurveKind::Logarithmic => "Logarithmic",
+            CcCurveKind::Ramp => "Ramp",
+            CcCurveKind::Flat => "Flat",
+            CcCurveKind::Triangle => "Triangle",
+            CcCurveKind::Saw => "Saw",
+            CcCurveKind::Square => "Square",
+            CcCurveKind::Random => "Random",
+            CcCurveKind::Humanize => "Humanize",
+        }
+    }
+
+    /// Map normalized time `t` in [0, 1] to a value in [0, 1] for shaped ramps.
+    /// Oscillator shapes ignore `from`/`to` endpoints and fill their own range.
+    fn sample(self, t: f32, from: f32, to: f32) -> f32 {
+        let t = t.clamp(0.0, 1.0);
+        match self {
+            CcCurveKind::Linear | CcCurveKind::Ramp => from + (to - from) * t,
+            CcCurveKind::EaseIn => from + (to - from) * (t * t),
+            CcCurveKind::EaseOut => {
+                let u = 1.0 - (1.0 - t) * (1.0 - t);
+                from + (to - from) * u
+            }
+            CcCurveKind::EaseInOut => {
+                let u = if t < 0.5 {
+                    2.0 * t * t
+                } else {
+                    1.0 - (-2.0 * t + 2.0).powi(2) / 2.0
+                };
+                from + (to - from) * u
+            }
+            CcCurveKind::SCurve => {
+                // Smoothstep (Hermite).
+                let u = t * t * (3.0 - 2.0 * t);
+                from + (to - from) * u
+            }
+            CcCurveKind::Exponential => {
+                let u = if t <= 0.0 {
+                    0.0
+                } else {
+                    ((t * 4.0).exp() - 1.0) / ((4.0_f32).exp() - 1.0)
+                };
+                from + (to - from) * u
+            }
+            CcCurveKind::Logarithmic => {
+                let u = if t <= 0.0 {
+                    0.0
+                } else {
+                    (1.0 + t * 9.0).ln() / (10.0_f32).ln()
+                };
+                from + (to - from) * u
+            }
+            CcCurveKind::Flat => from,
+            CcCurveKind::Triangle => {
+                if t < 0.5 {
+                    t * 2.0
+                } else {
+                    2.0 - t * 2.0
+                }
+            }
+            CcCurveKind::Saw => t,
+            CcCurveKind::Square => {
+                if t < 0.5 {
+                    1.0
+                } else {
+                    0.0
+                }
+            }
+            CcCurveKind::Random | CcCurveKind::Humanize => {
+                // Deterministic-ish hash of t so re-applying the same span is stable
+                // within a session without pulling RNG into the hot path.
+                let bits = (t * 10000.0) as u32;
+                let h = bits.wrapping_mul(2654435761);
+                (h >> 24) as f32 / 255.0
+            }
+        }
+        .clamp(0.0, 1.0)
+    }
 }
 
 impl PianoRoll {
@@ -554,6 +762,7 @@ impl PianoRoll {
             on_midi_preview: None,
             tool: PianoTool::Draw,
             ppb: 80.0,
+            row_h: DEFAULT_ROW_H,
             snap_on: true,
             grid_res: GridRes::Sixteenth,
             quantize_res: GridRes::Sixteenth,
@@ -581,6 +790,8 @@ impl PianoRoll {
             custom_cc: 74,
             cc_bounds: Rc::new(Cell::new(None)),
             cc_edit_prev: None,
+            cc_selection: HashSet::new(),
+            open_cc_curve_menu: None,
             last_editing_clip: None,
             active_preview_note: None,
             key_lane_pressed_pitch: None,
@@ -657,7 +868,8 @@ impl PianoRoll {
             | PianoDrag::CcMove { .. }
             | PianoDrag::CcLine { .. }
             | PianoDrag::ArtMove { .. }
-            | PianoDrag::RulerSeek => false,
+            | PianoDrag::RulerSeek
+            | PianoDrag::Pan { .. } => false,
             PianoDrag::Move { prev, .. } => {
                 prev.retain(|(id, _, _)| valid_note_ids.contains(id));
                 prev.is_empty()
@@ -762,6 +974,7 @@ impl PianoRoll {
                     "Select".to_string()
                 }
             }
+            PianoDrag::Pan { .. } => "Pan".to_string(),
             PianoDrag::None => self.hover_note_status.clone().unwrap_or(pointer),
         };
         format!("{} notes · {} sel · {}", note_count, sel_count, drag)
@@ -857,7 +1070,13 @@ impl PianoRoll {
                     cx.notify();
                 }
             }
-            "midi:scroll-to-c4" | "midi:reset-pitch-zoom" => {
+            "midi:scroll-to-c4" => {
+                self.scroll_to_pitch(60);
+                cx.notify();
+            }
+            "midi:reset-pitch-zoom" => {
+                // Restore default note-row height (Zoom Y) without touching Zoom X.
+                self.reset_row_h_zoom(cx);
                 self.scroll_to_pitch(60);
                 cx.notify();
             }
@@ -1092,18 +1311,45 @@ impl PianoRoll {
     }
 
     fn step_beats(&self) -> f32 {
-        self.grid_res.beats()
+        match self.grid_res {
+            GridRes::Free => 0.0,
+            GridRes::Adaptive => self.adaptive_step_beats(),
+            other => other.fixed_beats(),
+        }
+    }
+
+    /// Adaptive grid step from Zoom X: coarser when zoomed out, finer when
+    /// zoomed in. Mirrors arrangement `get_grid_sub_beats` thresholds.
+    fn adaptive_step_beats(&self) -> f32 {
+        let ppb = self.ppb.max(0.0001);
+        if ppb < 8.0 {
+            4.0
+        } else if ppb < 16.0 {
+            2.0
+        } else if ppb < 32.0 {
+            1.0
+        } else if ppb < 64.0 {
+            0.5
+        } else if ppb < 128.0 {
+            0.25
+        } else if ppb < 256.0 {
+            0.125
+        } else {
+            0.0625
+        }
     }
 
     fn snap_beats(&self, beats: f32) -> f32 {
-        if !self.snap_on {
+        if !self.snap_on || self.grid_res.is_free() {
             return beats.max(0.0);
         }
         let step = self.step_beats();
         if step <= 0.0 {
             return beats.max(0.0);
         }
-        ((beats / step).floor() * step).max(0.0)
+        // Round (not floor) so drag jitter near a grid line settles stably
+        // instead of snapping one step early under the cursor.
+        ((beats / step).round() * step).max(0.0)
     }
 
     /// Same as [`Self::snap_beats`], but `unsnap` (live Shift state of the
@@ -1124,10 +1370,21 @@ impl PianoRoll {
         beat * self.ppb - self.scroll_x
     }
     fn y_to_pitch(&self, local_y: f32) -> u8 {
-        local_y_to_pitch(local_y, self.scroll_y)
+        local_y_to_pitch(local_y, self.scroll_y, self.row_h)
     }
     fn pitch_to_y(&self, pitch: u8) -> f32 {
-        (PITCH_CNT - 1 - pitch as i32) as f32 * ROW_H - self.scroll_y
+        (PITCH_CNT - 1 - pitch as i32) as f32 * self.row_h - self.scroll_y
+    }
+
+    /// Current Zoom Y (px per semitone). Prefer this over the `DEFAULT_ROW_H`
+    /// constant in render/hit-test paths so vertical zoom stays coherent.
+    #[inline]
+    fn note_row_h(&self) -> f32 {
+        self.row_h.max(0.0001)
+    }
+
+    fn total_pitch_h(&self) -> f32 {
+        PITCH_CNT as f32 * self.note_row_h()
     }
 
     fn point_to_beat_pitch(&self, local_x: f32, local_y: f32) -> (f32, u8) {
@@ -1379,7 +1636,7 @@ impl PianoRoll {
 
     fn max_scroll_y(&self) -> f32 {
         let (_, h) = self.grid_view_size();
-        (TOTAL_H - h).max(0.0)
+        (self.total_pitch_h() - h).max(0.0)
     }
 
     fn clip_meta(&self, cx: &Context<Self>, clip_id: &str) -> (f32, f32) {
@@ -1397,7 +1654,9 @@ impl PianoRoll {
     /// Scroll the pitch axis so `pitch` is vertically centered in the view.
     fn scroll_to_pitch(&mut self, pitch: u8) {
         let (_, view_h) = self.grid_view_size();
-        let target = ((PITCH_CNT - 1) as f32 - pitch as f32) * ROW_H - view_h * 0.5 + ROW_H * 0.5;
+        let row_h = self.note_row_h();
+        let target =
+            ((PITCH_CNT - 1) as f32 - pitch as f32) * row_h - view_h * 0.5 + row_h * 0.5;
         self.scroll_y = target.clamp(0.0, self.max_scroll_y());
     }
 
@@ -1433,7 +1692,9 @@ impl PianoRoll {
         };
 
         let mid = (min_p as f32 + max_p as f32) * 0.5;
-        let target_scroll = ((PITCH_CNT - 1) as f32 - mid) * ROW_H - view_h * 0.5 + ROW_H * 0.5;
+        let row_h = self.note_row_h();
+        let target_scroll =
+            ((PITCH_CNT - 1) as f32 - mid) * row_h - view_h * 0.5 + row_h * 0.5;
         self.scroll_y = target_scroll.clamp(0.0, self.max_scroll_y());
 
         let (_, clip_len) = self.clip_meta(cx, clip_id);
@@ -1872,8 +2133,11 @@ impl PianoRoll {
             vec![(id, orig_vel)]
         };
         let value = self.velocity_from_window_y(event.position);
-        self.apply_velocity_value(&prev, value, cx);
-        self.drag = PianoDrag::Velocity { prev };
+        self.apply_velocity_relative(&prev, orig_vel, value, cx);
+        self.drag = PianoDrag::Velocity {
+            prev,
+            anchor_orig: orig_vel,
+        };
         cx.notify();
     }
 
@@ -1894,6 +2158,7 @@ impl PianoRoll {
         (1.0 + norm * 126.0).round().clamp(1.0, 127.0) as u8
     }
 
+    /// Absolute velocity assign (inspector / single absolute paths).
     fn apply_velocity_value(&mut self, prev: &[(u64, u8)], value: u8, cx: &mut Context<Self>) {
         if prev.is_empty() {
             return;
@@ -1907,6 +2172,39 @@ impl PianoRoll {
             self.with_timeline_silent(cx, |tl, _| {
                 for (id, _) in prev {
                     tl.state.set_midi_note_velocity(&clip_id, *id, value);
+                }
+            });
+        }
+    }
+
+    /// Relative multi-note velocity: each note moves by
+    /// `cursor_vel - anchor_orig` from its snapshot, preserving differences.
+    fn apply_velocity_relative(
+        &mut self,
+        prev: &[(u64, u8)],
+        anchor_orig: u8,
+        cursor_vel: u8,
+        cx: &mut Context<Self>,
+    ) {
+        if prev.is_empty() {
+            return;
+        }
+        let delta = cursor_vel as i32 - anchor_orig as i32;
+        self.drag_value_status = Some(if prev.len() == 1 {
+            let v = (prev[0].1 as i32 + delta).clamp(1, 127) as u8;
+            format!("Velocity: {v}")
+        } else {
+            format!(
+                "Velocity Δ{:+} · {} notes",
+                delta,
+                prev.len()
+            )
+        });
+        if let Some(clip_id) = self.editing_clip_id(cx) {
+            self.with_timeline_silent(cx, |tl, _| {
+                for (id, orig) in prev {
+                    let next = (*orig as i32 + delta).clamp(1, 127) as u8;
+                    tl.state.set_midi_note_velocity(&clip_id, *id, next);
                 }
             });
         }
@@ -2018,9 +2316,12 @@ impl PianoRoll {
                 }
                 return;
             }
-            PianoDrag::CcMove { id } => {
+            PianoDrag::CcMove { .. } => {
+                if let PianoDrag::CcMove { unsnap, .. } = &mut self.drag {
+                    *unsnap = event.modifiers.shift;
+                }
                 if let Some((lx, ly)) = self.cc_local(event.position) {
-                    self.cc_move_to(id, lx, ly, cx);
+                    self.cc_move_selection_to(lx, ly, cx);
                 }
                 return;
             }
@@ -2080,6 +2381,27 @@ impl PianoRoll {
             }
             return;
         }
+        // Middle-mouse grab-pan: update scroll from pointer delta. Handled
+        // before the Left-only early return so note editing never sees Middle.
+        if matches!(self.drag, PianoDrag::Pan { .. }) {
+            if event.pressed_button != Some(MouseButton::Middle) {
+                self.drag = PianoDrag::None;
+                cx.notify();
+                return;
+            }
+            let cur_x: f32 = event.position.x.into();
+            let cur_y: f32 = event.position.y.into();
+            if let PianoDrag::Pan { last_x, last_y } = &mut self.drag {
+                let dx = cur_x - *last_x;
+                let dy = cur_y - *last_y;
+                *last_x = cur_x;
+                *last_y = cur_y;
+                self.scroll_x = (self.scroll_x - dx).max(0.0);
+                self.scroll_y = (self.scroll_y - dy).clamp(0.0, self.max_scroll_y());
+            }
+            cx.notify();
+            return;
+        }
         if event.pressed_button != Some(MouseButton::Left) {
             return;
         }
@@ -2111,6 +2433,7 @@ impl PianoRoll {
             let cur_x: f32 = event.position.x.into();
             let cur_y: f32 = event.position.y.into();
             let ppb = self.ppb.max(0.0001);
+            let row_h = self.note_row_h();
             let pitch_ctx = self.pitch_ctx;
             let mut audition_pitch: Option<u8> = None;
             if let PianoDrag::Move {
@@ -2126,7 +2449,7 @@ impl PianoRoll {
                 // Store the raw beat delta; snapping is applied per-note against
                 // each note's absolute start in `display_note` / commit.
                 *dx_beats = (cur_x - *start_x) / ppb;
-                *dpitch = -(((cur_y - *start_y) / ROW_H).round() as i32);
+                *dpitch = -(((cur_y - *start_y) / row_h).round() as i32);
                 *unsnap = event.modifiers.shift;
                 let raw_pitch = (*grab_pitch as i32 + *dpitch).clamp(0, 127) as u8;
                 audition_pitch = Some(pitch_ctx.constrain_pitch(raw_pitch));
@@ -2146,6 +2469,14 @@ impl PianoRoll {
             cx.notify();
             return;
         }
+        let ppb = self.ppb.max(0.0001);
+        let snap_enabled = self.snap_on && !self.grid_res.is_free();
+        let step = self.step_beats();
+        let velocity_cursor = if matches!(self.drag, PianoDrag::Velocity { .. }) {
+            Some(self.velocity_from_window_y(event.position))
+        } else {
+            None
+        };
         match &mut self.drag {
             PianoDrag::None => {}
             PianoDrag::Move { .. } => {}
@@ -2159,20 +2490,20 @@ impl PianoRoll {
             } => {
                 *unsnap = event.modifiers.shift;
                 let cur_x: f32 = event.position.x.into();
-                let mut d =
-                    (*prev_dur + (cur_x - *start_x) / self.ppb.max(0.0001)).max(MIN_NOTE_BEATS);
-                if self.snap_on && !*unsnap {
-                    let step = self.grid_res.beats();
+                let mut d = (*prev_dur + (cur_x - *start_x) / ppb).max(MIN_NOTE_BEATS);
+                if snap_enabled && !*unsnap && step > 0.0 {
                     d = ((d / step).round() * step).max(MIN_NOTE_BEATS);
                 }
                 *delta_dur = d - *prev_dur;
                 *new_dur = d;
                 cx.notify();
             }
-            PianoDrag::Velocity { prev } => {
+            PianoDrag::Velocity { prev, anchor_orig } => {
                 let prev = prev.clone();
-                let value = self.velocity_from_window_y(event.position);
-                self.apply_velocity_value(&prev, value, cx);
+                let anchor_orig = *anchor_orig;
+                if let Some(value) = velocity_cursor {
+                    self.apply_velocity_relative(&prev, anchor_orig, value, cx);
+                }
             }
             PianoDrag::MarqueeSelect { .. } => {}
             PianoDrag::DrawNote { .. } | PianoDrag::EraseNotes { .. } => {}
@@ -2180,7 +2511,7 @@ impl PianoRoll {
             | PianoDrag::CcMove { .. }
             | PianoDrag::CcLine { .. }
             | PianoDrag::ArtMove { .. } => {}
-            PianoDrag::RulerSeek => {}
+            PianoDrag::RulerSeek | PianoDrag::Pan { .. } => {}
         }
     }
 
@@ -2287,6 +2618,11 @@ impl PianoRoll {
         }
         if matches!(self.drag, PianoDrag::MarqueeSelect { .. }) {
             self.commit_marquee_select(cx);
+            return;
+        }
+        if matches!(self.drag, PianoDrag::Pan { .. }) {
+            self.drag = PianoDrag::None;
+            cx.notify();
             return;
         }
         let drag = std::mem::replace(&mut self.drag, PianoDrag::None);
@@ -2416,7 +2752,7 @@ impl PianoRoll {
             | PianoDrag::CcMove { .. }
             | PianoDrag::CcLine { .. }
             | PianoDrag::ArtMove { .. } => {}
-            PianoDrag::RulerSeek => {}
+            PianoDrag::RulerSeek | PianoDrag::Pan { .. } => {}
         }
     }
 
@@ -2612,34 +2948,35 @@ impl PianoRoll {
             .unwrap_or(false)
     }
 
-    /// Cycle the channel-view filter: All -> Ch1 -> Ch2 -> ... -> Ch16 -> All.
-    fn cycle_channel_view(&mut self, cx: &mut Context<Self>) {
-        self.channel_view = if self.channel_view.is_all() {
-            MidiChannelMask::single(MidiChannel::from_ui(1))
-        } else if let Some(current) =
-            MidiChannel::all().find(|ch| self.channel_view == MidiChannelMask::single(*ch))
-        {
-            if current.ui() >= 16 {
-                MidiChannelMask::ALL
-            } else {
-                MidiChannelMask::single(MidiChannel::from_ui(current.ui() + 1))
-            }
-        } else {
-            MidiChannelMask::ALL
-        };
+    /// Set the channel-view filter (All Channels or a single Channel 1–16).
+    fn set_channel_view(&mut self, mask: MidiChannelMask, cx: &mut Context<Self>) {
+        self.channel_view = mask;
+        self.open_select_menu = None;
         cx.notify();
     }
 
     fn channel_view_label(&self) -> String {
         if self.channel_view.is_all() {
-            "View: All Ch".to_string()
+            "All Channels".to_string()
         } else if let Some(ch) =
             MidiChannel::all().find(|ch| self.channel_view == MidiChannelMask::single(*ch))
         {
-            format!("View: {}", ch.label())
+            format!("Channel {}", ch.ui())
         } else {
-            "View: Custom".to_string()
+            "Custom".to_string()
         }
+    }
+
+    /// Begin middle-mouse grab-pan of the note grid.
+    fn begin_pan(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        window.focus(&self.focus, cx);
+        window.prevent_default();
+        cx.stop_propagation();
+        self.drag = PianoDrag::Pan {
+            last_x: event.position.x.into(),
+            last_y: event.position.y.into(),
+        };
+        cx.notify();
     }
 
     fn delete_selection(&mut self, cx: &mut Context<Self>) {
@@ -3204,6 +3541,44 @@ impl PianoRoll {
         });
     }
 
+    /// Restore default Zoom Y (`row_h`) without touching Zoom X (`ppb`).
+    fn reset_row_h_zoom(&mut self, cx: &mut Context<Self>) {
+        let (_, view_h) = self.grid_view_size();
+        let anchor_y = view_h * 0.5;
+        let old_row = self.note_row_h();
+        let anchor_pitch_f =
+            (PITCH_CNT as f32 - 1.0) - ((anchor_y + self.scroll_y) / old_row);
+        self.row_h = DEFAULT_ROW_H;
+        let new_row = self.note_row_h();
+        self.scroll_y = (((PITCH_CNT as f32 - 1.0) - anchor_pitch_f) * new_row - anchor_y)
+            .clamp(0.0, self.max_scroll_y());
+        cx.notify();
+    }
+
+    /// Multiplicative vertical zoom around a grid-local y anchor. The pitch
+    /// under `anchor_y` stays fixed while `row_h` changes.
+    fn zoom_row_h_around(&mut self, factor: f32, anchor_y: f32, cx: &mut Context<Self>) {
+        let factor = factor.max(0.0001);
+        let old_row = self.note_row_h();
+        let new_row = (old_row * factor).clamp(PIANO_ROLL_MIN_ROW_H, PIANO_ROLL_MAX_ROW_H);
+        if (new_row - old_row).abs() < 0.0001 {
+            return;
+        }
+        let (_, view_h) = self.grid_view_size();
+        let anchor_y = anchor_y.clamp(0.0, view_h.max(0.0));
+        // Fractional pitch row under the cursor (higher pitch = smaller row index).
+        let anchor_row = (anchor_y + self.scroll_y) / old_row;
+        self.row_h = new_row;
+        self.scroll_y = (anchor_row * new_row - anchor_y).clamp(0.0, self.max_scroll_y());
+        if midi_zoom_debug_enabled() {
+            eprintln!(
+                "[MidiEditorZoom] old_row_h={:.4} new_row_h={:.4} anchor_y={:.2} scroll_y={:.2}",
+                old_row, new_row, anchor_y, self.scroll_y,
+            );
+        }
+        cx.notify();
+    }
+
     /// Multiplicative horizontal zoom around a grid-local x anchor. Mirrors the
     /// arrangement timeline's `TimelineState::zoom_by`: the beat under `anchor_x`
     /// stays visually fixed while `ppb` changes, so zooming never jumps back to
@@ -3254,6 +3629,17 @@ impl PianoRoll {
             gpui::ScrollDelta::Pixels(p) => (f32::from(p.x), f32::from(p.y)),
             gpui::ScrollDelta::Lines(p) => (p.x * 36.0, p.y * 36.0),
         };
+        // Alt + wheel = Zoom Y (independent of Zoom X).
+        if event.modifiers.alt && !(event.modifiers.control || event.modifiers.platform) {
+            let (_, view_h) = self.grid_view_size();
+            let anchor_y = self
+                .grid_local(event.position)
+                .map(|(_, ly)| ly)
+                .unwrap_or(view_h * 0.5);
+            let factor = (1.0022_f32).powf(-dy);
+            self.zoom_row_h_around(factor, anchor_y, cx);
+            return;
+        }
         if event.modifiers.control || event.modifiers.platform {
             // Zoom horizontal, anchored at the cursor. Fall back to the viewport
             // center if the grid hasn't been laid out yet (no captured bounds).
@@ -3671,6 +4057,7 @@ impl PianoRoll {
         let start_beat = self.x_to_beat(0.0);
         let end_beat = self.x_to_beat(view_w);
 
+        let row_h = self.note_row_h();
         let tl = self.timeline.read(cx);
         let mut notes = Vec::new();
         let mut velocity = Vec::new();
@@ -3680,7 +4067,7 @@ impl PianoRoll {
                 let x = self.beat_to_x(d.start);
                 let w = (d.duration * self.ppb).max(3.0);
                 let y = self.pitch_to_y(d.pitch);
-                if x + w < 0.0 || x > view_w || y + ROW_H < 0.0 || y > view_h {
+                if x + w < 0.0 || x > view_w || y + row_h < 0.0 || y > view_h {
                     continue;
                 }
                 let selected = self.selection.contains(&d.id);
@@ -3739,14 +4126,14 @@ mod piano_key_pitch_tests {
     /// Top of the lane is the highest pitch (reversed pitch order).
     #[test]
     fn top_row_is_highest_pitch() {
-        assert_eq!(local_y_to_pitch(0.0, 0.0), MAX_PITCH);
+        assert_eq!(local_y_to_pitch(0.0, 0.0, ROW_H), MAX_PITCH);
     }
 
     /// Each row down drops exactly one semitone.
     #[test]
     fn moving_down_one_row_lowers_pitch_by_one() {
-        assert_eq!(local_y_to_pitch(ROW_H, 0.0), MAX_PITCH - 1);
-        assert_eq!(local_y_to_pitch(ROW_H * 2.0, 0.0), MAX_PITCH - 2);
+        assert_eq!(local_y_to_pitch(ROW_H, 0.0, ROW_H), MAX_PITCH - 1);
+        assert_eq!(local_y_to_pitch(ROW_H * 2.0, 0.0, ROW_H), MAX_PITCH - 2);
     }
 
     /// Scrolling shifts which pitch is at the lane top, consistently (spec test
@@ -3754,9 +4141,9 @@ mod piano_key_pitch_tests {
     #[test]
     fn scroll_offsets_mapping_by_whole_rows() {
         let scroll = ROW_H * 3.0;
-        assert_eq!(local_y_to_pitch(0.0, scroll), MAX_PITCH - 3);
+        assert_eq!(local_y_to_pitch(0.0, scroll, ROW_H), MAX_PITCH - 3);
         // ...and a click one row further down with the same scroll is one lower.
-        assert_eq!(local_y_to_pitch(ROW_H, scroll), MAX_PITCH - 4);
+        assert_eq!(local_y_to_pitch(ROW_H, scroll, ROW_H), MAX_PITCH - 4);
     }
 
     /// The key lane mapping is the exact inverse of `pitch_to_y` (the layout
@@ -3769,14 +4156,18 @@ mod piano_key_pitch_tests {
             // `pitch_to_y`: (PITCH_CNT - 1 - pitch) * ROW_H - scroll.
             let row_top = (PITCH_CNT - 1 - pitch as i32) as f32 * ROW_H - scroll;
             let row_mid = row_top + ROW_H * 0.5;
-            assert_eq!(local_y_to_pitch(row_mid, scroll), pitch, "pitch {pitch}");
+            assert_eq!(
+                local_y_to_pitch(row_mid, scroll, ROW_H),
+                pitch,
+                "pitch {pitch}"
+            );
         }
     }
 
     /// Out-of-range rows clamp to the MIDI bounds (never panic / wrap).
     #[test]
     fn clamps_beyond_the_range() {
-        assert_eq!(local_y_to_pitch(1.0e6, 0.0), 0);
-        assert_eq!(local_y_to_pitch(-1.0e6, 0.0), MAX_PITCH);
+        assert_eq!(local_y_to_pitch(1.0e6, 0.0, ROW_H), 0);
+        assert_eq!(local_y_to_pitch(-1.0e6, 0.0, ROW_H), MAX_PITCH);
     }
 }

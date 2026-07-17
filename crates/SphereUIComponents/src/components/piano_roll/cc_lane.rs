@@ -101,42 +101,204 @@ impl PianoRoll {
         })
     }
 
-    /// Begin dragging an existing CC point; snapshot the lane for undo.
-    pub(super) fn begin_cc_move(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
+    /// Begin dragging an existing CC point (and any multi-selection that
+    /// contains it). Ctrl/Cmd+click toggles selection without starting a drag
+    /// when handled by the lane mouse-down path before this is called.
+    pub(super) fn begin_cc_move(
+        &mut self,
+        id: u64,
+        unsnap: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         window.focus(&self.focus, cx);
         let Some(clip_id) = self.editing_clip_id(cx) else {
             return;
         };
         let kind = self.active_cc;
+        if !self.cc_selection.contains(&id) {
+            self.cc_selection = HashSet::from([id]);
+        }
+        let selected = self.cc_selection.clone();
+        let prev: Vec<(u64, f32, f32)> = self
+            .timeline
+            .read(cx)
+            .state
+            .controller_lane_points(&clip_id, kind)
+            .map(|pts| {
+                pts.iter()
+                    .filter(|p| selected.contains(&p.id))
+                    .map(|p| (p.id, p.beat, p.value))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let (anchor_beat, anchor_value) = prev
+            .iter()
+            .find(|(pid, _, _)| *pid == id)
+            .map(|(_, b, v)| (*b, *v))
+            .unwrap_or((0.0, 0.0));
         self.cc_edit_prev = Some(
             self.timeline
                 .read(cx)
                 .state
                 .controller_points_snapshot(&clip_id, kind),
         );
-        self.drag = PianoDrag::CcMove { id };
+        let ids: Vec<u64> = prev.iter().map(|(pid, _, _)| *pid).collect();
+        self.drag = PianoDrag::CcMove {
+            ids,
+            prev,
+            anchor_beat,
+            anchor_value,
+            unsnap,
+        };
         cx.notify();
     }
 
-    /// Move the dragged CC point to the cursor (beat snapped, value continuous).
-    pub(super) fn cc_move_to(&mut self, id: u64, lx: f32, ly: f32, cx: &mut Context<Self>) {
+    /// Move every selected CC point by the same relative Δbeat/Δvalue from the
+    /// grab anchor. Beat snaps unless Shift (`unsnap`) is held.
+    pub(super) fn cc_move_selection_to(&mut self, lx: f32, ly: f32, cx: &mut Context<Self>) {
         let Some(clip_id) = self.editing_clip_id(cx) else {
             return;
         };
+        let PianoDrag::CcMove {
+            prev,
+            anchor_beat,
+            anchor_value,
+            unsnap,
+            ..
+        } = &self.drag
+        else {
+            return;
+        };
+        let prev = prev.clone();
+        let anchor_beat = *anchor_beat;
+        let anchor_value = *anchor_value;
+        let unsnap = *unsnap;
         let kind = self.active_cc;
-        let beat = self.snap_beats(self.x_to_beat(lx));
+        let cur_beat = self.snap_beats_live(self.x_to_beat(lx).max(0.0), unsnap);
         let (_, cc_h) = self.cc_view_size();
-        let value = (1.0 - (ly / cc_h.max(1.0))).clamp(0.0, 1.0);
-        self.drag_value_status = Some(format!(
-            "{}: {}",
-            cc_kind_label(kind),
-            controller_display_value(kind, value)
-        ));
+        let cur_value = (1.0 - (ly / cc_h.max(1.0))).clamp(0.0, 1.0);
+        let d_beat = cur_beat - anchor_beat;
+        let d_value = cur_value - anchor_value;
+        let step = self.step_beats();
+        self.drag_value_status = Some(if prev.len() == 1 {
+            format!(
+                "{}: {}",
+                cc_kind_label(kind),
+                controller_display_value(kind, cur_value)
+            )
+        } else {
+            format!(
+                "{} Δbeat {:+.2} · {} pts",
+                cc_kind_label(kind),
+                d_beat,
+                prev.len()
+            )
+        });
         self.timeline.update(cx, |tl, tcx| {
-            tl.state
-                .set_controller_point(&clip_id, kind, id, beat, value);
+            for (id, beat, value) in &prev {
+                let raw = (*beat + d_beat).max(0.0);
+                let next_beat = if unsnap || step <= 0.0 {
+                    raw
+                } else {
+                    ((raw / step).round() * step).max(0.0)
+                };
+                let next_value = (*value + d_value).clamp(0.0, 1.0);
+                tl.state
+                    .set_controller_point(&clip_id, kind, *id, next_beat, next_value);
+            }
             tcx.notify();
         });
+    }
+
+    /// Generate a shaped CC curve over the selected points' beat span (or one
+    /// bar from the click beat when nothing is selected). Replaces points in
+    /// that span; commits as one `SetControllerPoints` undo entry.
+    pub(super) fn apply_cc_curve(
+        &mut self,
+        kind: CcCurveKind,
+        click_beat: f32,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(clip_id) = self.editing_clip_id(cx) else {
+            return;
+        };
+        let controller = self.active_cc;
+        let step = self.step_beats().max(1.0e-3);
+        let existing = self
+            .timeline
+            .read(cx)
+            .state
+            .controller_points_snapshot(&clip_id, controller);
+        let selected: Vec<&MidiControllerPoint> = existing
+            .iter()
+            .filter(|p| self.cc_selection.contains(&p.id))
+            .collect();
+        let (lo_beat, hi_beat, from, to) = if selected.len() >= 2 {
+            let lo = selected
+                .iter()
+                .map(|p| p.beat)
+                .fold(f32::INFINITY, f32::min);
+            let hi = selected.iter().map(|p| p.beat).fold(0.0_f32, f32::max);
+            let from = selected
+                .iter()
+                .min_by(|a, b| a.beat.partial_cmp(&b.beat).unwrap_or(std::cmp::Ordering::Equal))
+                .map(|p| p.value)
+                .unwrap_or(0.0);
+            let to = selected
+                .iter()
+                .max_by(|a, b| a.beat.partial_cmp(&b.beat).unwrap_or(std::cmp::Ordering::Equal))
+                .map(|p| p.value)
+                .unwrap_or(1.0);
+            (lo, hi.max(lo + step), from, to)
+        } else if selected.len() == 1 {
+            let p = selected[0];
+            (p.beat, p.beat + 4.0, p.value, 1.0 - p.value)
+        } else {
+            let start = self.snap_beats(click_beat.max(0.0));
+            (start, start + 4.0, 0.0, 1.0)
+        };
+
+        // Humanize: jitter existing points in-span rather than regenerating.
+        let prev = existing.clone();
+        let mut points: Vec<MidiControllerPoint> = existing
+            .into_iter()
+            .filter(|p| p.beat < lo_beat - 1.0e-4 || p.beat > hi_beat + 1.0e-4)
+            .collect();
+
+        if kind == CcCurveKind::Humanize {
+            for p in prev.iter().filter(|p| p.beat >= lo_beat - 1.0e-4 && p.beat <= hi_beat + 1.0e-4)
+            {
+                let jitter = (CcCurveKind::Humanize.sample(p.beat.fract(), 0.0, 1.0) - 0.5) * 0.12;
+                points.push(MidiControllerPoint::new(
+                    p.beat,
+                    (p.value + jitter).clamp(0.0, 1.0),
+                ));
+            }
+        } else {
+            let span = (hi_beat - lo_beat).max(step);
+            let count = (span / step).round().max(1.0) as i32;
+            for i in 0..=count {
+                let beat = (lo_beat + step * i as f32).min(hi_beat);
+                let t = if span <= 1.0e-6 {
+                    0.0
+                } else {
+                    (beat - lo_beat) / span
+                };
+                let value = kind.sample(t, from, to);
+                points.push(MidiControllerPoint::new(beat, value));
+            }
+        }
+
+        self.cc_edit_prev = Some(prev);
+        self.timeline.update(cx, |tl, tcx| {
+            tl.state
+                .set_controller_lane_points(&clip_id, controller, points);
+            tcx.notify();
+        });
+        self.commit_cc_edit(cx);
+        self.open_cc_curve_menu = None;
+        cx.notify();
     }
 
     /// Begin a Shift+drag ramp: snapshot the lane for undo and anchor the line
@@ -339,6 +501,7 @@ impl PianoRoll {
                     return None;
                 }
                 let y = Self::controller_y_for_value(value, cc_h);
+                let selected = self.cc_selection.contains(&id);
                 Some(
                     div()
                         .id(("pr-cc-point", id as usize))
@@ -358,8 +521,25 @@ impl PianoRoll {
                                 .h(px(8.0))
                                 .rounded(px(4.0))
                                 .border(px(1.0))
-                                .border_color(Colors::text_primary())
-                                .bg(accent),
+                                .border_color(if selected {
+                                    Colors::accent_primary()
+                                } else {
+                                    Colors::text_primary()
+                                })
+                                .bg(if selected {
+                                    Colors::with_alpha(accent, 1.0)
+                                } else {
+                                    accent
+                                })
+                                .when(selected, |el| {
+                                    el.shadow(vec![gpui::BoxShadow {
+                                        color: Colors::with_alpha(accent, 0.45).into(),
+                                        offset: gpui::point(px(0.0), px(0.0)),
+                                        blur_radius: px(6.0),
+                                        spread_radius: px(0.0),
+                                        inset: false,
+                                    }])
+                                }),
                         )
                         .into_any_element(),
                 )
@@ -394,8 +574,9 @@ impl PianoRoll {
                 .justify_center()
                 .text_size(px(9.0))
                 .text_color(Colors::text_faint())
-                .child("Click to draw controller points · Shift-drag for line")
+                .child("Click to draw · Shift-drag line · Right-click curves")
         });
+        let curve_menu = self.build_cc_curve_menu(cx);
         let cc_bounds = self.cc_bounds.clone();
         let canvas = canvas(
             move |bounds, _w, _cx| cc_bounds.set(Some(bounds)),
@@ -419,23 +600,38 @@ impl PianoRoll {
             .children(points)
             .children(empty_state)
             .children(value_chip_el)
+            .children(curve_menu)
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, ev: &MouseDownEvent, window, cx| {
                     cx.stop_propagation();
+                    this.open_cc_curve_menu = None;
                     if let Some((lx, ly)) = this.cc_local(ev.position) {
                         // Shift+drag draws a straight ramp across the spanned range.
                         if ev.modifiers.shift {
                             this.begin_cc_line(lx, ly, window, cx);
                             return;
                         }
-                        // Grab an existing point to move it; otherwise paint.
+                        // Grab an existing point to move it; Ctrl/Cmd toggles
+                        // multi-selection. Empty click clears selection and paints.
                         if let Some(cid) = this.editing_clip_id(cx) {
                             if let Some(id) = this.cc_point_at(cx, &cid, lx, ly) {
-                                this.begin_cc_move(id, window, cx);
+                                let additive =
+                                    ev.modifiers.control || ev.modifiers.platform;
+                                if additive {
+                                    if this.cc_selection.contains(&id) {
+                                        this.cc_selection.remove(&id);
+                                    } else {
+                                        this.cc_selection.insert(id);
+                                    }
+                                    cx.notify();
+                                    return;
+                                }
+                                this.begin_cc_move(id, ev.modifiers.shift, window, cx);
                                 return;
                             }
                         }
+                        this.cc_selection.clear();
                         this.begin_cc_paint(false, lx, ly, window, cx);
                     }
                 }),
@@ -444,10 +640,78 @@ impl PianoRoll {
                 MouseButton::Right,
                 cx.listener(|this, ev: &MouseDownEvent, window, cx| {
                     cx.stop_propagation();
+                    window.focus(&this.focus, cx);
+                    // Alt+right keeps the legacy erase paint; plain right-click
+                    // opens the CC curve context menu (controller lane only).
+                    if ev.modifiers.alt {
+                        if let Some((lx, ly)) = this.cc_local(ev.position) {
+                            this.begin_cc_paint(true, lx, ly, window, cx);
+                        }
+                        return;
+                    }
                     if let Some((lx, ly)) = this.cc_local(ev.position) {
-                        this.begin_cc_paint(true, lx, ly, window, cx);
+                        this.open_cc_curve_menu = Some((lx, ly));
+                        cx.notify();
                     }
                 }),
             )
+    }
+
+    fn build_cc_curve_menu(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        let (lx, ly) = self.open_cc_curve_menu?;
+        let click_beat = self.x_to_beat(lx);
+        let mut panel = div()
+            .absolute()
+            .left(px(lx.clamp(4.0, 240.0)))
+            .top(px(ly.clamp(4.0, 40.0)))
+            .w(px(132.0))
+            .max_h(px(LANE_H - 8.0))
+            .id("pr-cc-curve-menu")
+            .overflow_y_scroll()
+            .flex()
+            .flex_col()
+            .p(px(3.0))
+            .gap(px(1.0))
+            .rounded(px(6.0))
+            .bg(Colors::surface_card())
+            .border(px(1.0))
+            .border_color(Colors::border_subtle())
+            .shadow_lg()
+            .occlude()
+            .on_mouse_down(MouseButton::Left, |_, _window, cx| cx.stop_propagation())
+            .child(
+                div()
+                    .px(px(7.0))
+                    .py(px(3.0))
+                    .text_size(px(9.0))
+                    .text_color(Colors::text_muted())
+                    .child("Generate Curve"),
+            );
+        for (i, kind) in CcCurveKind::ALL.iter().enumerate() {
+            let kind = *kind;
+            panel = panel.child(
+                div()
+                    .id(("pr-cc-curve", i))
+                    .flex()
+                    .items_center()
+                    .h(px(18.0))
+                    .px(px(7.0))
+                    .rounded(px(4.0))
+                    .text_size(px(10.0))
+                    .text_color(Colors::text_secondary())
+                    .hover(|s| s.bg(Colors::surface_hover()))
+                    .cursor(gpui::CursorStyle::PointingHand)
+                    .child(kind.label())
+                    .on_click(cx.listener(move |this, _ev, _w, cx| {
+                        cx.stop_propagation();
+                        this.apply_cc_curve(kind, click_beat, cx);
+                    })),
+            );
+        }
+        Some(
+            deferred(panel.into_any_element())
+                .with_priority(PIANO_ROLL_MENU_PRIORITY)
+                .into_any_element(),
+        )
     }
 }

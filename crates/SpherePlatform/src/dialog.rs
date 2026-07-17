@@ -80,7 +80,14 @@ fn escape_applescript(value: &str) -> String {
 fn linux_alert(title: &str, message: &str) {
     // Prefer common desktop dialog tools; fall back to stderr if none exist.
     if std::process::Command::new("zenity")
-        .args(["--error", "--title", title, "--text", message, "--width=420"])
+        .args([
+            "--error",
+            "--title",
+            title,
+            "--text",
+            message,
+            "--width=420",
+        ])
         .status()
         .map(|s| s.success())
         .unwrap_or(false)

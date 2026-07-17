@@ -195,6 +195,7 @@ fn generic_channel_info(kind: &str, count: u32) -> Vec<EngineAudioChannelInfo> {
         .collect()
 }
 
+#[cfg(target_os = "windows")]
 fn asio_channel_info(
     channel: &crate::backend::AsioChannelInfo,
     direction: &str,

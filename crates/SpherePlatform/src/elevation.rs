@@ -125,7 +125,10 @@ pub fn abort_if_elevated() {
 }
 
 /// Pure Unix elevation rule (euid == 0). Env vars are not consulted.
-#[cfg_attr(not(any(test, target_os = "linux", target_os = "macos")), allow(dead_code))]
+#[cfg_attr(
+    not(any(test, target_os = "linux", target_os = "macos")),
+    allow(dead_code)
+)]
 pub(crate) fn unix_euid_is_elevated(euid: u32) -> bool {
     euid == 0
 }
@@ -166,8 +169,8 @@ mod windows {
     fn probe_windows() -> windows::core::Result<ElevationProbe> {
         use windows::Win32::Foundation::{CloseHandle, HANDLE};
         use windows::Win32::Security::{
-            GetTokenInformation, TOKEN_ELEVATION, TOKEN_ELEVATION_TYPE, TOKEN_QUERY, TokenElevation,
-            TokenElevationType, TokenElevationTypeFull,
+            GetTokenInformation, TOKEN_ELEVATION, TOKEN_ELEVATION_TYPE, TOKEN_QUERY,
+            TokenElevation, TokenElevationType, TokenElevationTypeFull,
         };
         use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
@@ -196,8 +199,7 @@ mod windows {
             );
 
             let token_is_elevated = elev_ok.is_ok() && elevation.TokenIsElevated != 0;
-            let elevation_type_full =
-                type_ok.is_ok() && elev_type == TokenElevationTypeFull;
+            let elevation_type_full = type_ok.is_ok() && elev_type == TokenElevationTypeFull;
 
             // Administrators group membership alone is not elevation under UAC
             // (filtered admin tokens remain members). Combine with elevation.

@@ -79,6 +79,12 @@ jobs:
             libxi-dev libgl1-mesa-dev libfontconfig1-dev \
             libssl-dev
 
+      - name: Install macOS libclang (bindgen)
+        if: matrix.os == 'macos-latest'
+        run: |
+          brew install llvm
+          echo "LIBCLANG_PATH=$(brew --prefix llvm)/lib" >> "$GITHUB_ENV"
+
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 

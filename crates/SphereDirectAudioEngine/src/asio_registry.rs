@@ -56,7 +56,9 @@ pub enum AsioDriverCompatibility {
     /// The registered module path does not exist on disk.
     ModuleMissing,
     /// The module's PE machine type does not match this process.
-    WrongArchitecture { machine: u16 },
+    WrongArchitecture {
+        machine: u16,
+    },
     /// Registered only in the 32-bit (`WOW6432Node`) view — invisible to the
     /// ASIO loader in a 64-bit process.
     WrongRegistryView,
@@ -470,7 +472,10 @@ mod tests {
 
     #[test]
     fn asiolist_name_matches_sdk_truncation() {
-        assert_eq!(asiolist_driver_name("Focusrite USB ASIO"), "Focusrite USB ASIO");
+        assert_eq!(
+            asiolist_driver_name("Focusrite USB ASIO"),
+            "Focusrite USB ASIO"
+        );
         // 31 bytes: passes through untouched (fits the 32-byte buffer).
         let thirty_one = "a".repeat(31);
         assert_eq!(asiolist_driver_name(&thirty_one), thirty_one);
@@ -498,7 +503,10 @@ mod tests {
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].stable_id, "DriverA");
         assert_eq!(out[0].compatibility, AsioDriverCompatibility::Compatible);
-        assert_eq!(out[0].module_path.as_deref(), Some(Path::new("C:/asio/a.dll")));
+        assert_eq!(
+            out[0].module_path.as_deref(),
+            Some(Path::new("C:/asio/a.dll"))
+        );
     }
 
     #[test]
@@ -532,9 +540,10 @@ mod tests {
     #[test]
     fn missing_module_and_wrong_arch_are_flagged() {
         let mut resolver = FakeResolver::new().with_driver(CLSID_B, "C:/asio/x86.dll", 0x014C);
-        resolver
-            .servers
-            .insert(normalize_clsid(CLSID_A).unwrap(), PathBuf::from("C:/gone.dll"));
+        resolver.servers.insert(
+            normalize_clsid(CLSID_A).unwrap(),
+            PathBuf::from("C:/gone.dll"),
+        );
         let out = resolve_descriptors(
             vec![
                 raw("Gone", None, Some(CLSID_A)),

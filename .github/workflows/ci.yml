@@ -79,6 +79,13 @@ jobs:
             libxi-dev libgl1-mesa-dev libfontconfig1-dev \
             libssl-dev
 
+      # coreaudio-sys / bindgen need a discoverable libclang on macOS runners.
+      - name: Install macOS libclang (bindgen)
+        if: runner.os == 'macOS'
+        run: |
+          brew install llvm
+          echo "LIBCLANG_PATH=$(brew --prefix llvm)/lib" >> "$GITHUB_ENV"
+
       - name: Setup Rust (clippy)
         uses: dtolnay/rust-toolchain@stable
         with:

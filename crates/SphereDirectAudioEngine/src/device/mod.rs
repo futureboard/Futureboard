@@ -125,4 +125,3 @@ pub(crate) fn resolve_output_device_for_host(
         }
     }
 }
-

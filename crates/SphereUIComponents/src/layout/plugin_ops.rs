@@ -3771,9 +3771,20 @@ fn studio_native_hwnd(window: &Window) -> Option<u64> {
     }
 }
 
+// On Linux the external plugin host owns a top-level GTK4/X11 editor window;
+// the returned X11 window id is a read-only owner/DPI reference (never a real
+// cross-process parent). Under XWayland GPUI uses the X11 backend so this
+// resolves; on pure Wayland there is no X11 owner and VST3 X11 embedding is not
+// available, so this returns None (the caller surfaces a clear error).
 #[cfg(not(target_os = "windows"))]
-fn studio_native_hwnd(_window: &Window) -> Option<u64> {
-    None
+fn studio_native_hwnd(window: &Window) -> Option<u64> {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    let handle = HasWindowHandle::window_handle(window).ok()?;
+    match handle.as_raw() {
+        RawWindowHandle::Xcb(w) => Some(w.window.get() as u64),
+        RawWindowHandle::Xlib(w) => Some(w.window as u64),
+        _ => None,
+    }
 }
 
 /// Emit paint-instrumentation counters for a native editor shell (spec Part 6).

@@ -492,6 +492,11 @@ struct SphereDauxVst3Processor {
   int editor_requested_width{0};
   int editor_requested_height{0};
   bool editor_attached{false};
+  // Host-owned top-level editor (Linux/macOS): set when the user closes the
+  // editor window via its own titlebar so the external plugin-host process can
+  // poll it (sphere_daux_vst3_embed_take_user_close), report EditorClosed, and
+  // detach — while keeping the audio instance alive. Read-and-reset on poll.
+  std::atomic<bool> editor_user_closed{false};
   std::atomic<bool> processor_valid{true};
 #endif
 

@@ -22,8 +22,10 @@
 #include <cstring>
 #include <mutex>
 #include <thread>
+#include <vector>
 
 #include <gtk/gtk.h>
+#include <glib-unix.h>
 
 #ifdef GDK_WINDOWING_X11
 #  include <gdk/x11/gdkx.h>
@@ -32,7 +34,21 @@
 #  include <gdk/wayland/gdkwayland.h>
 #endif
 
+#include "pluginterfaces/base/funknown.h"
+#include "pluginterfaces/gui/iplugview.h"
+
 #include "sphere_daux_editor_bridge.h"
+
+// The Linux run-loop interfaces are GUI-layer IIDs that the SDK IID TUs we
+// compile (coreiids.cpp / vstinitiids.cpp) do not emit. Our IRunLoop frame's
+// queryInterface references IRunLoop::iid, so define the symbol here (exactly
+// once, in this the only Linux TU). IPlugFrame::iid is defined in
+// vst3_processor.cpp and referenced here as extern.
+namespace Steinberg {
+namespace Linux {
+DEF_CLASS_IID(IRunLoop)
+} // namespace Linux
+} // namespace Steinberg
 
 // ── Forward declarations ──────────────────────────────────────────────────────
 
@@ -78,6 +94,158 @@ bool ensure_gtk() {
                               [] { return s_gtk_ready; });
 }
 
+// ── IPlugFrame + Linux::IRunLoop ─────────────────────────────────────────────
+//
+// VST3 on Linux has no global event loop, so the host must hand the plug-in an
+// IRunLoop (queried off the IPlugFrame). The plug-in registers its X11 socket
+// file descriptor and repaint timers through it; the host drives them from its
+// own main loop. Here we bridge those registrations onto the GTK thread's GLib
+// main context. Without this the editor window attaches but never repaints.
+//
+// All methods run on the GTK thread: the plug-in calls them from attached() /
+// removed() / its own event and timer callbacks, all of which we dispatch on
+// the GTK thread. No locking is therefore required for the registration list.
+class LinuxRunLoopFrame final : public Steinberg::IPlugFrame,
+                                public Steinberg::Linux::IRunLoop {
+public:
+    LinuxRunLoopFrame(SphereDauxVst3Processor* proc, GtkWindow* window)
+        : proc_(proc), window_(window) {}
+
+    ~LinuxRunLoopFrame() {
+        // Defensive: drop any GLib sources the plug-in failed to unregister.
+        for (auto* reg : regs_) {
+            if (reg->source_id) g_source_remove(reg->source_id);
+            if (reg->handler)   reg->handler->release();
+            delete reg;
+        }
+        regs_.clear();
+    }
+
+    // ── IPlugFrame ───────────────────────────────────────────────────────────
+    Steinberg::tresult PLUGIN_API resizeView(Steinberg::IPlugView* view,
+                                             Steinberg::ViewRect* newSize) override {
+        if (!view || !newSize) return Steinberg::kInvalidArgument;
+        const int w = newSize->right - newSize->left;
+        const int h = newSize->bottom - newSize->top;
+        if (window_ && w > 0 && h > 0 && !resizing_) {
+            resizing_ = true;
+            gtk_window_set_default_size(window_, w, h);
+            Steinberg::ViewRect local{0, 0, w, h};
+            view->onSize(&local); // let the plug-in fit its child to the new rect
+            resizing_ = false;
+        }
+        return Steinberg::kResultTrue;
+    }
+
+    // ── Linux::IRunLoop ────────────────────────────────────────────────────────
+    Steinberg::tresult PLUGIN_API registerEventHandler(
+        Steinberg::Linux::IEventHandler* handler,
+        Steinberg::Linux::FileDescriptor fd) override {
+        if (!handler) return Steinberg::kInvalidArgument;
+        handler->addRef();
+        auto* reg = new Reg{handler, nullptr, fd, 0};
+        reg->source_id = g_unix_fd_add_full(
+            G_PRIORITY_DEFAULT, fd,
+            static_cast<GIOCondition>(G_IO_IN | G_IO_ERR | G_IO_HUP),
+            &LinuxRunLoopFrame::fd_cb, reg, nullptr);
+        regs_.push_back(reg);
+        return Steinberg::kResultTrue;
+    }
+
+    Steinberg::tresult PLUGIN_API unregisterEventHandler(
+        Steinberg::Linux::IEventHandler* handler) override {
+        return remove_reg([&](Reg* r) { return r->handler == handler; });
+    }
+
+    Steinberg::tresult PLUGIN_API registerTimer(
+        Steinberg::Linux::ITimerHandler* handler,
+        Steinberg::Linux::TimerInterval milliseconds) override {
+        if (!handler) return Steinberg::kInvalidArgument;
+        if (milliseconds == 0) milliseconds = 1; // GLib requires a non-zero period
+        handler->addRef();
+        auto* reg = new Reg{handler, nullptr, -1, 0};
+        reg->source_id = g_timeout_add_full(
+            G_PRIORITY_DEFAULT, static_cast<guint>(milliseconds),
+            &LinuxRunLoopFrame::timer_cb, reg, nullptr);
+        regs_.push_back(reg);
+        return Steinberg::kResultTrue;
+    }
+
+    Steinberg::tresult PLUGIN_API unregisterTimer(
+        Steinberg::Linux::ITimerHandler* handler) override {
+        return remove_reg(
+            [&](Reg* r) { return r->handler == handler; });
+    }
+
+    // ── FUnknown (shared final overrider for both interface paths) ──────────────
+    Steinberg::tresult PLUGIN_API queryInterface(const Steinberg::TUID iid,
+                                                 void** obj) override {
+        if (Steinberg::FUnknownPrivate::iidEqual(iid,
+                                                 Steinberg::Linux::IRunLoop::iid)) {
+            *obj = static_cast<Steinberg::Linux::IRunLoop*>(this);
+            addRef();
+            return Steinberg::kResultTrue;
+        }
+        if (Steinberg::FUnknownPrivate::iidEqual(iid, Steinberg::IPlugFrame::iid) ||
+            Steinberg::FUnknownPrivate::iidEqual(iid, Steinberg::FUnknown::iid)) {
+            *obj = static_cast<Steinberg::IPlugFrame*>(this);
+            addRef();
+            return Steinberg::kResultTrue;
+        }
+        *obj = nullptr;
+        return Steinberg::kNoInterface;
+    }
+    // Lifetime is owned by the editor window, not the plug-in: a plug-in
+    // release() must not destroy us (matches the Windows PluginEditorFrame).
+    Steinberg::uint32 PLUGIN_API addRef() override { return 1000; }
+    Steinberg::uint32 PLUGIN_API release() override { return 1000; }
+
+private:
+    // One registration record; `handler` is stored as FUnknown* so a single
+    // list holds both event- and timer-handlers (they share addRef/release).
+    struct Reg {
+        Steinberg::FUnknown* handler{nullptr};
+        void*                unused{nullptr};
+        int                  fd{-1};
+        guint                source_id{0};
+    };
+
+    static gboolean fd_cb(gint fd, GIOCondition, gpointer ud) {
+        auto* reg = static_cast<Reg*>(ud);
+        static_cast<Steinberg::Linux::IEventHandler*>(
+            static_cast<void*>(reg->handler))
+            ->onFDIsSet(fd);
+        return G_SOURCE_CONTINUE;
+    }
+
+    static gboolean timer_cb(gpointer ud) {
+        auto* reg = static_cast<Reg*>(ud);
+        static_cast<Steinberg::Linux::ITimerHandler*>(
+            static_cast<void*>(reg->handler))
+            ->onTimer();
+        return G_SOURCE_CONTINUE;
+    }
+
+    template <typename Pred>
+    Steinberg::tresult remove_reg(Pred pred) {
+        for (auto it = regs_.begin(); it != regs_.end(); ++it) {
+            if (pred(*it)) {
+                if ((*it)->source_id) g_source_remove((*it)->source_id);
+                if ((*it)->handler)   (*it)->handler->release();
+                delete *it;
+                regs_.erase(it);
+                return Steinberg::kResultTrue;
+            }
+        }
+        return Steinberg::kResultFalse;
+    }
+
+    SphereDauxVst3Processor* proc_{nullptr};
+    GtkWindow*               window_{nullptr};
+    bool                     resizing_{false};
+    std::vector<Reg*>        regs_;
+};
+
 // ── Resize callback ────────────────────────────────────────────────────────
 
 struct ResizeCtx {
@@ -95,6 +263,37 @@ static void on_surface_layout(GdkSurface* /*surface*/,
     }
 }
 #endif
+
+// ── Teardown (must run on the GTK thread) ─────────────────────────────────
+//
+// Shared by idle_close_editor (cross-thread close request) and the window's
+// own close-request handler (user pressed the titlebar X). Both already run on
+// the GTK thread, so this runs the teardown inline — it must NOT go through
+// close_editor_linux() from the close-request handler, which would g_idle_add()
+// and then block-wait on the GTK thread for an idle source that can only run
+// once the handler returns (self-deadlock). Idempotent.
+static void close_editor_on_gtk_thread(SphereDauxVst3Processor* proc) {
+    void* win_ptr = sphere_daux_editor_get_native_window(proc);
+    if (!win_ptr) return;
+
+    // Grab the IRunLoop frame (stored in native_embed) before clearing.
+    auto* frame = static_cast<LinuxRunLoopFrame*>(
+        sphere_daux_editor_get_native_embed(proc));
+
+    sphere_daux_editor_clear_native(proc);       // zero first to prevent re-entrancy
+    sphere_daux_editor_set_frame(proc, nullptr); // setFrame(nullptr) before removed()
+    sphere_daux_editor_detach_view(proc);        // IPlugView::removed()
+
+    GtkWidget* window = static_cast<GtkWidget*>(win_ptr);
+    gtk_window_destroy(GTK_WINDOW(window));
+    g_object_unref(window); // matches the g_object_ref in idle_open_editor
+
+    // Destroy the frame last — its dtor drops any leftover GLib fd/timer
+    // sources the plug-in did not unregister in removed().
+    delete frame;
+
+    std::fprintf(stderr, "[SphereVST3/linux] editor closed\n");
+}
 
 // ── Open-task (executed on the GTK thread via g_idle_add) ─────────────────
 
@@ -186,6 +385,13 @@ static gboolean idle_open_editor(gpointer user_data) {
                      "[SphereVST3/linux] X11 XID=0x%lx w=%d h=%d\n",
                      xid, editor_width, editor_height);
 
+        // ── Install IPlugFrame + IRunLoop BEFORE attached() ───────────────
+        // The plug-in queries the frame for Linux::IRunLoop during attached()
+        // to register its X11 fd and repaint timers. Owned here (deleted in
+        // idle_close_editor); stored in the otherwise-unused native_embed slot.
+        auto* frame = new LinuxRunLoopFrame(proc, GTK_WINDOW(window));
+        sphere_daux_editor_set_frame(proc, frame);
+
         // ── Attach IPlugView ──────────────────────────────────────────────
         // kPlatformTypeX11EmbedWindowID = "XcbWindow"
         // Pass the X11 Window ID cast to void*.
@@ -195,6 +401,8 @@ static gboolean idle_open_editor(gpointer user_data) {
                                             "XcbWindow")) {
             std::fprintf(stderr,
                          "[SphereVST3/linux] attach_view('XcbWindow') failed\n");
+            sphere_daux_editor_set_frame(proc, nullptr);
+            delete frame;
             gtk_window_destroy(GTK_WINDOW(window));
             goto done;
         }
@@ -217,7 +425,7 @@ static gboolean idle_open_editor(gpointer user_data) {
         sphere_daux_editor_store_native(
             proc,
             window,      // native_window  (GtkWidget*, g_object_ref'd)
-            nullptr,     // native_embed   (unused on Linux)
+            frame,       // native_embed   (reused on Linux to hold the IRunLoop frame)
             nullptr,     // native_delegate
             handle,
             task->window_id ? task->window_id : "",
@@ -233,8 +441,13 @@ static gboolean idle_open_editor(gpointer user_data) {
             window, "close-request",
             G_CALLBACK(+[](GtkWindow*, gpointer ud) -> gboolean {
                 auto* ctx = static_cast<CloseCtx*>(ud);
-                if (ctx->proc) close_editor_linux(ctx->proc);
-                return TRUE; // prevent default GTK close behaviour
+                if (ctx->proc) {
+                    // Signal the host (host-owned mode) so it reports
+                    // EditorClosed, then tear down inline on this (GTK) thread.
+                    sphere_daux_editor_signal_user_close(ctx->proc);
+                    close_editor_on_gtk_thread(ctx->proc);
+                }
+                return TRUE; // we destroyed the window ourselves
             }),
             close_ctx,
             [](gpointer data, GClosure*) { delete static_cast<CloseCtx*>(data); },
@@ -273,19 +486,7 @@ struct CloseTask {
 
 static gboolean idle_close_editor(gpointer user_data) {
     auto* task = static_cast<CloseTask*>(user_data);
-    SphereDauxVst3Processor* proc = task->proc;
-
-    void* win_ptr = sphere_daux_editor_get_native_window(proc);
-    if (win_ptr) {
-        sphere_daux_editor_clear_native(proc);   // zero first to prevent re-entrancy
-        sphere_daux_editor_detach_view(proc);    // IPlugView::removed()
-
-        GtkWidget* window = static_cast<GtkWidget*>(win_ptr);
-        gtk_window_destroy(GTK_WINDOW(window));
-        g_object_unref(window); // matches the g_object_ref in idle_open_editor
-
-        std::fprintf(stderr, "[SphereVST3/linux] editor closed\n");
-    }
+    close_editor_on_gtk_thread(task->proc);
 
     {
         std::lock_guard<std::mutex> lk(task->done_mutex);

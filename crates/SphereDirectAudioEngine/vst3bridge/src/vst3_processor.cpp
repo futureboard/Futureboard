@@ -744,6 +744,23 @@ extern "C" int sphere_daux_editor_attach_view(SphereDauxVst3Processor *proc,
   return 1;
 }
 
+extern "C" void
+sphere_daux_editor_signal_user_close(SphereDauxVst3Processor *proc) {
+  if (proc)
+    proc->editor_user_closed.store(true, std::memory_order_release);
+}
+
+extern "C" int sphere_daux_editor_set_frame(SphereDauxVst3Processor *proc,
+                                            void *frame) {
+  if (!proc || !proc->editor_view)
+    return 0;
+  auto *plug_frame = static_cast<Steinberg::IPlugFrame *>(frame);
+  const auto res = proc->editor_view->setFrame(plug_frame);
+  std::fprintf(stderr, "[SphereVST3] IPlugView::setFrame(%p) result=%d\n", frame,
+               (int)res);
+  return (res == Steinberg::kResultTrue || res == Steinberg::kResultOk) ? 1 : 0;
+}
+
 extern "C" void sphere_daux_editor_notify_resize(SphereDauxVst3Processor *proc,
                                                  int width, int height) {
   if (!proc || !proc->editor_view)
@@ -3696,6 +3713,22 @@ sphere_daux_vst3_embed_editor(SphereDauxVst3Processor *processor,
                static_cast<void *>(top), static_cast<void *>(content), editor_w,
                editor_h);
   return processor->editor_handle;
+#elif defined(__linux__)
+  // Host-owned model on Linux: the external plugin-host process owns a
+  // top-level GTK4/X11 window. `parent_hwnd` is only a DPI/position/owner
+  // reference cross-process — never a real parent (XEmbed across processes is
+  // exactly what host-owned mode avoids), so we ignore it and create our own
+  // top-level window via the standalone editor path (open_editor_linux), which
+  // attaches the IPlugView with a Linux::IRunLoop so the editor actually paints.
+  (void)parent_hwnd;
+  (void)x;
+  (void)y;
+  processor->editor_user_closed.store(false, std::memory_order_release);
+  std::string title_copy = processor->editor_title;
+  std::string window_id_copy = processor->editor_window_id;
+  return open_editor_linux(
+      processor, window_id_copy.c_str(),
+      title_copy.empty() ? "Plugin Editor" : title_copy.c_str(), width, height);
 #else
   (void)processor;
   (void)parent_hwnd;
@@ -3818,6 +3851,10 @@ sphere_daux_vst3_embed_detach(SphereDauxVst3Processor *processor) {
   if (!processor || !processor->embed_mode)
     return;
   processor->close_embed_editor("embed_detach");
+#elif defined(__linux__)
+  // Host-owned top-level: close the GTK window + detach the view. The audio
+  // instance stays alive (close_editor_linux only tears down the editor).
+  close_editor_linux(processor);
 #else
   (void)processor;
 #endif
@@ -3843,6 +3880,13 @@ sphere_daux_vst3_embed_attach_hwnd(SphereDauxVst3Processor *processor) {
     return reinterpret_cast<unsigned long long>(processor->editor_attach_hwnd);
   }
   return 0;
+#elif defined(__linux__)
+  // No cross-process HWND on Linux; the host-owned window lives in this
+  // process. Return the opaque editor handle so the host records a non-zero
+  // host_hwnd (its message-pump calls are no-ops on Linux).
+  if (!processor)
+    return 0;
+  return processor->editor_native_window ? processor->editor_handle : 0;
 #else
   (void)processor;
   return 0;
@@ -3856,6 +3900,8 @@ sphere_daux_vst3_embed_is_valid(SphereDauxVst3Processor *processor) {
           IsWindow(processor->editor_attach_hwnd))
              ? 1
              : 0;
+#elif defined(__linux__)
+  return (processor && processor->editor_native_window) ? 1 : 0;
 #else
   (void)processor;
   return 0;
@@ -3866,6 +3912,8 @@ extern "C" int
 sphere_daux_vst3_embed_has_visible_ui(SphereDauxVst3Processor *processor) {
 #ifdef _WIN32
   return daux_embed_has_visible_ui(processor) ? 1 : 0;
+#elif defined(__linux__)
+  return (processor && processor->editor_attached) ? 1 : 0;
 #else
   (void)processor;
   return 0;
@@ -3878,6 +3926,9 @@ sphere_daux_vst3_embed_host_kind(SphereDauxVst3Processor *processor) {
   if (!processor || !processor->embed_mode)
     return -1;
   return processor->embed_host_kind; // 0 child, 1 tool, 2 detached
+#elif defined(__linux__)
+  // Always a detached top-level window on Linux (host-owned model).
+  return (processor && processor->editor_native_window) ? 2 : -1;
 #else
   (void)processor;
   return -1;
@@ -3892,6 +3943,12 @@ sphere_daux_vst3_embed_take_user_close(SphereDauxVst3Processor *processor) {
   if (!processor)
     return 0;
   return processor->embed_user_closed.exchange(false, std::memory_order_acq_rel)
+             ? 1
+             : 0;
+#elif defined(__linux__)
+  if (!processor)
+    return 0;
+  return processor->editor_user_closed.exchange(false, std::memory_order_acq_rel)
              ? 1
              : 0;
 #else
@@ -3925,6 +3982,10 @@ sphere_daux_vst3_embed_set_instance_label(SphereDauxVst3Processor *processor,
   if (!processor)
     return;
   processor->embed_instance_label = instance_id ? instance_id : "";
+#elif defined(__linux__)
+  if (!processor)
+    return;
+  processor->editor_window_id = instance_id ? instance_id : "";
 #else
   (void)processor;
   (void)instance_id;
@@ -3938,6 +3999,10 @@ extern "C" void
 sphere_daux_vst3_set_editor_title(SphereDauxVst3Processor *processor,
                                   const char *title) {
 #ifdef _WIN32
+  if (!processor)
+    return;
+  processor->editor_title = title ? title : "";
+#elif defined(__linux__)
   if (!processor)
     return;
   processor->editor_title = title ? title : "";

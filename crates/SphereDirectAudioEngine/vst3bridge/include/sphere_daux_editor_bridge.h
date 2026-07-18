@@ -22,6 +22,12 @@ void sphere_daux_editor_set_error(const char* msg);
 /// Return and increment the global editor-handle counter (1-based, never 0).
 unsigned long long sphere_daux_editor_next_handle(void);
 
+/// Mark that the user closed the (host-owned) editor window via its own
+/// titlebar. The external plugin-host process polls this via
+/// sphere_daux_vst3_embed_take_user_close() to report EditorClosed. Safe no-op
+/// when the processor has no such state. Called from the GTK/AppKit UI thread.
+void sphere_daux_editor_signal_user_close(SphereDauxVst3Processor* proc);
+
 // ── IPlugView lifecycle ───────────────────────────────────────────────────────
 
 /// Ask the IEditController to create a native view and query the plugin's
@@ -61,6 +67,18 @@ void sphere_daux_editor_notify_resize(
 /// Detach and release the IPlugView (calls IPlugView::removed()).
 /// Safe to call even when no view is currently attached.
 void sphere_daux_editor_detach_view(SphereDauxVst3Processor* proc);
+
+/// Install (frame != NULL) or clear (frame == NULL) the host IPlugFrame on the
+/// current IPlugView via IPlugView::setFrame().
+///
+/// `frame` is an opaque Steinberg::IPlugFrame* (passed as void* to keep this
+/// bridge free of SDK headers). On Linux the frame MUST also implement
+/// Steinberg::Linux::IRunLoop — without it most VST3 editors never repaint.
+///
+/// Contract: call with a valid frame AFTER create_view and BEFORE attach_view;
+/// call with NULL before detach_view (mirrors the SDK editorhost teardown).
+/// Returns 1 on success, 0 if there is no view or setFrame() was rejected.
+int sphere_daux_editor_set_frame(SphereDauxVst3Processor* proc, void* frame);
 
 // ── Native window state storage ───────────────────────────────────────────────
 

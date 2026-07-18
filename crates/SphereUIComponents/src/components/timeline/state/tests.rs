@@ -689,6 +689,107 @@ mod audio_asset_key_tests {
         assert_eq!(clip.stretch.mode, StretchMode::Off);
         assert!(clip.stretch.source_end_samples < 48_000);
     }
+
+    // ── Audio trim ⇒ no waveform stretch (spec §3/§4/§5/§15) ────────────────
+    //
+    // Invariant proving the waveform is not stretched: for an Off-mode clip the
+    // active source window's real duration (source_len / source_rate) must equal
+    // the clip's timeline duration (duration_beats * seconds_per_beat). When the
+    // two spans stay equal, the renderer's `[0..clip_width] ↔ [source_start..
+    // source_end]` mapping keeps a constant source-samples-per-pixel scale — i.e.
+    // the source strip crops/reveals behind the clip window instead of being
+    // squeezed to fit it.
+    fn audio_time_ratio(state: &TimelineState, clip_id: &str) -> f64 {
+        let (_, clip) = state.find_clip(clip_id).expect("clip");
+        let source_rate = clip
+            .stretch
+            .original_sample_rate
+            .max(clip.stretch.project_sample_rate)
+            .max(1) as f64;
+        let source_seconds = clip.stretch.source_len_samples() as f64 / source_rate;
+        let timeline_seconds = clip.duration_beats as f64 * state.seconds_per_beat() as f64;
+        source_seconds / timeline_seconds.max(f64::MIN_POSITIVE)
+    }
+
+    fn imported_audio_clip() -> (TimelineState, String) {
+        let mut state = TimelineState::default();
+        state.bpm = 120.0; // seconds_per_beat = 0.5
+        let clip_id =
+            state.import_audio_at("C:/a/loop.wav".to_string(), "loop".to_string(), 0.0, 1.0e9);
+        // 48_000 frames @ 48 kHz = 1.0 s = 2.0 beats at 120 BPM.
+        state.update_audio_clip_metadata("C:/a/loop.wav", "wav", 48_000, 2, 48_000, 1.0);
+        (state, clip_id)
+    }
+
+    #[test]
+    fn inspector_length_change_trims_audio_source_without_stretch() {
+        let (mut state, clip_id) = imported_audio_clip();
+        // Baseline: full clip, source span == timeline span (ratio 1.0).
+        assert!((audio_time_ratio(&state, &clip_id) - 1.0).abs() < 1e-6);
+
+        // The inspector "Length" field halves the clip. This must trim the source
+        // window (right-edge semantics), NOT stretch the fixed source into the new
+        // width. The audio→timeline ratio must stay 1.0.
+        assert!(state.set_clip_length_trimming(&clip_id, 1.0));
+        let (_, clip) = state.find_clip(&clip_id).expect("clip");
+        assert_eq!(clip.stretch.mode, StretchMode::Off);
+        assert_eq!(clip.stretch.source_start_samples, 0);
+        assert_eq!(clip.stretch.source_end_samples, 24_000);
+        assert!((clip.duration_beats - 1.0).abs() < 1e-4);
+        // Playback rate unchanged, and no visual stretch.
+        assert!((clip.stretch.effective_time_ratio(state.bpm as f64) - 1.0).abs() < 1e-9);
+        assert!((audio_time_ratio(&state, &clip_id) - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn right_edge_trim_preserves_source_scale_and_rate() {
+        let (mut state, clip_id) = imported_audio_clip();
+        assert!(state.resize_clip(&clip_id, ClipEdge::Right, 0.5));
+        let (_, clip) = state.find_clip(&clip_id).expect("clip");
+        assert_eq!(clip.stretch.source_start_samples, 0);
+        assert_eq!(clip.stretch.source_end_samples, 12_000); // 0.5 beat * 0.5 s * 48k
+        assert!((clip.stretch.stretch_ratio - 1.0).abs() < 1e-9); // trim never restretches
+        assert!((audio_time_ratio(&state, &clip_id) - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn left_edge_trim_advances_source_offset_without_stretch() {
+        let (mut state, clip_id) = imported_audio_clip();
+        assert!(state.resize_clip(&clip_id, ClipEdge::Left, 1.0));
+        let (_, clip) = state.find_clip(&clip_id).expect("clip");
+        assert!((clip.start_beat - 1.0).abs() < 1e-4);
+        assert!((clip.duration_beats - 1.0).abs() < 1e-4);
+        assert_eq!(clip.stretch.source_start_samples, 24_000); // 1.0 beat in
+        assert_eq!(clip.stretch.source_end_samples, 48_000); // right edge fixed
+        assert!((audio_time_ratio(&state, &clip_id) - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn left_edge_reveal_clamps_to_media_start_without_stretch() {
+        let (mut state, clip_id) = imported_audio_clip();
+        // Trim in from the left, then relocate the clip so its source offset no
+        // longer aligns with the timeline origin.
+        assert!(state.resize_clip(&clip_id, ClipEdge::Left, 1.0));
+        assert!(state.set_clip_start(&clip_id, 5.0));
+        let source_start_before = state
+            .find_clip(&clip_id)
+            .map(|(_, c)| c.stretch.source_start_samples)
+            .unwrap();
+        assert_eq!(source_start_before, 24_000);
+
+        // Ask to reveal further left than the available media (only 0.5 s / 1 beat
+        // of source exists before the current offset). The timeline start must
+        // clamp so the source bottoms out at 0 without stretching the waveform.
+        assert!(state.resize_clip(&clip_id, ClipEdge::Left, 3.0));
+        let (_, clip) = state.find_clip(&clip_id).expect("clip");
+        assert_eq!(clip.stretch.source_start_samples, 0); // clamped at media start
+        assert!(
+            (clip.start_beat - 4.0).abs() < 1e-4,
+            "start clamped to available media: {}",
+            clip.start_beat
+        );
+        assert!((audio_time_ratio(&state, &clip_id) - 1.0).abs() < 1e-6);
+    }
 }
 
 #[cfg(test)]

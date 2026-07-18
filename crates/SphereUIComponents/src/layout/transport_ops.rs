@@ -4,7 +4,10 @@ use std::sync::Arc;
 
 use crate::components;
 use crate::components::numeric_edit::NumericEditSession;
-use crate::components::text_input::TextInputState;
+use crate::components::text_input::{
+    bind_mouse_selection, TextInputCallbacks, TextInputMouseEvent, TextInputMousePhase,
+    TextInputState,
+};
 use crate::components::{PerformanceOverlaySnapshot, StatusBarContent, StatusBarPerfMetrics};
 
 use super::{ContextMenuRequest, ContextMenuTarget, ContextTarget, StudioLayout, TransportCommand};
@@ -55,6 +58,33 @@ impl TempoEditState {
             ts_edit_point_id: None,
             ts_edit_focus_num: true,
         }
+    }
+}
+
+fn bind_time_signature_mouse_selection(
+    target: gpui::Entity<StudioLayout>,
+    numerator: bool,
+) -> TextInputCallbacks {
+    TextInputCallbacks {
+        on_context_menu: None,
+        on_mouse: Some(Arc::new(move |event: &TextInputMouseEvent, _window, cx| {
+            let _ = target.update(cx, |layout, cx| {
+                if matches!(event.phase, TextInputMousePhase::Down) {
+                    layout.tempo_edit.ts_edit_focus_num = numerator;
+                }
+                let input = if numerator {
+                    &mut layout.tempo_edit.ts_num_input
+                } else {
+                    &mut layout.tempo_edit.ts_den_input
+                };
+                match event.phase {
+                    TextInputMousePhase::Down => input.handle_mouse_down(event.index, event.extend),
+                    TextInputMousePhase::Drag => input.handle_mouse_drag(event.index),
+                    TextInputMousePhase::Up => input.handle_mouse_up(),
+                }
+                cx.notify();
+            });
+        })),
     }
 }
 
@@ -384,6 +414,14 @@ impl StudioLayout {
             })
         };
 
+        let bpm_input_callbacks =
+            bind_mouse_selection(cx.entity().clone(), |layout: &mut StudioLayout| {
+                &mut layout.tempo_edit.bpm_input
+            });
+        let ts_num_input_callbacks = bind_time_signature_mouse_selection(cx.entity().clone(), true);
+        let ts_den_input_callbacks =
+            bind_time_signature_mouse_selection(cx.entity().clone(), false);
+
         components::TransportChromeState {
             playing,
             recording,
@@ -397,6 +435,7 @@ impl StudioLayout {
             bpm_has_automation,
             bpm_editing: self.tempo_edit.bpm_editing,
             bpm_input: self.tempo_edit.bpm_input.clone(),
+            bpm_input_callbacks,
             // The layout's key handler routes keys while editing, so render the
             // caret whenever the editor is open.
             bpm_edit_focused: self.tempo_edit.bpm_editing,
@@ -405,7 +444,9 @@ impl StudioLayout {
             ts_has_markers,
             ts_editing: self.tempo_edit.ts_editing,
             ts_num_input: self.tempo_edit.ts_num_input.clone(),
+            ts_num_input_callbacks,
             ts_den_input: self.tempo_edit.ts_den_input.clone(),
+            ts_den_input_callbacks,
             ts_edit_focus_num: self.tempo_edit.ts_edit_focus_num,
             on_ts_menu,
             on_ts_edit_start,

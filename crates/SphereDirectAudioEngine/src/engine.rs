@@ -127,6 +127,32 @@ pub fn f32_load(v: u32) -> f32 {
 }
 
 #[inline]
+fn monitor_channel_pair(channels: &[u32]) -> Option<(u32, u32)> {
+    channels
+        .first()
+        .copied()
+        .map(|left| (left, channels.get(1).copied().unwrap_or(left)))
+}
+
+#[inline]
+const fn pack_monitor_source_pair(left: u32, right: u32) -> u64 {
+    left as u64 | ((right as u64) << 32)
+}
+
+#[inline]
+const fn unpack_monitor_source_pair(pair: u64) -> (u32, u32) {
+    (pair as u32, (pair >> 32) as u32)
+}
+
+#[cfg(any(test, all(target_os = "windows", feature = "asio")))]
+fn routed_input_peaks(input_peaks: &[f32], channels: &[u32]) -> Option<(f32, f32)> {
+    let (left, right) = monitor_channel_pair(channels)?;
+    let peak_l = input_peaks.get(left as usize).copied().unwrap_or(0.0);
+    let peak_r = input_peaks.get(right as usize).copied().unwrap_or(0.0);
+    Some((peak_l, peak_r))
+}
+
+#[inline]
 pub(crate) fn atomic_max_f32_bits(target: &AtomicU32, value: f32) {
     let value = value.max(0.0);
     let mut current = target.load(Ordering::Relaxed);
@@ -367,12 +393,13 @@ pub struct SharedState {
     pub live_input_peak_r: AtomicU32,
 
     // ── Live monitoring / input bus (Layers 4, 6, 7) ──────────────────────
-    /// Source channel indices the monitor path taps from the capture stream.
-    /// WASAPI capture streams capture these at build time; the persistent ASIO
-    /// input callback re-reads them every block, which is what makes selecting
-    /// a different input a pure atomic store instead of a stream rebuild.
-    pub monitor_src_l: AtomicU32,
-    pub monitor_src_r: AtomicU32,
+    /// Packed source channel indices (`left | right << 32`) tapped by the
+    /// monitor path. Publishing the pair in one atomic prevents a callback from
+    /// observing half of an old route and half of a new one.
+    monitor_src_pair: AtomicU64,
+    /// `true` when input and output are driven by the same ASIO device clock.
+    /// Backend/render code can use this to choose a lower monitor latency target.
+    pub monitor_shared_clock: AtomicBool,
     /// Max-hold input peak across *all* capture channels (ASIO session), reset
     /// by the Settings input-test poll via `swap`.
     pub session_input_peak: AtomicU32,
@@ -480,8 +507,8 @@ impl Default for SharedState {
             live_input_r: AtomicU32::new(f32_store(0.0)),
             live_input_peak_l: AtomicU32::new(f32_store(0.0)),
             live_input_peak_r: AtomicU32::new(f32_store(0.0)),
-            monitor_src_l: AtomicU32::new(0),
-            monitor_src_r: AtomicU32::new(1),
+            monitor_src_pair: AtomicU64::new(pack_monitor_source_pair(0, 1)),
+            monitor_shared_clock: AtomicBool::new(false),
             session_input_peak: AtomicU32::new(f32_store(0.0)),
             input_ring: crate::input_ring::InputRing::default(),
             monitor_enabled_any: AtomicBool::new(false),
@@ -518,6 +545,19 @@ impl Default for SharedState {
             pdc_enabled: AtomicBool::new(true),
             latency_graph_version: AtomicU64::new(1),
         }
+    }
+}
+
+impl SharedState {
+    #[inline]
+    pub(crate) fn set_monitor_source_pair(&self, left: u32, right: u32) {
+        self.monitor_src_pair
+            .store(pack_monitor_source_pair(left, right), Ordering::Relaxed);
+    }
+
+    #[inline]
+    pub(crate) fn monitor_source_pair(&self) -> (u32, u32) {
+        unpack_monitor_source_pair(self.monitor_src_pair.load(Ordering::Relaxed))
     }
 }
 
@@ -975,6 +1015,10 @@ impl EngineInner {
     }
 
     fn close_device_inner(&self) {
+        // Preserve the input ring's SPSC contract across backend switches: the
+        // standalone capture callback must be gone before a duplex ASIO producer
+        // can start writing into the same ring.
+        self.stop_live_input_stream();
         // Drop active DAUx stream (stops WASAPI exclusive thread or cpal stream).
         *self.active_stream.lock() = None;
         // Drop legacy cpal stream path.
@@ -1392,23 +1436,13 @@ impl EngineInner {
                     }) else {
                         continue;
                     };
-                    match track.input_source.channels.as_slice() {
-                        [channel] => {
-                            meter.peak_l =
-                                input_peaks.get(*channel as usize).copied().unwrap_or(0.0) as f64;
-                            meter.peak_r = 0.0;
-                            meter.rms_l = 0.0;
-                            meter.rms_r = 0.0;
-                        }
-                        [left, right, ..] => {
-                            meter.peak_l =
-                                input_peaks.get(*left as usize).copied().unwrap_or(0.0) as f64;
-                            meter.peak_r =
-                                input_peaks.get(*right as usize).copied().unwrap_or(0.0) as f64;
-                            meter.rms_l = 0.0;
-                            meter.rms_r = 0.0;
-                        }
-                        [] => {}
+                    if let Some((peak_l, peak_r)) =
+                        routed_input_peaks(&input_peaks, &track.input_source.channels)
+                    {
+                        meter.peak_l = peak_l as f64;
+                        meter.peak_r = peak_r as f64;
+                        meter.rms_l = 0.0;
+                        meter.rms_r = 0.0;
                     }
                 }
             }
@@ -2737,15 +2771,13 @@ impl EngineInner {
 
         *self.active_stream.lock() = Some(stream);
 
-        // A fresh ASIO session starts with default routing atomics; re-derive
-        // track input routing from the stored project so arm/monitor state
-        // survives a device reopen (atomics only — no reload).
-        #[cfg(all(target_os = "windows", feature = "asio"))]
-        if self.asio_caps.lock().is_some() {
-            if let Some(snapshot) = self.project.lock().clone() {
-                if let Err(error) = self.sync_live_input_stream(&snapshot) {
-                    eprintln!("[DAUx ASIO] input routing restore failed: {error}");
-                }
+        // Re-derive input routing after every backend/device reopen. ASIO
+        // restores atomic routing on its persistent callback; other backends
+        // recreate the standalone capture stream when an armed/monitored track
+        // needs one.
+        if let Some(snapshot) = self.project.lock().clone() {
+            if let Err(error) = self.sync_live_input_stream(&snapshot) {
+                eprintln!("[DAUx] input routing restore failed: {error}");
             }
         }
 
@@ -2877,14 +2909,23 @@ impl EngineInner {
 
         // ASIO: the duplex session's persistent input already feeds the ring.
         // Route changes are atomic stores — never a stream open/close, which
-        // would dispose the shared buffer set and kill playback.
-        #[cfg(all(target_os = "windows", feature = "asio"))]
-        {
-            let caps = self.asio_caps.lock().clone();
-            if let Some(caps) = caps {
+        // would dispose the shared buffer set and kill playback. During stream
+        // startup/restart the backend is selected before session capabilities
+        // are published; defer routing in that window. `open_daux` restores it
+        // from the project as soon as the duplex session is installed.
+        if self.daux_config.lock().backend == BackendKind::Asio {
+            #[cfg(all(target_os = "windows", feature = "asio"))]
+            if let Some(caps) = self.asio_caps.lock().clone() {
                 return self.sync_asio_input_routing(snapshot, &caps);
             }
+
+            self.stop_live_input_stream();
+            return Ok(());
         }
+
+        self.shared
+            .monitor_shared_clock
+            .store(false, Ordering::Relaxed);
 
         // The first armed/monitored audio track with a routable input source
         // drives which device + channels the shared capture stream uses.
@@ -2926,13 +2967,9 @@ impl EngineInner {
 
         // Which device channels feed the L/R input bus.
         let (mon_l_ch, mon_r_ch) = desired_track
-            .map(|track| {
-                let ch = &track.input_source.channels;
-                let l = ch.first().copied().unwrap_or(0);
-                let r = ch.get(1).copied().unwrap_or(l);
-                (l as usize, r as usize)
-            })
+            .and_then(|track| monitor_channel_pair(&track.input_source.channels))
             .unwrap_or((0, 1));
+        self.shared.set_monitor_source_pair(mon_l_ch, mon_r_ch);
 
         eprintln!(
             "[Engine] applied input device = {:?} (preferred={:?}) monitor_any={}",
@@ -2999,12 +3036,15 @@ impl EngineInner {
                     shared
                         .input_frames_received
                         .fetch_add(frames as u64, Ordering::Relaxed);
+                    let (mon_l_ch, mon_r_ch) = shared.monitor_source_pair();
+                    let mon_l_ch = mon_l_ch as usize;
+                    let mon_r_ch = mon_r_ch as usize;
                     let mut peak_l = 0.0f32;
                     let mut peak_r = 0.0f32;
                     let mut last_l = 0.0f32;
                     let mut last_r = 0.0f32;
                     for frame in data.chunks(channel_count) {
-                        // Pick the configured monitor channels; fall back to the
+                        // Pick this block's monitor channels; fall back to the
                         // first sample when a channel index is out of range.
                         let first = frame.first().copied().unwrap_or(0.0);
                         let l = frame
@@ -3152,18 +3192,18 @@ impl EngineInner {
             return Ok(());
         };
 
-        let channels = &track.input_source.channels;
-        let left = channels.first().copied().unwrap_or(0);
-        let right = channels.get(1).copied().unwrap_or(left);
+        let (left, right) = monitor_channel_pair(&track.input_source.channels).unwrap_or((0, 0));
 
-        self.shared.monitor_src_l.store(left, Ordering::Relaxed);
-        self.shared.monitor_src_r.store(right, Ordering::Relaxed);
+        self.shared.set_monitor_source_pair(left, right);
         self.shared
             .monitor_enabled_any
             .store(monitor_any, Ordering::Relaxed);
         self.shared
             .input_ring
             .set_active(true, caps.input_channels, caps.sample_rate);
+        self.shared
+            .monitor_shared_clock
+            .store(true, Ordering::Relaxed);
         self.shared.live_input_active.store(true, Ordering::Relaxed);
         self.warm_output_for_monitoring();
         Ok(())
@@ -3188,6 +3228,9 @@ impl EngineInner {
         *self.live_input.lock() = None;
         self.shared
             .live_input_active
+            .store(false, Ordering::Relaxed);
+        self.shared
+            .monitor_shared_clock
             .store(false, Ordering::Relaxed);
         self.shared.input_ring.set_active(false, 0, 0);
         self.shared
@@ -4472,7 +4515,8 @@ where
                 if shared.live_input_active.load(Ordering::Relaxed) {
                     let input_l = f32_load(shared.live_input_l.load(Ordering::Relaxed));
                     let input_r = f32_load(shared.live_input_r.load(Ordering::Relaxed));
-                    runtime.accumulate_live_input_meters(input_l, input_r);
+                    let source_pair = shared.monitor_source_pair();
+                    runtime.accumulate_live_input_meters(input_l, input_r, source_pair);
                 }
 
                 // ── 4. Compute meters (no allocation) ────────────────────────
@@ -4537,6 +4581,114 @@ where
         .map_err(|e| e.to_string())?;
 
     Ok(stream)
+}
+
+#[cfg(test)]
+mod input_route_tests {
+    use super::{monitor_channel_pair, routed_input_peaks, EngineInner, SharedState};
+    use std::sync::atomic::Ordering;
+
+    #[test]
+    fn mono_monitor_route_uses_one_channel_for_both_sides() {
+        assert_eq!(monitor_channel_pair(&[5]), Some((5, 5)));
+    }
+
+    #[test]
+    fn mono_input_meter_duplicates_selected_channel_peak() {
+        assert_eq!(routed_input_peaks(&[0.1, 0.4, 0.2], &[1]), Some((0.4, 0.4)));
+    }
+
+    #[test]
+    fn monitor_source_pair_publishes_both_channels_together() {
+        let shared = SharedState::default();
+        shared.set_monitor_source_pair(7, 3);
+        assert_eq!(shared.monitor_source_pair(), (7, 3));
+    }
+
+    #[test]
+    fn monitor_shared_clock_defaults_false() {
+        assert!(!SharedState::default()
+            .monitor_shared_clock
+            .load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn stopping_live_input_clears_shared_clock() {
+        let engine = EngineInner::new();
+        engine
+            .shared
+            .monitor_shared_clock
+            .store(true, Ordering::Relaxed);
+
+        engine.stop_live_input_stream();
+
+        assert!(!engine.shared.monitor_shared_clock.load(Ordering::Relaxed));
+    }
+}
+
+#[cfg(test)]
+mod live_input_tests {
+    use super::*;
+    use crate::types::{EngineRoutingSnapshot, EngineTrackSnapshot};
+
+    fn monitored_audio_snapshot() -> EngineProjectSnapshot {
+        EngineProjectSnapshot {
+            project_id: "asio-routing-test".into(),
+            project_root: None,
+            preferred_input_device: None,
+            bpm: 120.0,
+            tempo_points: Vec::new(),
+            time_signature: [4, 4],
+            sample_rate: 48_000,
+            tracks: vec![EngineTrackSnapshot {
+                id: "audio-1".into(),
+                track_type: "audio".into(),
+                volume: 1.0,
+                pan: 0.0,
+                muted: false,
+                solo: false,
+                armed: true,
+                input_monitor: true,
+                input_source: EngineTrackInputSourceSnapshot {
+                    device_id: Some("test-asio-driver".into()),
+                    channels: vec![0, 1],
+                },
+                preview_mode: "stereo".into(),
+                output_track_id: None,
+                inserts: Vec::new(),
+                sends: Vec::new(),
+                automation_lanes: Vec::new(),
+                builtin_soundfont_player: false,
+                soundfont_path: None,
+                soundfont_preset_bank: None,
+                soundfont_preset_patch: None,
+                soundfont_volume: 1.0,
+                soundfont_reverb_chorus: true,
+                soundfont_polyphony: 64,
+            }],
+            clips: Vec::new(),
+            midi_clips: Vec::new(),
+            pdc_enabled: true,
+            latency_graph_version: 0,
+            routing: EngineRoutingSnapshot {
+                master_output_device: None,
+                sample_rate: 48_000,
+                buffer_size: 256,
+            },
+        }
+    }
+
+    #[test]
+    fn asio_input_routing_waits_for_duplex_session() {
+        let engine = EngineInner::new();
+        engine.daux_config.lock().backend = BackendKind::Asio;
+
+        let result = engine.sync_live_input_stream(&monitored_audio_snapshot());
+
+        assert!(result.is_ok());
+        assert!(engine.live_input.lock().is_none());
+        assert!(!engine.shared.input_ring.is_active());
+    }
 }
 
 #[cfg(test)]

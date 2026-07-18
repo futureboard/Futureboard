@@ -11,7 +11,9 @@ use crate::components::plugin_picker::{
     CatalogStatus, PickerFilter, PluginPickerCallbacks, PluginPickerPrefs,
     PluginPickerScrollHandles, PluginPickerState, PluginSearchIndex,
 };
-use crate::components::text_input::TextInputCallbacks;
+use crate::components::text_input::{
+    bind_mouse_selection, TextInputCallbacks, TextInputMouseCb, TextInputMouseEvent,
+};
 use crate::components::title_bar::external_window_titlebar;
 use crate::theme::{self, Colors};
 use crate::window_position::resolve_owner_bounds_with_preferred;
@@ -272,9 +274,27 @@ impl Render for InsertPickerWindow {
             }),
         };
 
+        let search_mouse_callbacks =
+            bind_mouse_selection(self.owner.clone(), |layout: &mut StudioLayout| {
+                &mut layout.plugin_picker_search_input
+            });
+        let owner = self.owner.clone();
+        let target_for_search = target.clone();
         let search_callbacks = TextInputCallbacks {
             on_context_menu: None,
-            on_mouse: None,
+            on_mouse: search_mouse_callbacks.on_mouse.map(|on_mouse| {
+                Arc::new(
+                    move |event: &TextInputMouseEvent, window: &mut Window, cx: &mut App| {
+                        on_mouse(event, window, &mut *cx);
+                        let snapshot =
+                            owner.update(cx, |layout, _cx| layout.insert_picker_snapshot());
+                        let _ = target_for_search.update(cx, |this, cx| {
+                            this.set_snapshot(snapshot);
+                            cx.notify();
+                        });
+                    },
+                ) as TextInputMouseCb
+            }),
         };
 
         let panel = div().flex_1().min_h(px(0.0)).child(plugin_picker_panel(

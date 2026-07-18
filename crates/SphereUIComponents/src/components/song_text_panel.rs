@@ -9,7 +9,9 @@ use gpui::{
 };
 
 use crate::components::edit::EditCommand;
-use crate::components::text_input::{text_field, TextInputAction, TextInputState};
+use crate::components::text_input::{
+    bind_mouse_selection, text_field_with_callbacks, TextInputAction, TextInputState,
+};
 use crate::components::timeline::timeline_state::{
     SongTextEvent, SongTextEventKind, SongTextEventType, TimeSignatureMap,
 };
@@ -581,6 +583,8 @@ impl Render for SongTextPanelView {
             .cloned();
 
         let entity = cx.entity().clone();
+        let chord_callbacks = bind_mouse_selection(entity.clone(), |view| &mut view.chord_input);
+        let lyric_callbacks = bind_mouse_selection(entity.clone(), |view| &mut view.lyric_input);
         let scroll_entity = cx.entity().clone();
         let root = div()
             .id(("song-text-panel", kind as u32))
@@ -744,9 +748,10 @@ impl Render for SongTextPanelView {
                                 )),
                         )
                         .child(field_label("CHORD"))
-                        .child(text_field(
+                        .child(text_field_with_callbacks(
                             &self.chord_input,
                             self.chord_input.is_focused(window),
+                            chord_callbacks,
                         ))
                         .child(
                             div()
@@ -774,9 +779,10 @@ impl Render for SongTextPanelView {
                                 )),
                         )
                         .child(field_label("LYRIC"))
-                        .child(text_field(
+                        .child(text_field_with_callbacks(
                             &self.lyric_input,
                             self.lyric_input.is_focused(window),
+                            lyric_callbacks,
                         ))
                         .child(
                             div()

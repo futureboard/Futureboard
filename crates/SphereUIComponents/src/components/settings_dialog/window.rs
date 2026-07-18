@@ -2,6 +2,8 @@
 
 use super::*;
 
+use crate::components::text_input::bind_mouse_selection;
+
 impl SettingsWindow {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -387,9 +389,11 @@ impl Render for SettingsWindow {
             on_open_keyboard_shortcuts: self.on_open_keyboard_shortcuts.clone(),
         };
 
+        let search_mouse_callbacks =
+            bind_mouse_selection(target.clone(), |this| &mut this.search_input);
         let search_callbacks = TextInputCallbacks {
             on_context_menu: None,
-            on_mouse: None,
+            on_mouse: search_mouse_callbacks.on_mouse,
         };
 
         // Read cached snapshots only — no provider calls, no enumeration here.

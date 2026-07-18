@@ -19,12 +19,62 @@ pub const WINDOW_CONTROL_WIDTH: f32 = 34.0;
 pub const CHROME_PAD_X: f32 = 6.0;
 pub const CHROME_TEXT_SIZE: f32 = crate::theme::typography::UI_XS;
 pub const CHROME_TITLE_SIZE: f32 = crate::theme::typography::UI_XS;
-/// Native Windows window-control glyph family. It ships with Windows 10+ and
-/// matches the OS caption-button metrics more closely than our generic SVGs.
+/// Windows 10 caption glyph family.
+pub const WINDOWS_MDL2_ICON_FONT: &str = "Segoe MDL2 Assets";
+/// Windows 11 caption glyph family.
 pub const WINDOWS_FLUENT_ICON_FONT: &str = "Segoe Fluent Icons";
 
-/// Caption glyph for the current platform. Windows deliberately uses the
-/// system Fluent font; other platforms retain the shared SVG icon set.
+#[cfg(target_os = "windows")]
+const WINDOWS_11_MIN_BUILD: u32 = 22_000;
+
+#[cfg(target_os = "windows")]
+fn windows_control_icon_font() -> &'static str {
+    static FONT: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
+    *FONT.get_or_init(|| windows_control_icon_font_for_build(windows_build_number()))
+}
+
+#[cfg(target_os = "windows")]
+fn windows_build_number() -> Option<u32> {
+    let mut version: windows::Win32::System::SystemInformation::OSVERSIONINFOW =
+        unsafe { std::mem::zeroed() };
+    version.dwOSVersionInfoSize = std::mem::size_of_val(&version) as u32;
+    let status = unsafe { windows::Wdk::System::SystemServices::RtlGetVersion(&mut version) };
+    status.is_ok().then_some(version.dwBuildNumber)
+}
+
+#[cfg(target_os = "windows")]
+fn windows_control_icon_font_for_build(build: Option<u32>) -> &'static str {
+    if build.is_some_and(|build| build >= WINDOWS_11_MIN_BUILD) {
+        WINDOWS_FLUENT_ICON_FONT
+    } else {
+        WINDOWS_MDL2_ICON_FONT
+    }
+}
+
+#[cfg(all(test, target_os = "windows"))]
+mod windows_icon_font_tests {
+    use super::*;
+
+    #[test]
+    fn selects_caption_font_for_windows_generation() {
+        assert!(windows_build_number().is_some());
+        assert_eq!(
+            windows_control_icon_font_for_build(Some(19_045)),
+            WINDOWS_MDL2_ICON_FONT
+        );
+        assert_eq!(
+            windows_control_icon_font_for_build(Some(WINDOWS_11_MIN_BUILD)),
+            WINDOWS_FLUENT_ICON_FONT
+        );
+        assert_eq!(
+            windows_control_icon_font_for_build(None),
+            WINDOWS_MDL2_ICON_FONT
+        );
+    }
+}
+
+/// Caption glyph for the current platform. Windows uses the icon font shipped
+/// with that OS generation; other platforms retain the shared SVG icon set.
 pub fn window_control_icon(
     area: WindowControlArea,
     icon_path: &'static str,
@@ -44,7 +94,7 @@ pub fn window_control_icon(
             .flex()
             .items_center()
             .justify_center()
-            .font(gpui::font(WINDOWS_FLUENT_ICON_FONT))
+            .font(gpui::font(windows_control_icon_font()))
             .text_size(px(10.0))
             .text_color(Colors::text_muted())
             .child(glyph)

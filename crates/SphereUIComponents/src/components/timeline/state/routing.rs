@@ -75,6 +75,19 @@ impl TrackInputRouting {
             Self::MidiDevice { device_id } => device_id.clone(),
         }
     }
+
+    pub fn is_compatible_with_audio_format(&self, audio_format: TrackAudioFormat) -> bool {
+        match self {
+            Self::None | Self::AllInputs | Self::MidiDevice { .. } => true,
+            Self::AudioDeviceChannel { .. } => true,
+            Self::AudioDeviceChannels { channels, .. } => match audio_format {
+                TrackAudioFormat::Mono => channels.len() == 1,
+                TrackAudioFormat::Stereo => {
+                    channels.len() == 1 || (channels.len() == 2 && channels[0] != channels[1])
+                }
+            },
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -126,21 +139,6 @@ impl TrackAudioFormat {
             Self::Mono => "Mono",
             Self::Stereo => "Stereo",
         }
-    }
-}
-
-fn input_route_matches_audio_format(
-    input: &TrackInputRouting,
-    audio_format: TrackAudioFormat,
-) -> bool {
-    match input {
-        TrackInputRouting::None | TrackInputRouting::AllInputs => true,
-        TrackInputRouting::AudioDeviceChannel { .. } => audio_format == TrackAudioFormat::Mono,
-        TrackInputRouting::AudioDeviceChannels { channels, .. } => match audio_format {
-            TrackAudioFormat::Mono => channels.len() == 1,
-            TrackAudioFormat::Stereo => channels.len() == 2,
-        },
-        TrackInputRouting::MidiDevice { .. } => true,
     }
 }
 
@@ -253,7 +251,7 @@ impl TrackRoutingState {
 impl TimelineState {
     pub fn set_track_input_routing(&mut self, track_id: &str, input: TrackInputRouting) -> bool {
         if let Some(t) = self.tracks.iter_mut().find(|t| t.id == track_id) {
-            if !input_route_matches_audio_format(&input, t.routing.audio_format) {
+            if !input.is_compatible_with_audio_format(t.routing.audio_format) {
                 return false;
             }
             if t.routing.input != input {
@@ -325,7 +323,11 @@ impl TimelineState {
                     );
                 }
                 t.routing.audio_format = audio_format;
-                if !input_route_matches_audio_format(&t.routing.input, audio_format) {
+                if !t
+                    .routing
+                    .input
+                    .is_compatible_with_audio_format(audio_format)
+                {
                     t.routing.input = TrackInputRouting::None;
                 }
                 return true;
@@ -556,6 +558,47 @@ mod tests {
             armed: false,
             input_monitor: InputMonitorMode::Off,
         })
+    }
+
+    #[test]
+    fn audio_input_routes_follow_track_format_compatibility() {
+        let mut state = TimelineState::default();
+        state.tracks.clear();
+        let track_id = create_track(&mut state, TrackType::Audio, "Audio");
+        let mono_route = TrackInputRouting::AudioDeviceChannel {
+            device_id: "input-device".to_string(),
+            channel: 1,
+        };
+        let stereo_route = TrackInputRouting::AudioDeviceChannels {
+            device_id: "input-device".to_string(),
+            channels: vec![0, 1],
+        };
+
+        assert!(state.set_track_input_routing(&track_id, mono_route.clone()));
+        assert!(state.set_track_audio_format(&track_id, TrackAudioFormat::Mono));
+        assert_eq!(
+            state.find_track(&track_id).unwrap().routing.input,
+            mono_route
+        );
+
+        assert!(!state.set_track_input_routing(&track_id, stereo_route.clone()));
+        assert!(state.set_track_audio_format(&track_id, TrackAudioFormat::Stereo));
+        assert!(state.set_track_input_routing(&track_id, stereo_route));
+        assert!(state.set_track_audio_format(&track_id, TrackAudioFormat::Mono));
+        assert_eq!(
+            state.find_track(&track_id).unwrap().routing.input,
+            TrackInputRouting::None
+        );
+    }
+
+    #[test]
+    fn stereo_routes_reject_duplicate_channel_pairs() {
+        let route = TrackInputRouting::AudioDeviceChannels {
+            device_id: "input-device".to_string(),
+            channels: vec![1, 1],
+        };
+
+        assert!(!route.is_compatible_with_audio_format(TrackAudioFormat::Stereo));
     }
 
     #[test]

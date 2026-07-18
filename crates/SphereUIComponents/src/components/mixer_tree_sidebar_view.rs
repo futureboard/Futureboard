@@ -17,7 +17,8 @@ use crate::components::mixer_tree_sidebar::{
     MIXER_TREE_COLLAPSED_RAIL_WIDTH,
 };
 use crate::components::text_input::{
-    text_field_with_callbacks, TextInputCallbacks, TextInputContextCb, TextInputState,
+    bind_mouse_selection, text_field_with_callbacks, TextInputCallbacks, TextInputContextCb,
+    TextInputState,
 };
 use crate::components::timeline::timeline::Timeline;
 use crate::layout::StudioLayout;
@@ -216,9 +217,11 @@ impl Render for MixerTreeSidebar {
         let show_only = callbacks.on_show_only_selected_group.clone();
         let reset_vis = callbacks.on_reset_visibility.clone();
 
+        let filter_mouse_callbacks =
+            bind_mouse_selection(cx.entity().clone(), |this| &mut this.filter_input);
         let filter_callbacks = TextInputCallbacks {
             on_context_menu: Some(self.filter_context_menu.clone()),
-            on_mouse: None,
+            on_mouse: filter_mouse_callbacks.on_mouse,
         };
 
         let toolbar = div()

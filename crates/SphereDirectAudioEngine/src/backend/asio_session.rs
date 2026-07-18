@@ -14,7 +14,7 @@
 //!
 //! Everything that used to require opening a second stream — selecting a track
 //! input, enabling monitoring, arming, starting a take — is now either an
-//! atomic store (`SharedState::monitor_src_l/r`, ring active flags) or a
+//! atomic store (`SharedState` monitor-source pair, ring active flags) or a
 //! bounded command to the input callback ([`AsioInputCommand`]). The driver
 //! and its buffers are never touched after open, which is what keeps playback
 //! running while inputs are used.
@@ -60,6 +60,8 @@ pub struct RecordSink {
     pub free_tx: Sender<Vec<i32>>,
     /// Preview-waveform bin width in frames (from the take's sample rate).
     pub samples_per_bin: usize,
+    /// Gate take-only paths on the transport while monitoring remains live.
+    pub capture_on_transport: bool,
     /// Blocks dropped because the pool/queue was exhausted (shared with the
     /// recording session for the end-of-take report).
     pub dropped_blocks: Arc<AtomicU64>,
@@ -693,10 +695,24 @@ fn build_input_fanout_typed<T: AsioInputSample>(
                     .input_frames_received
                     .fetch_add(frames as u64, Ordering::Relaxed);
 
-                let mon_l_ch = shared.monitor_src_l.load(Ordering::Relaxed) as usize;
-                let mon_r_ch = shared.monitor_src_r.load(Ordering::Relaxed) as usize;
+                let (mon_l_ch, mon_r_ch) = shared.monitor_source_pair();
+                let mon_l_ch = mon_l_ch as usize;
+                let mon_r_ch = mon_r_ch as usize;
                 let ring_active = shared.input_ring.is_active();
-                let preview_active = shared.recording_preview_active.load(Ordering::Relaxed);
+                let recording_active = shared.recording_active.load(Ordering::Relaxed);
+                let transport_playing = shared.playing.load(Ordering::Relaxed);
+                let capture_active = record_sink
+                    .active()
+                    .map(|sink| {
+                        crate::recording::should_capture_recording(
+                            recording_active,
+                            sink.capture_on_transport,
+                            transport_playing,
+                        )
+                    })
+                    .unwrap_or(false);
+                let preview_active =
+                    capture_active && shared.recording_preview_active.load(Ordering::Relaxed);
                 let samples_per_bin = record_sink
                     .active()
                     .map(|sink| sink.samples_per_bin)
@@ -781,7 +797,7 @@ fn build_input_fanout_typed<T: AsioInputSample>(
                 atomic_max_f32_bits(&shared.live_input_peak_l, raw_peak_l);
                 atomic_max_f32_bits(&shared.live_input_peak_r, raw_peak_r);
                 atomic_max_f32_bits(&shared.session_input_peak, session_peak);
-                if shared.recording_active.load(Ordering::Relaxed) {
+                if capture_active {
                     atomic_max_f32_bits(&shared.record_peak, session_peak);
                 }
                 if ring_active {
@@ -789,7 +805,7 @@ fn build_input_fanout_typed<T: AsioInputSample>(
                 }
 
                 // 4. Record fan-out → disk writer (only while a take is live).
-                if shared.recording_active.load(Ordering::Relaxed) {
+                if capture_active {
                     if let Some(sink) = record_sink.active() {
                         match sink.free_rx.try_recv() {
                             Ok(mut block) => {
@@ -849,6 +865,7 @@ mod tests {
                 free_rx,
                 free_tx,
                 samples_per_bin: 1,
+                capture_on_transport: false,
                 dropped_blocks: Arc::new(AtomicU64::new(0)),
             }),
             audio_rx,

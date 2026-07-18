@@ -270,6 +270,7 @@ impl StudioLayout {
                 timestamp,
                 bpm: bpm.max(1.0) as f64,
                 start_beat: start_beat.max(0.0) as f64,
+                capture_on_transport: Some(true),
                 sample_rate: sample_rate.max(1),
                 input_device_id,
                 tracks,
@@ -964,12 +965,6 @@ fn recording_input_channels_checked(
             })
         }
         TrackInputRouting::AudioDeviceChannel { device_id, channel } => {
-            if track.routing.audio_format != TrackAudioFormat::Mono {
-                return Err(format!(
-                    "{} is stereo but has a mono input route. Choose a stereo input pair.",
-                    track.name
-                ));
-            }
             let device = find_recording_input_device(devices, device_id).ok_or_else(|| {
                 format!("{} input device is unavailable: {}", track.name, device_id)
             })?;
@@ -994,9 +989,9 @@ fn recording_input_channels_checked(
                         track.name
                     ));
                 }
-                TrackAudioFormat::Stereo if channels.len() != 2 => {
+                TrackAudioFormat::Stereo if !(1..=2).contains(&channels.len()) => {
                     return Err(format!(
-                        "{} is stereo but has an incompatible input route. Choose a stereo input pair.",
+                        "{} is stereo but has an incompatible input route. Choose one input channel or a stereo input pair.",
                         track.name
                     ));
                 }
@@ -1077,6 +1072,15 @@ mod tests {
     use super::*;
     use crate::components::timeline::timeline_state::TimelineState;
 
+    fn input_device(channels: u32) -> RecordingInputDevice {
+        RecordingInputDevice {
+            id: "default-input".to_string(),
+            name: "Default Input".to_string(),
+            channels,
+            is_default: true,
+        }
+    }
+
     #[test]
     fn fresh_armed_stereo_track_records_from_the_default_input() {
         let mut timeline = TimelineState::default();
@@ -1087,17 +1091,46 @@ mod tests {
         assert_eq!(track.routing.input, TrackInputRouting::None);
         assert_eq!(track.routing.audio_format, TrackAudioFormat::Stereo);
 
-        let device = RecordingInputDevice {
-            id: "default-input".to_string(),
-            name: "Default Input".to_string(),
-            channels: 2,
-            is_default: true,
-        };
+        let device = input_device(2);
         let route =
             recording_input_channels_checked(track, std::slice::from_ref(&device), Some(&device))
                 .expect("fresh armed-track route should resolve to the default input");
 
         assert_eq!(route.device_id.as_deref(), Some("default-input"));
         assert_eq!(route.channels, vec![0, 1]);
+    }
+
+    #[test]
+    fn recording_channel_count_follows_track_audio_format() {
+        let mut timeline = TimelineState::default();
+        let track_id = timeline.create_audio_track();
+        let mut track = timeline.find_track(&track_id).unwrap().clone();
+        let device = input_device(4);
+
+        track.routing.input = TrackInputRouting::AudioDeviceChannel {
+            device_id: device.id.clone(),
+            channel: 2,
+        };
+        let mono_route =
+            recording_input_channels_checked(&track, std::slice::from_ref(&device), Some(&device))
+                .expect("stereo tracks may record one input channel");
+        assert_eq!(mono_route.channels, vec![2]);
+
+        track.routing.input = TrackInputRouting::AudioDeviceChannels {
+            device_id: device.id.clone(),
+            channels: vec![1, 2],
+        };
+        let stereo_route =
+            recording_input_channels_checked(&track, std::slice::from_ref(&device), Some(&device))
+                .expect("stereo tracks may record two input channels");
+        assert_eq!(stereo_route.channels, vec![1, 2]);
+
+        track.routing.audio_format = TrackAudioFormat::Mono;
+        assert!(recording_input_channels_checked(
+            &track,
+            std::slice::from_ref(&device),
+            Some(&device),
+        )
+        .is_err());
     }
 }

@@ -407,6 +407,33 @@ fn atomic_max_bits(target: &AtomicU32, value: f32) {
     }
 }
 
+/// Whether this callback should feed take-only capture paths.
+///
+/// Pure and realtime-safe: callers provide callback-local atomic snapshots.
+#[inline]
+pub(crate) fn should_capture_recording(
+    recording_active: bool,
+    capture_on_transport: bool,
+    transport_playing: bool,
+) -> bool {
+    recording_active && (!capture_on_transport || transport_playing)
+}
+
+fn reset_failed_own_stream_start(shared: &crate::engine::SharedState) {
+    shared.recording_active.store(false, Ordering::Relaxed);
+    shared.recording_monitor_mix.store(false, Ordering::Relaxed);
+    shared
+        .recording_preview_active
+        .store(false, Ordering::Relaxed);
+    shared.live_input_active.store(false, Ordering::Relaxed);
+    shared.input_ring.set_active(false, 0, 0);
+    shared.monitor_enabled_any.store(false, Ordering::Relaxed);
+    shared.monitor_shared_clock.store(false, Ordering::Relaxed);
+    shared
+        .record_peak
+        .store(crate::engine::f32_store(0.0), Ordering::Relaxed);
+}
+
 // ── Input stream builder (f32 samples) ───────────────────────────────────────
 
 /// Build the single recording capture stream. Its one realtime callback fans
@@ -432,6 +459,7 @@ fn build_f32_input_stream(
     channels: usize,
     monitor_channels: Vec<usize>,
     samples_per_bin: usize,
+    capture_on_transport: bool,
 ) -> Result<cpal::Stream, SphereAudioError> {
     use crate::engine::{f32_load, f32_store};
     use crate::input_ring::WaveformPeak;
@@ -456,6 +484,11 @@ fn build_f32_input_stream(
                 shared
                     .input_frames_received
                     .fetch_add(frames as u64, Ordering::Relaxed);
+                let capture_active = should_capture_recording(
+                    active.load(Ordering::Relaxed),
+                    capture_on_transport,
+                    shared.playing.load(Ordering::Relaxed),
+                );
 
                 let mut raw_peak_l = 0.0f32;
                 let mut raw_peak_r = 0.0f32;
@@ -483,7 +516,7 @@ fn build_f32_input_stream(
                     // Guard with the same session-active flag as the writer so
                     // stopping a take cannot publish late bins while the UI is
                     // finalizing the committed clip.
-                    if active.load(Ordering::Relaxed) {
+                    if capture_active {
                         let m = (l + r) * 0.5;
                         bin_min = bin_min.min(m);
                         bin_max = bin_max.max(m);
@@ -509,8 +542,10 @@ fn build_f32_input_stream(
                     }
 
                     // 4. Record peak across all channels (diagnostics).
-                    for &s in frame {
-                        rec_peak = rec_peak.max(s.abs());
+                    if capture_active {
+                        for &s in frame {
+                            rec_peak = rec_peak.max(s.abs());
+                        }
                     }
                 }
 
@@ -524,13 +559,15 @@ fn build_f32_input_stream(
                 atomic_max_bits(&shared.live_input_peak_l, raw_peak_l);
                 atomic_max_bits(&shared.live_input_peak_r, raw_peak_r);
                 shared.live_input_active.store(true, Ordering::Relaxed);
-                let prev_rec = f32_load(shared.record_peak.load(Ordering::Relaxed)) * 0.9;
-                shared
-                    .record_peak
-                    .store(f32_store(prev_rec.max(rec_peak)), Ordering::Relaxed);
+                if capture_active {
+                    let prev_rec = f32_load(shared.record_peak.load(Ordering::Relaxed)) * 0.9;
+                    shared
+                        .record_peak
+                        .store(f32_store(prev_rec.max(rec_peak)), Ordering::Relaxed);
+                }
 
                 // 2. Record path → disk writer worker (only while armed/active).
-                if active.load(Ordering::Relaxed) {
+                if capture_active {
                     match free_rx.try_recv() {
                         Ok(mut block) => {
                             if block.capacity() < data.len() {
@@ -771,11 +808,15 @@ pub(crate) fn start_recording_with_device(
         stop_flag,
     } = pipeline;
     let start_beat = config.start_beat;
+    let capture_on_transport = config.capture_on_transport.unwrap_or(false);
 
     // AtomicBool: the input callback checks this before sending.
     let recording_active = Arc::new(AtomicBool::new(true));
     let dropped_blocks = Arc::new(AtomicU64::new(0));
     shared.recording_active.store(true, Ordering::Relaxed);
+    shared
+        .record_peak
+        .store(crate::engine::f32_store(0.0), Ordering::Relaxed);
     shared
         .recording_monitor_mix
         .store(monitor_mix, Ordering::Relaxed);
@@ -818,7 +859,9 @@ pub(crate) fn start_recording_with_device(
         .store(true, Ordering::Relaxed);
 
     // Arm the monitor ring for this stream's format and enable output monitoring
-    // when the user requested it.
+    // when the user requested it. A dedicated capture stream does not share the
+    // output device's callback clock, even when both endpoints are WASAPI.
+    shared.monitor_shared_clock.store(false, Ordering::Relaxed);
     shared
         .input_ring
         .set_active(true, input_ch as u32, sample_rate);
@@ -827,7 +870,7 @@ pub(crate) fn start_recording_with_device(
         .store(monitor_mix, Ordering::Relaxed);
 
     // Build the input stream — `audio_tx` is moved into the closure.
-    let input_stream = build_f32_input_stream(
+    let input_stream = match build_f32_input_stream(
         &device,
         &stream_config,
         audio_tx,
@@ -839,11 +882,23 @@ pub(crate) fn start_recording_with_device(
         input_ch,
         monitor_channels,
         samples_per_bin,
-    )?;
+        capture_on_transport,
+    ) {
+        Ok(stream) => stream,
+        Err(error) => {
+            recording_active.store(false, Ordering::Relaxed);
+            reset_failed_own_stream_start(&shared);
+            return Err(error);
+        }
+    };
 
-    input_stream
-        .play()
-        .map_err(|e| SphereAudioError::NativeError(format!("Cannot start input stream: {e}")))?;
+    if let Err(error) = input_stream.play() {
+        recording_active.store(false, Ordering::Relaxed);
+        reset_failed_own_stream_start(&shared);
+        return Err(SphereAudioError::NativeError(format!(
+            "Cannot start input stream: {error}"
+        )));
+    }
 
     eprintln!(
         "[SphereAudio] Recording started: {track_count} track(s), \
@@ -904,6 +959,9 @@ pub(crate) fn start_recording_asio_tap(
     let dropped_blocks = Arc::new(AtomicU64::new(0));
     shared.recording_active.store(true, Ordering::Relaxed);
     shared
+        .record_peak
+        .store(crate::engine::f32_store(0.0), Ordering::Relaxed);
+    shared
         .recording_monitor_mix
         .store(monitor_mix, Ordering::Relaxed);
 
@@ -935,6 +993,7 @@ pub(crate) fn start_recording_asio_tap(
         free_rx: pipeline.free_rx,
         free_tx: pipeline.free_tx,
         samples_per_bin,
+        capture_on_transport: config.capture_on_transport.unwrap_or(false),
         dropped_blocks: Arc::clone(&dropped_blocks),
     };
 
@@ -1036,4 +1095,48 @@ pub fn stop_recording(
             error: r.error,
         })
         .collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{reset_failed_own_stream_start, should_capture_recording};
+    use crate::engine::{f32_load, f32_store, SharedState};
+    use std::sync::atomic::Ordering;
+
+    #[test]
+    fn direct_recording_captures_without_transport() {
+        assert!(should_capture_recording(true, false, false));
+        assert!(should_capture_recording(true, false, true));
+    }
+
+    #[test]
+    fn transport_gated_recording_waits_for_playback() {
+        assert!(!should_capture_recording(true, true, false));
+        assert!(should_capture_recording(true, true, true));
+        assert!(!should_capture_recording(false, true, true));
+    }
+
+    #[test]
+    fn failed_own_stream_start_clears_recording_state() {
+        let shared = SharedState::default();
+        shared.recording_active.store(true, Ordering::Relaxed);
+        shared.recording_monitor_mix.store(true, Ordering::Relaxed);
+        shared
+            .recording_preview_active
+            .store(true, Ordering::Relaxed);
+        shared.live_input_active.store(true, Ordering::Relaxed);
+        shared.monitor_enabled_any.store(true, Ordering::Relaxed);
+        shared.record_peak.store(f32_store(0.75), Ordering::Relaxed);
+        shared.input_ring.set_active(true, 2, 48_000);
+
+        reset_failed_own_stream_start(&shared);
+
+        assert!(!shared.recording_active.load(Ordering::Relaxed));
+        assert!(!shared.recording_monitor_mix.load(Ordering::Relaxed));
+        assert!(!shared.recording_preview_active.load(Ordering::Relaxed));
+        assert!(!shared.live_input_active.load(Ordering::Relaxed));
+        assert!(!shared.monitor_enabled_any.load(Ordering::Relaxed));
+        assert!(!shared.input_ring.is_active());
+        assert_eq!(f32_load(shared.record_peak.load(Ordering::Relaxed)), 0.0);
+    }
 }

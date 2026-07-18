@@ -8,7 +8,9 @@ use gpui::{
 
 use crate::assets;
 use crate::components::menu_bar;
-use crate::components::text_input::TextInputState;
+use crate::components::text_input::{
+    text_field_with_callbacks, TextInputCallbacks, TextInputState,
+};
 use crate::components::title_bar::{
     chrome_button, draggable_spacer, section_separator, CHROME_TITLE_SIZE, WINDOW_CONTROL_WIDTH,
 };
@@ -101,12 +103,15 @@ pub struct TransportChromeState {
     /// Inline BPM editor state (open flag, field contents, focus).
     pub bpm_editing: bool,
     pub bpm_input: TextInputState,
+    pub bpm_input_callbacks: TextInputCallbacks,
     pub bpm_edit_focused: bool,
     pub time_signature_label: String,
     pub ts_has_markers: bool,
     pub ts_editing: bool,
     pub ts_num_input: TextInputState,
+    pub ts_num_input_callbacks: TextInputCallbacks,
     pub ts_den_input: TextInputState,
+    pub ts_den_input_callbacks: TextInputCallbacks,
     pub ts_edit_focus_num: bool,
     pub on_ts_menu: BpmMenuCb,
     pub on_ts_edit_start: ChromeActionCb,
@@ -199,6 +204,7 @@ fn bpm_display(
     on_bpm_edit_start: ChromeActionCb,
     editing: bool,
     bpm_input: &TextInputState,
+    bpm_input_callbacks: TextInputCallbacks,
     edit_focused: bool,
 ) -> gpui::AnyElement {
     // Inline numeric editor: replaces the draggable box while open. Keys are
@@ -207,9 +213,10 @@ fn bpm_display(
     if editing {
         return div()
             .w(px(48.0))
-            .child(crate::components::text_input::text_field(
+            .child(text_field_with_callbacks(
                 bpm_input,
                 edit_focused,
+                bpm_input_callbacks,
             ))
             .into_any_element();
     }
@@ -420,6 +427,7 @@ fn transport_controls(state: TransportChromeState) -> impl IntoElement {
     let bpm_has_automation = state.bpm_has_automation;
     let bpm_editing = state.bpm_editing;
     let bpm_input = state.bpm_input.clone();
+    let bpm_input_callbacks = state.bpm_input_callbacks.clone();
     let bpm_edit_focused = state.bpm_edit_focused;
     let tap_tempo_session_taps = state.tap_tempo_session_taps;
     let on_tap_tempo = state.on_tap_tempo.clone();
@@ -429,7 +437,9 @@ fn transport_controls(state: TransportChromeState) -> impl IntoElement {
     let on_ts_edit_start = state.on_ts_edit_start.clone();
     let ts_editing = state.ts_editing;
     let ts_num_input = state.ts_num_input.clone();
+    let ts_num_input_callbacks = state.ts_num_input_callbacks.clone();
     let ts_den_input = state.ts_den_input.clone();
+    let ts_den_input_callbacks = state.ts_den_input_callbacks.clone();
     let ts_edit_focus_num = state.ts_edit_focus_num;
 
     div()
@@ -578,6 +588,7 @@ fn transport_controls(state: TransportChromeState) -> impl IntoElement {
                     on_bpm_edit_start,
                     bpm_editing,
                     &bpm_input,
+                    bpm_input_callbacks,
                     bpm_edit_focused,
                 ))
                 // AUTO badge — shown only when tempo automation is active so the
@@ -642,9 +653,10 @@ fn transport_controls(state: TransportChromeState) -> impl IntoElement {
                     vec![
                         div()
                             .w(px(22.0))
-                            .child(crate::components::text_input::text_field(
+                            .child(text_field_with_callbacks(
                                 &ts_num_input,
                                 ts_edit_focus_num,
+                                ts_num_input_callbacks,
                             ))
                             .into_any_element(),
                         div()
@@ -654,9 +666,10 @@ fn transport_controls(state: TransportChromeState) -> impl IntoElement {
                             .into_any_element(),
                         div()
                             .w(px(22.0))
-                            .child(crate::components::text_input::text_field(
+                            .child(text_field_with_callbacks(
                                 &ts_den_input,
                                 !ts_edit_focus_num,
+                                ts_den_input_callbacks,
                             ))
                             .into_any_element(),
                     ]

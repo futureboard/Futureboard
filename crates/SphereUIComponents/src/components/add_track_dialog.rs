@@ -106,6 +106,25 @@ pub enum AudioFormat {
     Stereo,
 }
 
+pub(crate) const FIRST_STEREO_PAIR_INPUT_LABEL: &str = "Stereo Pair 1+2";
+const MONO_AUDIO_INPUT_OPTIONS: &[&str] = &["Input 1", "Input 2", "None"];
+const STEREO_AUDIO_INPUT_OPTIONS: &[&str] =
+    &["Input 1", "Input 2", FIRST_STEREO_PAIR_INPUT_LABEL, "None"];
+
+fn audio_input_options(format: AudioFormat) -> &'static [&'static str] {
+    match format {
+        AudioFormat::Mono => MONO_AUDIO_INPUT_OPTIONS,
+        AudioFormat::Stereo => STEREO_AUDIO_INPUT_OPTIONS,
+    }
+}
+
+fn default_audio_input(format: AudioFormat) -> &'static str {
+    match format {
+        AudioFormat::Mono => "Input 1",
+        AudioFormat::Stereo => FIRST_STEREO_PAIR_INPUT_LABEL,
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InstrumentMode {
     Vsti,
@@ -224,7 +243,7 @@ impl AddTrackKind {
     pub fn default_input(self) -> &'static str {
         match self {
             Self::Midi | Self::Instrument => "All MIDI Inputs",
-            Self::Audio => "System Input (Stereo)",
+            Self::Audio => FIRST_STEREO_PAIR_INPUT_LABEL,
             _ => "None",
         }
     }
@@ -370,6 +389,24 @@ impl AddTrackDialogState {
             AudioFormat::Mono => 1,
             AudioFormat::Stereo => 2,
         };
+    }
+
+    pub fn set_audio_format(&mut self, audio_format: AudioFormat) {
+        self.audio_format = audio_format;
+        self.sync_channel_count_from_format();
+        if !audio_input_options(audio_format).contains(&self.input_label.as_str()) {
+            self.input_label = default_audio_input(audio_format).to_string();
+        }
+    }
+
+    pub fn set_kind(&mut self, kind: AddTrackKind) {
+        self.selected_kind = kind;
+        self.input_label = if kind == AddTrackKind::Audio {
+            default_audio_input(self.audio_format)
+        } else {
+            kind.default_input()
+        }
+        .to_string();
     }
 }
 
@@ -1169,7 +1206,7 @@ fn type_fields(
                         "add-track-input-select",
                         Some(state.input_label.as_str()),
                         "Select input...",
-                        select_options(&["System Input (Stereo)", "Input 1", "Input 2", "None"]),
+                        select_options(audio_input_options(state.audio_format)),
                         add_track_select_open(open_select, AddTrackSelectId::Input),
                         SelectMenuPlacement::Below,
                         Arc::new(move |_, w, cx| toggle_input(&AddTrackSelectId::Input, w, cx)),
@@ -1639,8 +1676,7 @@ impl AddTrackWindow {
             has_master,
             default_monitor_mode,
         );
-        dialog.selected_kind = kind;
-        dialog.input_label = kind.default_input().to_string();
+        dialog.set_kind(kind);
         let i18n = I18n::new(&self.language);
         dialog.track_name = format!("{} {}", i18n.tr(kind.label_key()), dialog.next_number);
         dialog.instrument_mode = InstrumentMode::Vsti;
@@ -1961,8 +1997,7 @@ impl Render for AddTrackWindow {
                 move |kind: &AddTrackKind, _w, cx| {
                     let kind = *kind;
                     let _ = target.update(cx, |this, cx| {
-                        this.state.selected_kind = kind;
-                        this.state.input_label = kind.default_input().to_string();
+                        this.state.set_kind(kind);
                         let i18n = I18n::new(&this.language);
                         this.state.track_name =
                             format!("{} {}", i18n.tr(kind.label_key()), this.state.next_number);
@@ -2036,8 +2071,7 @@ impl Render for AddTrackWindow {
                 move |format: &AudioFormat, _w, cx| {
                     let format = *format;
                     let _ = target.update(cx, |this, cx| {
-                        this.state.audio_format = format;
-                        this.state.sync_channel_count_from_format();
+                        this.state.set_audio_format(format);
                         this.open_select = None;
                         cx.notify();
                     });
@@ -2496,5 +2530,48 @@ fn valid_monitor_mode(mode: &'static str) -> &'static str {
     match mode {
         "auto" | "input" => mode,
         _ => "off",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn audio_input_options_only_offer_pairs_for_stereo() {
+        assert_eq!(
+            audio_input_options(AudioFormat::Mono),
+            &["Input 1", "Input 2", "None"]
+        );
+        assert_eq!(
+            audio_input_options(AudioFormat::Stereo),
+            &["Input 1", "Input 2", FIRST_STEREO_PAIR_INPUT_LABEL, "None"]
+        );
+    }
+
+    #[test]
+    fn format_changes_preserve_mono_selections_and_replace_stereo_pairs() {
+        let mut state = AddTrackDialogState::open_for(0, false);
+        assert_eq!(state.input_label, FIRST_STEREO_PAIR_INPUT_LABEL);
+
+        state.input_label = "Input 2".to_string();
+        state.set_audio_format(AudioFormat::Mono);
+        assert_eq!(state.input_label, "Input 2");
+
+        state.set_audio_format(AudioFormat::Stereo);
+        state.input_label = FIRST_STEREO_PAIR_INPUT_LABEL.to_string();
+        state.set_audio_format(AudioFormat::Mono);
+        assert_eq!(state.input_label, "Input 1");
+    }
+
+    #[test]
+    fn kind_round_trip_restores_a_format_compatible_audio_input() {
+        let mut state = AddTrackDialogState::open_for(0, false);
+        state.set_audio_format(AudioFormat::Mono);
+        state.set_kind(AddTrackKind::Midi);
+        state.set_kind(AddTrackKind::Audio);
+
+        assert_eq!(state.audio_format, AudioFormat::Mono);
+        assert_eq!(state.input_label, "Input 1");
     }
 }

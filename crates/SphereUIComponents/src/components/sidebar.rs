@@ -28,7 +28,7 @@ use crate::components::file_browser::{
 };
 use crate::components::icon_button::icon_button;
 use crate::components::text_input::{
-    text_field_with_callbacks, TextInputCallbacks, TextInputContextCb, TextInputState,
+    text_field_with_callbacks, TextInputCallbacks, TextInputState,
 };
 use crate::components::timeline::waveform_cache;
 use crate::theme::Colors;
@@ -103,7 +103,7 @@ pub fn sidebar(
     search_input: &TextInputState,
     search_focused: bool,
     active: bool,
-    on_search_context_menu: TextInputContextCb,
+    search_callbacks: TextInputCallbacks,
     on_toggle: ToggleNodeCb,
     on_select: SelectEntryCb,
     on_activate_file: ActivateFileCb,
@@ -175,10 +175,6 @@ pub fn sidebar(
         );
 
     // ── Search field ────────────────────────────────────────────────
-    let search_callbacks = TextInputCallbacks {
-        on_context_menu: Some(on_search_context_menu),
-        on_mouse: None,
-    };
     let search_container = div()
         .flex()
         .flex_row()

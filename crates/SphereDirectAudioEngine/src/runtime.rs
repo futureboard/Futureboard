@@ -235,15 +235,70 @@ impl RuntimeTrackInputSource {
     pub fn sample_from_latest(&self, latest_l: f32, latest_r: f32) -> (f32, f32) {
         match self {
             Self::None => (0.0, 0.0),
+            Self::Mono { .. } => (latest_l, latest_l),
+            Self::Stereo { .. } => (latest_l, latest_r),
+        }
+    }
+
+    #[inline]
+    pub fn sample_from_monitor_pair(
+        &self,
+        latest_l: f32,
+        latest_r: f32,
+        monitor_source: (u32, u32),
+    ) -> (f32, f32) {
+        let monitor_source = (monitor_source.0 as usize, monitor_source.1 as usize);
+        let pick = |channel: usize| {
+            if channel == monitor_source.0 {
+                latest_l
+            } else if channel == monitor_source.1 {
+                latest_r
+            } else {
+                0.0
+            }
+        };
+        match self {
+            Self::None => (0.0, 0.0),
             Self::Mono { channel } => {
-                let mono = if *channel == 0 { latest_l } else { latest_r };
+                let mono = pick(*channel);
                 (mono, mono)
             }
-            Self::Stereo { left, right } => {
-                let pick = |channel: usize| if channel == 0 { latest_l } else { latest_r };
-                (pick(*left), pick(*right))
-            }
+            Self::Stereo { left, right } => (pick(*left), pick(*right)),
         }
+    }
+}
+
+#[cfg(test)]
+mod track_input_source_tests {
+    use super::RuntimeTrackInputSource;
+
+    #[test]
+    fn mono_latest_sample_is_route_local_and_duplicated() {
+        let source = RuntimeTrackInputSource::Mono { channel: 7 };
+
+        assert_eq!(source.sample_from_latest(0.25, -0.75), (0.25, 0.25));
+    }
+
+    #[test]
+    fn stereo_latest_samples_are_route_local() {
+        let source = RuntimeTrackInputSource::Stereo { left: 7, right: 2 };
+
+        assert_eq!(source.sample_from_latest(0.25, -0.75), (0.25, -0.75));
+    }
+
+    #[test]
+    fn meter_samples_follow_the_published_hardware_pair() {
+        let mono_right = RuntimeTrackInputSource::Mono { channel: 3 };
+        assert_eq!(
+            mono_right.sample_from_monitor_pair(0.25, -0.75, (2, 3)),
+            (-0.75, -0.75)
+        );
+
+        let unavailable = RuntimeTrackInputSource::Mono { channel: 7 };
+        assert_eq!(
+            unavailable.sample_from_monitor_pair(0.25, -0.75, (2, 3)),
+            (0.0, 0.0)
+        );
     }
 }
 
@@ -2533,7 +2588,12 @@ impl RuntimeProject {
     }
 
     #[inline]
-    pub fn accumulate_live_input_meters(&mut self, latest_l: f32, latest_r: f32) {
+    pub fn accumulate_live_input_meters(
+        &mut self,
+        latest_l: f32,
+        latest_r: f32,
+        monitor_source: (u32, u32),
+    ) {
         if latest_l == 0.0 && latest_r == 0.0 {
             return;
         }
@@ -2547,7 +2607,10 @@ impl RuntimeProject {
             if !track.input_source.is_routable() {
                 continue;
             }
-            let (l, r) = track.input_source.sample_from_latest(latest_l, latest_r);
+            let (l, r) =
+                track
+                    .input_source
+                    .sample_from_monitor_pair(latest_l, latest_r, monitor_source);
             let abs_l = l.abs();
             let abs_r = r.abs();
             track.meter_peak_l = track.meter_peak_l.max(abs_l);

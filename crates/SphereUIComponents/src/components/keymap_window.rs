@@ -13,7 +13,9 @@ use gpui::{
 use crate::components::controls::{fb_button, fb_field_label, FbButtonKind};
 use crate::components::form::select::{select, SelectOption};
 use crate::components::key_recorder::{key_recorder_field, KeyRecorderState};
-use crate::components::text_input::{text_field, TextInputAction, TextInputState};
+use crate::components::text_input::{
+    bind_mouse_selection, text_field_with_callbacks, TextInputAction, TextInputState,
+};
 use crate::components::title_bar::external_window_titlebar;
 use crate::keymap::{
     format_keystroke_list, KeymapConflict, KeymapManager, KeymapRow, PROFILE_DESCRIPTORS,
@@ -402,6 +404,8 @@ impl Render for KeymapWindow {
         let row_count = rows.len();
         let selected = self.selected_row_id.clone();
         let entity = cx.entity().clone();
+        let search_callbacks = bind_mouse_selection(entity.clone(), |this| &mut this.search_input);
+        let json_callbacks = bind_mouse_selection(entity.clone(), |this| &mut this.json_input);
 
         let on_profile_toggle = {
             let entity = entity.clone();
@@ -435,9 +439,10 @@ impl Render for KeymapWindow {
             .px(px(12.0))
             .border_b(px(1.0))
             .border_color(Colors::border_subtle())
-            .child(div().w(px(320.0)).child(text_field(
+            .child(div().w(px(320.0)).child(text_field_with_callbacks(
                 &self.search_input,
                 self.search_input.is_focused(window),
+                search_callbacks,
             )))
             .child(div().flex_1())
             .child(fb_button(
@@ -630,9 +635,10 @@ impl Render for KeymapWindow {
                         },
                     )),
             )
-            .child(div().flex_1().min_h_0().child(text_field(
+            .child(div().flex_1().min_h_0().child(text_field_with_callbacks(
                 &self.json_input,
                 self.json_input.is_focused(window),
+                json_callbacks,
             )))
             .children(self.json_error.as_ref().map(|error| {
                 div()

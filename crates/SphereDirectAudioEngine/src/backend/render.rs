@@ -1040,7 +1040,8 @@ fn fill_output_f32_inner(
         // Per-track input meters from the latest captured sample (Layer 6).
         let input_l = f32_load(shared.live_input_l.load(Ordering::Relaxed));
         let input_r = f32_load(shared.live_input_r.load(Ordering::Relaxed));
-        runtime.accumulate_live_input_meters(input_l, input_r);
+        let source_pair = shared.monitor_source_pair();
+        runtime.accumulate_live_input_meters(input_l, input_r, source_pair);
         read_monitor_input(frames_in_block as usize, shared, local)
     } else {
         clear_input_bus_meter(shared, local);
@@ -1356,6 +1357,29 @@ fn mix_plugin_bridge(
     (peak_l, peak_r)
 }
 
+#[inline]
+fn monitor_resync_target_frames(
+    output_block_frames: usize,
+    sample_rate: u32,
+    shared_clock: bool,
+) -> u64 {
+    let output_block_frames = output_block_frames as u64;
+    if shared_clock {
+        output_block_frames
+    } else {
+        ((sample_rate.max(1) as u64 * 15) / 1000).max(output_block_frames.saturating_mul(2))
+    }
+}
+
+#[inline]
+fn monitor_resync_limit_frames(target: u64, output_block_frames: u64, shared_clock: bool) -> u64 {
+    if shared_clock {
+        target
+    } else {
+        target.saturating_add(output_block_frames)
+    }
+}
+
 /// Drain the shared input ring into the preallocated monitor-input block
 /// (Layers 4 + 7).
 ///
@@ -1390,15 +1414,18 @@ fn read_monitor_input(
     }
     let frames64 = frames as u64;
 
-    // Hold a small, stable monitoring latency behind the producer. The input
-    // and output callbacks are separate WASAPI clients with different block
-    // sizes, so reading right up to the head underruns on every block tail
-    // (the warble). Target ≈15 ms of buffered input; resync only when drift
-    // leaves the safe window. Same physical device ⇒ shared word clock ⇒ no
-    // sustained drift, so corrections are rare.
+    // Hold a small, stable monitoring latency behind the producer. Separate
+    // WASAPI clients retain the existing ≈15 ms / two-block target because
+    // their callback sizes and scheduling differ. ASIO input/output callbacks
+    // share one device clock, so one output block is sufficient resync backlog.
     let cap = ring.capacity_frames();
-    let sr = shared.sample_rate.load(Ordering::Relaxed).max(1) as u64;
-    let target = ((sr * 15) / 1000).max(frames64 * 2);
+    let shared_clock = shared.monitor_shared_clock.load(Ordering::Relaxed);
+    let target = monitor_resync_target_frames(
+        frames,
+        shared.sample_rate.load(Ordering::Relaxed),
+        shared_clock,
+    );
+    let resync_limit = monitor_resync_limit_frames(target, frames64, shared_clock);
 
     // Resync on gross overrun (cursor lapped) or if the cursor is ahead of the
     // producer (should not happen): jump to `target` frames behind the head.
@@ -1407,7 +1434,7 @@ fn read_monitor_input(
         shared.monitor_ring_overruns.fetch_add(1, Ordering::Relaxed);
     }
     // Latency crept too high (input outran output): skip forward to `target`.
-    if head.saturating_sub(local.input_read_frames) > target + frames64 {
+    if head.saturating_sub(local.input_read_frames) > resync_limit {
         local.input_read_frames = head.saturating_sub(target);
         shared.monitor_ring_overruns.fetch_add(1, Ordering::Relaxed);
     }
@@ -1489,6 +1516,24 @@ fn clear_input_bus_meter(shared: &Arc<SharedState>, local: &mut LocalAudioState)
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shared_clock_monitor_target_is_one_output_block() {
+        assert_eq!(monitor_resync_target_frames(256, 48_000, true), 256);
+        assert_eq!(monitor_resync_target_frames(512, 96_000, true), 512);
+    }
+
+    #[test]
+    fn independent_clock_monitor_target_preserves_wasapi_backlog() {
+        assert_eq!(monitor_resync_target_frames(256, 48_000, false), 720);
+        assert_eq!(monitor_resync_target_frames(512, 48_000, false), 1024);
+    }
+
+    #[test]
+    fn shared_clock_resyncs_as_soon_as_backlog_exceeds_one_block() {
+        assert_eq!(monitor_resync_limit_frames(256, 256, true), 256);
+        assert_eq!(monitor_resync_limit_frames(720, 256, false), 976);
+    }
 
     #[test]
     fn metronome_click_waits_for_compensation_delay() {

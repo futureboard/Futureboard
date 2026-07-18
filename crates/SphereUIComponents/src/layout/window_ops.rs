@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use crate::components::add_track_dialog::{
     open_add_track_window, AddTrackDialogState, AddTrackKind, AudioFormat, InstrumentMode,
+    FIRST_STEREO_PAIR_INPUT_LABEL,
 };
 use crate::components::combo_box::dedupe_preserve_order;
 use crate::components::keymap_window::{open_keymap_window, KeymapChangedCb};
@@ -65,21 +66,21 @@ fn dialog_audio_input_routing(
             if channel >= *channels {
                 return TrackInputRouting::AllInputs;
             }
-            match format {
-                AudioFormat::Mono => TrackInputRouting::AudioDeviceChannel {
-                    device_id: device_id.clone(),
-                    channel,
-                },
-                AudioFormat::Stereo => {
-                    if channel + 1 < *channels {
-                        TrackInputRouting::AudioDeviceChannels {
-                            device_id: device_id.clone(),
-                            channels: vec![channel, channel + 1],
-                        }
-                    } else {
-                        TrackInputRouting::AllInputs
-                    }
-                }
+            TrackInputRouting::AudioDeviceChannel {
+                device_id: device_id.clone(),
+                channel,
+            }
+        }
+        FIRST_STEREO_PAIR_INPUT_LABEL if format == AudioFormat::Stereo => {
+            let Some((device_id, channels)) = input_device else {
+                return TrackInputRouting::AllInputs;
+            };
+            if *channels < 2 {
+                return TrackInputRouting::AllInputs;
+            }
+            TrackInputRouting::AudioDeviceChannels {
+                device_id: device_id.clone(),
+                channels: vec![0, 1],
             }
         }
         _ => TrackInputRouting::AllInputs,
@@ -1274,5 +1275,48 @@ impl StudioLayout {
         if handle.update(cx, |_w, _window, _cx| ()).is_err() {
             self.midi_editor.window = None;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dialog_input_number_always_maps_to_one_channel() {
+        let device = ("input-device".to_string(), 4);
+        for format in [AudioFormat::Mono, AudioFormat::Stereo] {
+            assert_eq!(
+                dialog_audio_input_routing("Input 2", format, Some(&device)),
+                TrackInputRouting::AudioDeviceChannel {
+                    device_id: device.0.clone(),
+                    channel: 1,
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn dialog_stereo_pair_label_maps_to_first_pair_only_for_stereo() {
+        let device = ("input-device".to_string(), 4);
+        assert_eq!(
+            dialog_audio_input_routing(
+                FIRST_STEREO_PAIR_INPUT_LABEL,
+                AudioFormat::Stereo,
+                Some(&device),
+            ),
+            TrackInputRouting::AudioDeviceChannels {
+                device_id: device.0.clone(),
+                channels: vec![0, 1],
+            }
+        );
+        assert_eq!(
+            dialog_audio_input_routing(
+                FIRST_STEREO_PAIR_INPUT_LABEL,
+                AudioFormat::Mono,
+                Some(&device),
+            ),
+            TrackInputRouting::AllInputs
+        );
     }
 }

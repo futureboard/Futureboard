@@ -278,6 +278,14 @@ impl Render for StudioLayout {
         }
         let inspector_clip_name_focused =
             self.inspector_name_edit.clip_name_input.is_focused(window);
+        let inspector_name_callbacks = crate::components::text_input::bind_mouse_selection(
+            cx.entity().clone(),
+            |layout: &mut StudioLayout| &mut layout.inspector_name_edit.name_input,
+        );
+        let inspector_clip_name_callbacks = crate::components::text_input::bind_mouse_selection(
+            cx.entity().clone(),
+            |layout: &mut StudioLayout| &mut layout.inspector_name_edit.clip_name_input,
+        );
 
         crate::perf::count("tracks", tracks.len() as u64);
 
@@ -301,6 +309,14 @@ impl Render for StudioLayout {
                     cx.notify();
                 });
             })
+        };
+        let browser_search_mouse_callbacks = crate::components::text_input::bind_mouse_selection(
+            cx.entity().clone(),
+            |layout: &mut StudioLayout| &mut layout.browser_search_input,
+        );
+        let browser_search_callbacks = TextInputCallbacks {
+            on_context_menu: Some(on_browser_search_context),
+            on_mouse: browser_search_mouse_callbacks.on_mouse,
         };
 
         let on_browser_toggle: std::sync::Arc<
@@ -919,7 +935,6 @@ impl Render for StudioLayout {
                     )
                 }
                 Some(OpenPopover::AutomationTargetPicker { track_id, x, y }) => {
-                    use crate::components::text_input::TextInputCallbacks;
                     use crate::components::timeline::automation_target_picker::automation_target_picker_overlay;
 
                     self.automation_picker_query =
@@ -930,10 +945,10 @@ impl Render for StudioLayout {
                         .state
                         .automation_picker_model(&track_id)
                         .unwrap_or_default();
-                    let search_callbacks = TextInputCallbacks {
-                        on_context_menu: None,
-                        on_mouse: None,
-                    };
+                    let search_callbacks = crate::components::text_input::bind_mouse_selection(
+                        cx.entity().clone(),
+                        |layout: &mut StudioLayout| &mut layout.automation_picker_search_input,
+                    );
                     Some(
                         automation_target_picker_overlay(
                             &model,
@@ -1035,6 +1050,10 @@ impl Render for StudioLayout {
         let plugin_picker_overlay_el: Option<gpui::AnyElement> = if self.plugin_picker.is_open
             && self.plugin_picker_window.is_none()
         {
+            let search_mouse_callbacks = crate::components::text_input::bind_mouse_selection(
+                cx.entity().clone(),
+                |layout: &mut StudioLayout| &mut layout.plugin_picker_search_input,
+            );
             let search_context_callbacks = TextInputCallbacks {
                 on_context_menu: Some(Arc::new({
                     let this = cx.entity().clone();
@@ -1051,7 +1070,7 @@ impl Render for StudioLayout {
                         });
                     }
                 })),
-                on_mouse: None,
+                on_mouse: search_mouse_callbacks.on_mouse,
             };
             let picker_callbacks = PluginPickerCallbacks {
                 on_close: Arc::new({
@@ -1600,7 +1619,7 @@ impl Render for StudioLayout {
                             &self.browser_search_input,
                             self.browser_search_input.is_focused(window),
                             active_panel == WorkspaceActivePanel::Browser,
-                            on_browser_search_context,
+                            browser_search_callbacks,
                             on_browser_toggle,
                             on_browser_select,
                             on_browser_activate,
@@ -1651,8 +1670,10 @@ impl Render for StudioLayout {
                                     stretch_tempo,
                                     &self.inspector_name_edit.name_input,
                                     inspector_name_focused,
+                                    inspector_name_callbacks,
                                     &self.inspector_name_edit.clip_name_input,
                                     inspector_clip_name_focused,
+                                    inspector_clip_name_callbacks,
                                     active_panel == WorkspaceActivePanel::Inspector,
                                     &inspector_callbacks,
                                 ).into_any_element()

@@ -17,7 +17,8 @@ const FEED_FETCH_TIMEOUT_SECS: u64 = 8;
 
 use crate::assets;
 use crate::components::text_input::{
-    is_repeatable_edit_key, text_field_with_callbacks_and_ime, TextInputCallbacks,
+    bind_mouse_selection, is_repeatable_edit_key, text_field_with_callbacks_and_ime,
+    TextInputCallbacks,
 };
 use crate::components::title_bar::{draggable_spacer, section_separator, window_control_button};
 use crate::components::{TextInputAction, TextInputState};
@@ -398,6 +399,8 @@ crate::impl_single_input_window_ime!(WelcomeWindow, project_name_input);
 impl Render for WelcomeWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let target = cx.entity().clone();
+        let project_name_callbacks =
+            bind_mouse_selection(target.clone(), |this| &mut this.project_name_input);
         div()
             .key_context("WelcomeWindow")
             .capture_key_down(move |event, window, cx| {
@@ -421,18 +424,24 @@ impl Render for WelcomeWindow {
                 window.prevent_default();
             })
             .child(startup_titlebar(window))
-            .child(self.render_welcome(window, cx))
+            .child(self.render_welcome(window, cx, project_name_callbacks))
     }
 }
 
 impl WelcomeWindow {
-    fn render_welcome(&mut self, window: &Window, cx: &mut Context<Self>) -> gpui::AnyElement {
+    fn render_welcome(
+        &mut self,
+        window: &Window,
+        cx: &mut Context<Self>,
+        project_name_callbacks: TextInputCallbacks,
+    ) -> gpui::AnyElement {
         // Center pane content depends on the selected sidebar tab.
         let center = match self.active_nav {
             StartupNav::NewProject => new_project_pane(
                 cx,
                 &self.project_name_input,
                 self.project_name_input.is_focused(window),
+                project_name_callbacks,
                 self.selected_template,
                 self.project_sample_rate,
                 self.project_bpm,
@@ -851,6 +860,7 @@ fn new_project_pane(
     cx: &mut Context<WelcomeWindow>,
     project_name_input: &TextInputState,
     name_focused: bool,
+    name_callbacks: TextInputCallbacks,
     selected_template: ProjectTemplate,
     sample_rate: u32,
     bpm: f32,
@@ -957,7 +967,7 @@ fn new_project_pane(
         .child(text_field_with_callbacks_and_ime(
             project_name_input,
             name_focused,
-            TextInputCallbacks::default(),
+            name_callbacks,
             target.clone(),
         ))
         .child(form_label("Location"))

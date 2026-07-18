@@ -374,7 +374,9 @@ impl TextEditBuffer {
             return;
         }
         let idx = index.min(self.char_count());
-        self.unmark_text();
+        // Keep an active IME range until the platform commits or cancels it.
+        // Clearing it here can leave pre-edit text behind when a click is followed
+        // by `replace_text_in_range(None, ..)` from the IME.
         self.cursor = idx;
         self.selection_anchor = Some(idx);
     }
@@ -1343,6 +1345,7 @@ fn text_field_inner(
             .flex_row()
             .items_center()
             .w_full()
+            .when(focused, |d| d.child(caret()))
             .child(
                 div()
                     .min_w_0()
@@ -1351,7 +1354,6 @@ fn text_field_inner(
                     .text_color(Colors::text_faint())
                     .child(placeholder),
             )
-            .when(focused, |d| d.child(caret()))
             .into_any_element()
     } else if let Some(range) = selection {
         let before: String = value.chars().take(range.start).collect();
@@ -2096,6 +2098,29 @@ mod tests {
         b.place_cursor(1);
         b.select_to(3);
         assert_eq!(b.selected_text().as_deref(), Some("👍ก"));
+    }
+
+    #[test]
+    fn mouse_click_preserves_active_composition_until_commit() {
+        let mut b = buf("ab");
+        b.cursor = 1;
+        ev(
+            &mut b,
+            Ev::CompositionUpdate {
+                text: "き".into(),
+                cursor: 1,
+            },
+        );
+        assert_eq!(b.value, "aきb");
+
+        b.place_cursor(0);
+        assert!(b.is_composing());
+        ev(&mut b, Ev::CompositionCommit("亜".into()));
+
+        assert_eq!(
+            b.value, "a亜b",
+            "commit must replace the old pre-edit range"
+        );
     }
 
     #[test]

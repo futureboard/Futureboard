@@ -89,6 +89,51 @@ impl ClipState {
             _ => None,
         }
     }
+
+    /// Reconcile an **Off-mode audio** clip's source trim window with its current
+    /// `duration_beats`, using right-edge trim semantics: `source_start_samples`
+    /// stays fixed and `source_end_samples` follows the clip length, clamped to
+    /// the available media. When the media length is known, `duration_beats` is
+    /// snapped back to the clamped source window so the waveform's source→pixel
+    /// scale is preserved — the waveform crops/reveals, it never stretches
+    /// (spec §4/§5). No-op for MIDI clips and for time-stretched clips, whose
+    /// length↔source coupling is owned by the stretch/tempo path.
+    ///
+    /// This is the single source of truth shared by right-edge drag resize
+    /// ([`TimelineState::resize_clip_with_bypass`]) and the inspector Length
+    /// field ([`TimelineState::set_clip_length`]), so both trim identically.
+    pub(crate) fn reconcile_off_mode_audio_trim(
+        &mut self,
+        seconds_per_beat: f32,
+        min_len_beats: f32,
+    ) {
+        if !matches!(self.clip_type, ClipType::Audio { .. })
+            || !matches!(self.stretch.mode, StretchMode::Off)
+        {
+            return;
+        }
+        let source_rate = self
+            .stretch
+            .original_sample_rate
+            .max(self.stretch.project_sample_rate)
+            .max(1) as f64;
+        let source_start = self.stretch.source_start_samples;
+        let source_end = source_start.saturating_add(
+            ((self.duration_beats as f64 * seconds_per_beat as f64) * source_rate)
+                .round()
+                .max(0.0) as u64,
+        );
+        self.stretch.apply_trim(source_start, source_end);
+        if self.stretch.original_duration_samples > 0 {
+            self.stretch.source_end_samples = self
+                .stretch
+                .source_end_samples
+                .min(self.stretch.original_duration_samples);
+            let source_len = self.stretch.source_end_samples.saturating_sub(source_start);
+            self.duration_beats = ((source_len as f64 / source_rate) / seconds_per_beat as f64)
+                .max(min_len_beats as f64) as f32;
+        }
+    }
 }
 
 /// Which edge of a clip an edge-resize gesture is dragging.
@@ -191,6 +236,11 @@ impl TimelineState {
         false
     }
 
+    /// Raw duration setter. This is a low-level primitive shared by the stretch
+    /// command machinery (which sets a *stretched* length and owns the source↔
+    /// length coupling itself) and undo/redo, so it deliberately does **not**
+    /// touch the audio source trim window. UI that means "trim the clip" must use
+    /// [`Self::set_clip_length_trimming`] instead.
     pub fn set_clip_length(&mut self, clip_id: &str, duration_beats: f32) -> bool {
         for track in &mut self.tracks {
             if let Some(clip) = track.clips.iter_mut().find(|clip| clip.id == clip_id) {
@@ -210,6 +260,42 @@ impl TimelineState {
                     return true;
                 }
                 return false;
+            }
+        }
+        false
+    }
+
+    /// User-facing "set clip length" (inspector Length field). Behaves like a
+    /// right-edge resize: for an Off-mode audio clip it reconciles the source
+    /// trim window so the waveform crops/reveals instead of stretching to fit
+    /// the new width (spec §4/§5). MIDI and time-stretched clips fall back to the
+    /// raw [`Self::set_clip_length`] behaviour. Returns `true` when anything
+    /// changed. UI-mutating only — the caller records undo / marks dirty.
+    pub fn set_clip_length_trimming(&mut self, clip_id: &str, duration_beats: f32) -> bool {
+        let seconds_per_beat = self.seconds_per_beat();
+        for track in &mut self.tracks {
+            if let Some(clip) = track.clips.iter_mut().find(|clip| clip.id == clip_id) {
+                let min_len = match &clip.clip_type {
+                    ClipType::Midi { notes, .. } => {
+                        let last_note_end = notes
+                            .iter()
+                            .map(|note| note.start.max(0.0) + note.duration.max(MIN_NOTE_BEATS))
+                            .fold(0.0_f32, f32::max);
+                        MIN_MIDI_CLIP_BEATS.max(last_note_end)
+                    }
+                    ClipType::Audio { .. } => 0.25,
+                };
+                let duration_beats = duration_beats.max(min_len);
+                let before = (
+                    clip.duration_beats,
+                    clip.stretch.source_start_samples,
+                    clip.stretch.source_end_samples,
+                );
+                clip.duration_beats = duration_beats;
+                clip.reconcile_off_mode_audio_trim(seconds_per_beat, min_len);
+                return (before.0 - clip.duration_beats).abs() > 0.0001
+                    || before.1 != clip.stretch.source_start_samples
+                    || before.2 != clip.stretch.source_end_samples;
             }
         }
         false
@@ -499,37 +585,32 @@ impl TimelineState {
                     .max(min_len)
                     .max(last_note_end);
                 clip.duration_beats = dur;
-                if !is_midi && matches!(clip.stretch.mode, StretchMode::Off) {
-                    let source_rate = clip
-                        .stretch
-                        .original_sample_rate
-                        .max(clip.stretch.project_sample_rate)
-                        .max(1) as f64;
-                    let source_start = clip.stretch.source_start_samples;
-                    let source_end = source_start.saturating_add(
-                        ((clip.duration_beats as f64 * seconds_per_beat as f64) * source_rate)
-                            .round()
-                            .max(0.0) as u64,
-                    );
-                    clip.stretch.apply_trim(source_start, source_end);
-                    if clip.stretch.original_duration_samples > 0 {
-                        clip.stretch.source_end_samples = clip
-                            .stretch
-                            .source_end_samples
-                            .min(clip.stretch.original_duration_samples);
-                        let source_len =
-                            clip.stretch.source_end_samples.saturating_sub(source_start);
-                        clip.duration_beats =
-                            ((source_len as f64 / source_rate) / seconds_per_beat as f64)
-                                .max(min_len as f64) as f32;
-                    }
-                }
+                // Right-edge drag = source trim: keep source_start, follow the new
+                // length with source_end (clamped to media). Shared with the
+                // inspector Length field so both crop/reveal, never stretch.
+                clip.reconcile_off_mode_audio_trim(seconds_per_beat, min_len);
             }
             ClipEdge::Left => {
                 let old_start = clip.start_beat;
                 let old_right = old_start + clip.duration_beats;
                 // Keep the right edge fixed; clamp the new start to [0, right-min].
                 let mut new_start = edge_beat.min(old_right - min_len).max(0.0);
+                // Off-mode audio: never reveal earlier than the start of the
+                // available media. Bounding the timeline start by the source that
+                // actually exists keeps the source window and clip width locked in
+                // lockstep, so revealing left uncovers real audio instead of
+                // stretching the waveform (spec §4).
+                if !is_midi && matches!(clip.stretch.mode, StretchMode::Off) {
+                    let source_rate = clip
+                        .stretch
+                        .original_sample_rate
+                        .max(clip.stretch.project_sample_rate)
+                        .max(1) as f64;
+                    let max_reveal_beats = clip.stretch.source_start_samples as f64
+                        / (source_rate * seconds_per_beat as f64).max(f64::MIN_POSITIVE);
+                    let min_new_start = (old_start as f64 - max_reveal_beats).max(0.0) as f32;
+                    new_start = new_start.max(min_new_start);
+                }
                 // Trimming from the left must not push the earliest note < 0.
                 if let ClipType::Midi { notes, .. } = &clip.clip_type {
                     if let Some(min_local) = notes.iter().map(|n| n.start).reduce(f32::min) {

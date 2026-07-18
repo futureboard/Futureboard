@@ -587,6 +587,10 @@ pub struct JsStartRecordingConfig {
     /// 0-based input channel indices used for software monitoring. One channel
     /// is duplicated to stereo; two or more use the first stereo pair.
     pub monitor_channels: Vec<u32>,
+    /// When true, monitoring starts immediately but file capture, recording
+    /// peaks, and preview bins wait for the transport to play. None/false keeps
+    /// the direct API's immediate-capture behavior.
+    pub capture_on_transport: Option<bool>,
 }
 
 /// Per-track result returned by `stopRecording()`.

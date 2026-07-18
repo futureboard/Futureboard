@@ -322,7 +322,8 @@ impl StudioLayout {
                 .find_clip(&clip_id)
                 .map(|(_, clip)| clip.duration_beats);
             let changed = timeline.update(cx, |t, cx| {
-                let changed = t.state.set_clip_length(&clip_id, length);
+                // Inspector Length = trim (crop/reveal source), not stretch.
+                let changed = t.state.set_clip_length_trimming(&clip_id, length);
                 if changed {
                     cx.notify();
                 }
@@ -1090,16 +1091,17 @@ impl StudioLayout {
     }
 
     fn audio_format_cb(&self, owner: Entity<Self>) -> AudioFormatCb {
+        let audio_engine = self.audio_bridge.engine.clone();
         let timeline = self.timeline.clone();
         Arc::new(
             move |(id, audio_format): &(String, TrackAudioFormat), _w, cx| {
                 let id = id.clone();
                 let audio_format = *audio_format;
-                let old = timeline
+                let previous = timeline
                     .read(cx)
                     .state
                     .find_track(&id)
-                    .map(|track| track.routing.audio_format);
+                    .map(|track| (track.routing.audio_format, track.routing.input.clone()));
                 let changed = timeline.update(cx, |t, cx| {
                     let changed = t.state.set_track_audio_format(&id, audio_format);
                     if changed {
@@ -1107,16 +1109,42 @@ impl StudioLayout {
                     }
                     changed
                 });
-                if changed {
-                    inspector_debug(&format!(
-                        "routing audio_format track={id} old={:?} new={:?}",
-                        old, audio_format
-                    ));
-                    StudioLayout::defer_update(&owner, cx, |this, cx| {
-                        this.mark_dirty();
-                        this.push_mixer_snapshot_to_window(cx);
-                    });
+                if !changed {
+                    return;
                 }
+
+                inspector_debug(&format!(
+                    "routing audio_format track={id} old={:?} new={:?}",
+                    previous.as_ref().map(|(format, _)| *format),
+                    audio_format
+                ));
+                let apply_error = audio_engine.as_ref().and_then(|engine| {
+                    timeline
+                        .read(cx)
+                        .state
+                        .find_track(&id)
+                        .and_then(|track| apply_engine_track_input_state(engine, track).err())
+                });
+                if let Some(error) = apply_error {
+                    if let Some((old_format, old_input)) = previous {
+                        timeline.update(cx, |t, cx| {
+                            t.state.set_track_audio_format(&id, old_format);
+                            t.state.set_track_input_routing(&id, old_input);
+                            cx.notify();
+                        });
+                    }
+                    StudioLayout::defer_update(&owner, cx, move |this, cx| {
+                        this.audio_bridge.last_error =
+                            Some(format!("Audio format update failed: {error}"));
+                        cx.notify();
+                    });
+                    return;
+                }
+
+                StudioLayout::defer_update(&owner, cx, |this, cx| {
+                    this.mark_dirty();
+                    this.push_mixer_snapshot_to_window(cx);
+                });
             },
         )
     }

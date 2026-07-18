@@ -1648,6 +1648,12 @@ fn project_routing_to_timeline(
         ProjectTrackAudioFormat::Mono => TrackAudioFormat::Mono,
         ProjectTrackAudioFormat::Stereo => TrackAudioFormat::Stereo,
     };
+    if !state
+        .input
+        .is_compatible_with_audio_format(state.audio_format)
+    {
+        state.input = TrackInputRouting::None;
+    }
     state.midi_input = match &routing.midi_input {
         ProjectTrackMidiInputRouting::None => TrackMidiInputRouting::None,
         ProjectTrackMidiInputRouting::AllInputs => TrackMidiInputRouting::AllInputs,
@@ -1718,6 +1724,50 @@ fn desc_to_target(
                 T::TrackVolume
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod audio_routing_persistence_tests {
+    use super::*;
+    use crate::components::timeline::timeline_state::{TrackAudioFormat, TrackInputRouting};
+
+    #[test]
+    fn loaded_mono_track_clears_stereo_pair_route() {
+        let routing = TrackRouting {
+            input: ProjectTrackInputRouting::AudioDeviceChannels {
+                device_id: "input-device".to_string(),
+                channels: vec![0, 1],
+            },
+            audio_format: ProjectTrackAudioFormat::Mono,
+            ..TrackRouting::default()
+        };
+
+        let state = project_routing_to_timeline(&routing, TlTrackType::Audio);
+        assert_eq!(state.audio_format, TrackAudioFormat::Mono);
+        assert_eq!(state.input, TrackInputRouting::None);
+    }
+
+    #[test]
+    fn loaded_stereo_track_preserves_mono_route() {
+        let routing = TrackRouting {
+            input: ProjectTrackInputRouting::AudioDeviceChannel {
+                device_id: "input-device".to_string(),
+                channel: 1,
+            },
+            audio_format: ProjectTrackAudioFormat::Stereo,
+            ..TrackRouting::default()
+        };
+
+        let state = project_routing_to_timeline(&routing, TlTrackType::Audio);
+        assert_eq!(state.audio_format, TrackAudioFormat::Stereo);
+        assert_eq!(
+            state.input,
+            TrackInputRouting::AudioDeviceChannel {
+                device_id: "input-device".to_string(),
+                channel: 1,
+            }
+        );
     }
 }
 

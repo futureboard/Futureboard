@@ -31,7 +31,9 @@ use crate::components::inspector::{
 };
 use crate::components::reorder::{drag_handle, drop_over_highlight};
 use crate::components::slider::slider;
-use crate::components::text_input::{text_field, TextInputState};
+use crate::components::text_input::{
+    text_field_with_callbacks, TextInputCallbacks, TextInputState,
+};
 use crate::components::timeline::timeline_state::{
     volume, vsti_output_bus_strip_indices, vsti_output_child_channels_for_bus_layout,
     AudioClipStretchState, ClipType, InsertLoadStatus, InsertSlotState, StretchAlgorithm,
@@ -314,15 +316,24 @@ pub fn inspector_panel<'a>(
     stretch_tempo: Option<StretchTempoUiSnapshot>,
     name_input: &TextInputState,
     name_focused: bool,
+    name_callbacks: TextInputCallbacks,
     clip_name_input: &TextInputState,
     clip_name_focused: bool,
+    clip_name_callbacks: TextInputCallbacks,
     active: bool,
     callbacks: &InspectorCallbacks,
 ) -> impl IntoElement {
     let body: gpui::AnyElement = if let Some(clip) = clip_summary {
         let tempo = stretch_tempo.unwrap_or_default();
-        clip_inspector(clip, clip_name_input, clip_name_focused, tempo, callbacks)
-            .into_any_element()
+        clip_inspector(
+            clip,
+            clip_name_input,
+            clip_name_focused,
+            clip_name_callbacks,
+            tempo,
+            callbacks,
+        )
+        .into_any_element()
     } else if let Some(tid) = selected_track_id {
         match tracks.iter().find(|t| t.id == tid) {
             Some(t) => {
@@ -334,8 +345,15 @@ pub fn inspector_panel<'a>(
                     .filter(|track| track.track_type == TrackType::Instrument)
                     .map(|track| (track.id.clone(), track.name.clone()))
                     .collect();
-                track_inspector(t, name_input, name_focused, &instrument_targets, callbacks)
-                    .into_any_element()
+                track_inspector(
+                    t,
+                    name_input,
+                    name_focused,
+                    name_callbacks,
+                    &instrument_targets,
+                    callbacks,
+                )
+                .into_any_element()
             }
             None => no_selection(tracks.len()).into_any_element(),
         }
@@ -829,59 +847,60 @@ fn build_input_routing_options(
                 format!("{base} [{}]", channel.sample_format)
             }
         };
-        match track.routing.audio_format {
-            TrackAudioFormat::Mono => {
-                for channel in device.channels.iter().filter(|channel| channel.active) {
-                    out.push((
-                        format!(
-                            "{device_label} — Mono {} (Ch {})",
-                            channel_label(channel),
-                            channel.index.saturating_add(1)
-                        ),
-                        TrackInputRouting::AudioDeviceChannel {
-                            device_id: device.id.clone(),
-                            channel: channel.index,
-                        },
-                    ));
-                }
-            }
-            TrackAudioFormat::Stereo => {
-                let mut pair_ids = device
+        for channel in device.channels.iter().filter(|channel| channel.active) {
+            out.push((
+                format!(
+                    "{device_label} — Mono {} (Ch {})",
+                    channel_label(channel),
+                    channel.index.saturating_add(1)
+                ),
+                TrackInputRouting::AudioDeviceChannel {
+                    device_id: device.id.clone(),
+                    channel: channel.index,
+                },
+            ));
+        }
+        if track.routing.audio_format == TrackAudioFormat::Stereo {
+            let mut pair_ids = device
+                .channels
+                .iter()
+                .filter(|channel| channel.active)
+                .filter_map(|channel| channel.stereo_pair)
+                .collect::<Vec<_>>();
+            pair_ids.sort_unstable();
+            pair_ids.dedup();
+            for pair_id in pair_ids {
+                let mut pair = device
                     .channels
                     .iter()
-                    .filter(|channel| channel.active)
-                    .filter_map(|channel| channel.stereo_pair)
+                    .filter(|channel| channel.active && channel.stereo_pair == Some(pair_id))
                     .collect::<Vec<_>>();
-                pair_ids.sort_unstable();
-                pair_ids.dedup();
-                for pair_id in pair_ids {
-                    let mut pair = device
-                        .channels
-                        .iter()
-                        .filter(|channel| channel.active && channel.stereo_pair == Some(pair_id))
-                        .collect::<Vec<_>>();
-                    pair.sort_by_key(|channel| channel.index);
-                    let [left, right] = pair.as_slice() else {
-                        continue;
-                    };
-                    out.push((
-                        format!(
-                            "{device_label} — Stereo {} + {} (Ch {}+{})",
-                            channel_label(left),
-                            channel_label(right),
-                            left.index.saturating_add(1),
-                            right.index.saturating_add(1)
-                        ),
-                        TrackInputRouting::AudioDeviceChannels {
-                            device_id: device.id.clone(),
-                            channels: vec![left.index, right.index],
-                        },
-                    ));
-                }
+                pair.sort_by_key(|channel| channel.index);
+                let [left, right] = pair.as_slice() else {
+                    continue;
+                };
+                out.push((
+                    format!(
+                        "{device_label} — Stereo {} + {} (Ch {}+{})",
+                        channel_label(left),
+                        channel_label(right),
+                        left.index.saturating_add(1),
+                        right.index.saturating_add(1)
+                    ),
+                    TrackInputRouting::AudioDeviceChannels {
+                        device_id: device.id.clone(),
+                        channels: vec![left.index, right.index],
+                    },
+                ));
             }
         }
     }
-    if !out.iter().any(|(_, r)| *r == track.routing.input) {
+    if track
+        .routing
+        .input
+        .is_compatible_with_audio_format(track.routing.audio_format)
+        && !out.iter().any(|(_, r)| *r == track.routing.input)
+    {
         out.push((
             format!(
                 "Missing - {}",
@@ -1756,6 +1775,7 @@ fn track_inspector(
     track: &TrackState,
     name_input: &TextInputState,
     name_focused: bool,
+    name_callbacks: TextInputCallbacks,
     instrument_targets: &[(String, String)],
     callbacks: &InspectorCallbacks,
 ) -> impl IntoElement {
@@ -1936,7 +1956,10 @@ fn track_inspector(
                 .gap(px(4.0))
                 .child(fb_section_header("TRACK"))
                 .child(kv_row("Type", track_type_badge(track.track_type)))
-                .child(fb_form_row("Name", text_field(name_input, name_focused)))
+                .child(fb_form_row(
+                    "Name",
+                    text_field_with_callbacks(name_input, name_focused, name_callbacks),
+                ))
                 .child(fb_form_row("Volume", volume_row))
                 .child(fb_form_row("Pan", pan_row))
                 .child(fb_form_row(
@@ -2879,6 +2902,7 @@ fn clip_inspector(
     clip: SelectedClipSummary<'_>,
     clip_name_input: &TextInputState,
     clip_name_focused: bool,
+    clip_name_callbacks: TextInputCallbacks,
     tempo: StretchTempoUiSnapshot,
     callbacks: &InspectorCallbacks,
 ) -> impl IntoElement {
@@ -2972,7 +2996,11 @@ fn clip_inspector(
                     .gap(px(3.0))
                     .child(compact_property_row(
                         "Name",
-                        text_field(clip_name_input, clip_name_focused),
+                        text_field_with_callbacks(
+                            clip_name_input,
+                            clip_name_focused,
+                            clip_name_callbacks.clone(),
+                        ),
                     )),
             ))
             .child(inspector_section(
@@ -3176,7 +3204,11 @@ fn clip_inspector(
                 .child(kv_row("Track ID", clip.track_id.to_string()))
                 .child(fb_form_row(
                     "Name",
-                    text_field(clip_name_input, clip_name_focused),
+                    text_field_with_callbacks(
+                        clip_name_input,
+                        clip_name_focused,
+                        clip_name_callbacks,
+                    ),
                 ))
                 .child(fb_form_row(
                     "Start",
@@ -3396,7 +3428,7 @@ mod input_routing_tests {
     }
 
     #[test]
-    fn stereo_routes_require_two_active_channels_in_the_same_pair() {
+    fn stereo_routes_include_active_mono_channels_and_valid_pairs() {
         let track = audio_track(TrackAudioFormat::Stereo);
         let device = device(vec![
             channel(0, true, Some(0)),
@@ -3407,6 +3439,15 @@ mod input_routing_tests {
         ]);
 
         let options = build_input_routing_options(&track, Some(&device));
+        let mono_channels = options
+            .iter()
+            .filter_map(|(_, route)| match route {
+                TrackInputRouting::AudioDeviceChannel { channel, .. } => Some(*channel),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(mono_channels, vec![0, 1, 2, 4]);
+
         let stereo_routes = options
             .iter()
             .filter_map(|(_, route)| match route {

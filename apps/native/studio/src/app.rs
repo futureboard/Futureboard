@@ -271,13 +271,20 @@ fn open_welcome_window(cx: &mut App) {
     set_app_mode(cx, AppMode::Welcome);
     let callbacks = WelcomeCallbacks {
         on_action: Arc::new(|action, welcome_window, cx| match action {
+            // Always open the LoadingSession shell before retiring Welcome.
+            // On Linux, QuitMode::LastWindowClosed would otherwise quit the app
+            // the moment Welcome closes with no replacement window yet.
             WelcomeAction::OpenProjectFile(path) => {
-                welcome_window.remove_window();
                 begin_load_project_from_welcome(path, ProjectOpenOptions::default(), cx);
+                welcome_window.remove_window();
             }
             WelcomeAction::OpenRecent(path) => {
+                begin_load_project_from_welcome(
+                    path,
+                    ProjectOpenOptions { from_recent: true },
+                    cx,
+                );
                 welcome_window.remove_window();
-                begin_load_project_from_welcome(path, ProjectOpenOptions { from_recent: true }, cx);
             }
             other => {
                 open_studio_for_action(other, cx);

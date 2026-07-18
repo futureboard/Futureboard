@@ -194,10 +194,16 @@ impl WaylandSurfaceState {
         let toplevel = xdg_surface.get_toplevel(&globals.qh, surface.id());
         let xdg_parent = parent.as_ref().and_then(|w| w.toplevel());
 
-        if matches!(
-            params.kind,
-            WindowKind::Floating | WindowKind::MdiChild | WindowKind::Dialog
-        ) {
+        // Dialogs with `dialog_parenting = false` must outlive the window they
+        // were opened from (Welcome → LoadingSession → Studio). Parenting them
+        // would cascade-close the loader when Welcome is removed and trigger
+        // QuitMode::LastWindowClosed.
+        let should_attach_parent = match params.kind {
+            WindowKind::Floating | WindowKind::MdiChild => true,
+            WindowKind::Dialog => params.dialog_parenting,
+            _ => false,
+        };
+        if should_attach_parent {
             toplevel.set_parent(xdg_parent.as_ref());
         }
 
@@ -208,7 +214,9 @@ impl WaylandSurfaceState {
                 xdg_dialog
             });
 
-            if let Some(parent) = parent.as_ref() {
+            if params.dialog_parenting
+                && let Some(parent) = parent.as_ref()
+            {
                 parent.add_child(surface.id());
             }
 

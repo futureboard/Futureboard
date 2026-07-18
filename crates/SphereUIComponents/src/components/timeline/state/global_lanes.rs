@@ -5,6 +5,7 @@ use super::*;
 pub enum GlobalLaneKind {
     Tempo,
     TimeSignature,
+    SongText,
     Marker,
     Arranger,
 }
@@ -29,7 +30,9 @@ pub fn y_to_bpm(y: f32, lane_height: f32, min_bpm: f64, max_bpm: f64) -> f64 {
 
 impl TimelineState {
     pub fn global_lanes_height(&self) -> f32 {
-        self.tempo_track_height() + self.time_signature_track_height()
+        self.tempo_track_height()
+            + self.time_signature_track_height()
+            + crate::components::timeline::song_text_track::SONG_TEXT_LANE_HEIGHT
     }
 
     /// Visible global/system lanes (Tempo then Time Signature when shown).
@@ -41,6 +44,7 @@ impl TimelineState {
         if self.show_time_signature_track {
             lanes.push(GlobalLaneKind::TimeSignature);
         }
+        lanes.push(GlobalLaneKind::SongText);
         lanes
     }
 }

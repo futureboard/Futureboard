@@ -1,17 +1,18 @@
-//! Project chord/lyric displays and the structured lyric editor.
-//!
-//! Size: fills its dock/window, minimum useful size 260×160. The cue list is
-//! the sole scroll owner. Focus is local to the editor inputs; displays are
-//! read-only. All persisted data lives in `TimelineState::song_text_cues`.
+//! Timeline-backed chord, lyric, and Song Text editing surfaces.
 
+use gpui::prelude::FluentBuilder;
 use gpui::{
-    div, px, size, App, AppContext, Bounds, Context, Entity, InteractiveElement, IntoElement,
-    KeyDownEvent, ParentElement, Render, StatefulInteractiveElement, Styled, Window,
-    WindowBackgroundAppearance, WindowBounds, WindowHandle,
+    div, px, size, uniform_list, App, AppContext, Bounds, Context, Entity, InteractiveElement,
+    IntoElement, KeyDownEvent, ParentElement, Render, ScrollStrategy, StatefulInteractiveElement,
+    Styled, Subscription, UniformListScrollHandle, Window, WindowBackgroundAppearance,
+    WindowBounds, WindowHandle,
 };
 
+use crate::components::edit::EditCommand;
 use crate::components::text_input::{text_field, TextInputAction, TextInputState};
-use crate::components::timeline::timeline_state::SongTextCue;
+use crate::components::timeline::timeline_state::{
+    SongTextEvent, SongTextEventKind, SongTextEventType,
+};
 use crate::components::timeline::Timeline;
 use crate::theme::Colors;
 use crate::window_position::{apply_owner_display, centered_window_bounds};
@@ -26,9 +27,9 @@ pub enum SongTextPanelKind {
 impl SongTextPanelKind {
     pub fn title(self) -> &'static str {
         match self {
-            Self::ChordDisplay => "Chord Display",
-            Self::LyricDisplay => "Lyric Display",
-            Self::LyricEditor => "Lyric Editor",
+            Self::ChordDisplay => "Chords",
+            Self::LyricDisplay => "Lyrics",
+            Self::LyricEditor => "Song Text Editor",
         }
     }
 }
@@ -36,9 +37,15 @@ impl SongTextPanelKind {
 pub struct SongTextPanelView {
     timeline: Entity<Timeline>,
     kind: SongTextPanelKind,
-    selected_id: Option<String>,
     chord_input: TextInputState,
     lyric_input: TextInputState,
+    loaded_selection_id: Option<String>,
+    list_scroll: UniformListScrollHandle,
+    last_followed_event_id: Option<String>,
+    manual_follow_until: Option<std::time::Instant>,
+    cached_event_revision: u64,
+    cached_events: std::sync::Arc<Vec<SongTextEvent>>,
+    _timeline_subscription: Subscription,
 }
 
 impl SongTextPanelView {
@@ -47,23 +54,26 @@ impl SongTextPanelView {
         kind: SongTextPanelKind,
         cx: &mut Context<Self>,
     ) -> Self {
-        cx.spawn(async move |this, cx| loop {
-            cx.background_executor()
-                .timer(std::time::Duration::from_millis(100))
-                .await;
-            if this.update(cx, |_view, cx| cx.notify()).is_err() {
-                break;
-            }
-        })
-        .detach();
+        let subscription = cx.observe(&timeline, |view, _, cx| {
+            view.sync_inputs_from_selection(cx);
+            view.refresh_event_cache(cx);
+            view.follow_playback(cx);
+            cx.notify();
+        });
         Self {
             timeline,
             kind,
-            selected_id: None,
             chord_input: TextInputState::new("song-text-chord", cx.focus_handle())
                 .with_placeholder("Chord, e.g. Am7"),
             lyric_input: TextInputState::new("song-text-lyric", cx.focus_handle())
-                .with_placeholder("Lyric line"),
+                .with_placeholder("Lyric phrase or line"),
+            loaded_selection_id: None,
+            list_scroll: UniformListScrollHandle::new(),
+            last_followed_event_id: None,
+            manual_follow_until: None,
+            cached_event_revision: u64::MAX,
+            cached_events: std::sync::Arc::new(Vec::new()),
+            _timeline_subscription: subscription,
         }
     }
 
@@ -71,88 +81,425 @@ impl SongTextPanelView {
         self.kind
     }
 
-    fn select(&mut self, id: &str, cx: &mut Context<Self>) {
-        let cue = self
-            .timeline
-            .read(cx)
-            .state
-            .song_text_cues
+    pub fn is_text_input_focused(&self, window: &Window) -> bool {
+        self.chord_input.focus_handle.is_focused(window)
+            || self.lyric_input.focus_handle.is_focused(window)
+    }
+
+    fn refresh_event_cache(&mut self, cx: &Context<Self>) {
+        let state = &self.timeline.read(cx).state;
+        if self.cached_event_revision == state.song_text_revision {
+            return;
+        }
+        self.cached_events = std::sync::Arc::new(
+            state
+                .song_text_events
+                .iter()
+                .filter(|event| match self.kind {
+                    SongTextPanelKind::ChordDisplay => {
+                        event.event_type() == SongTextEventType::Chord
+                    }
+                    SongTextPanelKind::LyricDisplay => matches!(
+                        event.event_type(),
+                        SongTextEventType::Lyric | SongTextEventType::Section
+                    ),
+                    SongTextPanelKind::LyricEditor => true,
+                })
+                .cloned()
+                .collect(),
+        );
+        self.cached_event_revision = state.song_text_revision;
+    }
+
+    fn follow_playback(&mut self, cx: &mut Context<Self>) {
+        let now = std::time::Instant::now();
+        if self.manual_follow_until.is_some_and(|until| until > now) {
+            return;
+        }
+        self.manual_follow_until = None;
+        let timeline = self.timeline.read(cx);
+        let state = &timeline.state;
+        if !state.transport.playing {
+            self.last_followed_event_id = None;
+            return;
+        }
+        let active = match self.kind {
+            SongTextPanelKind::ChordDisplay => {
+                state.active_song_text_event(SongTextEventType::Chord)
+            }
+            SongTextPanelKind::LyricDisplay | SongTextPanelKind::LyricEditor => state
+                .active_song_text_event(SongTextEventType::Lyric)
+                .or_else(|| state.active_song_text_event(SongTextEventType::Chord)),
+        };
+        let Some(active) = active else {
+            return;
+        };
+        if self.last_followed_event_id.as_deref() == Some(active.id.as_str()) {
+            return;
+        }
+        let active_id = active.id.clone();
+        let start = self
+            .cached_events
+            .partition_point(|event| event.beat < active.beat);
+        let index = self.cached_events[start..]
             .iter()
-            .find(|cue| cue.id == id)
-            .cloned();
-        if let Some(cue) = cue {
-            self.selected_id = Some(cue.id);
-            self.chord_input.set_value(cue.chord);
-            self.lyric_input.set_value(cue.lyric);
-            cx.notify();
+            .take_while(|event| event.beat == active.beat)
+            .position(|event| event.id == active_id)
+            .map(|offset| start + offset);
+        if let Some(index) = index {
+            self.list_scroll
+                .scroll_to_item(index, ScrollStrategy::Nearest);
+            self.last_followed_event_id = Some(active_id);
         }
     }
 
-    fn add_at_playhead(&mut self, cx: &mut Context<Self>) {
-        static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
-        let id = format!(
-            "song-text-{}",
-            NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-        );
-        let mut beat = 0.0;
+    fn sync_inputs_from_selection(&mut self, cx: &mut Context<Self>) {
+        let selected = self
+            .timeline
+            .read(cx)
+            .state
+            .selected_song_text_event()
+            .cloned();
+        let selected_id = selected.as_ref().map(|event| event.id.clone());
+        if selected_id == self.loaded_selection_id {
+            return;
+        }
+        self.loaded_selection_id = selected_id;
+        match selected.map(|event| event.kind) {
+            Some(SongTextEventKind::Chord(chord)) => {
+                self.chord_input.set_value(chord.symbol);
+                self.lyric_input.set_value("");
+            }
+            Some(SongTextEventKind::Lyric(lyric)) => {
+                self.chord_input.set_value("");
+                self.lyric_input.set_value(lyric.text);
+            }
+            Some(SongTextEventKind::Section(_)) | None => {
+                self.chord_input.set_value("");
+                self.lyric_input.set_value("");
+            }
+        }
+    }
+
+    fn select(&mut self, id: &str, additive: bool, seek: bool, cx: &mut Context<Self>) {
+        let id = id.to_string();
         let _ = self.timeline.update(cx, |timeline, cx| {
-            beat = timeline.state.transport.playhead_beats as f64;
-            if timeline
-                .state
-                .upsert_song_text_cue(SongTextCue::new(id.clone(), beat))
-            {
-                timeline.mark_project_changed(cx);
+            let beat = timeline.state.song_text_event(&id).map(|event| event.beat);
+            timeline.state.select_song_text_event(&id, additive);
+            if seek {
+                if let Some(beat) = beat {
+                    timeline.seek_to_exact_beat(
+                        beat as f32,
+                        crate::layout::SeekReason::TimelineClick,
+                        cx,
+                    );
+                }
+            } else {
                 cx.notify();
             }
         });
-        self.selected_id = Some(id);
-        self.chord_input.set_value("");
-        self.lyric_input.set_value("");
+        self.loaded_selection_id = None;
+        self.sync_inputs_from_selection(cx);
         cx.notify();
     }
 
-    fn commit_selected(&mut self, cx: &mut Context<Self>) {
-        let Some(id) = self.selected_id.clone() else {
+    fn insertion_beat(&self, bypass_snap: bool, cx: &Context<Self>) -> f64 {
+        let timeline = self.timeline.read(cx);
+        timeline
+            .state
+            .snap_beats_with_bypass(timeline.state.transport.playhead_beats, bypass_snap)
+            as f64
+    }
+
+    fn add_from_inputs(
+        &mut self,
+        add_chord: bool,
+        add_lyric: bool,
+        bypass_snap: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let beat = self.insertion_beat(bypass_snap, cx);
+        let chord = self.chord_input.value.trim();
+        let lyric = self.lyric_input.value.trim();
+        let mut events = Vec::with_capacity(2);
+        if add_chord {
+            if let Some(event) = SongTextEvent::chord(beat, chord) {
+                events.push(event);
+            }
+        }
+        if add_lyric {
+            if let Some(event) = SongTextEvent::lyric(beat, lyric) {
+                events.push(event);
+            }
+        }
+        if events.is_empty() {
+            return;
+        }
+        let label = if events.len() == 2 {
+            "Add Chord and Lyric"
+        } else if events[0].event_type() == SongTextEventType::Chord {
+            "Add Chord"
+        } else {
+            "Add Lyric"
+        };
+        let selected_ids: Vec<_> = events.iter().map(|event| event.id.clone()).collect();
+        let _ = self.timeline.update(cx, |timeline, cx| {
+            timeline.run_metadata_edit_command(
+                EditCommand::SetSongTextEvents {
+                    label,
+                    previous: Vec::new(),
+                    next: events,
+                },
+                cx,
+            );
+            timeline.state.selection.selected_song_text_event_ids = selected_ids;
+            cx.notify();
+        });
+        self.loaded_selection_id = None;
+        self.sync_inputs_from_selection(cx);
+        cx.notify();
+    }
+
+    fn update_selected(&mut self, cx: &mut Context<Self>) {
+        let Some(previous) = self
+            .timeline
+            .read(cx)
+            .state
+            .selected_song_text_event()
+            .cloned()
+        else {
             return;
         };
-        let chord = self.chord_input.value.trim().to_string();
-        let lyric = self.lyric_input.value.trim().to_string();
-        let _ = self.timeline.update(cx, |timeline, cx| {
-            let Some(existing) = timeline
-                .state
-                .song_text_cues
-                .iter()
-                .find(|cue| cue.id == id)
-                .cloned()
-            else {
-                return;
-            };
-            let cue = SongTextCue {
-                chord,
-                lyric,
-                ..existing
-            };
-            if timeline.state.upsert_song_text_cue(cue) {
-                timeline.mark_project_changed(cx);
-                cx.notify();
+        let mut next = previous.clone();
+        match &mut next.kind {
+            SongTextEventKind::Chord(chord) => {
+                let value = self.chord_input.value.trim();
+                if value.is_empty() {
+                    return;
+                }
+                chord.symbol = value.to_string();
             }
+            SongTextEventKind::Lyric(lyric) => {
+                let value = self.lyric_input.value.trim();
+                if value.is_empty() {
+                    return;
+                }
+                lyric.text = value.to_string();
+            }
+            SongTextEventKind::Section(_) => return,
+        }
+        if previous == next {
+            return;
+        }
+        let _ = self.timeline.update(cx, |timeline, cx| {
+            timeline.run_metadata_edit_command(
+                EditCommand::SetSongTextEvents {
+                    label: "Edit Song Text",
+                    previous: vec![previous],
+                    next: vec![next],
+                },
+                cx,
+            );
         });
         cx.notify();
     }
 
     fn delete_selected(&mut self, cx: &mut Context<Self>) {
-        let Some(id) = self.selected_id.take() else {
+        let previous: Vec<_> = {
+            let timeline = self.timeline.read(cx);
+            timeline
+                .state
+                .selection
+                .selected_song_text_event_ids
+                .iter()
+                .filter_map(|id| timeline.state.song_text_event(id).cloned())
+                .collect()
+        };
+        if previous.is_empty() {
+            return;
+        }
+        let _ = self.timeline.update(cx, |timeline, cx| {
+            timeline.run_metadata_edit_command(
+                EditCommand::SetSongTextEvents {
+                    label: "Delete Song Text",
+                    previous,
+                    next: Vec::new(),
+                },
+                cx,
+            );
+        });
+        self.loaded_selection_id = None;
+        self.sync_inputs_from_selection(cx);
+        cx.notify();
+    }
+
+    fn move_selected_to_playhead(&mut self, bypass_snap: bool, cx: &mut Context<Self>) {
+        let target = self.insertion_beat(bypass_snap, cx);
+        let previous: Vec<_> = {
+            let timeline = self.timeline.read(cx);
+            timeline
+                .state
+                .selection
+                .selected_song_text_event_ids
+                .iter()
+                .filter_map(|id| timeline.state.song_text_event(id).cloned())
+                .collect()
+        };
+        let Some(anchor) = previous.first().map(|event| event.beat) else {
             return;
         };
+        let delta = target - anchor;
+        let next: Vec<_> = previous
+            .iter()
+            .cloned()
+            .map(|mut event| {
+                event.beat = (event.beat + delta).max(0.0);
+                event
+            })
+            .collect();
+        if previous == next {
+            return;
+        }
         let _ = self.timeline.update(cx, |timeline, cx| {
-            if timeline.state.remove_song_text_cue(&id) {
-                timeline.mark_project_changed(cx);
-                cx.notify();
-            }
+            timeline.run_metadata_edit_command(
+                EditCommand::SetSongTextEvents {
+                    label: "Move Song Text",
+                    previous,
+                    next,
+                },
+                cx,
+            );
         });
+        cx.notify();
+    }
+
+    fn navigate(&mut self, next: bool, cx: &mut Context<Self>) {
+        let target = {
+            let timeline = self.timeline.read(cx);
+            let state = &timeline.state;
+            if let Some(selected) = state.selected_song_text_event() {
+                if next {
+                    state.next_song_text_event(&selected.id)
+                } else {
+                    state.previous_song_text_event(&selected.id)
+                }
+            } else if next {
+                state
+                    .song_text_events
+                    .iter()
+                    .find(|event| event.beat >= state.transport.playhead_beats as f64)
+            } else {
+                state
+                    .song_text_events
+                    .iter()
+                    .rev()
+                    .find(|event| event.beat <= state.transport.playhead_beats as f64)
+            }
+            .map(|event| event.id.clone())
+        };
+        if let Some(id) = target {
+            self.select(&id, false, true, cx);
+        }
+    }
+
+    fn clear_inputs(&mut self, cx: &mut Context<Self>) {
         self.chord_input.set_value("");
         self.lyric_input.set_value("");
         cx.notify();
+    }
+
+    pub fn command_add_chord_at_playhead(&mut self, cx: &mut Context<Self>) {
+        self.add_from_inputs(true, false, false, cx);
+    }
+
+    pub fn command_add_lyric_at_playhead(&mut self, cx: &mut Context<Self>) {
+        self.add_from_inputs(false, true, false, cx);
+    }
+
+    pub fn command_add_both_at_playhead(&mut self, cx: &mut Context<Self>) {
+        self.add_from_inputs(true, true, false, cx);
+    }
+
+    pub fn command_commit(&mut self, cx: &mut Context<Self>) {
+        if self
+            .timeline
+            .read(cx)
+            .state
+            .selected_song_text_event()
+            .is_some()
+        {
+            self.update_selected(cx);
+        } else {
+            let add_chord = !self.chord_input.value.trim().is_empty();
+            let add_lyric = !self.lyric_input.value.trim().is_empty();
+            self.add_from_inputs(add_chord, add_lyric, false, cx);
+        }
+    }
+
+    pub fn command_commit_next_grid(&mut self, cx: &mut Context<Self>) {
+        self.command_commit(cx);
+        self.advance_playhead(SongTextAdvance::Grid, cx);
+    }
+
+    pub fn command_commit_next_beat(&mut self, cx: &mut Context<Self>) {
+        self.command_commit(cx);
+        self.advance_playhead(SongTextAdvance::Beat, cx);
+    }
+
+    pub fn command_commit_next_bar(&mut self, cx: &mut Context<Self>) {
+        self.command_commit(cx);
+        self.advance_playhead(SongTextAdvance::Bar, cx);
+    }
+
+    pub fn command_previous_event(&mut self, cx: &mut Context<Self>) {
+        self.navigate(false, cx);
+    }
+
+    pub fn command_next_event(&mut self, cx: &mut Context<Self>) {
+        self.navigate(true, cx);
+    }
+
+    pub fn command_move_to_playhead(&mut self, cx: &mut Context<Self>) {
+        self.move_selected_to_playhead(false, cx);
+    }
+
+    pub fn command_delete_selected(&mut self, cx: &mut Context<Self>) {
+        self.delete_selected(cx);
+    }
+
+    fn advance_playhead(&mut self, mode: SongTextAdvance, cx: &mut Context<Self>) {
+        let target = {
+            let timeline = self.timeline.read(cx);
+            let state = &timeline.state;
+            let current = state.transport.playhead_beats as f64;
+            match mode {
+                SongTextAdvance::Grid => {
+                    let step =
+                        crate::components::timeline::timeline_state::SnapSettings::from_timeline(
+                            state,
+                        )
+                        .to_musical()
+                        .step_beats()
+                        .unwrap_or(0.25);
+                    current + step
+                }
+                SongTextAdvance::Beat => {
+                    let signature = state.time_signature_map.time_signature_at_beat(current);
+                    current
+                        + crate::components::timeline::timeline_state::denominator_unit_quarter_beats(
+                            signature.denominator,
+                        )
+                }
+                SongTextAdvance::Bar => state.time_signature_map.next_bar_beat(current),
+            }
+        };
+        let _ = self.timeline.update(cx, |timeline, cx| {
+            timeline.seek_to_exact_beat(
+                target as f32,
+                crate::layout::SeekReason::TimelineClick,
+                cx,
+            );
+        });
     }
 
     fn handle_key(
@@ -169,12 +516,25 @@ impl SongTextPanelView {
             return false;
         };
         match action {
-            TextInputAction::Submit => self.commit_selected(cx),
+            TextInputAction::Submit => {
+                if self
+                    .timeline
+                    .read(cx)
+                    .state
+                    .selected_song_text_event()
+                    .is_some()
+                {
+                    self.update_selected(cx);
+                } else {
+                    let add_chord = !self.chord_input.value.trim().is_empty();
+                    let add_lyric = !self.lyric_input.value.trim().is_empty();
+                    self.add_from_inputs(add_chord, add_lyric, event.keystroke.modifiers.shift, cx);
+                }
+            }
             TextInputAction::Consumed => cx.notify(),
             TextInputAction::Cancel => {
-                if let Some(id) = self.selected_id.clone() {
-                    self.select(&id, cx);
-                }
+                self.loaded_selection_id = None;
+                self.sync_inputs_from_selection(cx);
             }
             TextInputAction::Pass => return false,
         }
@@ -182,13 +542,35 @@ impl SongTextPanelView {
     }
 }
 
+#[derive(Clone, Copy)]
+enum SongTextAdvance {
+    Grid,
+    Beat,
+    Bar,
+}
+
 impl Render for SongTextPanelView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let cues = self.timeline.read(cx).state.song_text_cues.clone();
-        let active = self.timeline.read(cx).state.active_song_text_cue().cloned();
+        self.sync_inputs_from_selection(cx);
+        self.refresh_event_cache(cx);
+        let events = self.cached_events.clone();
+        let timeline = self.timeline.read(cx);
+        let state = &timeline.state;
         let kind = self.kind;
-        let entity = cx.entity().clone();
+        let selected_ids = state.selection.selected_song_text_event_ids.clone();
+        let playhead_label = state.format_bar_beat_at(state.transport.playhead_beats as f64);
+        let selected_label = state
+            .selected_song_text_event()
+            .map(|event| state.format_bar_beat_at(event.beat));
+        let active_chord = state
+            .active_song_text_event(SongTextEventType::Chord)
+            .cloned();
+        let active_lyric = state
+            .active_song_text_event(SongTextEventType::Lyric)
+            .cloned();
 
+        let entity = cx.entity().clone();
+        let scroll_entity = cx.entity().clone();
         let root = div()
             .id(("song-text-panel", kind as u32))
             .flex()
@@ -204,118 +586,288 @@ impl Render for SongTextPanelView {
                     cx.stop_propagation();
                 }
             })
+            .on_scroll_wheel(move |_, _, cx| {
+                let _ = scroll_entity.update(cx, |view, _cx| {
+                    view.manual_follow_until =
+                        Some(std::time::Instant::now() + std::time::Duration::from_secs(2));
+                });
+            })
             .child(panel_header(kind.title()));
 
         match kind {
-            SongTextPanelKind::ChordDisplay => root.child(display_surface(
-                active
-                    .as_ref()
-                    .and_then(|cue| (!cue.chord.is_empty()).then_some(cue.chord.as_str())),
-                active.as_ref().map(|cue| cue.beat),
-                "No chord cue at the playhead",
-                true,
-            )),
-            SongTextPanelKind::LyricDisplay => root.child(display_surface(
-                active
-                    .as_ref()
-                    .and_then(|cue| (!cue.lyric.is_empty()).then_some(cue.lyric.as_str())),
-                active.as_ref().map(|cue| cue.beat),
-                "No lyric cue at the playhead",
-                false,
-            )),
-            SongTextPanelKind::LyricEditor => {
-                let selected = self.selected_id.clone();
-                let mut list = div()
-                    .id("song-text-cue-list")
-                    .flex()
-                    .flex_col()
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scroll();
-                for (cue_index, cue) in cues.into_iter().enumerate() {
-                    let id = cue.id.clone();
-                    let is_selected = selected.as_deref() == Some(id.as_str());
-                    let target = cx.entity().clone();
-                    list = list.child(
+            SongTextPanelKind::ChordDisplay | SongTextPanelKind::LyricDisplay => {
+                let active = if kind == SongTextPanelKind::ChordDisplay {
+                    active_chord.as_ref()
+                } else {
+                    active_lyric.as_ref()
+                };
+                let row_count = events.len();
+                let list_events = events.clone();
+                let list_entity = cx.entity().clone();
+                let active_id = active.map(|event| event.id.clone());
+                let rows = uniform_list(
+                    ("song-text-display-list", kind as u32),
+                    row_count,
+                    move |range, _window, _cx| {
+                        range
+                            .map(|index| {
+                                let event = &list_events[index];
+                                let id = event.id.clone();
+                                let selected = selected_ids.iter().any(|selected| selected == &id);
+                                let is_active = active_id.as_deref() == Some(id.as_str());
+                                let row_entity = list_entity.clone();
+                                song_text_row(event, selected, is_active).on_mouse_down(
+                                    gpui::MouseButton::Left,
+                                    move |mouse, _, cx| {
+                                        cx.stop_propagation();
+                                        let additive = mouse.modifiers.control
+                                            || mouse.modifiers.platform
+                                            || mouse.modifiers.shift;
+                                        let _ = row_entity.update(cx, |view, cx| {
+                                            view.select(&id, additive, true, cx)
+                                        });
+                                    },
+                                )
+                            })
+                            .collect()
+                    },
+                )
+                .size_full()
+                .track_scroll(&self.list_scroll);
+
+                root.child(active_summary(active, &playhead_label, kind))
+                    .child(
                         div()
-                            .id(("song-text-cue", cue_index))
-                            .h(px(28.0))
-                            .flex()
-                            .items_center()
-                            .gap(px(8.0))
-                            .px(px(8.0))
-                            .border_b(px(1.0))
-                            .border_color(Colors::border_subtle())
-                            .bg(if is_selected {
-                                Colors::accent_soft()
-                            } else {
-                                Colors::surface_base()
+                            .flex_1()
+                            .min_h_0()
+                            .relative()
+                            .children((row_count > 0).then_some(rows))
+                            .children((row_count == 0).then_some(empty_state(match kind {
+                                SongTextPanelKind::ChordDisplay => {
+                                    "No chords yet. Add one from the Edit tab at the playhead."
+                                }
+                                _ => "No lyrics yet. Add a line from the Edit tab at the playhead.",
+                            }))),
+                    )
+            }
+            SongTextPanelKind::LyricEditor => {
+                let selected_event = self
+                    .timeline
+                    .read(cx)
+                    .state
+                    .selected_song_text_event()
+                    .cloned();
+                let can_update = match selected_event.as_ref().map(|event| event.event_type()) {
+                    Some(SongTextEventType::Chord) => !self.chord_input.value.trim().is_empty(),
+                    Some(SongTextEventType::Lyric) => !self.lyric_input.value.trim().is_empty(),
+                    _ => false,
+                };
+                let has_selection = !selected_ids.is_empty();
+                let can_add_chord = !self.chord_input.value.trim().is_empty();
+                let can_add_lyric = !self.lyric_input.value.trim().is_empty();
+                let can_add_both = can_add_chord && can_add_lyric;
+
+                let list_events = events.clone();
+                let row_count = list_events.len();
+                let list_entity = cx.entity().clone();
+                let active_chord_id = active_chord.as_ref().map(|event| event.id.clone());
+                let active_lyric_id = active_lyric.as_ref().map(|event| event.id.clone());
+                let editor_rows = uniform_list(
+                    "song-text-editor-list",
+                    row_count,
+                    move |range, _window, _cx| {
+                        range
+                            .map(|index| {
+                                let event = &list_events[index];
+                                let id = event.id.clone();
+                                let selected = selected_ids.iter().any(|selected| selected == &id);
+                                let active = active_chord_id.as_deref() == Some(id.as_str())
+                                    || active_lyric_id.as_deref() == Some(id.as_str());
+                                let row_entity = list_entity.clone();
+                                song_text_row(event, selected, active).on_mouse_down(
+                                    gpui::MouseButton::Left,
+                                    move |mouse, _, cx| {
+                                        cx.stop_propagation();
+                                        let additive = mouse.modifiers.control
+                                            || mouse.modifiers.platform
+                                            || mouse.modifiers.shift;
+                                        let seek = mouse.click_count >= 2;
+                                        let _ = row_entity.update(cx, |view, cx| {
+                                            view.select(&id, additive, seek, cx)
+                                        });
+                                    },
+                                )
                             })
-                            .cursor(gpui::CursorStyle::PointingHand)
-                            .on_click(move |_, _, cx| {
-                                let _ = target.update(cx, |view, cx| view.select(&id, cx));
-                            })
-                            .child(
-                                div()
-                                    .w(px(54.0))
-                                    .text_size(px(10.0))
-                                    .text_color(Colors::text_muted())
-                                    .child(format!("{:.2}", cue.beat)),
-                            )
-                            .child(
-                                div()
-                                    .w(px(64.0))
-                                    .truncate()
-                                    .text_size(px(11.0))
-                                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                                    .text_color(Colors::accent_primary())
-                                    .child(cue.chord),
-                            )
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .truncate()
-                                    .text_size(px(11.0))
-                                    .text_color(Colors::text_primary())
-                                    .child(cue.lyric),
-                            ),
-                    );
-                }
+                            .collect()
+                    },
+                )
+                .size_full()
+                .track_scroll(&self.list_scroll);
+
+                let add_chord_target = cx.entity().clone();
+                let add_lyric_target = cx.entity().clone();
+                let add_both_target = cx.entity().clone();
+                let update_target = cx.entity().clone();
+                let move_target = cx.entity().clone();
+                let delete_target = cx.entity().clone();
+                let previous_target = cx.entity().clone();
+                let next_target = cx.entity().clone();
+                let clear_target = cx.entity().clone();
+
                 root.child(
                     div()
                         .flex()
                         .flex_col()
-                        .flex_1()
-                        .min_h_0()
-                        .child(list)
+                        .flex_shrink_0()
+                        .gap(px(6.0))
+                        .p(px(9.0))
+                        .border_b(px(1.0))
+                        .border_color(Colors::border_subtle())
                         .child(
                             div()
-                                .w_full()
-                                .h(px(150.0))
-                                .flex_shrink_0()
                                 .flex()
-                                .flex_col()
-                                .gap(px(8.0))
-                                .p(px(10.0))
-                                .border_t(px(1.0))
-                                .border_color(Colors::border_subtle())
-                                .child(field_label("CHORD"))
-                                .child(text_field(
-                                    &self.chord_input,
-                                    self.chord_input.is_focused(window),
-                                ))
-                                .child(field_label("LYRIC"))
-                                .child(text_field(
-                                    &self.lyric_input,
-                                    self.lyric_input.is_focused(window),
-                                ))
-                                .child(div().flex_1())
-                                .child(editor_actions(
-                                    cx.entity().clone(),
-                                    self.selected_id.is_some(),
+                                .items_center()
+                                .justify_between()
+                                .child(info_value("PLAYHEAD", &playhead_label))
+                                .child(info_value(
+                                    "SELECTED",
+                                    selected_label.as_deref().unwrap_or("None"),
                                 )),
+                        )
+                        .child(field_label("CHORD"))
+                        .child(text_field(
+                            &self.chord_input,
+                            self.chord_input.is_focused(window),
+                        ))
+                        .child(
+                            div()
+                                .flex()
+                                .gap(px(5.0))
+                                .child(action_button("Add Chord", can_add_chord).when(
+                                    can_add_chord,
+                                    |button| {
+                                        button.on_click(move |mouse, _, cx| {
+                                            let bypass = mouse.modifiers().shift;
+                                            let _ = add_chord_target.update(cx, |view, cx| {
+                                                view.add_from_inputs(true, false, bypass, cx)
+                                            });
+                                        })
+                                    },
+                                ))
+                                .child(action_button("Update", can_update).when(
+                                    can_update,
+                                    |button| {
+                                        button.on_click(move |_, _, cx| {
+                                            let _ = update_target
+                                                .update(cx, |view, cx| view.update_selected(cx));
+                                        })
+                                    },
+                                )),
+                        )
+                        .child(field_label("LYRIC"))
+                        .child(text_field(
+                            &self.lyric_input,
+                            self.lyric_input.is_focused(window),
+                        ))
+                        .child(
+                            div()
+                                .flex()
+                                .gap(px(5.0))
+                                .child(action_button("Add Lyric", can_add_lyric).when(
+                                    can_add_lyric,
+                                    |button| {
+                                        button.on_click(move |mouse, _, cx| {
+                                            let bypass = mouse.modifiers().shift;
+                                            let _ = add_lyric_target.update(cx, |view, cx| {
+                                                view.add_from_inputs(false, true, bypass, cx)
+                                            });
+                                        })
+                                    },
+                                ))
+                                .child(action_button("Add Both", can_add_both).when(
+                                    can_add_both,
+                                    |button| {
+                                        button.on_click(move |mouse, _, cx| {
+                                            let bypass = mouse.modifiers().shift;
+                                            let _ = add_both_target.update(cx, |view, cx| {
+                                                view.add_from_inputs(true, true, bypass, cx)
+                                            });
+                                        })
+                                    },
+                                )),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .flex_wrap()
+                                .gap(px(5.0))
+                                .child(action_button("Previous", row_count > 0).when(
+                                    row_count > 0,
+                                    |button| {
+                                        button.on_click(move |_, _, cx| {
+                                            let _ = previous_target
+                                                .update(cx, |view, cx| view.navigate(false, cx));
+                                        })
+                                    },
+                                ))
+                                .child(action_button("Next", row_count > 0).when(
+                                    row_count > 0,
+                                    |button| {
+                                        button.on_click(move |_, _, cx| {
+                                            let _ = next_target
+                                                .update(cx, |view, cx| view.navigate(true, cx));
+                                        })
+                                    },
+                                ))
+                                .child(action_button("Move to Playhead", has_selection).when(
+                                    has_selection,
+                                    |button| {
+                                        button.on_click(move |mouse, _, cx| {
+                                            let bypass = mouse.modifiers().shift;
+                                            let _ = move_target.update(cx, |view, cx| {
+                                                view.move_selected_to_playhead(bypass, cx)
+                                            });
+                                        })
+                                    },
+                                ))
+                                .child(action_button("Delete", has_selection).when(
+                                    has_selection,
+                                    |button| {
+                                        button.on_click(move |_, _, cx| {
+                                            let _ = delete_target
+                                                .update(cx, |view, cx| view.delete_selected(cx));
+                                        })
+                                    },
+                                ))
+                                .child(action_button("Clear", true).on_click(move |_, _, cx| {
+                                    let _ = clear_target
+                                        .update(cx, |view, cx| view.clear_inputs(cx));
+                                })),
                         ),
+                )
+                .child(
+                    div()
+                        .h(px(22.0))
+                        .flex_shrink_0()
+                        .flex()
+                        .items_center()
+                        .px(px(8.0))
+                        .bg(Colors::surface_panel())
+                        .border_b(px(1.0))
+                        .border_color(Colors::border_subtle())
+                        .text_size(px(9.5))
+                        .text_color(Colors::text_muted())
+                        .child("EVENTS IN TIMELINE ORDER"),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_h_0()
+                        .relative()
+                        .children((row_count > 0).then_some(editor_rows))
+                        .children((row_count == 0).then_some(empty_state(
+                            "Place the playhead, enter a chord or lyric, then add it to the timeline.",
+                        ))),
                 )
             }
         }
@@ -338,72 +890,157 @@ fn panel_header(title: &'static str) -> impl IntoElement {
         .child(title)
 }
 
-fn display_surface(
-    value: Option<&str>,
-    beat: Option<f64>,
-    empty: &'static str,
-    chord: bool,
+fn active_summary(
+    active: Option<&SongTextEvent>,
+    playhead_label: &str,
+    kind: SongTextPanelKind,
 ) -> impl IntoElement {
+    let empty = if kind == SongTextPanelKind::ChordDisplay {
+        "No active chord"
+    } else {
+        "No active lyric"
+    };
     div()
-        .flex_1()
-        .min_h_0()
+        .h(px(48.0))
+        .flex_shrink_0()
         .flex()
         .flex_col()
-        .items_center()
         .justify_center()
-        .gap(px(8.0))
-        .p(px(12.0))
+        .gap(px(2.0))
+        .px(px(10.0))
+        .border_b(px(1.0))
+        .border_color(Colors::border_subtle())
+        .bg(Colors::surface_panel_alt())
         .child(
             div()
-                .text_size(px(if chord { 42.0 } else { 28.0 }))
+                .text_size(px(if kind == SongTextPanelKind::ChordDisplay {
+                    18.0
+                } else {
+                    13.0
+                }))
                 .font_weight(gpui::FontWeight::BOLD)
-                .text_color(
-                    value
-                        .map(|_| Colors::text_primary())
-                        .unwrap_or_else(Colors::text_faint),
-                )
-                .child(value.unwrap_or(empty).to_string()),
+                .text_color(if active.is_some() {
+                    Colors::text_primary()
+                } else {
+                    Colors::text_faint()
+                })
+                .truncate()
+                .child(active.map(SongTextEvent::text).unwrap_or(empty).to_string()),
         )
-        .children(beat.map(|beat| {
+        .child(
             div()
-                .text_size(px(10.0))
+                .text_size(px(9.0))
                 .text_color(Colors::text_muted())
-                .child(format!("Beat {beat:.2}"))
-        }))
+                .child(format!("Playhead {playhead_label}")),
+        )
+}
+
+fn song_text_row(event: &SongTextEvent, selected: bool, active: bool) -> gpui::Stateful<gpui::Div> {
+    let event_type = event.event_type();
+    let type_color = match event_type {
+        SongTextEventType::Section => Colors::accent_success(),
+        SongTextEventType::Chord => Colors::accent_primary(),
+        SongTextEventType::Lyric => Colors::text_secondary(),
+    };
+    let row_id = {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        event.id.hash(&mut hasher);
+        hasher.finish()
+    };
+    div()
+        .id(("song-text-row", row_id))
+        .h(px(28.0))
+        .flex()
+        .items_center()
+        .gap(px(7.0))
+        .px(px(8.0))
+        .border_b(px(1.0))
+        .border_color(Colors::border_subtle())
+        .bg(if selected {
+            Colors::accent_soft()
+        } else if active {
+            Colors::with_alpha(Colors::accent_primary(), 0.08)
+        } else {
+            Colors::surface_base()
+        })
+        .cursor(gpui::CursorStyle::PointingHand)
+        .hover(|style| style.bg(Colors::surface_hover()))
+        .child(
+            div()
+                .w(px(58.0))
+                .text_size(px(9.5))
+                .text_color(Colors::text_muted())
+                .child(format!("{:.3}", event.beat)),
+        )
+        .child(
+            div()
+                .w(px(42.0))
+                .text_size(px(8.5))
+                .font_weight(gpui::FontWeight::BOLD)
+                .text_color(type_color)
+                .child(event_type.label()),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .truncate()
+                .text_size(px(10.5))
+                .font_weight(if event_type == SongTextEventType::Chord {
+                    gpui::FontWeight::SEMIBOLD
+                } else {
+                    gpui::FontWeight::NORMAL
+                })
+                .text_color(if active {
+                    Colors::text_primary()
+                } else {
+                    Colors::text_secondary()
+                })
+                .child(event.text().to_string()),
+        )
+}
+
+fn info_value(label: &'static str, value: &str) -> impl IntoElement {
+    div()
+        .flex()
+        .gap(px(5.0))
+        .text_size(px(9.5))
+        .child(div().text_color(Colors::text_muted()).child(label))
+        .child(
+            div()
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .text_color(Colors::text_primary())
+                .child(value.to_string()),
+        )
 }
 
 fn field_label(label: &'static str) -> impl IntoElement {
     div()
-        .text_size(px(9.5))
+        .text_size(px(9.0))
         .font_weight(gpui::FontWeight::BOLD)
         .text_color(Colors::text_muted())
         .child(label)
 }
 
-fn editor_actions(target: Entity<SongTextPanelView>, selected: bool) -> impl IntoElement {
-    let add_target = target.clone();
-    let save_target = target.clone();
+fn empty_state(message: &'static str) -> impl IntoElement {
     div()
+        .absolute()
+        .inset_0()
         .flex()
-        .gap(px(6.0))
-        .child(
-            action_button("Add at Playhead", true).on_click(move |_, _, cx| {
-                let _ = add_target.update(cx, |view, cx| view.add_at_playhead(cx));
-            }),
-        )
-        .child(action_button("Save", selected).on_click(move |_, _, cx| {
-            let _ = save_target.update(cx, |view, cx| view.commit_selected(cx));
-        }))
-        .child(action_button("Delete", selected).on_click(move |_, _, cx| {
-            let _ = target.update(cx, |view, cx| view.delete_selected(cx));
-        }))
+        .items_center()
+        .justify_center()
+        .px(px(18.0))
+        .text_size(px(10.5))
+        .text_color(Colors::text_faint())
+        .child(message)
 }
 
 fn action_button(label: &'static str, enabled: bool) -> gpui::Stateful<gpui::Div> {
     div()
         .id(label)
-        .h(px(24.0))
-        .px(px(8.0))
+        .h(px(23.0))
+        .px(px(7.0))
         .flex()
         .items_center()
         .justify_center()
@@ -411,7 +1048,7 @@ fn action_button(label: &'static str, enabled: bool) -> gpui::Stateful<gpui::Div
         .border(px(1.0))
         .border_color(Colors::border_subtle())
         .bg(Colors::surface_input())
-        .text_size(px(10.5))
+        .text_size(px(9.5))
         .text_color(if enabled {
             Colors::text_secondary()
         } else {
@@ -422,6 +1059,10 @@ fn action_button(label: &'static str, enabled: bool) -> gpui::Stateful<gpui::Div
         } else {
             gpui::CursorStyle::Arrow
         })
+        .when(enabled, |button| {
+            button.hover(|style| style.bg(Colors::surface_hover()))
+        })
+        .child(label)
 }
 
 pub struct SongTextWindow {
@@ -459,14 +1100,14 @@ pub fn open_song_text_window(
     on_close: std::sync::Arc<dyn Fn(SongTextPanelKind, &mut App) + Send + Sync>,
     cx: &mut App,
 ) -> Result<WindowHandle<SongTextWindow>, String> {
-    let window_bounds = centered_window_bounds(owner_bounds, size(px(640.0), px(400.0)), cx);
+    let window_bounds = centered_window_bounds(owner_bounds, size(px(640.0), px(460.0)), cx);
     let mut options = crate::platform_chrome::external_window_options_partial();
     if let Some(titlebar) = options.titlebar.as_mut() {
         titlebar.title = Some(crate::platform_chrome::branded_window_title(kind.title()).into());
     }
     options.window_bounds = Some(WindowBounds::Windowed(window_bounds));
     options.window_background = WindowBackgroundAppearance::Opaque;
-    options.window_min_size = Some(size(px(300.0), px(200.0)));
+    options.window_min_size = Some(size(px(300.0), px(240.0)));
     apply_owner_display(&mut options, owner_bounds, cx);
     cx.open_window(options, move |_window, cx| {
         let panel = cx.new(|cx| SongTextPanelView::new(timeline, kind, cx));

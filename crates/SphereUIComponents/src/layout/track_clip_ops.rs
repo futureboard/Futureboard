@@ -134,6 +134,30 @@ impl StudioLayout {
     }
 
     pub(super) fn delete_selected_clip_or_track(&mut self, cx: &mut Context<Self>) {
+        let song_text_events: Vec<_> = {
+            let timeline = self.timeline.read(cx);
+            timeline
+                .state
+                .selection
+                .selected_song_text_event_ids
+                .iter()
+                .filter_map(|id| timeline.state.song_text_event(id).cloned())
+                .collect()
+        };
+        if !song_text_events.is_empty() {
+            let _ = self.timeline.update(cx, |timeline, cx| {
+                timeline.run_metadata_edit_command(
+                    EditCommand::SetSongTextEvents {
+                        label: "Delete Song Text",
+                        previous: song_text_events,
+                        next: Vec::new(),
+                    },
+                    cx,
+                );
+            });
+            return;
+        }
+
         // Decide up front whether this gesture resolves to a *track* delete, so
         // plugin cleanup (close editors, MIDI panic) runs before the model
         // mutation. Mirrors the branch order inside the update below: automation
@@ -331,10 +355,17 @@ impl StudioLayout {
 
     pub(super) fn clear_automation_selection(&mut self, cx: &mut Context<Self>) {
         let _ = self.timeline.update(cx, |timeline, cx| {
+            let mut changed = !timeline
+                .state
+                .selection
+                .selected_song_text_event_ids
+                .is_empty();
+            timeline.state.clear_song_text_selection();
             if let Some(id) = timeline.state.selection.selected_track_id.clone() {
-                if timeline.state.clear_automation_selection(&id) {
-                    cx.notify();
-                }
+                changed |= timeline.state.clear_automation_selection(&id);
+            }
+            if changed {
+                cx.notify();
             }
         });
     }

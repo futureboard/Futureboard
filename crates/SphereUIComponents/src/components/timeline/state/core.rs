@@ -40,8 +40,12 @@ pub struct TimelineState {
     pub markers: Vec<TimelineMarkerState>,
     /// Named timeline regions spanning a beat range.
     pub regions: Vec<TimelineRegionState>,
-    /// Project-owned chord and lyric cues used by the display/editor panels.
-    pub song_text_cues: Vec<SongTextCue>,
+    /// Project-owned chord, lyric, and section events in canonical beat space.
+    pub song_text_events: Vec<SongTextEvent>,
+    /// UI lookup accelerator rebuilt whenever `song_text_events` changes.
+    pub song_text_index: SongTextIndex,
+    /// Non-persisted mutation revision used by virtualized Song Text views.
+    pub song_text_revision: u64,
     /// Legacy single signature — kept in sync with the marker at beat 0 for
     /// templates and engine fallbacks.
     pub time_signature_num: u32,
@@ -111,7 +115,9 @@ impl Default for TimelineState {
             time_signature_map: TimeSignatureMap::with_default_4_4(),
             markers: Vec::new(),
             regions: Vec::new(),
-            song_text_cues: Vec::new(),
+            song_text_events: Vec::new(),
+            song_text_index: SongTextIndex::default(),
+            song_text_revision: 0,
             time_signature_num: 4,
             time_signature_den: 4,
             viewport: TimelineViewport {
@@ -148,6 +154,7 @@ impl Default for TimelineState {
             selection: TimelineSelection {
                 selected_track_id: None,
                 selected_clip_ids: Vec::new(),
+                selected_song_text_event_ids: Vec::new(),
             },
             active_tool: TimelineTool::Pointer,
             snap_to_grid: true,

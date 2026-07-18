@@ -887,6 +887,19 @@ impl StudioLayout {
         {
             let target = cx.entity().clone();
             let _ = timeline.update(cx, |timeline, _cx| {
+                timeline.set_open_song_text_editor_callback(Some(Arc::new(move |_window, cx| {
+                    let _ = target.update(cx, |this, cx| {
+                        this.panels.inspector = true;
+                        this.right_dock_tab = RightDockTab::LyricEditor;
+                        this.set_active_panel(WorkspaceActivePanel::LyricEditor, cx);
+                        cx.notify();
+                    });
+                })));
+            });
+        }
+        {
+            let target = cx.entity().clone();
+            let _ = timeline.update(cx, |timeline, _cx| {
                 timeline.set_plugin_preset_drop_callback(Some(Arc::new(
                     move |(preset_path, track_id), _window, cx| {
                         let preset_path = preset_path.clone();
@@ -1375,6 +1388,17 @@ impl StudioLayout {
         }
     }
 
+    fn song_text_editor_accepts_input_commands(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.panels.inspector && self.right_dock_tab == RightDockTab::LyricEditor {
+            return true;
+        }
+        self.panels.inspector = true;
+        self.right_dock_tab = RightDockTab::LyricEditor;
+        self.set_active_panel(WorkspaceActivePanel::LyricEditor, cx);
+        cx.notify();
+        false
+    }
+
     pub(super) fn dispatch_command_id_from_bounds(
         &mut self,
         command_id: &str,
@@ -1814,6 +1838,75 @@ impl StudioLayout {
                 self.right_dock_tab = RightDockTab::LyricEditor;
                 self.set_active_panel(WorkspaceActivePanel::LyricEditor, cx);
             }
+            "song_text.add_chord_at_playhead" => {
+                if self.song_text_editor_accepts_input_commands(cx) {
+                    let _ = self
+                        .lyric_editor_panel
+                        .update(cx, |panel, cx| panel.command_add_chord_at_playhead(cx));
+                }
+            }
+            "song_text.add_lyric_at_playhead" => {
+                if self.song_text_editor_accepts_input_commands(cx) {
+                    let _ = self
+                        .lyric_editor_panel
+                        .update(cx, |panel, cx| panel.command_add_lyric_at_playhead(cx));
+                }
+            }
+            "song_text.add_both_at_playhead" => {
+                if self.song_text_editor_accepts_input_commands(cx) {
+                    let _ = self
+                        .lyric_editor_panel
+                        .update(cx, |panel, cx| panel.command_add_both_at_playhead(cx));
+                }
+            }
+            "song_text.commit" => {
+                if self.song_text_editor_accepts_input_commands(cx) {
+                    let _ = self
+                        .lyric_editor_panel
+                        .update(cx, |panel, cx| panel.command_commit(cx));
+                }
+            }
+            "song_text.commit_next_grid" => {
+                if self.song_text_editor_accepts_input_commands(cx) {
+                    let _ = self
+                        .lyric_editor_panel
+                        .update(cx, |panel, cx| panel.command_commit_next_grid(cx));
+                }
+            }
+            "song_text.commit_next_beat" => {
+                if self.song_text_editor_accepts_input_commands(cx) {
+                    let _ = self
+                        .lyric_editor_panel
+                        .update(cx, |panel, cx| panel.command_commit_next_beat(cx));
+                }
+            }
+            "song_text.commit_next_bar" => {
+                if self.song_text_editor_accepts_input_commands(cx) {
+                    let _ = self
+                        .lyric_editor_panel
+                        .update(cx, |panel, cx| panel.command_commit_next_bar(cx));
+                }
+            }
+            "song_text.previous_event" => {
+                let _ = self
+                    .lyric_editor_panel
+                    .update(cx, |panel, cx| panel.command_previous_event(cx));
+            }
+            "song_text.next_event" => {
+                let _ = self
+                    .lyric_editor_panel
+                    .update(cx, |panel, cx| panel.command_next_event(cx));
+            }
+            "song_text.move_to_playhead" => {
+                let _ = self
+                    .lyric_editor_panel
+                    .update(cx, |panel, cx| panel.command_move_to_playhead(cx));
+            }
+            "song_text.delete_selected" => {
+                let _ = self
+                    .lyric_editor_panel
+                    .update(cx, |panel, cx| panel.command_delete_selected(cx));
+            }
             "window:chord-display" => self.open_song_text_external_window(
                 components::SongTextPanelKind::ChordDisplay,
                 owner_bounds,
@@ -1950,26 +2043,14 @@ impl StudioLayout {
             "automation:toggle-mode" => self.toggle_selected_track_automation_mode(cx),
             "automation:cycle-target" => self.cycle_selected_track_automation_target(cx),
             "edit:undo" => {
-                let undone = self
+                let _ = self
                     .timeline
                     .update(cx, |timeline, cx| timeline.undo_edit(cx));
-                if undone {
-                    // Snapshot construction and serialization are synchronous.
-                    // Mark the engine dirty so the UI can publish the restored
-                    // state first; the regular audio poll coalesces the sync on
-                    // its next control-rate tick.
-                    self.mark_dirty();
-                }
             }
             "edit:redo" => {
-                let redone = self
+                let _ = self
                     .timeline
                     .update(cx, |timeline, cx| timeline.redo_edit(cx));
-                if redone {
-                    // Match undo: do not block shortcut dispatch on preparing a
-                    // full native-engine snapshot.
-                    self.mark_dirty();
-                }
             }
             "edit:duplicate" | "clip:duplicate" => self.duplicate_selected_clip(cx),
             "clip:rename" => {

@@ -127,6 +127,7 @@ impl Timeline {
         self.log_input_state("reset-before");
         self.file_drop_hint = None;
         self.clip_clone_hint = None;
+        self.song_text_drag_preview = None;
         self.clip_drag_origin = None;
         self.clip_drag_target_track_index = None;
         self.clip_clone_drag_id = None;
@@ -151,6 +152,7 @@ impl Timeline {
             eprintln!("[selection] marquee_cancel");
         }
         self.reset_input_state();
+        self.song_text_drag_cancelled = true;
         cx.notify();
     }
 
@@ -173,6 +175,8 @@ impl Timeline {
             last_drag_position: None,
             file_drop_hint: None,
             clip_clone_hint: None,
+            song_text_drag_preview: None,
+            song_text_drag_cancelled: false,
             clip_drag_origin: None,
             clip_drag_target_track_index: None,
             clip_clone_drag_id: None,
@@ -194,6 +198,7 @@ impl Timeline {
             on_playhead_scrub_begin: None,
             on_playhead_scrub_end: None,
             on_open_editor: None,
+            on_open_song_text_editor: None,
             chrome_metrics: TimelineChromeMetrics::default(),
             project_root: None,
             focus_lost_subscription: None,
@@ -220,6 +225,8 @@ impl Timeline {
             last_drag_position: None,
             file_drop_hint: None,
             clip_clone_hint: None,
+            song_text_drag_preview: None,
+            song_text_drag_cancelled: false,
             clip_drag_origin: None,
             clip_drag_target_track_index: None,
             clip_clone_drag_id: None,
@@ -241,6 +248,7 @@ impl Timeline {
             on_playhead_scrub_begin: None,
             on_playhead_scrub_end: None,
             on_open_editor: None,
+            on_open_song_text_editor: None,
             chrome_metrics: TimelineChromeMetrics::default(),
             project_root: None,
             focus_lost_subscription: None,
@@ -254,6 +262,15 @@ impl Timeline {
         cx.notify();
     }
 
+    /// Execute a persisted UI-metadata edit without invalidating the audio graph.
+    pub fn run_metadata_edit_command(&mut self, cmd: EditCommand, cx: &mut gpui::Context<Self>) {
+        debug_assert!(cmd.is_metadata_only());
+        cmd.execute(&mut self.state);
+        self.edit_history.push(cmd);
+        self.mark_control_state_changed(cx);
+        cx.notify();
+    }
+
     /// Record a command whose effect has already been applied to the state
     /// (e.g. a gesture that mutated `state` live). Pushes it onto the undo
     /// stack without re-executing, then marks the project changed.
@@ -264,8 +281,12 @@ impl Timeline {
     }
 
     pub fn undo_edit(&mut self, cx: &mut gpui::Context<Self>) -> bool {
-        if self.edit_history.undo(&mut self.state) {
-            self.mark_project_changed(cx);
+        if let Some(metadata_only) = self.edit_history.undo_with_impact(&mut self.state) {
+            if metadata_only {
+                self.mark_control_state_changed(cx);
+            } else {
+                self.mark_project_changed(cx);
+            }
             cx.notify();
             true
         } else {
@@ -274,8 +295,12 @@ impl Timeline {
     }
 
     pub fn redo_edit(&mut self, cx: &mut gpui::Context<Self>) -> bool {
-        if self.edit_history.redo(&mut self.state) {
-            self.mark_project_changed(cx);
+        if let Some(metadata_only) = self.edit_history.redo_with_impact(&mut self.state) {
+            if metadata_only {
+                self.mark_control_state_changed(cx);
+            } else {
+                self.mark_project_changed(cx);
+            }
             cx.notify();
             true
         } else {
@@ -332,6 +357,10 @@ impl Timeline {
 
     pub fn set_open_editor_callback(&mut self, callback: Option<TimelineOpenEditorCb>) {
         self.on_open_editor = callback;
+    }
+
+    pub fn set_open_song_text_editor_callback(&mut self, callback: Option<TimelineOpenEditorCb>) {
+        self.on_open_song_text_editor = callback;
     }
 
     pub fn set_add_track_callback(&mut self, callback: Option<TimelineAddTrackCb>) {
@@ -1141,7 +1170,7 @@ impl Timeline {
     }
 
     pub(super) fn timeline_content_width(&self) -> f32 {
-        let longest_seconds = self
+        let clip_end_seconds = self
             .state
             .tracks
             .iter()
@@ -1152,6 +1181,13 @@ impl Timeline {
                     + 4.0
             })
             .fold(16.0_f32, f32::max);
+        let song_text_end_seconds = self
+            .state
+            .song_text_events
+            .last()
+            .map(|event| self.state.beats_to_seconds(event.beat as f32) + 4.0)
+            .unwrap_or(0.0);
+        let longest_seconds = clip_end_seconds.max(song_text_end_seconds);
         (longest_seconds * self.state.viewport.pixels_per_second).max(1200.0)
     }
 
@@ -1200,7 +1236,20 @@ impl Timeline {
         let snapped_sec = self
             .state
             .snap_time(beat.max(0.0) * self.state.seconds_per_beat());
-        self.state.transport.playhead_beats = snapped_sec / self.state.seconds_per_beat();
+        let snapped_beat = snapped_sec / self.state.seconds_per_beat();
+        self.seek_to_exact_beat(snapped_beat, reason, cx);
+    }
+
+    /// Seek to an event's stored musical position without applying the current
+    /// edit grid. Used by marker and Song Text navigation so off-grid events
+    /// remain seekable exactly.
+    pub fn seek_to_exact_beat(
+        &mut self,
+        beat: f32,
+        reason: crate::layout::SeekReason,
+        cx: &mut Context<Self>,
+    ) {
+        self.state.transport.playhead_beats = beat.max(0.0);
         let beat = self.state.transport.playhead_beats;
         self.state.recompute_effective_volumes(beat, "seek");
         if let Some(cb) = self.on_seek_beats.as_ref() {

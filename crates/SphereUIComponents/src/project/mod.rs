@@ -524,12 +524,55 @@ pub struct ProjectTimelineRegion {
     pub color_hex: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProjectLyricSyllableMode {
+    Phrase,
+    Syllables,
+}
+
 #[derive(Debug, Clone, PartialEq)]
-pub struct ProjectSongTextCue {
+pub struct ProjectLyricSyllable {
+    pub text: String,
+    pub offset_beats: f64,
+    pub duration_beats: Option<f64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProjectSongSectionType {
+    Custom,
+    Intro,
+    Verse,
+    PreChorus,
+    Chorus,
+    Bridge,
+    Solo,
+    Outro,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum ProjectSongTextEventKind {
+    Chord {
+        symbol: String,
+    },
+    Lyric {
+        text: String,
+        syllable_mode: ProjectLyricSyllableMode,
+        continuation: bool,
+        duration_beats: Option<f64>,
+        syllables: Vec<ProjectLyricSyllable>,
+    },
+    Section {
+        name: String,
+        section_type: ProjectSongSectionType,
+        color_hex: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProjectSongTextEvent {
     pub id: String,
     pub beat: f64,
-    pub chord: String,
-    pub lyric: String,
+    pub kind: ProjectSongTextEventKind,
 }
 
 #[derive(Debug, Clone)]
@@ -541,7 +584,7 @@ pub struct ProjectSettings {
     pub time_signature_points: Vec<ProjectTimeSignaturePoint>,
     pub timeline_markers: Vec<ProjectTimelineMarker>,
     pub timeline_regions: Vec<ProjectTimelineRegion>,
-    pub song_text_cues: Vec<ProjectSongTextCue>,
+    pub song_text_events: Vec<ProjectSongTextEvent>,
     pub time_sig_num: u32,
     pub time_sig_den: u32,
     pub sample_rate: u32,
@@ -556,7 +599,7 @@ impl Default for ProjectSettings {
             time_signature_points: Vec::new(),
             timeline_markers: Vec::new(),
             timeline_regions: Vec::new(),
-            song_text_cues: Vec::new(),
+            song_text_events: Vec::new(),
             time_sig_num: 4,
             time_sig_den: 4,
             sample_rate: 48000,
@@ -981,14 +1024,75 @@ impl From<&TimelineState> for FutureboardProject {
                 color_hex: region.color_hex.clone(),
             })
             .collect();
-        project.settings.song_text_cues = tl
-            .song_text_cues
+        project.settings.song_text_events = tl
+            .song_text_events
             .iter()
-            .map(|cue| ProjectSongTextCue {
-                id: cue.id.clone(),
-                beat: cue.beat,
-                chord: cue.chord.clone(),
-                lyric: cue.lyric.clone(),
+            .map(|event| ProjectSongTextEvent {
+                id: event.id.clone(),
+                beat: event.beat,
+                kind: match &event.kind {
+                    crate::components::timeline::timeline_state::SongTextEventKind::Chord(
+                        chord,
+                    ) => ProjectSongTextEventKind::Chord {
+                        symbol: chord.symbol.clone(),
+                    },
+                    crate::components::timeline::timeline_state::SongTextEventKind::Lyric(
+                        lyric,
+                    ) => ProjectSongTextEventKind::Lyric {
+                        text: lyric.text.clone(),
+                        syllable_mode: match lyric.syllable_mode {
+                            crate::components::timeline::timeline_state::LyricSyllableMode::Phrase => {
+                                ProjectLyricSyllableMode::Phrase
+                            }
+                            crate::components::timeline::timeline_state::LyricSyllableMode::Syllables => {
+                                ProjectLyricSyllableMode::Syllables
+                            }
+                        },
+                        continuation: lyric.continuation,
+                        duration_beats: lyric.duration_beats,
+                        syllables: lyric
+                            .syllables
+                            .iter()
+                            .map(|syllable| ProjectLyricSyllable {
+                                text: syllable.text.clone(),
+                                offset_beats: syllable.offset_beats,
+                                duration_beats: syllable.duration_beats,
+                            })
+                            .collect(),
+                    },
+                    crate::components::timeline::timeline_state::SongTextEventKind::Section(
+                        section,
+                    ) => ProjectSongTextEventKind::Section {
+                        name: section.name.clone(),
+                        section_type: match section.section_type {
+                            crate::components::timeline::timeline_state::SongSectionType::Custom => {
+                                ProjectSongSectionType::Custom
+                            }
+                            crate::components::timeline::timeline_state::SongSectionType::Intro => {
+                                ProjectSongSectionType::Intro
+                            }
+                            crate::components::timeline::timeline_state::SongSectionType::Verse => {
+                                ProjectSongSectionType::Verse
+                            }
+                            crate::components::timeline::timeline_state::SongSectionType::PreChorus => {
+                                ProjectSongSectionType::PreChorus
+                            }
+                            crate::components::timeline::timeline_state::SongSectionType::Chorus => {
+                                ProjectSongSectionType::Chorus
+                            }
+                            crate::components::timeline::timeline_state::SongSectionType::Bridge => {
+                                ProjectSongSectionType::Bridge
+                            }
+                            crate::components::timeline::timeline_state::SongSectionType::Solo => {
+                                ProjectSongSectionType::Solo
+                            }
+                            crate::components::timeline::timeline_state::SongSectionType::Outro => {
+                                ProjectSongSectionType::Outro
+                            }
+                        },
+                        color_hex: section.color_hex.clone(),
+                    },
+                },
             })
             .collect();
         project.settings.time_sig_num = tl.time_signature_num;
@@ -1068,20 +1172,68 @@ pub fn apply_to_timeline(project: &FutureboardProject, tl: &mut TimelineState) {
             .total_cmp(&b.start_beat)
             .then_with(|| a.id.cmp(&b.id))
     });
-    tl.song_text_cues = project
+    let song_text_events = project
         .settings
-        .song_text_cues
+        .song_text_events
         .iter()
-        .map(
-            |cue| crate::components::timeline::timeline_state::SongTextCue {
-                id: cue.id.clone(),
-                beat: cue.beat,
-                chord: cue.chord.clone(),
-                lyric: cue.lyric.clone(),
-            },
-        )
+        .filter_map(|event| {
+            use crate::components::timeline::timeline_state::{
+                ChordEvent, LyricEvent, LyricSyllable, LyricSyllableMode, SectionEvent,
+                SongSectionType, SongTextEvent, SongTextEventKind,
+            };
+
+            let kind = match &event.kind {
+                ProjectSongTextEventKind::Chord { symbol } => {
+                    SongTextEventKind::Chord(ChordEvent {
+                        symbol: symbol.clone(),
+                    })
+                }
+                ProjectSongTextEventKind::Lyric {
+                    text,
+                    syllable_mode,
+                    continuation,
+                    duration_beats,
+                    syllables,
+                } => SongTextEventKind::Lyric(LyricEvent {
+                    text: text.clone(),
+                    syllable_mode: match syllable_mode {
+                        ProjectLyricSyllableMode::Phrase => LyricSyllableMode::Phrase,
+                        ProjectLyricSyllableMode::Syllables => LyricSyllableMode::Syllables,
+                    },
+                    continuation: *continuation,
+                    duration_beats: *duration_beats,
+                    syllables: syllables
+                        .iter()
+                        .map(|syllable| LyricSyllable {
+                            text: syllable.text.clone(),
+                            offset_beats: syllable.offset_beats,
+                            duration_beats: syllable.duration_beats,
+                        })
+                        .collect(),
+                }),
+                ProjectSongTextEventKind::Section {
+                    name,
+                    section_type,
+                    color_hex,
+                } => SongTextEventKind::Section(SectionEvent {
+                    name: name.clone(),
+                    section_type: match section_type {
+                        ProjectSongSectionType::Custom => SongSectionType::Custom,
+                        ProjectSongSectionType::Intro => SongSectionType::Intro,
+                        ProjectSongSectionType::Verse => SongSectionType::Verse,
+                        ProjectSongSectionType::PreChorus => SongSectionType::PreChorus,
+                        ProjectSongSectionType::Chorus => SongSectionType::Chorus,
+                        ProjectSongSectionType::Bridge => SongSectionType::Bridge,
+                        ProjectSongSectionType::Solo => SongSectionType::Solo,
+                        ProjectSongSectionType::Outro => SongSectionType::Outro,
+                    },
+                    color_hex: color_hex.clone(),
+                }),
+            };
+            SongTextEvent::with_id(event.id.clone(), event.beat, kind)
+        })
         .collect();
-    tl.song_text_cues.sort_by(|a, b| a.beat.total_cmp(&b.beat));
+    tl.replace_song_text_events(song_text_events);
     if project.settings.time_signature_points.is_empty() {
         tl.time_signature_map =
             crate::components::timeline::timeline_state::TimeSignatureMap::with_default_4_4();

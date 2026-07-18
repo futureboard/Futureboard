@@ -1002,6 +1002,25 @@ impl StudioLayout {
                     ContextMenuEntry::item("Zoom Out", "view:zoom-out"),
                 ]
             }
+            ContextTarget::SongTextMarker { event_id, beat } => {
+                let state = &self.timeline.read(cx).state;
+                let position = state.format_bar_beat_at(*beat);
+                let event_label = state
+                    .song_text_event(event_id)
+                    .map(|event| format!("{}: {}", event.event_type().label(), event.text()))
+                    .unwrap_or_else(|| "Song Text event".to_string());
+                vec![
+                    ContextMenuEntry::disabled_item(format!("{event_label} at {position}"), "noop"),
+                    ContextMenuEntry::Separator,
+                    ContextMenuEntry::item("Edit", "panel:show-lyric-editor"),
+                    ContextMenuEntry::item("Move to Playhead", "song_text.move_to_playhead"),
+                    danger_menu_item_enabled(
+                        "Delete",
+                        "song_text.delete_selected",
+                        state.song_text_event(event_id).is_some(),
+                    ),
+                ]
+            }
             ContextTarget::AutomationLane { .. } => vec![
                 ContextMenuEntry::item("Cycle Automation Target", "automation:cycle-target"),
                 ContextMenuEntry::item("Select All Points", "automation:select-all-points"),

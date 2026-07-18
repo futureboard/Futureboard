@@ -6,6 +6,10 @@ use crate::assets;
 use crate::components::edit::{normalize_range, ClipSnapshot, EditCommand, EditHistory};
 use crate::components::sidebar::{BrowserDragItem, SIDEBAR_WIDTH};
 use crate::components::timeline::floating_tools_bar::floating_tools_bar;
+use crate::components::timeline::song_text_track::{
+    song_text_drag_positions, song_text_track_lane, SongTextDragPreview, SongTextDragSession,
+    SongTextMarkerDown,
+};
 use crate::components::timeline::tempo_track::tempo_track_lane;
 use crate::components::timeline::time_signature_track::time_signature_track_lane;
 use crate::components::timeline::timeline_ruler::{
@@ -150,6 +154,10 @@ pub struct Timeline {
     last_drag_position: Option<gpui::Point<gpui::Pixels>>,
     file_drop_hint: Option<FileDropHint>,
     clip_clone_hint: Option<ClipCloneHint>,
+    /// UI-only Song Text positions calculated from the drag-start snapshot.
+    song_text_drag_preview: Option<SongTextDragPreview>,
+    /// Blocks further drag-move/drop events after Escape or focus-loss cancellation.
+    song_text_drag_cancelled: bool,
     clip_drag_origin: Option<gpui::Point<gpui::Pixels>>,
     clip_drag_target_track_index: Option<usize>,
     clip_clone_drag_id: Option<String>,
@@ -196,6 +204,8 @@ pub struct Timeline {
     /// Invoked when the user double-clicks a MIDI clip — `StudioLayout` uses it
     /// to switch the bottom panel to the piano-roll Editor tab.
     on_open_editor: Option<TimelineOpenEditorCb>,
+    /// Invoked when the user double-clicks a Song Text marker.
+    on_open_song_text_editor: Option<TimelineOpenEditorCb>,
     chrome_metrics: TimelineChromeMetrics,
     /// Absolute root folder of the saved project, pushed by `StudioLayout` each
     /// render. `None` for an Untitled (unsaved) project. Used to eagerly copy
@@ -229,6 +239,10 @@ pub enum TimelineContextTarget {
     Clip(String),
     Marker {
         marker_id: String,
+        beat: f64,
+    },
+    SongTextMarker {
+        event_id: String,
         beat: f64,
     },
     AutomationLane {

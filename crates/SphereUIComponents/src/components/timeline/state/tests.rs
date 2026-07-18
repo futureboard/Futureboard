@@ -725,11 +725,14 @@ mod tempo_track_tests {
     fn show_tempo_track_enables_global_lane() {
         let mut state = TimelineState::default();
         assert!(!state.show_tempo_track);
-        assert!(state.visible_global_lanes().is_empty());
+        assert_eq!(state.visible_global_lanes(), vec![GlobalLaneKind::SongText]);
 
         state.show_tempo_track_lane();
         assert!(state.show_tempo_track);
-        assert_eq!(state.visible_global_lanes(), vec![GlobalLaneKind::Tempo]);
+        assert_eq!(
+            state.visible_global_lanes(),
+            vec![GlobalLaneKind::Tempo, GlobalLaneKind::SongText]
+        );
     }
 
     #[test]

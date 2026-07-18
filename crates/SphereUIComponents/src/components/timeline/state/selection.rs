@@ -4,6 +4,8 @@ use super::*;
 pub struct TimelineSelection {
     pub selected_track_id: Option<String>,
     pub selected_clip_ids: Vec<String>,
+    /// Shared Song Text selection used by the ruler and all panel/window views.
+    pub selected_song_text_event_ids: Vec<SongTextEventId>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -62,11 +64,13 @@ impl TimelineState {
     pub fn select_track(&mut self, track_id: &str) {
         self.selection.selected_track_id = Some(track_id.to_string());
         self.selection.selected_clip_ids.clear();
+        self.selection.selected_song_text_event_ids.clear();
         self.arrangement_range = None;
     }
 
     pub fn select_clip(&mut self, clip_id: &str) {
         self.selection.selected_clip_ids = vec![clip_id.to_string()];
+        self.selection.selected_song_text_event_ids.clear();
         self.arrangement_range = None;
         if let Some(track) = self
             .tracks
@@ -78,6 +82,7 @@ impl TimelineState {
     }
 
     pub fn select_clip_additive(&mut self, clip_id: &str) {
+        self.selection.selected_song_text_event_ids.clear();
         self.arrangement_range = None;
         if let Some(pos) = self
             .selection
@@ -96,5 +101,35 @@ impl TimelineState {
         {
             self.selection.selected_track_id = Some(track.id.clone());
         }
+    }
+
+    pub fn select_song_text_event(&mut self, id: &str, additive: bool) {
+        self.selection.selected_clip_ids.clear();
+        self.arrangement_range = None;
+        if additive {
+            if let Some(index) = self
+                .selection
+                .selected_song_text_event_ids
+                .iter()
+                .position(|selected| selected == id)
+            {
+                self.selection.selected_song_text_event_ids.remove(index);
+            } else {
+                self.selection
+                    .selected_song_text_event_ids
+                    .push(id.to_string());
+            }
+        } else {
+            self.selection.selected_song_text_event_ids = vec![id.to_string()];
+        }
+    }
+
+    pub fn selected_song_text_event(&self) -> Option<&SongTextEvent> {
+        let id = self.selection.selected_song_text_event_ids.first()?;
+        self.song_text_event(id)
+    }
+
+    pub fn clear_song_text_selection(&mut self) {
+        self.selection.selected_song_text_event_ids.clear();
     }
 }

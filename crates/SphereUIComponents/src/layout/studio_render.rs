@@ -503,6 +503,9 @@ impl Render for StudioLayout {
                             TimelineContextTarget::Marker { marker_id, beat } => {
                                 ContextTarget::TimelineMarker { marker_id, beat }
                             }
+                            TimelineContextTarget::SongTextMarker { event_id, beat } => {
+                                ContextTarget::SongTextMarker { event_id, beat }
+                            }
                             TimelineContextTarget::AutomationLane {
                                 track_id,
                                 lane_id,
@@ -1231,10 +1234,17 @@ impl Render for StudioLayout {
         // reports its `FocusHandle` as focused (orphaned), which would otherwise
         // block this reclaim and leave Space/transport shortcuts dead until the
         // user clicks a control. See `docked_midi_editor_visible`.
-        let docked_editor_owns_keyboard =
+        let docked_midi_editor_owns_keyboard =
             self.docked_midi_editor_visible() && midi_editor.read(cx).is_focused(window);
+        let docked_song_text_editor_owns_keyboard = self.panels.inspector
+            && self.right_dock_tab == RightDockTab::LyricEditor
+            && self
+                .lyric_editor_panel
+                .read(cx)
+                .is_text_input_focused(window);
         if !self.focus_handle.is_focused(window)
-            && !docked_editor_owns_keyboard
+            && !docked_midi_editor_owns_keyboard
+            && !docked_song_text_editor_owns_keyboard
             && !self.keyboard_text_capture_live(window)
         {
             self.focus_handle.focus(window, cx);
@@ -1311,10 +1321,22 @@ impl Render for StudioLayout {
                     });
                     return;
                 }
+                let song_text_input_focused = shortcut_keydown_target
+                    .read(cx)
+                    .panels
+                    .inspector
+                    && shortcut_keydown_target.read(cx).right_dock_tab
+                        == RightDockTab::LyricEditor
+                    && shortcut_keydown_target
+                        .read(cx)
+                        .lyric_editor_panel
+                        .read(cx)
+                        .is_text_input_focused(window);
                 let focus = FocusContext {
                     text_input_focused: shortcut_keydown_target
                         .read(cx)
-                        .is_text_editing_context(window),
+                        .is_text_editing_context(window)
+                        || song_text_input_focused,
                 };
                 let focused_widget_kind = shortcut_keydown_target.read(cx).focused_widget_kind(window);
                 let key_for_diag = event.keystroke.key.clone();

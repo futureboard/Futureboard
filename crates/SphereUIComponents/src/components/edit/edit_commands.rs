@@ -4,7 +4,7 @@ use std::collections::VecDeque;
 
 use crate::components::timeline::timeline_state::{
     AudioClipStretchState, ClipState, MidiArticulationEvent, MidiControllerKind,
-    MidiControllerPoint, MidiNoteState, TimelineState, TrackState,
+    MidiControllerPoint, MidiNoteState, SongTextEvent, TimelineState, TrackState,
 };
 
 /// Snapshot of a clip plus its owning track for undo/redo.
@@ -177,9 +177,20 @@ pub enum EditCommand {
         prev: f32,
         next: f32,
     },
+    /// Replace only the affected Song Text events. Empty `previous` creates,
+    /// empty `next` deletes, and populated snapshots edit/move atomically.
+    SetSongTextEvents {
+        label: &'static str,
+        previous: Vec<SongTextEvent>,
+        next: Vec<SongTextEvent>,
+    },
 }
 
 impl EditCommand {
+    pub fn is_metadata_only(&self) -> bool {
+        matches!(self, EditCommand::SetSongTextEvents { .. })
+    }
+
     pub fn label(&self) -> &'static str {
         match self {
             EditCommand::CreateClip { .. } => "Create Clip",
@@ -209,6 +220,7 @@ impl EditCommand {
             EditCommand::SetTrackHeights { .. } => "Resize Track Height",
             EditCommand::SetTrackVolume { .. } => "Set Volume",
             EditCommand::SetTrackPan { .. } => "Set Pan",
+            EditCommand::SetSongTextEvents { label, .. } => label,
         }
     }
 
@@ -357,6 +369,9 @@ impl EditCommand {
             EditCommand::SetTrackPan { track_id, next, .. } => {
                 state.set_track_pan(track_id, *next);
             }
+            EditCommand::SetSongTextEvents { previous, next, .. } => {
+                apply_song_text_snapshot(state, previous, next);
+            }
         }
     }
 
@@ -478,8 +493,19 @@ impl EditCommand {
             EditCommand::SetTrackPan { track_id, prev, .. } => {
                 state.set_track_pan(track_id, *prev);
             }
+            EditCommand::SetSongTextEvents { previous, next, .. } => {
+                apply_song_text_snapshot(state, next, previous);
+            }
         }
     }
+}
+
+fn apply_song_text_snapshot(
+    state: &mut TimelineState,
+    remove: &[SongTextEvent],
+    insert: &[SongTextEvent],
+) {
+    state.apply_song_text_patch(remove, insert);
 }
 
 fn apply_track_heights_snapshot(state: &mut TimelineState, heights: &[(String, f32)]) {
@@ -501,6 +527,65 @@ fn restore_clip_snapshot(state: &mut TimelineState, snapshot: &ClipSnapshot) {
         if !track.clips.iter().any(|c| c.id == snapshot.clip.id) {
             track.clips.push(snapshot.clip.clone());
         }
+    }
+}
+
+#[cfg(test)]
+mod song_text_command_tests {
+    use super::*;
+    use crate::components::timeline::timeline_state::{SongTextEvent, SongTextEventType};
+
+    #[test]
+    fn chord_and_lyric_pair_is_one_undoable_command() {
+        let mut state = TimelineState::default();
+        let chord = SongTextEvent::chord(4.0, "Am7").unwrap();
+        let lyric = SongTextEvent::lyric(4.0, "I remember").unwrap();
+        let command = EditCommand::SetSongTextEvents {
+            label: "Add Chord and Lyric",
+            previous: Vec::new(),
+            next: vec![chord.clone(), lyric.clone()],
+        };
+        let mut history = EditHistory::new(10);
+        command.execute(&mut state);
+        history.push(command);
+        assert_eq!(state.song_text_events.len(), 2);
+        assert!(history.undo(&mut state));
+        assert!(state.song_text_events.is_empty());
+        assert!(
+            !history.undo(&mut state),
+            "the pair must consume one history item"
+        );
+        assert!(history.redo(&mut state));
+        assert_eq!(
+            state
+                .song_text_events
+                .iter()
+                .map(SongTextEvent::event_type)
+                .collect::<Vec<_>>(),
+            vec![SongTextEventType::Chord, SongTextEventType::Lyric]
+        );
+    }
+
+    #[test]
+    fn text_edit_undo_restores_exact_content_and_id() {
+        let mut state = TimelineState::default();
+        let previous = SongTextEvent::lyric(2.5, "before").unwrap();
+        state.upsert_song_text_event(previous.clone());
+        let mut next = previous.clone();
+        if let crate::components::timeline::timeline_state::SongTextEventKind::Lyric(lyric) =
+            &mut next.kind
+        {
+            lyric.text = "after".to_string();
+        }
+        let command = EditCommand::SetSongTextEvents {
+            label: "Edit Song Text",
+            previous: vec![previous.clone()],
+            next: vec![next.clone()],
+        };
+        command.execute(&mut state);
+        assert_eq!(state.song_text_event(&previous.id), Some(&next));
+        command.undo(&mut state);
+        assert_eq!(state.song_text_event(&previous.id), Some(&previous));
     }
 }
 
@@ -674,22 +759,28 @@ impl EditHistory {
         self.redo_stack.clear();
     }
 
-    pub fn undo(&mut self, state: &mut TimelineState) -> bool {
-        let Some(cmd) = self.undo_stack.pop_back() else {
-            return false;
-        };
+    pub fn undo_with_impact(&mut self, state: &mut TimelineState) -> Option<bool> {
+        let cmd = self.undo_stack.pop_back()?;
+        let metadata_only = cmd.is_metadata_only();
         cmd.undo(state);
         self.redo_stack.push_back(cmd);
-        true
+        Some(metadata_only)
+    }
+
+    pub fn undo(&mut self, state: &mut TimelineState) -> bool {
+        self.undo_with_impact(state).is_some()
+    }
+
+    pub fn redo_with_impact(&mut self, state: &mut TimelineState) -> Option<bool> {
+        let cmd = self.redo_stack.pop_back()?;
+        let metadata_only = cmd.is_metadata_only();
+        cmd.execute(state);
+        self.undo_stack.push_back(cmd);
+        Some(metadata_only)
     }
 
     pub fn redo(&mut self, state: &mut TimelineState) -> bool {
-        let Some(cmd) = self.redo_stack.pop_back() else {
-            return false;
-        };
-        cmd.execute(state);
-        self.undo_stack.push_back(cmd);
-        true
+        self.redo_with_impact(state).is_some()
     }
 
     pub fn can_undo(&self) -> bool {

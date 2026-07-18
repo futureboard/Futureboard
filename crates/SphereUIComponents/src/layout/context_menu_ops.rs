@@ -138,6 +138,9 @@ impl StudioLayout {
                 ContextTarget::Track(track_id) => state.find_track(track_id).is_some(),
                 ContextTarget::Clip(clip_id) => state.find_clip(clip_id).is_some(),
                 ContextTarget::TimelineMarker { .. } => true,
+                ContextTarget::SongTextMarker { event_id, .. } => {
+                    state.song_text_event(event_id).is_some()
+                }
                 ContextTarget::AutomationLane { track_id, .. } => {
                     state.find_track(track_id).is_some()
                 }

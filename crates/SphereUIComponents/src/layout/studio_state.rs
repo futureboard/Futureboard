@@ -142,6 +142,10 @@ pub enum ContextTarget {
         marker_id: String,
         beat: f64,
     },
+    SongTextMarker {
+        event_id: String,
+        beat: f64,
+    },
     AutomationLane {
         track_id: String,
         lane_id: String,

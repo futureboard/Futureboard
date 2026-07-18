@@ -124,3 +124,18 @@ pub fn next_timeline_region_id() -> String {
         .as_nanos();
     format!("region-{ts:x}-{seq:x}")
 }
+
+/// Stable project identity for chord, lyric, and section events. Timestamp plus
+/// a process-local sequence avoids collisions with loaded projects without an
+/// observe pass, while preserving IDs across save/load and undo/redo.
+pub fn next_song_text_event_id() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+    static COUNTER: AtomicU64 = AtomicU64::new(1);
+    let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    format!("song-text-{ts:x}-{seq:x}")
+}

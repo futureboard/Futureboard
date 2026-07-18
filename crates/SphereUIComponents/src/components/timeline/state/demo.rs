@@ -197,7 +197,9 @@ impl TimelineState {
             time_signature_map: TimeSignatureMap::with_default_4_4(),
             markers: Vec::new(),
             regions: Vec::new(),
-            song_text_cues: Vec::new(),
+            song_text_events: Vec::new(),
+            song_text_index: SongTextIndex::default(),
+            song_text_revision: 0,
             time_signature_num: 4,
             time_signature_den: 4,
             viewport: TimelineViewport {
@@ -234,6 +236,7 @@ impl TimelineState {
             selection: TimelineSelection {
                 selected_track_id: Some("track-1".to_string()),
                 selected_clip_ids: vec![],
+                selected_song_text_event_ids: Vec::new(),
             },
             active_tool: TimelineTool::Pointer,
             snap_to_grid: true,

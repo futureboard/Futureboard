@@ -28,6 +28,7 @@ impl Render for Timeline {
                     || this.automation_drag.is_some()
                     || this.automation_marquee.is_some()
                     || this.tempo_drag.is_some()
+                    || this.song_text_drag_preview.is_some()
                     || this.pan_last_position.is_some()
                 {
                     if Self::input_debug_enabled() {
@@ -777,6 +778,62 @@ impl Render for Timeline {
                 }
             },
         );
+        let on_song_text_marker_down =
+            cx.listener(|this, marker: &SongTextMarkerDown, window, cx| {
+                this.song_text_drag_cancelled = false;
+                this.state
+                    .select_song_text_event(&marker.event_id, marker.additive);
+                this.seek_to_exact_beat(
+                    marker.beat as f32,
+                    crate::layout::SeekReason::TimelineClick,
+                    cx,
+                );
+                if marker.click_count >= 2 {
+                    if let Some(open) = this.on_open_song_text_editor.as_ref() {
+                        open(window, cx);
+                    }
+                }
+            });
+        let on_song_text_marker_down: crate::components::timeline::song_text_track::SongTextMarkerDownCallback =
+            std::sync::Arc::new(on_song_text_marker_down);
+        let on_song_text_marker_context = self.on_context_menu.clone().map(|callback| {
+            let timeline = cx.entity().clone();
+            std::sync::Arc::new(
+                move |(event_id, beat, x, y): &(String, f64, f32, f32),
+                      window: &mut gpui::Window,
+                      cx: &mut gpui::App| {
+                    let _ = timeline.update(cx, |timeline, cx| {
+                        timeline.state.select_song_text_event(event_id, false);
+                        timeline.seek_to_exact_beat(
+                            *beat as f32,
+                            crate::layout::SeekReason::TimelineClick,
+                            cx,
+                        );
+                    });
+                    callback(
+                        &(
+                            TimelineContextTarget::SongTextMarker {
+                                event_id: event_id.clone(),
+                                beat: *beat,
+                            },
+                            *x,
+                            *y,
+                        ),
+                        window,
+                        cx,
+                    );
+                },
+            )
+                as crate::components::timeline::song_text_track::SongTextMarkerContextCallback
+        });
+        let on_song_text_empty_seek = cx.listener(|this, lane_x: &f32, _window, cx| {
+            this.state.clear_song_text_selection();
+            let beat = this.state.x_to_beat(*lane_x).max(0.0);
+            this.seek_to_exact_beat(beat as f32, crate::layout::SeekReason::TimelineClick, cx);
+        });
+        let on_song_text_empty_seek: crate::components::timeline::song_text_track::SongTextLaneSeekCallback =
+            std::sync::Arc::new(on_song_text_empty_seek);
+
         let on_region_drag = cx.listener(|this, update: &TimelineRegionDragUpdate, _window, cx| {
             if this
                 .state
@@ -1357,6 +1414,70 @@ impl Render for Timeline {
             cx.notify();
         });
 
+        let on_song_text_drag_move = cx.listener(
+            |this, event: &gpui::DragMoveEvent<SongTextDragSession>, _window, cx| {
+                if this.song_text_drag_cancelled {
+                    return;
+                }
+                let drag = event.drag(cx).clone();
+                let pointer_beat = this.beat_from_window_x(event.event.position.x.into()) as f64;
+                let pixels_per_beat = this.state.viewport.pixels_per_beat.max(1.0) as f64;
+                let raw_anchor =
+                    (pointer_beat - drag.pointer_offset_x as f64 / pixels_per_beat).max(0.0);
+                let snapped_anchor = this
+                    .state
+                    .snap_beats_with_bypass(raw_anchor as f32, event.event.modifiers.shift)
+                    as f64;
+                this.song_text_drag_preview = Some(SongTextDragPreview {
+                    positions: song_text_drag_positions(
+                        &drag.anchor_event_id,
+                        &drag.original_positions,
+                        snapped_anchor,
+                    ),
+                });
+                cx.notify();
+            },
+        );
+        let on_song_text_drag_drop =
+            cx.listener(|this, drag: &SongTextDragSession, _window, cx| {
+                if this.song_text_drag_cancelled {
+                    this.song_text_drag_preview = None;
+                    return;
+                }
+                let Some(preview) = this.song_text_drag_preview.take() else {
+                    return;
+                };
+                let previous: Vec<_> = drag
+                    .original_positions
+                    .iter()
+                    .filter_map(|(id, _)| this.state.song_text_event(id).cloned())
+                    .collect();
+                let positions: std::collections::HashMap<_, _> =
+                    preview.positions.into_iter().collect();
+                let next: Vec<_> = previous
+                    .iter()
+                    .cloned()
+                    .map(|mut event| {
+                        if let Some(beat) = positions.get(&event.id) {
+                            event.beat = *beat;
+                        }
+                        event
+                    })
+                    .collect();
+                if previous != next {
+                    this.run_metadata_edit_command(
+                        EditCommand::SetSongTextEvents {
+                            label: "Move Song Text",
+                            previous,
+                            next,
+                        },
+                        cx,
+                    );
+                } else {
+                    cx.notify();
+                }
+            });
+
         let on_track_height_resize_move = cx.listener(
             |this, event: &gpui::DragMoveEvent<TrackHeightResizeDrag>, _window, cx| {
                 let y: f32 = event.event.position.y.into();
@@ -1554,6 +1675,7 @@ impl Render for Timeline {
                             || this.erase_clip_drag.is_some()
                             || this.automation_drag.is_some()
                             || this.automation_marquee.is_some()
+                            || this.song_text_drag_preview.is_some()
                             || this.pan_last_position.is_some()
                             || this.state.track_height_resize.is_some()
                             || this.state.track_height_resize_arm.is_some())
@@ -1571,6 +1693,8 @@ impl Render for Timeline {
             .on_drop::<ClipDragItem>(on_clip_dropped)
             .on_drag_move::<ClipResizeDrag>(on_clip_resize_move)
             .on_drop::<ClipResizeDrag>(on_clip_resize_drop)
+            .on_drag_move::<SongTextDragSession>(on_song_text_drag_move)
+            .on_drop::<SongTextDragSession>(on_song_text_drag_drop)
             .on_drag_move::<TrackHeightResizeDrag>(on_track_height_resize_move)
             .on_drop::<TrackHeightResizeDrag>(on_track_height_resize_drop)
             .on_drag_move::<TrackDragItem>(on_track_drag_move)
@@ -1646,6 +1770,13 @@ impl Render for Timeline {
                     Some(on_ts_toggle_collapsed.clone()),
                 ))
             })
+            .child(song_text_track_lane(
+                state,
+                self.song_text_drag_preview.as_ref(),
+                on_song_text_marker_down,
+                on_song_text_marker_context,
+                on_song_text_empty_seek,
+            ))
             // 2. Track List Scroll Area
             .child(div().flex_1().min_h_0().relative().child(track_list(
                 state,

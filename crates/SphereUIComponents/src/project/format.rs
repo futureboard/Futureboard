@@ -2,8 +2,9 @@ use super::{
     AutomationLane, AutomationPoint, AutomationTargetDesc, ClipSource, FutureboardProject,
     InputMonitorMode, MidiArticulation, MidiControllerKind, MidiControllerLane,
     MidiControllerPoint, MidiNote, MidiSysExEvent, MidiSysExKind, PluginFormat, PluginStateBlob,
-    ProjectAsset, ProjectClip, ProjectInsert, ProjectMixer, ProjectPluginInstance, ProjectSend,
-    ProjectSongTextCue, ProjectTempoPoint, ProjectTimelineMarker, ProjectTimelineRegion,
+    ProjectAsset, ProjectClip, ProjectInsert, ProjectLyricSyllable, ProjectLyricSyllableMode,
+    ProjectMixer, ProjectPluginInstance, ProjectSend, ProjectSongSectionType, ProjectSongTextEvent,
+    ProjectSongTextEventKind, ProjectTempoPoint, ProjectTimelineMarker, ProjectTimelineRegion,
     ProjectTrack, ProjectTrackAudioFormat, ProjectTrackInputRouting, ProjectTrackMidiInputRouting,
     ProjectTrackOutputRouting, ProjectTrackType, TrackRouting,
 };
@@ -46,7 +47,10 @@ pub const PROJECT_MAGIC: &[u8; 8] = b"FBSTUD1\0";
 /// v26 persists stable MIDI note and CC-point identities plus optional note
 /// release velocity. Pre-v26 notes/points mint fresh ids on load; release
 /// velocity defaults to unset (`0`).
-pub const PROJECT_VERSION: u32 = 26;
+/// v27 replaces combined chord/lyric cues with typed Song Text events and adds
+/// lyric timing/syllable data plus section metadata. v24-v26 cues migrate on load;
+/// pre-v24 projects have no Song Text events.
+pub const PROJECT_VERSION: u32 = 27;
 
 /// Minimum on-disk header size: magic (8) + version (4) + reserved (4) + body_len (4).
 pub const PROJECT_HEADER_SIZE: usize = 20;
@@ -794,6 +798,195 @@ fn encode_asset(w: &mut FbWriter, a: &ProjectAsset) {
     w.write_opt_u64(&a.duration_samples); // v12
 }
 
+fn encode_song_text_event(w: &mut FbWriter, event: &ProjectSongTextEvent) {
+    w.write_str(&event.id);
+    w.write_f64(event.beat);
+    match &event.kind {
+        ProjectSongTextEventKind::Chord { symbol } => {
+            w.write_u8(0);
+            w.write_str(symbol);
+        }
+        ProjectSongTextEventKind::Lyric {
+            text,
+            syllable_mode,
+            continuation,
+            duration_beats,
+            syllables,
+        } => {
+            w.write_u8(1);
+            w.write_str(text);
+            w.write_u8(match syllable_mode {
+                ProjectLyricSyllableMode::Phrase => 0,
+                ProjectLyricSyllableMode::Syllables => 1,
+            });
+            w.write_bool(*continuation);
+            w.write_opt_f64(duration_beats);
+            w.write_u32(syllables.len() as u32);
+            for syllable in syllables {
+                w.write_str(&syllable.text);
+                w.write_f64(syllable.offset_beats);
+                w.write_opt_f64(&syllable.duration_beats);
+            }
+        }
+        ProjectSongTextEventKind::Section {
+            name,
+            section_type,
+            color_hex,
+        } => {
+            w.write_u8(2);
+            w.write_str(name);
+            w.write_u8(match section_type {
+                ProjectSongSectionType::Custom => 0,
+                ProjectSongSectionType::Intro => 1,
+                ProjectSongSectionType::Verse => 2,
+                ProjectSongSectionType::PreChorus => 3,
+                ProjectSongSectionType::Chorus => 4,
+                ProjectSongSectionType::Bridge => 5,
+                ProjectSongSectionType::Solo => 6,
+                ProjectSongSectionType::Outro => 7,
+            });
+            w.write_str(color_hex);
+        }
+    }
+}
+
+fn decode_song_text_event(r: &mut FbReader) -> Result<ProjectSongTextEvent, ProjectError> {
+    let id = r.read_str()?;
+    let beat = r.read_f64()?;
+    let kind = match r.read_u8()? {
+        0 => ProjectSongTextEventKind::Chord {
+            symbol: r.read_str()?,
+        },
+        1 => {
+            let text = r.read_str()?;
+            let syllable_mode = match r.read_u8()? {
+                0 => ProjectLyricSyllableMode::Phrase,
+                1 => ProjectLyricSyllableMode::Syllables,
+                tag => {
+                    return Err(ProjectError::Corrupted(format!(
+                        "bad lyric syllable mode tag {tag}"
+                    )))
+                }
+            };
+            let continuation = r.read_bool()?;
+            let duration_beats = r.read_opt_f64()?;
+            let syllable_count = r.read_u32()? as usize;
+            const MIN_SYLLABLE_BYTES: usize = 13;
+            if syllable_count > 100_000 || syllable_count > r.remaining() / MIN_SYLLABLE_BYTES {
+                return Err(ProjectError::Corrupted(
+                    "invalid Song Text syllable count".to_string(),
+                ));
+            }
+            let mut syllables = Vec::with_capacity(syllable_count);
+            for _ in 0..syllable_count {
+                syllables.push(ProjectLyricSyllable {
+                    text: r.read_str()?,
+                    offset_beats: r.read_f64()?,
+                    duration_beats: r.read_opt_f64()?,
+                });
+            }
+            ProjectSongTextEventKind::Lyric {
+                text,
+                syllable_mode,
+                continuation,
+                duration_beats,
+                syllables,
+            }
+        }
+        2 => {
+            let name = r.read_str()?;
+            let section_type = match r.read_u8()? {
+                0 => ProjectSongSectionType::Custom,
+                1 => ProjectSongSectionType::Intro,
+                2 => ProjectSongSectionType::Verse,
+                3 => ProjectSongSectionType::PreChorus,
+                4 => ProjectSongSectionType::Chorus,
+                5 => ProjectSongSectionType::Bridge,
+                6 => ProjectSongSectionType::Solo,
+                7 => ProjectSongSectionType::Outro,
+                tag => {
+                    return Err(ProjectError::Corrupted(format!(
+                        "bad song section type tag {tag}"
+                    )))
+                }
+            };
+            ProjectSongTextEventKind::Section {
+                name,
+                section_type,
+                color_hex: r.read_str()?,
+            }
+        }
+        tag => {
+            return Err(ProjectError::Corrupted(format!(
+                "bad song text event kind tag {tag}"
+            )))
+        }
+    };
+    Ok(ProjectSongTextEvent { id, beat, kind })
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct LegacyProjectSongTextCue {
+    id: String,
+    beat: f64,
+    chord: String,
+    lyric: String,
+}
+
+fn decode_legacy_song_text_cue(r: &mut FbReader) -> Result<LegacyProjectSongTextCue, ProjectError> {
+    Ok(LegacyProjectSongTextCue {
+        id: r.read_str()?,
+        beat: r.read_f64()?,
+        chord: r.read_str()?,
+        lyric: r.read_str()?,
+    })
+}
+
+fn migrate_legacy_song_text_cue(
+    cue: LegacyProjectSongTextCue,
+    events: &mut Vec<ProjectSongTextEvent>,
+) {
+    let has_chord = !cue.chord.trim().is_empty();
+    let has_lyric = !cue.lyric.trim().is_empty();
+    match (has_chord, has_lyric) {
+        (true, true) => {
+            events.push(ProjectSongTextEvent {
+                id: format!("{}:chord", cue.id),
+                beat: cue.beat,
+                kind: ProjectSongTextEventKind::Chord { symbol: cue.chord },
+            });
+            events.push(ProjectSongTextEvent {
+                id: format!("{}:lyric", cue.id),
+                beat: cue.beat,
+                kind: ProjectSongTextEventKind::Lyric {
+                    text: cue.lyric,
+                    syllable_mode: ProjectLyricSyllableMode::Phrase,
+                    continuation: false,
+                    duration_beats: None,
+                    syllables: Vec::new(),
+                },
+            });
+        }
+        (true, false) => events.push(ProjectSongTextEvent {
+            id: cue.id,
+            beat: cue.beat,
+            kind: ProjectSongTextEventKind::Chord { symbol: cue.chord },
+        }),
+        (false, true) => events.push(ProjectSongTextEvent {
+            id: cue.id,
+            beat: cue.beat,
+            kind: ProjectSongTextEventKind::Lyric {
+                text: cue.lyric,
+                syllable_mode: ProjectLyricSyllableMode::Phrase,
+                continuation: false,
+                duration_beats: None,
+                syllables: Vec::new(),
+            },
+        }),
+        (false, false) => {}
+    }
+}
+
 fn encode_body(project: &FutureboardProject) -> Vec<u8> {
     let mut w = FbWriter::new();
 
@@ -885,13 +1078,10 @@ fn encode_body(project: &FutureboardProject) -> Vec<u8> {
         w.write_str(id);
     }
 
-    // Chord / lyric cues (v24+). Kept at the body tail for backwards loading.
-    w.write_u32(project.settings.song_text_cues.len() as u32);
-    for cue in &project.settings.song_text_cues {
-        w.write_str(&cue.id);
-        w.write_f64(cue.beat);
-        w.write_str(&cue.chord);
-        w.write_str(&cue.lyric);
+    // Typed Song Text events (v27+). Kept at the body tail for backwards loading.
+    w.write_u32(project.settings.song_text_events.len() as u32);
+    for event in &project.settings.song_text_events {
+        encode_song_text_event(&mut w, event);
     }
 
     w.into_bytes()
@@ -1675,18 +1865,33 @@ fn decode_body(body: &[u8], version: u32) -> Result<FutureboardProject, ProjectE
             (Vec::new(), Vec::new(), Vec::new())
         };
 
-    let song_text_cues = if version >= 24 {
+    let song_text_events = if version >= 27 {
         let count = r.read_u32()? as usize;
-        let mut cues = Vec::with_capacity(count);
-        for _ in 0..count {
-            cues.push(ProjectSongTextCue {
-                id: r.read_str()?,
-                beat: r.read_f64()?,
-                chord: r.read_str()?,
-                lyric: r.read_str()?,
-            });
+        const MIN_EVENT_BYTES: usize = 17;
+        if count > 1_000_000 || count > r.remaining() / MIN_EVENT_BYTES {
+            return Err(ProjectError::Corrupted(
+                "invalid Song Text event count".to_string(),
+            ));
         }
-        cues
+        let mut events = Vec::with_capacity(count);
+        for _ in 0..count {
+            events.push(decode_song_text_event(&mut r)?);
+        }
+        events
+    } else if version >= 24 {
+        let count = r.read_u32()? as usize;
+        const MIN_LEGACY_CUE_BYTES: usize = 20;
+        if count > 1_000_000 || count > r.remaining() / MIN_LEGACY_CUE_BYTES {
+            return Err(ProjectError::Corrupted(
+                "invalid legacy Song Text cue count".to_string(),
+            ));
+        }
+        let mut events = Vec::with_capacity(count.saturating_mul(2));
+        for _ in 0..count {
+            let cue = decode_legacy_song_text_cue(&mut r)?;
+            migrate_legacy_song_text_cue(cue, &mut events);
+        }
+        events
     } else {
         Vec::new()
     };
@@ -1702,7 +1907,7 @@ fn decode_body(body: &[u8], version: u32) -> Result<FutureboardProject, ProjectE
             time_signature_points,
             timeline_markers,
             timeline_regions,
-            song_text_cues,
+            song_text_events,
             time_sig_num,
             time_sig_den,
             sample_rate,
@@ -1845,6 +2050,34 @@ mod tests {
             channel: 1,
             articulation: 0,
         }
+    }
+
+    fn project_bytes_with_version(body: Vec<u8>, version: u32) -> Vec<u8> {
+        let checksum = crc32fast::hash(&body);
+        let mut bytes = Vec::with_capacity(PROJECT_HEADER_SIZE + body.len() + 4);
+        bytes.extend_from_slice(PROJECT_MAGIC);
+        bytes.extend_from_slice(&version.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&(body.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(&body);
+        bytes.extend_from_slice(&checksum.to_le_bytes());
+        bytes
+    }
+
+    fn encode_legacy_song_text_project(version: u32, cues: &[LegacyProjectSongTextCue]) -> Vec<u8> {
+        let mut body = encode_body(&FutureboardProject::new("Legacy Song Text"));
+        body.truncate(body.len() - std::mem::size_of::<u32>());
+
+        let mut tail = FbWriter::new();
+        tail.write_u32(cues.len() as u32);
+        for cue in cues {
+            tail.write_str(&cue.id);
+            tail.write_f64(cue.beat);
+            tail.write_str(&cue.chord);
+            tail.write_str(&cue.lyric);
+        }
+        body.extend_from_slice(&tail.into_bytes());
+        project_bytes_with_version(body, version)
     }
 
     #[test]
@@ -2124,20 +2357,155 @@ mod tests {
     }
 
     #[test]
-    fn song_text_cues_roundtrip_v24() {
+    fn song_text_events_roundtrip_v27() {
         let mut project = FutureboardProject::new("Song Text");
-        project.settings.song_text_cues = vec![ProjectSongTextCue {
-            id: "verse-1".to_string(),
-            beat: 16.0,
-            chord: "Am7".to_string(),
-            lyric: "คืนที่ดาวเต็มฟ้า".to_string(),
-        }];
+        project.settings.song_text_events = vec![
+            ProjectSongTextEvent {
+                id: "chord-1".to_string(),
+                beat: 4.0,
+                kind: ProjectSongTextEventKind::Chord {
+                    symbol: "F♯m7/C♯".to_string(),
+                },
+            },
+            ProjectSongTextEvent {
+                id: "lyric-1".to_string(),
+                beat: 4.5,
+                kind: ProjectSongTextEventKind::Lyric {
+                    text: "คืนที่ดาวเต็มฟ้า".to_string(),
+                    syllable_mode: ProjectLyricSyllableMode::Syllables,
+                    continuation: true,
+                    duration_beats: Some(3.5),
+                    syllables: vec![
+                        ProjectLyricSyllable {
+                            text: "คืน".to_string(),
+                            offset_beats: 0.0,
+                            duration_beats: Some(0.75),
+                        },
+                        ProjectLyricSyllable {
+                            text: "ที่ดาว".to_string(),
+                            offset_beats: 0.75,
+                            duration_beats: None,
+                        },
+                    ],
+                },
+            },
+            ProjectSongTextEvent {
+                id: "section-1".to_string(),
+                beat: 16.0,
+                kind: ProjectSongTextEventKind::Section {
+                    name: "Final Chorus".to_string(),
+                    section_type: ProjectSongSectionType::Chorus,
+                    color_hex: "#C45CFF".to_string(),
+                },
+            },
+        ];
+
         let bytes = encode_project(&project);
-        let decoded = decode_project(&bytes).expect("decode song text");
+        let decoded = decode_project(&bytes).expect("decode typed song text");
         assert_eq!(
-            decoded.settings.song_text_cues,
-            project.settings.song_text_cues
+            decoded.settings.song_text_events,
+            project.settings.song_text_events
         );
+    }
+
+    #[test]
+    fn legacy_song_text_cues_migrate_for_v24_through_v26() {
+        let cues = vec![
+            LegacyProjectSongTextCue {
+                id: "chord-only".to_string(),
+                beat: 1.0,
+                chord: "Cmaj7".to_string(),
+                lyric: String::new(),
+            },
+            LegacyProjectSongTextCue {
+                id: "lyric-only".to_string(),
+                beat: 2.0,
+                chord: String::new(),
+                lyric: "Hello".to_string(),
+            },
+            LegacyProjectSongTextCue {
+                id: "combined".to_string(),
+                beat: 3.0,
+                chord: "Am7".to_string(),
+                lyric: "world".to_string(),
+            },
+        ];
+        let expected = vec![
+            ProjectSongTextEvent {
+                id: "chord-only".to_string(),
+                beat: 1.0,
+                kind: ProjectSongTextEventKind::Chord {
+                    symbol: "Cmaj7".to_string(),
+                },
+            },
+            ProjectSongTextEvent {
+                id: "lyric-only".to_string(),
+                beat: 2.0,
+                kind: ProjectSongTextEventKind::Lyric {
+                    text: "Hello".to_string(),
+                    syllable_mode: ProjectLyricSyllableMode::Phrase,
+                    continuation: false,
+                    duration_beats: None,
+                    syllables: Vec::new(),
+                },
+            },
+            ProjectSongTextEvent {
+                id: "combined:chord".to_string(),
+                beat: 3.0,
+                kind: ProjectSongTextEventKind::Chord {
+                    symbol: "Am7".to_string(),
+                },
+            },
+            ProjectSongTextEvent {
+                id: "combined:lyric".to_string(),
+                beat: 3.0,
+                kind: ProjectSongTextEventKind::Lyric {
+                    text: "world".to_string(),
+                    syllable_mode: ProjectLyricSyllableMode::Phrase,
+                    continuation: false,
+                    duration_beats: None,
+                    syllables: Vec::new(),
+                },
+            },
+        ];
+
+        for version in 24..=26 {
+            let bytes = encode_legacy_song_text_project(version, &cues);
+            let decoded = decode_project(&bytes).expect("decode legacy song text");
+            assert_eq!(decoded.settings.song_text_events, expected, "v{version}");
+        }
+
+        let bytes = encode_legacy_song_text_project(23, &cues);
+        let decoded = decode_project(&bytes).expect("decode pre-song-text project");
+        assert!(decoded.settings.song_text_events.is_empty());
+    }
+
+    #[test]
+    fn legacy_song_text_positions_are_sanitized_when_applied() {
+        let cues = vec![
+            LegacyProjectSongTextCue {
+                id: "negative".to_string(),
+                beat: -4.0,
+                chord: "  Dm9  ".to_string(),
+                lyric: String::new(),
+            },
+            LegacyProjectSongTextCue {
+                id: "non-finite".to_string(),
+                beat: f64::INFINITY,
+                chord: String::new(),
+                lyric: "discard me".to_string(),
+            },
+        ];
+        let bytes = encode_legacy_song_text_project(26, &cues);
+        let project = decode_project(&bytes).expect("decode legacy positions");
+        let mut timeline = crate::components::timeline::timeline_state::TimelineState::default();
+
+        super::super::apply_to_timeline(&project, &mut timeline);
+
+        assert_eq!(timeline.song_text_events.len(), 1);
+        assert_eq!(timeline.song_text_events[0].id, "negative");
+        assert_eq!(timeline.song_text_events[0].beat, 0.0);
+        assert_eq!(timeline.song_text_events[0].text(), "Dm9");
     }
 
     #[test]

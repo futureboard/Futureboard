@@ -609,6 +609,72 @@ export const APP_MENUS: AppMenuGroup[] = [
         action: "panel:show-lyric-editor",
       },
       {
+        id: "window.song_text_commands",
+        type: "submenu",
+        label: "Song Text",
+        icon: "music",
+        children: [
+          {
+            id: "song_text.add_chord_at_playhead",
+            label: "Add Chord at Playhead",
+            accelerator: "Ctrl+Alt+C",
+            action: "song_text.add_chord_at_playhead",
+          },
+          {
+            id: "song_text.add_lyric_at_playhead",
+            label: "Add Lyric at Playhead",
+            accelerator: "Ctrl+Alt+L",
+            action: "song_text.add_lyric_at_playhead",
+          },
+          {
+            id: "song_text.add_both_at_playhead",
+            label: "Add Chord and Lyric at Playhead",
+            accelerator: "Ctrl+Alt+B",
+            action: "song_text.add_both_at_playhead",
+          },
+          {
+            id: "song_text.commit",
+            label: "Commit Song Text Edit",
+            action: "song_text.commit",
+          },
+          {
+            id: "song_text.commit_next_grid",
+            label: "Commit and Advance to Next Grid",
+            action: "song_text.commit_next_grid",
+          },
+          {
+            id: "song_text.commit_next_beat",
+            label: "Commit and Advance to Next Beat",
+            action: "song_text.commit_next_beat",
+          },
+          {
+            id: "song_text.commit_next_bar",
+            label: "Commit and Advance to Next Bar",
+            action: "song_text.commit_next_bar",
+          },
+          {
+            id: "song_text.previous_event",
+            label: "Previous Song Text Event",
+            action: "song_text.previous_event",
+          },
+          {
+            id: "song_text.next_event",
+            label: "Next Song Text Event",
+            action: "song_text.next_event",
+          },
+          {
+            id: "song_text.move_to_playhead",
+            label: "Move Song Text to Playhead",
+            action: "song_text.move_to_playhead",
+          },
+          {
+            id: "song_text.delete_selected",
+            label: "Delete Selected Song Text",
+            action: "song_text.delete_selected",
+          },
+        ],
+      },
+      {
         id: "window.chord_display",
         label: "Open Chord Display Window",
         icon: "external-link",

@@ -574,10 +574,16 @@ impl X11WindowState {
                 )?;
             }
 
-            if matches!(
-                params.kind,
-                WindowKind::Floating | WindowKind::MdiChild | WindowKind::Dialog
-            ) {
+            // Dialogs with `dialog_parenting = false` must outlive the window they
+            // were opened from (Welcome → LoadingSession → Studio). Parenting them
+            // would cascade-close the loader when Welcome is removed and trigger
+            // QuitMode::LastWindowClosed.
+            let should_attach_parent = match params.kind {
+                WindowKind::Floating | WindowKind::MdiChild => true,
+                WindowKind::Dialog => params.dialog_parenting,
+                _ => false,
+            };
+            if should_attach_parent {
                 if let Some(parent_window) = parent_window.as_ref().map(|w| w.x_window) {
                     // WM_TRANSIENT_FOR hint indicating the main application window. For floating windows, we set
                     // a parent window (WM_TRANSIENT_FOR) such that the window manager knows where to
@@ -597,6 +603,7 @@ impl X11WindowState {
             }
 
             let parent = if params.kind == WindowKind::Dialog
+                && params.dialog_parenting
                 && let Some(parent) = parent_window
             {
                 parent.add_child(x_window);

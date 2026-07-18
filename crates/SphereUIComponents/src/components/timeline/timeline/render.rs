@@ -265,7 +265,10 @@ impl Render for Timeline {
         });
 
         let on_add_clip = cx.listener(
-            |this, (track_id, beat, click_count): &(String, f32, u32), _window, cx| {
+            |this,
+             (track_id, beat, click_count, bypass_snap): &(String, f32, u32, bool),
+             _window,
+             cx| {
                 let track_type = this
                     .state
                     .tracks
@@ -290,7 +293,7 @@ impl Render for Timeline {
                                 })
                                 .cloned();
                             if let Some(source_id) = source_id {
-                                let start = this.snap_beat(*beat);
+                                let start = this.snap_beat_with_bypass(*beat, *bypass_snap);
                                 this.create_clip_clone_at(&source_id, track_id, start, cx);
                             }
                         }
@@ -300,7 +303,7 @@ impl Render for Timeline {
                             this.state.active_tool,
                             TimelineTool::Pen | TimelineTool::Pointer
                         ) {
-                            let start = this.snap_beat(*beat);
+                            let start = this.snap_beat_with_bypass(*beat, *bypass_snap);
                             // Pen tool always commits a default-length clip on a
                             // plain click; the Pointer tool's empty-lane-creates
                             // gesture only commits on a drag or a double-click so
@@ -539,7 +542,11 @@ impl Render for Timeline {
                 // only ever populated for the tool/lane combos that should draw
                 // (Pen on any MIDI/Instrument lane, or Pointer on an empty one),
                 // so no extra tool check is needed here.
-                let beat = this.snap_beat(this.beat_from_window_x(event.position.x.into()));
+                let bypass_snap = event.modifiers.shift;
+                let beat = this.snap_beat_with_bypass(
+                    this.beat_from_window_x(event.position.x.into()),
+                    bypass_snap,
+                );
                 if let Some(preview) = this.pen_clip_draw.as_mut() {
                     if (beat - preview.current_beat).abs() > f32::EPSILON {
                         preview.current_beat = beat;
@@ -562,7 +569,10 @@ impl Render for Timeline {
             let finished_ts = this.finish_time_signature_track_interaction(cx);
             let finished_automation = this.finish_automation_interaction(cx);
             if !finished_tempo && !finished_ts && !finished_automation {
-                let beat = this.snap_beat(this.beat_from_window_x(event.position.x.into()));
+                let beat = this.snap_beat_with_bypass(
+                    this.beat_from_window_x(event.position.x.into()),
+                    event.modifiers.shift,
+                );
                 if this.pen_clip_draw.is_some() {
                     this.finish_pen_midi_clip(beat, cx);
                 } else if this.range_select_drag.is_some() {
@@ -585,7 +595,10 @@ impl Render for Timeline {
             let finished_ts = this.finish_time_signature_track_interaction(cx);
             let finished_automation = this.finish_automation_interaction(cx);
             if !finished_tempo && !finished_ts && !finished_automation {
-                let beat = this.snap_beat(this.beat_from_window_x(event.position.x.into()));
+                let beat = this.snap_beat_with_bypass(
+                    this.beat_from_window_x(event.position.x.into()),
+                    event.modifiers.shift,
+                );
                 if this.pen_clip_draw.is_some() {
                     this.finish_pen_midi_clip(beat, cx);
                 } else if this.range_select_drag.is_some() {
@@ -732,7 +745,7 @@ impl Render for Timeline {
             dyn Fn(&(String, f32), &mut gpui::Window, &mut gpui::App) + 'static,
         > = std::sync::Arc::new(on_pan_change);
         let on_add_clip: std::sync::Arc<
-            dyn Fn(&(String, f32, u32), &mut gpui::Window, &mut gpui::App) + 'static,
+            dyn Fn(&(String, f32, u32, bool), &mut gpui::Window, &mut gpui::App) + 'static,
         > = std::sync::Arc::new(on_add_clip);
         let on_audio_clip_process_preview:
             crate::components::timeline::audio_clip::AudioClipProcessPreviewCb =
@@ -1235,11 +1248,20 @@ impl Render for Timeline {
                 .map(|track| track.id.clone())
             {
                 if this.clip_clone_drag_id.as_deref() == Some(drag.clip_id.as_str()) {
-                    let origin = this
-                        .clip_drag_origin
-                        .unwrap_or_else(|| this.last_drag_position.unwrap_or_default());
-                    let position = this.last_drag_position.unwrap_or(origin);
-                    let (_, start_beat) = this.resolve_clip_drag_target(drag, origin, position);
+                    // Commit the exact preview target, including live Shift snap
+                    // bypass, rather than resolving a second time with snap on.
+                    let start_beat = this
+                        .clip_clone_hint
+                        .as_ref()
+                        .filter(|hint| hint.clip_id == drag.clip_id)
+                        .map(|hint| hint.start_beat)
+                        .unwrap_or_else(|| {
+                            let origin = this
+                                .clip_drag_origin
+                                .unwrap_or_else(|| this.last_drag_position.unwrap_or_default());
+                            let position = this.last_drag_position.unwrap_or(origin);
+                            this.resolve_clip_drag_target(drag, origin, position).1
+                        });
                     this.create_clip_clone_group_at(
                         &drag.clip_id,
                         &target_track_id,
@@ -1312,7 +1334,12 @@ impl Render for Timeline {
             |this, event: &gpui::DragMoveEvent<ClipResizeDrag>, _window, cx| {
                 let drag = event.drag(cx).clone();
                 let beat = this.beat_from_window_x(event.event.position.x.into());
-                this.state.resize_clip(&drag.clip_id, drag.edge, beat);
+                this.state.resize_clip_with_bypass(
+                    &drag.clip_id,
+                    drag.edge,
+                    beat,
+                    event.event.modifiers.shift,
+                );
                 cx.notify();
             },
         );
@@ -2025,11 +2052,12 @@ pub(crate) fn horizontal_scrollbar(
 /// and the selected beat span horizontally. Non-interactive so it does not
 /// intercept lane drags. Returns `None` when no range is active.
 /// Resolve a pen-draw gesture's `(start_beat, end_beat)` into the final
-/// `(clip_start, length_beats)` that will be committed — snapping the length to
-/// the MIDI grid when snap is on and clamping to the minimum clip length. Shared
+/// `(clip_start, length_beats)` that will be committed. Both endpoints are
+/// already resolved by the shared musical snap source (or Shift-bypassed), so
+/// this helper only normalizes direction and enforces positive duration. Shared
 /// by the live ghost preview and the commit so they can never disagree.
 pub(crate) fn compute_pen_clip_span(
-    state: &TimelineState,
+    _state: &TimelineState,
     start_beat: f32,
     end_beat: f32,
 ) -> (f32, f32) {
@@ -2037,14 +2065,13 @@ pub(crate) fn compute_pen_clip_span(
         DEFAULT_MIDI_CLIP_BEATS, MIN_MIDI_CLIP_BEATS,
     };
     let (lo, hi) = normalize_range(start_beat, end_beat);
-    let mut len = (hi - lo).max(DEFAULT_MIDI_CLIP_BEATS);
-    if state.snap_to_grid {
-        let step = state.midi_snap_step_beats().max(1.0e-3);
-        len = ((len / step).ceil() * step).max(MIN_MIDI_CLIP_BEATS);
+    let dragged_length = hi - lo;
+    let length = if dragged_length <= f32::EPSILON {
+        DEFAULT_MIDI_CLIP_BEATS
     } else {
-        len = len.max(MIN_MIDI_CLIP_BEATS);
-    }
-    (lo, len)
+        dragged_length.max(MIN_MIDI_CLIP_BEATS)
+    };
+    (lo, length)
 }
 
 /// Human-readable musical length, e.g. `1 bar`, `4 bars`, `2.5 bars`, `3.0 bt`.
@@ -2535,4 +2562,32 @@ pub(crate) fn timeline_marker_region_overlay(state: &TimelineState) -> Option<gp
             .children(children)
             .into_any_element(),
     )
+}
+
+#[cfg(test)]
+mod midi_clip_draw_tests {
+    use super::*;
+    use crate::components::timeline::timeline_state::{
+        DEFAULT_MIDI_CLIP_BEATS, MIN_MIDI_CLIP_BEATS,
+    };
+
+    #[test]
+    fn drag_span_supports_both_directions() {
+        let state = TimelineState::default();
+        assert_eq!(compute_pen_clip_span(&state, 2.0, 5.0), (2.0, 3.0));
+        assert_eq!(compute_pen_clip_span(&state, 5.0, 2.0), (2.0, 3.0));
+    }
+
+    #[test]
+    fn click_uses_default_and_short_drag_stays_positive() {
+        let state = TimelineState::default();
+        assert_eq!(
+            compute_pen_clip_span(&state, 2.0, 2.0),
+            (2.0, DEFAULT_MIDI_CLIP_BEATS)
+        );
+        assert_eq!(
+            compute_pen_clip_span(&state, 2.0, 2.01),
+            (2.0, MIN_MIDI_CLIP_BEATS)
+        );
+    }
 }

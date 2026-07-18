@@ -20,7 +20,7 @@ pub fn track_lane(
         dyn Fn(&(String, bool, bool), &mut gpui::Window, &mut gpui::App) + 'static,
     >,
     on_add_clip: std::sync::Arc<
-        dyn Fn(&(String, f32, u32), &mut gpui::Window, &mut gpui::App) + 'static,
+        dyn Fn(&(String, f32, u32, bool), &mut gpui::Window, &mut gpui::App) + 'static,
     >,
     on_track_context_menu: Option<
         std::sync::Arc<dyn Fn(&(String, f32, f32), &mut gpui::Window, &mut gpui::App) + 'static>,
@@ -156,13 +156,13 @@ pub fn track_lane(
                 let x: f32 = event.position.x.into();
                 let click_x = x - SIDEBAR_WIDTH - HEADER_WIDTH;
                 let click_beat = state_ref.x_to_beats(click_x);
-                let snapped_sec = state_ref.snap_time(click_beat * state_ref.seconds_per_beat());
-                let snapped_beat = snapped_sec / state_ref.seconds_per_beat();
+                let bypass_snap = event.modifiers.shift;
+                let snapped_beat = state_ref.snap_beats_with_bypass(click_beat, bypass_snap);
                 let click_count = event.click_count as u32;
 
                 if active_tool == TimelineTool::Pen {
                     on_add(
-                        &(track_id_add.clone(), snapped_beat, click_count),
+                        &(track_id_add.clone(), snapped_beat, click_count, bypass_snap),
                         window,
                         cx,
                     );
@@ -172,7 +172,7 @@ pub fn track_lane(
                     // single-click stays a no-op (see ClipDrawPreview::commit_on_click).
                     on_select(&track_id_select, window, cx);
                     on_add(
-                        &(track_id_add.clone(), snapped_beat, click_count),
+                        &(track_id_add.clone(), snapped_beat, click_count, bypass_snap),
                         window,
                         cx,
                     );

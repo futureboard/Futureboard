@@ -296,8 +296,11 @@ impl Timeline {
     }
 
     pub(super) fn snap_beat(&self, beat: f32) -> f32 {
-        let snapped_sec = self.state.snap_time(beat * self.state.seconds_per_beat());
-        snapped_sec / self.state.seconds_per_beat()
+        self.snap_beat_with_bypass(beat, false)
+    }
+
+    pub(super) fn snap_beat_with_bypass(&self, beat: f32, bypass: bool) -> f32 {
+        self.state.snap_beats_with_bypass(beat, bypass)
     }
 
     /// Push the measured chrome panel sizes that surround the timeline so

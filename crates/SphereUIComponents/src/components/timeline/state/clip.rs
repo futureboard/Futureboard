@@ -446,13 +446,26 @@ impl TimelineState {
     /// UI-mutating only — the caller marks the project dirty once on commit.
     /// Returns `true` when a matching clip was found.
     pub fn resize_clip(&mut self, clip_id: &str, edge: ClipEdge, new_edge_beat: f32) -> bool {
+        self.resize_clip_with_bypass(clip_id, edge, new_edge_beat, false)
+    }
+
+    /// Variant used by active pointer gestures. Shift bypass applies only to
+    /// MIDI edge snapping; audio source trimming remains intentionally free.
+    pub fn resize_clip_with_bypass(
+        &mut self,
+        clip_id: &str,
+        edge: ClipEdge,
+        new_edge_beat: f32,
+        bypass_snap: bool,
+    ) -> bool {
         let is_audio_clip = self
             .find_clip(clip_id)
             .is_some_and(|(_, clip)| matches!(clip.clip_type, ClipType::Audio { .. }));
         let edge_beat = if is_audio_clip {
             new_edge_beat.max(0.0)
         } else {
-            self.snap_beats(new_edge_beat).max(0.0)
+            self.snap_beats_with_bypass(new_edge_beat, bypass_snap)
+                .max(0.0)
         };
         let seconds_per_beat = self.seconds_per_beat();
         let Some(track) = self

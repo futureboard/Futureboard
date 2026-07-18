@@ -960,6 +960,21 @@ mod midi_edit_tests {
     }
 
     #[test]
+    fn midi_resize_uses_shared_snap_and_shift_bypass() {
+        let (mut state, clip_id) = state_with_midi_clip();
+        state.snap_to_grid = true;
+        state.grid_division = SnapDivision::Div1_4;
+
+        assert!(state.resize_clip(&clip_id, ClipEdge::Right, 5.6));
+        let (_, snapped) = state.find_clip(&clip_id).expect("clip");
+        assert!((snapped.duration_beats - 6.0).abs() < 1.0e-6);
+
+        assert!(state.resize_clip_with_bypass(&clip_id, ClipEdge::Right, 5.6, true));
+        let (_, bypassed) = state.find_clip(&clip_id).expect("clip");
+        assert!((bypassed.duration_beats - 5.6).abs() < 1.0e-6);
+    }
+
+    #[test]
     fn delete_track_command_undo_redo_restores_track_position() {
         let mut state = TimelineState::default();
         state.tracks.clear();

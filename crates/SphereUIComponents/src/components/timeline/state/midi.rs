@@ -7,8 +7,9 @@ pub const MIN_NOTE_BEATS: f32 = 1.0 / 32.0;
 /// Default length for a newly created MIDI clip (one 4/4 bar at any BPM).
 pub const DEFAULT_MIDI_CLIP_BEATS: f32 = 4.0;
 
-/// Minimum visible MIDI clip length after edits (one bar).
-pub const MIN_MIDI_CLIP_BEATS: f32 = 4.0;
+/// Minimum visible MIDI clip length after draw/resize. One 1/32 note keeps the
+/// clip positive and hittable without forcing every short gesture to one bar.
+pub const MIN_MIDI_CLIP_BEATS: f32 = 1.0 / 8.0;
 
 #[inline]
 fn snap_up_beats(value: f32, step: f32) -> f32 {

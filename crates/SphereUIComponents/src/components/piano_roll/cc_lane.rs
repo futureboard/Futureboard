@@ -49,6 +49,7 @@ impl PianoRoll {
                 .state
                 .controller_points_snapshot(&clip_id, kind),
         );
+        self.cc_edit_target = Some((clip_id.clone(), kind));
         self.drag = PianoDrag::CcPaint { erase };
         self.cc_paint_at(lx, ly, erase, cx);
         cx.notify();
@@ -143,6 +144,7 @@ impl PianoRoll {
                 .state
                 .controller_points_snapshot(&clip_id, kind),
         );
+        self.cc_edit_target = Some((clip_id.clone(), kind));
         let ids: Vec<u64> = prev.iter().map(|(pid, _, _)| *pid).collect();
         self.drag = PianoDrag::CcMove {
             ids,
@@ -301,6 +303,7 @@ impl PianoRoll {
         }
 
         self.cc_edit_prev = Some(prev);
+        self.cc_edit_target = Some((clip_id.clone(), controller));
         self.timeline.update(cx, |tl, tcx| {
             tl.state
                 .set_controller_lane_points(&clip_id, controller, points);
@@ -334,6 +337,7 @@ impl PianoRoll {
                 .state
                 .controller_points_snapshot(&clip_id, kind),
         );
+        self.cc_edit_target = Some((clip_id.clone(), kind));
         let anchor_beat = self.snap_beats(self.x_to_beat(lx)).max(0.0);
         let (_, cc_h) = self.cc_view_size();
         let anchor_value = (1.0 - (ly / cc_h.max(1.0))).clamp(0.0, 1.0);
@@ -408,12 +412,12 @@ impl PianoRoll {
     /// Commit a finished CC gesture as one undoable command (skips no-ops).
     pub(super) fn commit_cc_edit(&mut self, cx: &mut Context<Self>) {
         let Some(prev) = self.cc_edit_prev.take() else {
+            self.cc_edit_target = None;
             return;
         };
-        let Some(clip_id) = self.editing_clip_id(cx) else {
+        let Some((clip_id, kind)) = self.cc_edit_target.take() else {
             return;
         };
-        let kind = self.active_cc;
         let next = self
             .timeline
             .read(cx)
@@ -617,8 +621,9 @@ impl PianoRoll {
                     cx.stop_propagation();
                     this.open_cc_curve_menu = None;
                     if let Some((lx, ly)) = this.cc_local(ev.position) {
-                        // Shift+drag draws a straight ramp across the spanned range.
-                        if ev.modifiers.shift {
+                        // The Line tool draws a ramp; Shift is retained as the
+                        // established temporary line gesture from other tools.
+                        if this.tool == PianoTool::Line || ev.modifiers.shift {
                             this.begin_cc_line(lx, ly, window, cx);
                             return;
                         }

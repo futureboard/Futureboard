@@ -14,14 +14,15 @@ impl PianoRoll {
                 prev,
                 dx_beats,
                 dpitch,
+                anchor_start,
                 unsnap,
                 ..
             } => {
                 if prev.iter().any(|(id, _, _)| *id == n.id) {
-                    // Snap the absolute resulting start (WebUI semantics), not
-                    // the raw delta, so notes always land on the grid. Shift
-                    // (`unsnap`) bypasses this live, same as on commit.
-                    start = self.snap_beats_live(n.start + dx_beats, *unsnap);
+                    // Snap only the grabbed anchor, then apply its delta to every
+                    // peer so an off-grid multi-selection keeps internal spacing.
+                    let snapped_anchor = self.snap_beats_live(*anchor_start + *dx_beats, *unsnap);
+                    start = (n.start + snapped_anchor - *anchor_start).max(0.0);
                     let raw_pitch = (n.pitch as i32 + dpitch).clamp(0, 127) as u8;
                     pitch = self.pitch_ctx.constrain_pitch(raw_pitch);
                 }
@@ -82,14 +83,19 @@ impl PianoRoll {
             pitch,
             start_beat,
             end_beat,
+            unsnap,
             ..
         } = &self.drag
         else {
             return None;
         };
         let (lo, hi) = normalize_range(*start_beat, *end_beat);
-        let step = self.step_beats().max(MIN_NOTE_BEATS);
-        let duration = (hi - lo).max(step);
+        let minimum = if self.snap_on && !self.grid_res.is_free() && !*unsnap {
+            self.step_beats().max(MIN_NOTE_BEATS)
+        } else {
+            MIN_NOTE_BEATS
+        };
+        let duration = (hi - lo).max(minimum);
         let x = self.beat_to_x(lo);
         let w = (duration * self.ppb).max(3.0);
         let y = self.pitch_to_y(*pitch);
@@ -143,6 +149,75 @@ impl PianoRoll {
         )
     }
 
+    pub(super) fn build_velocity_gesture_overlay(&self) -> Option<gpui::AnyElement> {
+        match &self.drag {
+            PianoDrag::VelocitySelect {
+                start_x,
+                start_y,
+                current_x,
+                current_y,
+                dragging: true,
+                ..
+            } => {
+                let (view_w, view_h) = self.cc_view_size();
+                let (left, top, right, bottom) = Self::normalized_marquee_rect(
+                    *start_x, *start_y, *current_x, *current_y, view_w, view_h,
+                );
+                Some(
+                    div()
+                        .absolute()
+                        .left(px(left))
+                        .top(px(top))
+                        .w(px((right - left).max(1.0)))
+                        .h(px((bottom - top).max(1.0)))
+                        .bg(Colors::with_alpha(Colors::accent_primary(), 0.15))
+                        .border(px(1.0))
+                        .border_color(Colors::with_alpha(Colors::accent_primary(), 0.85))
+                        .into_any_element(),
+                )
+            }
+            PianoDrag::VelocityLine {
+                anchor_beat,
+                anchor_value,
+                current_beat,
+                current_value,
+                ..
+            } => {
+                let x0 = self.beat_to_x(*anchor_beat);
+                let x1 = self.beat_to_x(*current_beat);
+                let (_, lane_h) = self.cc_view_size();
+                let usable_h = (lane_h - 8.0).max(1.0);
+                let y0 = 2.0 + (1.0 - (*anchor_value as f32 - 1.0) / 126.0) * usable_h;
+                let y1 = 2.0 + (1.0 - (*current_value as f32 - 1.0) / 126.0) * usable_h;
+                let color = Colors::accent_primary();
+                Some(
+                    canvas(
+                        |_bounds, _window, _cx| {},
+                        move |bounds: Bounds<Pixels>, (), window, _cx| {
+                            let steps = (x1 - x0).abs().ceil().max(1.0) as usize;
+                            for index in 0..=steps {
+                                let t = index as f32 / steps as f32;
+                                let x = x0 + (x1 - x0) * t;
+                                let y = y0 + (y1 - y0) * t;
+                                window.paint_quad(fill(
+                                    Bounds::new(
+                                        bounds.origin + point(px(x), px(y)),
+                                        size(px(2.0), px(2.0)),
+                                    ),
+                                    color,
+                                ));
+                            }
+                        },
+                    )
+                    .absolute()
+                    .inset_0()
+                    .into_any_element(),
+                )
+            }
+            _ => None,
+        }
+    }
+
     pub(super) fn build_marquee_overlay(&self) -> Option<gpui::AnyElement> {
         let PianoDrag::MarqueeSelect {
             start_x,
@@ -192,6 +267,9 @@ impl Render for PianoRoll {
         }
 
         let clip_id = self.editing_clip_id(cx);
+        if clip_id != self.last_editing_clip && !matches!(self.drag, PianoDrag::None) {
+            self.cancel_active_gesture(cx);
+        }
         self.prune_transient_state(cx, clip_id.as_deref());
 
         if clip_id != self.last_editing_clip {
@@ -252,6 +330,11 @@ impl Render for PianoRoll {
             .flex_col()
             .size_full()
             .bg(Colors::surface_base())
+            .cursor(if matches!(self.drag, PianoDrag::Pan { .. }) {
+                gpui::CursorStyle::ClosedHand
+            } else {
+                gpui::CursorStyle::Arrow
+            })
             .on_key_down(cx.listener(Self::on_key))
             .on_mouse_move(cx.listener(Self::on_move))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_up))
@@ -933,6 +1016,16 @@ impl PianoRoll {
                         }),
                     ))
                     .child(tool_btn(
+                        "pr-line",
+                        "Line",
+                        tool == PianoTool::Line,
+                        cx.listener(|this, _, _w, cx| {
+                            this.cancel_active_gesture(cx);
+                            this.tool = PianoTool::Line;
+                            cx.notify();
+                        }),
+                    ))
+                    .child(tool_btn(
                         "pr-erase",
                         "Erase",
                         tool == PianoTool::Erase,
@@ -1088,7 +1181,7 @@ impl PianoRoll {
                         "pr-dup",
                         "Dup",
                         false,
-                        cx.listener(|this, _, _w, cx| this.duplicate_selection(cx)),
+                        cx.listener(|this, _, _w, cx| this.duplicate_selection(false, cx)),
                     )),
             )
             .child(toolbar_group("Controller").child(self.render_lane_selector(cx)))
@@ -1325,6 +1418,7 @@ impl PianoRoll {
         } else if self.lane_view == PianoLaneView::Velocity {
             let vel_grid = self.build_velocity_grid(start_beat, end_beat, bpb);
             let vel_bars = self.build_velocity_bars(cx, clip_id, track_color);
+            let velocity_gesture_overlay = self.build_velocity_gesture_overlay();
             let velocity_bounds = self.cc_bounds.clone();
             let velocity_bounds_canvas = canvas(
                 move |bounds, _w, _cx| velocity_bounds.set(Some(bounds)),
@@ -1344,7 +1438,13 @@ impl PianoRoll {
                         .text_color(Colors::text_faint())
                         .child("No notes — draw notes above to edit velocity")
                 });
-            let velocity_value_chip = matches!(self.drag, PianoDrag::Velocity { .. }).then(|| {
+            let velocity_value_chip = matches!(
+                self.drag,
+                PianoDrag::Velocity { .. }
+                    | PianoDrag::VelocityPaint { .. }
+                    | PianoDrag::VelocityLine { .. }
+            )
+            .then(|| {
                 value_chip(
                     self.drag_value_status.as_deref().unwrap_or("Velocity"),
                     8.0,
@@ -1370,6 +1470,7 @@ impl PianoRoll {
                     .child(velocity_bounds_canvas)
                     .children(vel_grid)
                     .children(vel_bars)
+                    .children(velocity_gesture_overlay)
                     .children(velocity_empty)
                     .children(velocity_value_chip)
                     .into_any_element(),
@@ -1380,7 +1481,7 @@ impl PianoRoll {
                     .into_any_element(),
             )
         };
-        let grid_cursor = if self.tool == PianoTool::Draw {
+        let grid_cursor = if matches!(self.tool, PianoTool::Draw | PianoTool::Line) {
             gpui::CursorStyle::Crosshair
         } else {
             gpui::CursorStyle::Arrow
@@ -1838,7 +1939,7 @@ impl PianoRoll {
                     note_action_button(
                         "pr-notes-duplicate",
                         "Duplicate",
-                        cx.listener(|this, _, _w, cx| this.duplicate_selection(cx)),
+                        cx.listener(|this, _, _w, cx| this.duplicate_selection(false, cx)),
                     )
                     .into_any_element(),
                 ])
@@ -2565,6 +2666,7 @@ impl PianoRoll {
             };
             notes
                 .iter()
+                .filter(|n| self.channel_visible(n.channel))
                 .filter_map(|n| {
                     let d = self.display_note(n);
                     let x = self.beat_to_x(d.start);

@@ -80,6 +80,49 @@ fn local_y_to_pitch(local_y: f32, scroll_y: f32, row_h: f32) -> u8 {
     (PITCH_CNT - 1 - row).clamp(0, PITCH_CNT - 1) as u8
 }
 
+fn clamp_velocity(value: i32) -> u8 {
+    value.clamp(1, 127) as u8
+}
+
+fn relative_velocity(original: u8, delta: i32) -> u8 {
+    clamp_velocity(original as i32 + delta)
+}
+
+fn velocity_drag_delta(start_y: f32, current_y: f32, lane_h: f32, fine: bool) -> i32 {
+    let usable_h = (lane_h - 8.0).max(1.0);
+    let scale = if fine { 0.2 } else { 1.0 };
+    (-(current_y - start_y) * 126.0 / usable_h * scale).round() as i32
+}
+
+fn interpolate_velocity(from: u8, to: u8, t: f32, curve: VelocityCurve) -> u8 {
+    let shaped = curve.sample(t);
+    clamp_velocity((from as f32 + (to as f32 - from as f32) * shaped).round() as i32)
+}
+
+fn local_x_to_beat(local_x: f32, pixels_per_beat: f32, scroll_x: f32) -> f32 {
+    ((local_x + scroll_x) / pixels_per_beat.max(0.0001)).max(0.0)
+}
+
+fn beat_to_local_x(beat: f32, pixels_per_beat: f32, scroll_x: f32) -> f32 {
+    beat * pixels_per_beat.max(0.0001) - scroll_x
+}
+
+fn snap_beat_to_step(beat: f32, step: f32) -> f32 {
+    if step <= 0.0 {
+        beat.max(0.0)
+    } else {
+        ((beat / step).round() * step).max(0.0)
+    }
+}
+
+fn restore_velocity_values(notes: &mut [MidiNoteState], snapshot: &[(u64, u8)]) {
+    for note in notes {
+        if let Some((_, velocity)) = snapshot.iter().find(|(id, _)| *id == note.id) {
+            note.velocity = *velocity;
+        }
+    }
+}
+
 /// Piano-roll chrome theme (spec Part 7).
 struct PianoRollTheme {
     key_lane_width: f32,
@@ -104,6 +147,9 @@ const RULER_H: f32 = 18.0; // bar/beat ruler header height
 const RESIZE_ZONE: f32 = 6.0; // px on the right edge that starts a resize
 /// Pixels of movement before an empty-grid press becomes a marquee drag.
 const MARQUEE_DRAG_THRESHOLD: f32 = 4.0;
+/// Default velocity for newly drawn/reset notes. Kept beside the editor gesture
+/// constants so draw and reset use one value without adding velocity-owned data.
+const DEFAULT_NOTE_VELOCITY: u8 = 100;
 
 /// A copied note, stored with timing relative to the earliest note in the
 /// selection so paste/duplicate can re-anchor the group at a new beat.
@@ -189,6 +235,8 @@ fn note_name(pitch: i32) -> String {
 pub enum PianoTool {
     Draw,
     Select,
+    /// Draw a linear value ramp in the active controller lane.
+    Line,
     /// Click/drag a note to delete it.
     Erase,
     /// Click a note to split it at the cursor beat.
@@ -413,6 +461,33 @@ impl MarqueeSelectionMode {
     }
 }
 
+/// Velocity ramp shape. Only `Linear` is exposed today; keeping interpolation
+/// behind this enum lets future curve tools share the same gesture/undo path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum VelocityCurve {
+    Linear,
+    Exponential,
+    Logarithmic,
+    SCurve,
+    ReverseSCurve,
+}
+
+impl VelocityCurve {
+    fn sample(self, t: f32) -> f32 {
+        let t = t.clamp(0.0, 1.0);
+        match self {
+            Self::Linear => t,
+            Self::Exponential => t * t,
+            Self::Logarithmic => t.sqrt(),
+            Self::SCurve => t * t * (3.0 - 2.0 * t),
+            Self::ReverseSCurve => {
+                let u = 1.0 - t;
+                1.0 - u * u * (3.0 - 2.0 * u)
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 enum PianoDrag {
     None,
@@ -427,6 +502,9 @@ enum PianoDrag {
         dx_beats: f32,
         dpitch: i32,
         grab_pitch: u8,
+        /// Original start of the grabbed note. Snap this one anchor and apply its
+        /// resulting delta to every peer so off-grid spacing is preserved.
+        anchor_start: f32,
         clone_on_commit: bool,
         /// Live Shift-held state, refreshed every mouse move: bypasses grid
         /// snapping for this drag without touching the persistent `snap_on`
@@ -443,20 +521,58 @@ enum PianoDrag {
         start_x: f32,
         prev_dur: f32,
         prev_durs: Vec<(u64, f32)>,
+        /// Original start of the grabbed note; right-edge snapping is performed
+        /// against `anchor_start + duration`, not duration in isolation.
+        anchor_start: f32,
         delta_dur: f32,
         new_dur: f32,
         /// Live Shift-held state, refreshed every mouse move (see
         /// `PianoDrag::Move::unsnap`).
         unsnap: bool,
     },
-    /// Drag a velocity bar. When the grabbed note is part of a multi-selection,
-    /// every selected note moves by the same *relative* delta from its snapshot
-    /// velocity (differences preserved). `prev` is `(id, orig_velocity)`.
-    /// `anchor_orig` is the grabbed note's original velocity used to derive the
-    /// live delta from the cursor. Absolute (force-all-equal) mode is deferred.
+    /// Drag a velocity bar. Values are always derived from `prev`, never from
+    /// the prior mouse-move frame. Alt switches to absolute assignment and Shift
+    /// scales the relative pointer delta for fine adjustment.
     Velocity {
+        clip_id: String,
         prev: Vec<(u64, u8)>,
         anchor_orig: u8,
+        start_mouse_y: f32,
+        absolute: bool,
+        fine: bool,
+    },
+    /// Absolute velocity painting from the lane background. `original_notes` is
+    /// sorted by start beat for swept-interval hit testing; `touched` prevents a
+    /// note from being duplicated in the eventual undo snapshot.
+    VelocityPaint {
+        clip_id: String,
+        original_notes: Vec<MidiNoteState>,
+        touched: HashSet<u64>,
+        last_x: f32,
+        last_y: f32,
+    },
+    /// Linear velocity ramp over selected notes (when any are selected), or all
+    /// visible notes whose starts fall in the dragged beat range.
+    VelocityLine {
+        clip_id: String,
+        original_notes: Vec<MidiNoteState>,
+        affected: HashSet<u64>,
+        anchor_beat: f32,
+        anchor_value: u8,
+        current_beat: f32,
+        current_value: u8,
+        curve: VelocityCurve,
+    },
+    /// Range/lasso selection in the velocity lane. It updates the same note-id
+    /// selection used by the piano grid; velocity has no separate selection.
+    VelocitySelect {
+        clip_id: String,
+        start_x: f32,
+        start_y: f32,
+        current_x: f32,
+        current_y: f32,
+        mode: MarqueeSelectionMode,
+        dragging: bool,
     },
     /// Middle-mouse grab-pan of the note grid (scroll_x / scroll_y). Mutually
     /// exclusive with note editing — started only from Middle button down.
@@ -596,6 +712,9 @@ pub struct PianoRoll {
     cc_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
     /// Lane points snapshotted when a CC paint/erase gesture begins (undo prev).
     cc_edit_prev: Option<Vec<MidiControllerPoint>>,
+    /// Clip/controller captured with `cc_edit_prev`; cancellation and commit must
+    /// never resolve against a different clip or lane selected mid-gesture.
+    cc_edit_target: Option<(String, MidiControllerKind)>,
     /// Selected CC point ids in the active controller lane (multi-edit).
     cc_selection: HashSet<u64>,
     /// Right-click CC curve context menu (local strip px of the click).
@@ -790,6 +909,7 @@ impl PianoRoll {
             custom_cc: 74,
             cc_bounds: Rc::new(Cell::new(None)),
             cc_edit_prev: None,
+            cc_edit_target: None,
             cc_selection: HashSet::new(),
             open_cc_curve_menu: None,
             last_editing_clip: None,
@@ -825,6 +945,7 @@ impl PianoRoll {
             self.erase_preview_ids.clear();
             self.drag = PianoDrag::None;
             self.cc_edit_prev = None;
+            self.cc_edit_target = None;
             self.art_edit_prev = None;
             self.selected_articulation = None;
             self.hover_beat = None;
@@ -863,6 +984,7 @@ impl PianoRoll {
         let drag_is_stale = match &mut self.drag {
             PianoDrag::None
             | PianoDrag::MarqueeSelect { .. }
+            | PianoDrag::VelocitySelect { .. }
             | PianoDrag::DrawNote { .. }
             | PianoDrag::CcPaint { .. }
             | PianoDrag::CcMove { .. }
@@ -878,6 +1000,11 @@ impl PianoRoll {
             PianoDrag::Velocity { prev, .. } => {
                 prev.retain(|(id, _)| valid_note_ids.contains(id));
                 prev.is_empty()
+            }
+            PianoDrag::VelocityPaint { original_notes, .. }
+            | PianoDrag::VelocityLine { original_notes, .. } => {
+                original_notes.retain(|note| valid_note_ids.contains(&note.id));
+                original_notes.is_empty()
             }
             PianoDrag::EraseNotes { erased, .. } => {
                 erased.retain(|id| valid_note_ids.contains(id));
@@ -923,6 +1050,21 @@ impl PianoRoll {
                 .drag_value_status
                 .clone()
                 .unwrap_or_else(|| format!("Vel drag · {} note{}", prev.len(), plural(prev.len()))),
+            PianoDrag::VelocityPaint { touched, .. } => self
+                .drag_value_status
+                .clone()
+                .unwrap_or_else(|| format!("Velocity paint · {} notes", touched.len())),
+            PianoDrag::VelocityLine { affected, .. } => self
+                .drag_value_status
+                .clone()
+                .unwrap_or_else(|| format!("Velocity line · {} notes", affected.len())),
+            PianoDrag::VelocitySelect { mode, dragging, .. } => {
+                if *dragging {
+                    format!("Velocity select · {}", mode.label())
+                } else {
+                    "Velocity select".to_string()
+                }
+            }
             PianoDrag::DrawNote {
                 pitch,
                 start_beat,
@@ -1349,7 +1491,7 @@ impl PianoRoll {
         }
         // Round (not floor) so drag jitter near a grid line settles stably
         // instead of snapping one step early under the cursor.
-        ((beats / step).round() * step).max(0.0)
+        snap_beat_to_step(beats, step)
     }
 
     /// Same as [`Self::snap_beats`], but `unsnap` (live Shift state of the
@@ -1364,10 +1506,10 @@ impl PianoRoll {
 
     // ── Coordinate helpers (local px → beat / pitch) ──────────────────────
     fn x_to_beat(&self, local_x: f32) -> f32 {
-        ((local_x + self.scroll_x) / self.ppb.max(0.0001)).max(0.0)
+        local_x_to_beat(local_x, self.ppb, self.scroll_x)
     }
     fn beat_to_x(&self, beat: f32) -> f32 {
-        beat * self.ppb - self.scroll_x
+        beat_to_local_x(beat, self.ppb, self.scroll_x)
     }
     fn y_to_pitch(&self, local_y: f32) -> u8 {
         local_y_to_pitch(local_y, self.scroll_y, self.row_h)
@@ -1547,27 +1689,79 @@ impl PianoRoll {
         self.preview_all_notes_off("cancel", cx);
         if matches!(self.drag, PianoDrag::MarqueeSelect { .. }) {
             self.cancel_marquee_select(cx);
-        } else if !matches!(self.drag, PianoDrag::None) {
-            // A cancelled articulation drag restores the pre-gesture events
-            // (live moves were applied to state, so undo them without a
-            // history entry).
-            if matches!(self.drag, PianoDrag::ArtMove { .. }) {
-                if let (Some(prev), Some(clip_id)) =
-                    (self.art_edit_prev.take(), self.editing_clip_id(cx))
+            return;
+        }
+        if matches!(self.drag, PianoDrag::VelocitySelect { .. }) {
+            self.selection = self.selection_before_marquee.clone();
+            self.selection_before_marquee.clear();
+            self.drag = PianoDrag::None;
+            cx.notify();
+            return;
+        }
+        if matches!(self.drag, PianoDrag::None) {
+            return;
+        }
+
+        // Live value gestures write silently for responsive rendering. Restore
+        // their drag-start snapshots without creating history or dirty state.
+        match &self.drag {
+            PianoDrag::Velocity { clip_id, prev, .. } => {
+                let clip_id = clip_id.clone();
+                let prev = prev.clone();
+                self.with_timeline_silent(cx, |tl, _| {
+                    if let Some(notes) = tl.state.midi_clip_notes_mut(&clip_id) {
+                        restore_velocity_values(notes, &prev);
+                    }
+                });
+            }
+            PianoDrag::VelocityPaint {
+                clip_id,
+                original_notes,
+                ..
+            }
+            | PianoDrag::VelocityLine {
+                clip_id,
+                original_notes,
+                ..
+            } => {
+                let clip_id = clip_id.clone();
+                let originals: Vec<(u64, u8)> = original_notes
+                    .iter()
+                    .map(|note| (note.id, note.velocity))
+                    .collect();
+                self.with_timeline_silent(cx, |tl, _| {
+                    if let Some(notes) = tl.state.midi_clip_notes_mut(&clip_id) {
+                        restore_velocity_values(notes, &originals);
+                    }
+                });
+            }
+            PianoDrag::CcPaint { .. } | PianoDrag::CcMove { .. } | PianoDrag::CcLine { .. } => {
+                if let (Some(prev), Some((clip_id, kind))) =
+                    (self.cc_edit_prev.take(), self.cc_edit_target.take())
                 {
-                    self.timeline.update(cx, |tl, tcx| {
-                        tl.state.set_midi_articulations(&clip_id, prev);
-                        tcx.notify();
+                    self.with_timeline_silent(cx, |tl, _| {
+                        tl.state.set_controller_lane_points(&clip_id, kind, prev);
                     });
                 }
             }
-            self.drag = PianoDrag::None;
-            self.erase_preview_ids.clear();
-            self.cc_edit_prev = None;
-            self.art_edit_prev = None;
-            self.drag_value_status = None;
-            cx.notify();
+            PianoDrag::ArtMove { .. } => {
+                if let (Some(prev), Some(clip_id)) =
+                    (self.art_edit_prev.take(), self.editing_clip_id(cx))
+                {
+                    self.with_timeline_silent(cx, |tl, _| {
+                        tl.state.set_midi_articulations(&clip_id, prev);
+                    });
+                }
+            }
+            _ => {}
         }
+        self.drag = PianoDrag::None;
+        self.erase_preview_ids.clear();
+        self.cc_edit_prev = None;
+        self.cc_edit_target = None;
+        self.art_edit_prev = None;
+        self.drag_value_status = None;
+        cx.notify();
     }
 
     /// Resolve the local (grid-relative) cursor position from a window-space
@@ -1637,6 +1831,16 @@ impl PianoRoll {
     fn max_scroll_y(&self) -> f32 {
         let (_, h) = self.grid_view_size();
         (self.total_pitch_h() - h).max(0.0)
+    }
+
+    fn max_scroll_x(&self, cx: &Context<Self>) -> f32 {
+        let (view_w, _) = self.grid_view_size();
+        self.editing_clip_id(cx)
+            .map(|clip_id| {
+                let (_, clip_len) = self.clip_meta(cx, &clip_id);
+                (clip_len * self.ppb - view_w).max(0.0)
+            })
+            .unwrap_or(0.0)
     }
 
     fn clip_meta(&self, cx: &Context<Self>, clip_id: &str) -> (f32, f32) {
@@ -1873,7 +2077,7 @@ impl PianoRoll {
             return;
         };
 
-        let marquee_modifier = event.modifiers.shift
+        let marquee_modifier = (event.modifiers.shift && self.tool != PianoTool::Draw)
             || event.modifiers.control
             || event.modifiers.platform
             || event.modifiers.alt;
@@ -1888,7 +2092,8 @@ impl PianoRoll {
         match self.tool {
             PianoTool::Draw => {
                 let pitch = self.pitch_ctx.constrain_pitch(self.y_to_pitch(ly));
-                let start = self.snap_beats(self.x_to_beat(lx));
+                let unsnap = event.modifiers.shift;
+                let start = self.snap_beats_live(self.x_to_beat(lx), unsnap);
                 if let Some((track_id, channel)) = self.preview_target(cx) {
                     eprintln!(
                         "[MidiEditor] draw_start pitch={} velocity=100 track_id={} channel={}",
@@ -1901,7 +2106,7 @@ impl PianoRoll {
                     pitch,
                     start_beat: start,
                     end_beat: start,
-                    unsnap: false,
+                    unsnap,
                     channel,
                 };
                 cx.notify();
@@ -1926,8 +2131,8 @@ impl PianoRoll {
                 };
                 cx.notify();
             }
-            // Split/Mute act on notes only — empty-grid clicks do nothing.
-            PianoTool::Split | PianoTool::Mute => {}
+            // Line/Split/Mute act on lane values or notes only.
+            PianoTool::Line | PianoTool::Split | PianoTool::Mute => {}
         }
     }
 
@@ -2000,7 +2205,7 @@ impl PianoRoll {
                 }
                 return;
             }
-            PianoTool::Draw | PianoTool::Select => {}
+            PianoTool::Draw | PianoTool::Select | PianoTool::Line => {}
         }
         let shift = event.modifiers.shift;
         let ctrl = event.modifiers.control || event.modifiers.platform;
@@ -2022,14 +2227,14 @@ impl PianoRoll {
             return;
         };
         // Anchor pitch/velocity of the grabbed note for the live audition.
-        let (grab_pitch, grab_vel) = self
+        let (grab_pitch, grab_vel, anchor_start) = self
             .timeline
             .read(cx)
             .state
             .midi_clip_notes(&clip_id)
             .and_then(|notes| notes.iter().find(|n| n.id == id))
-            .map(|n| (n.pitch, n.velocity))
-            .unwrap_or((60, 100));
+            .map(|n| (n.pitch, n.velocity, n.start))
+            .unwrap_or((60, DEFAULT_NOTE_VELOCITY, 0.0));
         let prev = self.snapshot_selection(cx, &clip_id);
         self.drag = PianoDrag::Move {
             start_x: event.position.x.into(),
@@ -2038,6 +2243,7 @@ impl PianoRoll {
             dx_beats: 0.0,
             dpitch: 0,
             grab_pitch,
+            anchor_start,
             clone_on_commit,
             unsnap: false,
         };
@@ -2077,11 +2283,14 @@ impl PianoRoll {
                     .collect()
             })
             .unwrap_or_default();
-        let prev_dur = prev_durs
-            .iter()
-            .find(|(note_id, _)| *note_id == id)
-            .map(|(_, duration)| *duration)
-            .unwrap_or_else(|| self.step_beats());
+        let (anchor_start, prev_dur) = self
+            .timeline
+            .read(cx)
+            .state
+            .midi_clip_notes(&clip_id)
+            .and_then(|notes| notes.iter().find(|note| note.id == id))
+            .map(|note| (note.start, note.duration))
+            .unwrap_or((0.0, self.step_beats()));
         let ids: Vec<u64> = prev_durs.iter().map(|(note_id, _)| *note_id).collect();
         self.drag = PianoDrag::Resize {
             id,
@@ -2089,6 +2298,7 @@ impl PianoRoll {
             start_x: event.position.x.into(),
             prev_dur,
             prev_durs,
+            anchor_start,
             delta_dur: 0.0,
             new_dur: prev_dur,
             unsnap: event.modifiers.shift,
@@ -2096,9 +2306,9 @@ impl PianoRoll {
         cx.notify();
     }
 
-    /// Velocity bar mouse-down: begin a velocity drag. Grabbing a bar that is
-    /// already part of a multi-selection drags every selected note's velocity by
-    /// the same delta; otherwise it selects just that note and drags it alone.
+    /// Velocity bar mouse-down: begin a snapshot-based drag. Ctrl/Cmd toggles
+    /// note selection; Shift adds an unselected note, while Shift-dragging an
+    /// already selected note performs fine relative adjustment. Alt is absolute.
     fn begin_velocity_drag(
         &mut self,
         id: u64,
@@ -2108,33 +2318,72 @@ impl PianoRoll {
         cx: &mut Context<Self>,
     ) {
         window.focus(&self.focus, cx);
-        let multi = self.selection.len() > 1 && self.selection.contains(&id);
-        let prev: Vec<(u64, u8)> = if multi {
-            let Some(clip_id) = self.editing_clip_id(cx) else {
-                return;
-            };
-            let sel = &self.selection;
-            self.timeline
-                .read(cx)
-                .state
-                .midi_clip_notes(&clip_id)
-                .map(|notes| {
-                    notes
-                        .iter()
-                        .filter(|n| sel.contains(&n.id))
-                        .map(|n| (n.id, n.velocity))
-                        .collect()
-                })
-                .unwrap_or_else(|| vec![(id, orig_vel)])
-        } else {
-            self.selection = HashSet::from([id]);
-            vec![(id, orig_vel)]
+        let Some(clip_id) = self.editing_clip_id(cx) else {
+            return;
         };
-        let value = self.velocity_from_window_y(event.position);
-        self.apply_velocity_relative(&prev, orig_vel, value, cx);
+        let toggle = event.modifiers.control || event.modifiers.platform;
+        if toggle {
+            if self.selection.contains(&id) {
+                self.selection.remove(&id);
+            } else {
+                self.selection.insert(id);
+            }
+            cx.notify();
+            return;
+        }
+        if event.modifiers.shift && !self.selection.contains(&id) {
+            self.selection.insert(id);
+            cx.notify();
+            return;
+        }
+        if event.click_count >= 2 {
+            if !self.selection.contains(&id) {
+                self.selection = HashSet::from([id]);
+            }
+            let ids = self.selected_note_ids();
+            self.commit_note_transform(cx, &ids, |state, cid| {
+                for note_id in &ids {
+                    state.set_midi_note_velocity(cid, *note_id, DEFAULT_NOTE_VELOCITY);
+                }
+            });
+            self.drag_value_status = Some(format!(
+                "Velocity: {} · {} note{}",
+                DEFAULT_NOTE_VELOCITY,
+                ids.len(),
+                plural(ids.len())
+            ));
+            cx.notify();
+            return;
+        }
+        if !self.selection.contains(&id) {
+            self.selection = HashSet::from([id]);
+        }
+        let selected = &self.selection;
+        let prev: Vec<(u64, u8)> = self
+            .timeline
+            .read(cx)
+            .state
+            .midi_clip_notes(&clip_id)
+            .map(|notes| {
+                notes
+                    .iter()
+                    .filter(|n| selected.contains(&n.id))
+                    .map(|n| (n.id, n.velocity))
+                    .collect()
+            })
+            .unwrap_or_else(|| vec![(id, orig_vel)]);
+        self.drag_value_status = Some(if prev.len() == 1 {
+            format!("Velocity: {orig_vel} · Δ+0")
+        } else {
+            format!("Anchor {orig_vel} · Δ+0 · {} notes", prev.len())
+        });
         self.drag = PianoDrag::Velocity {
+            clip_id,
             prev,
             anchor_orig: orig_vel,
+            start_mouse_y: event.position.y.into(),
+            absolute: event.modifiers.alt,
+            fine: event.modifiers.shift,
         };
         cx.notify();
     }
@@ -2156,52 +2405,53 @@ impl PianoRoll {
         (1.0 + norm * 126.0).round().clamp(1.0, 127.0) as u8
     }
 
-    /// Absolute velocity assign (inspector / single absolute paths).
-    fn apply_velocity_value(&mut self, prev: &[(u64, u8)], value: u8, cx: &mut Context<Self>) {
-        if prev.is_empty() {
-            return;
-        }
-        self.drag_value_status = Some(if prev.len() == 1 {
-            format!("Velocity: {value}")
-        } else {
-            format!("Velocity: {value} · {} notes", prev.len())
-        });
-        if let Some(clip_id) = self.editing_clip_id(cx) {
-            self.with_timeline_silent(cx, |tl, _| {
-                for (id, _) in prev {
-                    tl.state.set_midi_note_velocity(&clip_id, *id, value);
-                }
-            });
-        }
-    }
-
-    /// Relative multi-note velocity: each note moves by
-    /// `cursor_vel - anchor_orig` from its snapshot, preserving differences.
-    fn apply_velocity_relative(
+    fn apply_velocity_absolute(
         &mut self,
+        clip_id: &str,
         prev: &[(u64, u8)],
-        anchor_orig: u8,
-        cursor_vel: u8,
+        value: u8,
         cx: &mut Context<Self>,
     ) {
         if prev.is_empty() {
             return;
         }
-        let delta = cursor_vel as i32 - anchor_orig as i32;
-        self.drag_value_status = Some(if prev.len() == 1 {
-            let v = (prev[0].1 as i32 + delta).clamp(1, 127) as u8;
-            format!("Velocity: {v}")
-        } else {
-            format!("Velocity Δ{:+} · {} notes", delta, prev.len())
+        self.drag_value_status = Some(format!(
+            "Velocity: {value} · absolute · {} note{}",
+            prev.len(),
+            plural(prev.len())
+        ));
+        self.with_timeline_silent(cx, |tl, _| {
+            for (id, _) in prev {
+                tl.state.set_midi_note_velocity(clip_id, *id, value);
+            }
         });
-        if let Some(clip_id) = self.editing_clip_id(cx) {
-            self.with_timeline_silent(cx, |tl, _| {
-                for (id, orig) in prev {
-                    let next = (*orig as i32 + delta).clamp(1, 127) as u8;
-                    tl.state.set_midi_note_velocity(&clip_id, *id, next);
-                }
-            });
+    }
+
+    fn apply_velocity_relative(
+        &mut self,
+        clip_id: &str,
+        prev: &[(u64, u8)],
+        anchor_orig: u8,
+        delta: i32,
+        fine: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if prev.is_empty() {
+            return;
         }
+        let anchor = relative_velocity(anchor_orig, delta);
+        self.drag_value_status = Some(format!(
+            "Anchor {anchor} · Δ{delta:+}{} · {} note{}",
+            if fine { " fine" } else { "" },
+            prev.len(),
+            plural(prev.len())
+        ));
+        self.with_timeline_silent(cx, |tl, _| {
+            for (id, orig) in prev {
+                tl.state
+                    .set_midi_note_velocity(clip_id, *id, relative_velocity(*orig, delta));
+            }
+        });
     }
 
     fn velocity_note_at_x(&self, cx: &Context<Self>, clip_id: &str, lx: f32) -> Option<(u64, u8)> {
@@ -2209,6 +2459,7 @@ impl PianoRoll {
         let notes = tl.state.midi_clip_notes(clip_id)?;
         notes
             .iter()
+            .filter(|note| self.channel_visible(note.channel))
             .filter_map(|note| {
                 let d = self.display_note(note);
                 let x = self.beat_to_x(d.start);
@@ -2231,16 +2482,273 @@ impl PianoRoll {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        cx.stop_propagation();
+        window.focus(&self.focus, cx);
         let Some(clip_id) = self.editing_clip_id(cx) else {
             return;
         };
-        let Some((lx, _)) = self.cc_local(event.position) else {
+        let Some((lx, ly)) = self.cc_local(event.position) else {
             return;
         };
-        let Some((id, velocity)) = self.velocity_note_at_x(cx, &clip_id, lx) else {
-            return;
+        let selection_modifier =
+            event.modifiers.shift || event.modifiers.control || event.modifiers.platform;
+        if self.tool == PianoTool::Select || selection_modifier {
+            let mode = MarqueeSelectionMode::from_modifiers(&event.modifiers);
+            self.selection_before_marquee = self.selection.clone();
+            self.drag = PianoDrag::VelocitySelect {
+                clip_id,
+                start_x: lx,
+                start_y: ly,
+                current_x: lx,
+                current_y: ly,
+                mode,
+                dragging: false,
+            };
+            cx.notify();
+        } else if self.tool == PianoTool::Line {
+            self.begin_velocity_line(clip_id, lx, ly, cx);
+        } else {
+            self.begin_velocity_paint(clip_id, lx, ly, cx);
+        }
+    }
+
+    fn velocity_from_local_y(&self, local_y: f32) -> u8 {
+        let (_, lane_h) = self.cc_view_size();
+        let usable_h = (lane_h - 8.0).max(1.0);
+        let norm = (1.0 - ((local_y - 2.0) / usable_h)).clamp(0.0, 1.0);
+        clamp_velocity((1.0 + norm * 126.0).round() as i32)
+    }
+
+    fn velocity_gesture_notes(&self, cx: &Context<Self>, clip_id: &str) -> Vec<MidiNoteState> {
+        let mut notes: Vec<MidiNoteState> = self
+            .timeline
+            .read(cx)
+            .state
+            .midi_clip_notes(clip_id)
+            .map(|notes| {
+                notes
+                    .iter()
+                    .filter(|note| self.channel_visible(note.channel))
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default();
+        notes.sort_by(|a, b| {
+            a.start
+                .partial_cmp(&b.start)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.id.cmp(&b.id))
+        });
+        notes
+    }
+
+    fn begin_velocity_paint(&mut self, clip_id: String, lx: f32, ly: f32, cx: &mut Context<Self>) {
+        let original_notes = self.velocity_gesture_notes(cx, &clip_id);
+        self.drag = PianoDrag::VelocityPaint {
+            clip_id,
+            original_notes,
+            touched: HashSet::new(),
+            last_x: lx,
+            last_y: ly,
         };
-        self.begin_velocity_drag(id, velocity, event, window, cx);
+        self.paint_velocity_segment(lx, ly, lx, ly, cx);
+        cx.notify();
+    }
+
+    fn paint_velocity_segment(
+        &mut self,
+        from_x: f32,
+        from_y: f32,
+        to_x: f32,
+        to_y: f32,
+        cx: &mut Context<Self>,
+    ) {
+        let lo_beat = self.x_to_beat(from_x.min(to_x) - 4.0);
+        let hi_beat = self.x_to_beat(from_x.max(to_x) + 4.0);
+        let (clip_id, updates): (String, Vec<(u64, u8)>) = match &self.drag {
+            PianoDrag::VelocityPaint {
+                clip_id,
+                original_notes,
+                ..
+            } => {
+                let start = original_notes.partition_point(|note| note.start < lo_beat);
+                let end = original_notes.partition_point(|note| note.start <= hi_beat);
+                let dx = to_x - from_x;
+                let updates = original_notes[start..end]
+                    .iter()
+                    .map(|note| {
+                        let note_x = self.beat_to_x(note.start);
+                        let t = if dx.abs() <= 1.0e-6 {
+                            1.0
+                        } else {
+                            ((note_x - from_x) / dx).clamp(0.0, 1.0)
+                        };
+                        let y = from_y + (to_y - from_y) * t;
+                        (note.id, self.velocity_from_local_y(y))
+                    })
+                    .collect();
+                (clip_id.clone(), updates)
+            }
+            _ => return,
+        };
+        if updates.is_empty() {
+            return;
+        }
+        if let PianoDrag::VelocityPaint {
+            touched,
+            last_x,
+            last_y,
+            ..
+        } = &mut self.drag
+        {
+            touched.extend(updates.iter().map(|(id, _)| *id));
+            *last_x = to_x;
+            *last_y = to_y;
+        }
+        let value = updates.last().map(|(_, value)| *value).unwrap_or(1);
+        self.drag_value_status = Some(format!(
+            "Paint {value} · {} note{}",
+            updates.len(),
+            plural(updates.len())
+        ));
+        self.with_timeline_silent(cx, |tl, _| {
+            for (id, value) in updates {
+                tl.state.set_midi_note_velocity(&clip_id, id, value);
+            }
+        });
+    }
+
+    fn begin_velocity_line(&mut self, clip_id: String, lx: f32, ly: f32, cx: &mut Context<Self>) {
+        let anchor_beat = self.snap_beats(self.x_to_beat(lx));
+        let anchor_value = self.velocity_from_local_y(ly);
+        let original_notes = self.velocity_gesture_notes(cx, &clip_id);
+        self.drag = PianoDrag::VelocityLine {
+            clip_id,
+            original_notes,
+            affected: HashSet::new(),
+            anchor_beat,
+            anchor_value,
+            current_beat: anchor_beat,
+            current_value: anchor_value,
+            curve: VelocityCurve::Linear,
+        };
+        self.update_velocity_line(lx, ly, cx);
+        cx.notify();
+    }
+
+    fn update_velocity_line(&mut self, lx: f32, ly: f32, cx: &mut Context<Self>) {
+        let cursor_beat = self.snap_beats(self.x_to_beat(lx));
+        let cursor_value = self.velocity_from_local_y(ly);
+        let selection = self.selection.clone();
+        let (clip_id, updates, affected): (String, Vec<(u64, u8)>, HashSet<u64>) = match &self.drag
+        {
+            PianoDrag::VelocityLine {
+                clip_id,
+                original_notes,
+                affected,
+                anchor_beat,
+                anchor_value,
+                curve,
+                ..
+            } => {
+                let (lo, hi, from, to) = if *anchor_beat <= cursor_beat {
+                    (*anchor_beat, cursor_beat, *anchor_value, cursor_value)
+                } else {
+                    (cursor_beat, *anchor_beat, cursor_value, *anchor_value)
+                };
+                let span = (hi - lo).max(1.0e-6);
+                let mut next_affected = affected.clone();
+                let mut values = Vec::new();
+                for note in original_notes {
+                    let in_scope = note.start >= lo - 1.0e-4
+                        && note.start <= hi + 1.0e-4
+                        && (selection.is_empty() || selection.contains(&note.id));
+                    if in_scope {
+                        let t = (note.start - lo) / span;
+                        values.push((note.id, interpolate_velocity(from, to, t, *curve)));
+                        next_affected.insert(note.id);
+                    } else if affected.contains(&note.id) {
+                        values.push((note.id, note.velocity));
+                    }
+                }
+                (clip_id.clone(), values, next_affected)
+            }
+            _ => return,
+        };
+        if let PianoDrag::VelocityLine {
+            current_beat,
+            current_value,
+            affected: target_affected,
+            ..
+        } = &mut self.drag
+        {
+            *current_beat = cursor_beat;
+            *current_value = cursor_value;
+            *target_affected = affected;
+        }
+        self.drag_value_status = Some(format!(
+            "Linear {}→{} · {:.2}..{:.2}",
+            match &self.drag {
+                PianoDrag::VelocityLine { anchor_value, .. } => *anchor_value,
+                _ => cursor_value,
+            },
+            cursor_value,
+            match &self.drag {
+                PianoDrag::VelocityLine { anchor_beat, .. } => *anchor_beat,
+                _ => cursor_beat,
+            },
+            cursor_beat
+        ));
+        self.with_timeline_silent(cx, |tl, _| {
+            for (id, value) in updates {
+                tl.state.set_midi_note_velocity(&clip_id, id, value);
+            }
+        });
+    }
+
+    fn update_velocity_select(&mut self, lx: f32, ly: f32, cx: &mut Context<Self>) {
+        let (clip_id, start_x, start_y, mode, was_dragging) = match &self.drag {
+            PianoDrag::VelocitySelect {
+                clip_id,
+                start_x,
+                start_y,
+                mode,
+                dragging,
+                ..
+            } => (clip_id.clone(), *start_x, *start_y, *mode, *dragging),
+            _ => return,
+        };
+        let dx = lx - start_x;
+        let dy = ly - start_y;
+        let dragging = was_dragging || (dx * dx + dy * dy).sqrt() >= MARQUEE_DRAG_THRESHOLD;
+        if let PianoDrag::VelocitySelect {
+            current_x,
+            current_y,
+            dragging: state_dragging,
+            ..
+        } = &mut self.drag
+        {
+            *current_x = lx;
+            *current_y = ly;
+            *state_dragging = dragging;
+        }
+        if !dragging {
+            return;
+        }
+        let (view_w, lane_h) = self.cc_view_size();
+        let rect = Self::normalized_marquee_rect(start_x, start_y, lx, ly, view_w, lane_h);
+        let hits: HashSet<u64> = self
+            .velocity_gesture_notes(cx, &clip_id)
+            .into_iter()
+            .filter(|note| {
+                let x = self.beat_to_x(note.start);
+                let bar_h = (((note.velocity as f32 - 1.0) / 126.0) * (lane_h - 8.0)).max(1.0);
+                Self::rects_intersect(rect, (x, lane_h - bar_h - 2.0, x + 8.0, lane_h - 2.0))
+            })
+            .map(|note| note.id)
+            .collect();
+        self.selection = Self::apply_marquee_mode(&self.selection_before_marquee, &hits, mode);
+        cx.notify();
     }
 
     fn snapshot_selection(&self, cx: &Context<Self>, clip_id: &str) -> Vec<(u64, f32, u8)> {
@@ -2304,6 +2812,24 @@ impl PianoRoll {
             self.hover_pitch = Some(self.y_to_pitch(ly));
         }
         match self.drag {
+            PianoDrag::VelocityPaint { last_x, last_y, .. } => {
+                if let Some((lx, ly)) = self.cc_local(event.position) {
+                    self.paint_velocity_segment(last_x, last_y, lx, ly, cx);
+                }
+                return;
+            }
+            PianoDrag::VelocityLine { .. } => {
+                if let Some((lx, ly)) = self.cc_local(event.position) {
+                    self.update_velocity_line(lx, ly, cx);
+                }
+                return;
+            }
+            PianoDrag::VelocitySelect { .. } => {
+                if let Some((lx, ly)) = self.cc_local(event.position) {
+                    self.update_velocity_select(lx, ly, cx);
+                }
+                return;
+            }
             PianoDrag::CcPaint { erase } => {
                 if let Some((lx, ly)) = self.cc_local(event.position) {
                     self.cc_paint_at(lx, ly, erase, cx);
@@ -2385,13 +2911,15 @@ impl PianoRoll {
             }
             let cur_x: f32 = event.position.x.into();
             let cur_y: f32 = event.position.y.into();
+            let max_scroll_x = self.max_scroll_x(cx);
+            let max_scroll_y = self.max_scroll_y();
             if let PianoDrag::Pan { last_x, last_y } = &mut self.drag {
                 let dx = cur_x - *last_x;
                 let dy = cur_y - *last_y;
                 *last_x = cur_x;
                 *last_y = cur_y;
-                self.scroll_x = (self.scroll_x - dx).max(0.0);
-                self.scroll_y = (self.scroll_y - dy).clamp(0.0, self.max_scroll_y());
+                self.scroll_x = (self.scroll_x - dx).clamp(0.0, max_scroll_x);
+                self.scroll_y = (self.scroll_y - dy).clamp(0.0, max_scroll_y);
             }
             cx.notify();
             return;
@@ -2465,18 +2993,14 @@ impl PianoRoll {
         }
         let ppb = self.ppb.max(0.0001);
         let snap_enabled = self.snap_on && !self.grid_res.is_free();
-        let step = self.step_beats();
-        let velocity_cursor = if matches!(self.drag, PianoDrag::Velocity { .. }) {
-            Some(self.velocity_from_window_y(event.position))
-        } else {
-            None
-        };
+        let snap_step = self.step_beats();
         match &mut self.drag {
             PianoDrag::None => {}
             PianoDrag::Move { .. } => {}
             PianoDrag::Resize {
                 start_x,
                 prev_dur,
+                anchor_start,
                 delta_dur,
                 new_dur,
                 unsnap,
@@ -2484,22 +3008,45 @@ impl PianoRoll {
             } => {
                 *unsnap = event.modifiers.shift;
                 let cur_x: f32 = event.position.x.into();
-                let mut d = (*prev_dur + (cur_x - *start_x) / ppb).max(MIN_NOTE_BEATS);
-                if snap_enabled && !*unsnap && step > 0.0 {
-                    d = ((d / step).round() * step).max(MIN_NOTE_BEATS);
-                }
+                let raw_edge = *anchor_start + *prev_dur + (cur_x - *start_x) / ppb;
+                let snapped_edge = if snap_enabled && !*unsnap {
+                    snap_beat_to_step(raw_edge, snap_step)
+                } else {
+                    raw_edge.max(0.0)
+                };
+                let d = (snapped_edge - *anchor_start).max(MIN_NOTE_BEATS);
                 *delta_dur = d - *prev_dur;
                 *new_dur = d;
                 cx.notify();
             }
-            PianoDrag::Velocity { prev, anchor_orig } => {
+            PianoDrag::Velocity {
+                clip_id,
+                prev,
+                anchor_orig,
+                start_mouse_y,
+                absolute,
+                fine,
+            } => {
+                let clip_id = clip_id.clone();
                 let prev = prev.clone();
                 let anchor_orig = *anchor_orig;
-                if let Some(value) = velocity_cursor {
-                    self.apply_velocity_relative(&prev, anchor_orig, value, cx);
+                let start_mouse_y = *start_mouse_y;
+                *absolute = event.modifiers.alt;
+                *fine = event.modifiers.shift;
+                let absolute = *absolute;
+                let fine = *fine;
+                let current_y: f32 = event.position.y.into();
+                if absolute {
+                    let value = self.velocity_from_window_y(event.position);
+                    self.apply_velocity_absolute(&clip_id, &prev, value, cx);
+                } else {
+                    let (_, lane_h) = self.cc_view_size();
+                    let delta = velocity_drag_delta(start_mouse_y, current_y, lane_h, fine);
+                    self.apply_velocity_relative(&clip_id, &prev, anchor_orig, delta, fine, cx);
                 }
             }
-            PianoDrag::MarqueeSelect { .. } => {}
+            PianoDrag::MarqueeSelect { .. } | PianoDrag::VelocitySelect { .. } => {}
+            PianoDrag::VelocityPaint { .. } | PianoDrag::VelocityLine { .. } => {}
             PianoDrag::DrawNote { .. } | PianoDrag::EraseNotes { .. } => {}
             PianoDrag::CcPaint { .. }
             | PianoDrag::CcMove { .. }
@@ -2525,14 +3072,19 @@ impl PianoRoll {
         };
         let (lo, hi) = normalize_range(start_beat, end_beat);
         let step = self.step_beats().max(MIN_NOTE_BEATS);
-        let mut duration = (hi - lo).max(step);
-        if self.snap_on && !unsnap {
+        let minimum = if self.snap_on && !self.grid_res.is_free() && !unsnap {
+            step
+        } else {
+            MIN_NOTE_BEATS
+        };
+        let mut duration = (hi - lo).max(minimum);
+        if self.snap_on && !self.grid_res.is_free() && !unsnap {
             duration = ((duration / step).ceil() * step).max(MIN_NOTE_BEATS);
         }
         // Do not clamp the note into the current clip length — a note drawn past
         // the clip end auto-expands the clip (see `CreateMidiNote::execute`).
         // `MidiNoteState::new` clamps start >= 0, pitch 0..=127, dur >= MIN.
-        let mut note = MidiNoteState::new(pitch, lo, duration, 100);
+        let mut note = MidiNoteState::new(pitch, lo, duration, DEFAULT_NOTE_VELOCITY);
         note.channel = channel;
         let id = note.id;
         self.run_edit_command(EditCommand::CreateMidiNote { clip_id, note }, cx);
@@ -2614,6 +3166,17 @@ impl PianoRoll {
             self.commit_marquee_select(cx);
             return;
         }
+        if matches!(self.drag, PianoDrag::VelocitySelect { .. }) {
+            let drag = std::mem::replace(&mut self.drag, PianoDrag::None);
+            if let PianoDrag::VelocitySelect { mode, dragging, .. } = drag {
+                if !dragging && mode == MarqueeSelectionMode::Replace {
+                    self.selection.clear();
+                }
+            }
+            self.selection_before_marquee.clear();
+            cx.notify();
+            return;
+        }
         if matches!(self.drag, PianoDrag::Pan { .. }) {
             self.drag = PianoDrag::None;
             cx.notify();
@@ -2638,6 +3201,7 @@ impl PianoRoll {
                 prev,
                 dx_beats,
                 dpitch,
+                anchor_start,
                 clone_on_commit,
                 unsnap,
                 ..
@@ -2646,10 +3210,12 @@ impl PianoRoll {
                     return;
                 }
                 let pitch_ctx = self.pitch_ctx;
+                let snapped_anchor = self.snap_beats_live(anchor_start + dx_beats, unsnap);
+                let effective_delta = snapped_anchor - anchor_start;
                 let updates: Vec<(u64, f32, u8)> = prev
                     .iter()
                     .map(|(id, start, pitch)| {
-                        let new_start = self.snap_beats_live(*start + dx_beats, unsnap);
+                        let new_start = (*start + effective_delta).max(0.0);
                         let raw_pitch = (*pitch as i32 + dpitch).clamp(0, 127) as u8;
                         let new_pitch = pitch_ctx.constrain_pitch(raw_pitch);
                         (*id, new_start, new_pitch)
@@ -2722,12 +3288,16 @@ impl PianoRoll {
                     }
                 });
             }
-            PianoDrag::Velocity { prev: orig, .. } => {
+            PianoDrag::Velocity {
+                clip_id: velocity_clip_id,
+                prev: orig,
+                ..
+            } => {
                 // Velocity was applied live (silent). Reconstruct the pre-drag
                 // state from the per-note original velocities and record one
                 // undoable edit covering every affected note.
                 let ids: Vec<u64> = orig.iter().map(|(id, _)| *id).collect();
-                let next = self.snapshot_notes(cx, &clip_id, &ids);
+                let next = self.snapshot_notes(cx, &velocity_clip_id, &ids);
                 let prev: Vec<MidiNoteState> = next
                     .iter()
                     .map(|n| {
@@ -2738,9 +3308,37 @@ impl PianoRoll {
                         p
                     })
                     .collect();
-                self.push_note_edit(cx, clip_id, prev, next);
+                self.push_note_edit(cx, velocity_clip_id, prev, next);
             }
-            PianoDrag::MarqueeSelect { .. } => {}
+            PianoDrag::VelocityPaint {
+                clip_id: velocity_clip_id,
+                original_notes,
+                touched,
+                ..
+            } => {
+                let ids: Vec<u64> = touched.into_iter().collect();
+                let prev: Vec<MidiNoteState> = original_notes
+                    .into_iter()
+                    .filter(|note| ids.contains(&note.id))
+                    .collect();
+                let next = self.snapshot_notes(cx, &velocity_clip_id, &ids);
+                self.push_note_edit(cx, velocity_clip_id, prev, next);
+            }
+            PianoDrag::VelocityLine {
+                clip_id: velocity_clip_id,
+                original_notes,
+                affected,
+                ..
+            } => {
+                let ids: Vec<u64> = affected.into_iter().collect();
+                let prev: Vec<MidiNoteState> = original_notes
+                    .into_iter()
+                    .filter(|note| ids.contains(&note.id))
+                    .collect();
+                let next = self.snapshot_notes(cx, &velocity_clip_id, &ids);
+                self.push_note_edit(cx, velocity_clip_id, prev, next);
+            }
+            PianoDrag::MarqueeSelect { .. } | PianoDrag::VelocitySelect { .. } => {}
             PianoDrag::DrawNote { .. } | PianoDrag::EraseNotes { .. } => {}
             PianoDrag::CcPaint { .. }
             | PianoDrag::CcMove { .. }
@@ -2814,7 +3412,7 @@ impl PianoRoll {
             }
             "d" if ctrl => {
                 cx.stop_propagation();
-                self.duplicate_selection(cx);
+                self.duplicate_selection(shift, cx);
             }
             "m" if !ctrl => {
                 cx.stop_propagation();
@@ -2963,6 +3561,9 @@ impl PianoRoll {
 
     /// Begin middle-mouse grab-pan of the note grid.
     fn begin_pan(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if !matches!(self.drag, PianoDrag::None | PianoDrag::Pan { .. }) {
+            self.cancel_active_gesture(cx);
+        }
         window.focus(&self.focus, cx);
         window.prevent_default();
         cx.stop_propagation();
@@ -3283,7 +3884,7 @@ impl PianoRoll {
     /// Duplicate the selection in place, offset forward by the selection's beat
     /// span so the copies sit immediately after the originals. Selects the new
     /// notes. Does not use the clipboard.
-    fn duplicate_selection(&mut self, cx: &mut Context<Self>) {
+    fn duplicate_selection(&mut self, bypass_snap: bool, cx: &mut Context<Self>) {
         let Some(clip_id) = self.editing_clip_id(cx) else {
             return;
         };
@@ -3308,8 +3909,12 @@ impl PianoRoll {
             .iter()
             .map(|n| n.start + n.duration)
             .fold(0.0_f32, f32::max);
-        // Offset by the span, snapped so duplicates stay grid-aligned.
-        let offset = self.snap_beats(max_end - min_start).max(self.step_beats());
+        // Shift bypass keeps the exact source span; otherwise duplicates remain
+        // grid-aligned through the same piano-roll snap helper used by movement.
+        let raw_offset = (max_end - min_start).max(MIN_NOTE_BEATS);
+        let offset = self
+            .snap_beats_live(raw_offset, bypass_snap)
+            .max(MIN_NOTE_BEATS);
         let notes: Vec<MidiNoteState> = src
             .iter()
             .map(|n| {
@@ -3649,11 +4254,12 @@ impl PianoRoll {
             self.zoom_ppb_around(factor, anchor_x, cx);
             return;
         }
+        let max_scroll_x = self.max_scroll_x(cx);
         if event.modifiers.shift {
-            self.scroll_x = (self.scroll_x - dy - dx).max(0.0);
+            self.scroll_x = (self.scroll_x - dy - dx).clamp(0.0, max_scroll_x);
         } else {
             self.scroll_y = (self.scroll_y - dy).clamp(0.0, self.max_scroll_y());
-            self.scroll_x = (self.scroll_x - dx).max(0.0);
+            self.scroll_x = (self.scroll_x - dx).clamp(0.0, max_scroll_x);
         }
         cx.notify();
     }
@@ -4166,5 +4772,90 @@ mod piano_key_pitch_tests {
     fn clamps_beyond_the_range() {
         assert_eq!(local_y_to_pitch(1.0e6, 0.0, ROW_H), 0);
         assert_eq!(local_y_to_pitch(-1.0e6, 0.0, ROW_H), MAX_PITCH);
+    }
+}
+
+#[cfg(test)]
+mod velocity_and_timing_tests {
+    use super::*;
+
+    #[test]
+    fn relative_velocity_preserves_differences_and_clamps() {
+        assert_eq!(relative_velocity(40, 12), 52);
+        assert_eq!(relative_velocity(80, 12), 92);
+        assert_eq!(relative_velocity(120, 20), 127);
+        assert_eq!(relative_velocity(8, -20), 1);
+    }
+
+    #[test]
+    fn drag_delta_is_derived_from_start_and_shift_is_fine() {
+        let normal = velocity_drag_delta(100.0, 80.0, LANE_H, false);
+        let same_frame_again = velocity_drag_delta(100.0, 80.0, LANE_H, false);
+        let fine = velocity_drag_delta(100.0, 80.0, LANE_H, true);
+        assert_eq!(normal, same_frame_again);
+        assert!(normal > 0);
+        assert!(fine > 0 && fine < normal);
+    }
+
+    #[test]
+    fn linear_velocity_line_interpolates_note_values() {
+        assert_eq!(
+            interpolate_velocity(20, 120, 0.0, VelocityCurve::Linear),
+            20
+        );
+        assert_eq!(
+            interpolate_velocity(20, 120, 0.5, VelocityCurve::Linear),
+            70
+        );
+        assert_eq!(
+            interpolate_velocity(20, 120, 1.0, VelocityCurve::Linear),
+            120
+        );
+    }
+
+    #[test]
+    fn future_velocity_curves_stay_in_range() {
+        for curve in [
+            VelocityCurve::Exponential,
+            VelocityCurve::Logarithmic,
+            VelocityCurve::SCurve,
+            VelocityCurve::ReverseSCurve,
+        ] {
+            let value = interpolate_velocity(1, 127, 0.4, curve);
+            assert!((1..=127).contains(&value));
+        }
+    }
+
+    #[test]
+    fn beat_pixel_roundtrip_respects_scroll_and_zoom() {
+        let ppb = 96.0;
+        let scroll = 173.5;
+        for beat in [0.0, 0.25, 1.0, 7.5, 64.0] {
+            let x = beat_to_local_x(beat, ppb, scroll);
+            let roundtrip = local_x_to_beat(x, ppb, scroll);
+            assert!((roundtrip - beat).abs() < 1.0e-5, "beat={beat}");
+        }
+    }
+
+    #[test]
+    fn snap_boundaries_round_to_nearest_grid_line() {
+        assert_eq!(snap_beat_to_step(0.1249, 0.25), 0.0);
+        assert_eq!(snap_beat_to_step(0.1251, 0.25), 0.25);
+        assert_eq!(snap_beat_to_step(1.3749, 0.25), 1.25);
+        assert_eq!(snap_beat_to_step(1.3751, 0.25), 1.5);
+    }
+
+    #[test]
+    fn cancellation_snapshot_restores_every_affected_velocity() {
+        let mut notes = vec![
+            MidiNoteState::new(60, 0.0, 1.0, 20),
+            MidiNoteState::new(64, 1.0, 1.0, 80),
+        ];
+        let snapshot = vec![(notes[0].id, 20), (notes[1].id, 80)];
+        notes[0].velocity = 75;
+        notes[1].velocity = 127;
+        restore_velocity_values(&mut notes, &snapshot);
+        assert_eq!(notes[0].velocity, 20);
+        assert_eq!(notes[1].velocity, 80);
     }
 }

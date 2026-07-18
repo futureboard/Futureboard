@@ -1016,12 +1016,15 @@ mod midi_edit_tests {
     #[test]
     fn edit_midi_notes_velocity_roundtrips() {
         let (mut state, clip_id) = state_with_midi_clip();
-        let id = state.add_midi_note(&clip_id, 60, 0.0, 1.0, 100).unwrap();
+        let first = state.add_midi_note(&clip_id, 60, 0.0, 1.0, 40).unwrap();
+        let second = state.add_midi_note(&clip_id, 64, 1.0, 1.0, 80).unwrap();
 
         let prev = state.midi_clip_notes(&clip_id).unwrap().clone();
-        state.set_midi_notes_velocity_bulk(&clip_id, &[id], 40);
+        state.set_midi_note_velocity(&clip_id, first, 55);
+        state.set_midi_note_velocity(&clip_id, second, 95);
         let next = state.midi_clip_notes(&clip_id).unwrap().clone();
-        assert_eq!(note(&state, &clip_id, id).velocity, 40);
+        assert_eq!(note(&state, &clip_id, first).velocity, 55);
+        assert_eq!(note(&state, &clip_id, second).velocity, 95);
 
         let cmd = EditCommand::EditMidiNotes {
             clip_id: clip_id.clone(),
@@ -1029,9 +1032,27 @@ mod midi_edit_tests {
             next,
         };
         cmd.undo(&mut state);
-        assert_eq!(note(&state, &clip_id, id).velocity, 100, "undo restores");
+        assert_eq!(
+            note(&state, &clip_id, first).velocity,
+            40,
+            "undo restores first"
+        );
+        assert_eq!(
+            note(&state, &clip_id, second).velocity,
+            80,
+            "undo restores second"
+        );
         cmd.execute(&mut state);
-        assert_eq!(note(&state, &clip_id, id).velocity, 40, "redo reapplies");
+        assert_eq!(
+            note(&state, &clip_id, first).velocity,
+            55,
+            "redo reapplies first"
+        );
+        assert_eq!(
+            note(&state, &clip_id, second).velocity,
+            95,
+            "redo reapplies second"
+        );
     }
 
     #[test]

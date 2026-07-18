@@ -734,6 +734,8 @@ pub struct PianoRoll {
     cc_selection_before_marquee: HashSet<u64>,
     /// Right-click CC curve context menu (local strip px of the click).
     open_cc_curve_menu: Option<(f32, f32)>,
+    /// Right-click velocity transform menu (local lane px).
+    open_velocity_menu: Option<(f32, f32)>,
     /// Last clip the editor rendered — used to emit the `open_editor` debug log
     /// exactly once when the edited clip changes (not every frame).
     last_editing_clip: Option<String>,
@@ -764,6 +766,56 @@ pub struct PianoRoll {
 }
 
 /// CC curve generators available from the controller-lane context menu.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum VelocityOperation {
+    SetDefault,
+    Add,
+    Subtract,
+    Scale,
+    Compress,
+    Expand,
+    Randomize,
+    Humanize,
+    Crescendo,
+    Decrescendo,
+    Reverse,
+    ResetDefault,
+}
+
+impl VelocityOperation {
+    const ALL: [Self; 12] = [
+        Self::SetDefault,
+        Self::Add,
+        Self::Subtract,
+        Self::Scale,
+        Self::Compress,
+        Self::Expand,
+        Self::Randomize,
+        Self::Humanize,
+        Self::Crescendo,
+        Self::Decrescendo,
+        Self::Reverse,
+        Self::ResetDefault,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::SetDefault => "Set Velocity · 100",
+            Self::Add => "Add · +5",
+            Self::Subtract => "Subtract · -5",
+            Self::Scale => "Scale · 110%",
+            Self::Compress => "Compress · 25%",
+            Self::Expand => "Expand · 25%",
+            Self::Randomize => "Randomize",
+            Self::Humanize => "Humanize · ±5",
+            Self::Crescendo => "Crescendo",
+            Self::Decrescendo => "Decrescendo",
+            Self::Reverse => "Reverse",
+            Self::ResetDefault => "Reset to Default",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CcCurveKind {
     Linear,
@@ -928,6 +980,7 @@ impl PianoRoll {
             cc_selection: HashSet::new(),
             cc_selection_before_marquee: HashSet::new(),
             open_cc_curve_menu: None,
+            open_velocity_menu: None,
             last_editing_clip: None,
             active_preview_note: None,
             key_lane_pressed_pitch: None,
@@ -2402,6 +2455,7 @@ impl PianoRoll {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.open_velocity_menu = None;
         window.focus(&self.focus, cx);
         let Some(clip_id) = self.editing_clip_id(cx) else {
             return;
@@ -2568,6 +2622,7 @@ impl PianoRoll {
         cx: &mut Context<Self>,
     ) {
         cx.stop_propagation();
+        self.open_velocity_menu = None;
         window.focus(&self.focus, cx);
         let Some(clip_id) = self.editing_clip_id(cx) else {
             return;
@@ -2845,6 +2900,114 @@ impl PianoRoll {
             .map(|note| note.id)
             .collect();
         self.selection = Self::apply_marquee_mode(&self.selection_before_marquee, &hits, mode);
+        cx.notify();
+    }
+
+    fn open_velocity_context_menu(
+        &mut self,
+        event: &MouseDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        cx.stop_propagation();
+        window.focus(&self.focus, cx);
+        let Some(clip_id) = self.editing_clip_id(cx) else {
+            return;
+        };
+        let Some((lx, ly)) = self.cc_local(event.position) else {
+            return;
+        };
+        if let Some((id, _)) = self.velocity_note_at_x(cx, &clip_id, lx) {
+            if !self.selection.contains(&id) {
+                self.selection = HashSet::from([id]);
+            }
+        }
+        if self.selection.is_empty() {
+            self.open_velocity_menu = None;
+            return;
+        }
+        self.open_velocity_menu = Some((lx, ly));
+        cx.notify();
+    }
+
+    fn apply_velocity_operation(&mut self, operation: VelocityOperation, cx: &mut Context<Self>) {
+        let Some(clip_id) = self.editing_clip_id(cx) else {
+            return;
+        };
+        let mut notes: Vec<MidiNoteState> = self
+            .timeline
+            .read(cx)
+            .state
+            .midi_clip_notes(&clip_id)
+            .map(|notes| {
+                notes
+                    .iter()
+                    .filter(|note| self.selection.contains(&note.id))
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default();
+        if notes.is_empty() {
+            return;
+        }
+        notes.sort_by(|a, b| {
+            a.start
+                .partial_cmp(&b.start)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.id.cmp(&b.id))
+        });
+        let mean = notes.iter().map(|note| note.velocity as f32).sum::<f32>() / notes.len() as f32;
+        let min_velocity = notes.iter().map(|note| note.velocity).min().unwrap_or(1);
+        let max_velocity = notes.iter().map(|note| note.velocity).max().unwrap_or(127);
+        let reversed: Vec<u8> = notes.iter().rev().map(|note| note.velocity).collect();
+        let count = notes.len();
+        let updates: Vec<(u64, u8)> = notes
+            .iter()
+            .enumerate()
+            .map(|(index, note)| {
+                let hash = note.id.wrapping_mul(0x9E37_79B9_7F4A_7C15).rotate_left(17);
+                let t = if count <= 1 {
+                    0.0
+                } else {
+                    index as f32 / (count - 1) as f32
+                };
+                let value = match operation {
+                    VelocityOperation::SetDefault | VelocityOperation::ResetDefault => {
+                        DEFAULT_NOTE_VELOCITY
+                    }
+                    VelocityOperation::Add => relative_velocity(note.velocity, 5),
+                    VelocityOperation::Subtract => relative_velocity(note.velocity, -5),
+                    VelocityOperation::Scale => {
+                        clamp_velocity((note.velocity as f32 * 1.1).round() as i32)
+                    }
+                    VelocityOperation::Compress => {
+                        clamp_velocity((mean + (note.velocity as f32 - mean) * 0.75).round() as i32)
+                    }
+                    VelocityOperation::Expand => {
+                        clamp_velocity((mean + (note.velocity as f32 - mean) * 1.25).round() as i32)
+                    }
+                    VelocityOperation::Randomize => 1 + (hash % 127) as u8,
+                    VelocityOperation::Humanize => {
+                        relative_velocity(note.velocity, (hash % 11) as i32 - 5)
+                    }
+                    VelocityOperation::Crescendo => {
+                        interpolate_velocity(min_velocity, max_velocity, t, VelocityCurve::Linear)
+                    }
+                    VelocityOperation::Decrescendo => {
+                        interpolate_velocity(max_velocity, min_velocity, t, VelocityCurve::Linear)
+                    }
+                    VelocityOperation::Reverse => reversed[index],
+                };
+                (note.id, value)
+            })
+            .collect();
+        let ids: Vec<u64> = updates.iter().map(|(id, _)| *id).collect();
+        self.commit_note_transform(cx, &ids, move |state, cid| {
+            for (id, velocity) in updates {
+                state.set_midi_note_velocity(cid, id, velocity);
+            }
+        });
+        self.open_velocity_menu = None;
         cx.notify();
     }
 
@@ -3564,7 +3727,9 @@ impl PianoRoll {
             }
             "escape" => {
                 cx.stop_propagation();
-                if !matches!(self.drag, PianoDrag::None) {
+                if self.open_velocity_menu.take().is_some() {
+                    cx.notify();
+                } else if !matches!(self.drag, PianoDrag::None) {
                     self.cancel_active_gesture(cx);
                 } else {
                     if self.lane_view == PianoLaneView::Controller {

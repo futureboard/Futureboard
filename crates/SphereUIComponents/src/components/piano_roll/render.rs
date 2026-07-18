@@ -149,6 +149,63 @@ impl PianoRoll {
         )
     }
 
+    fn build_velocity_context_menu(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        let (lx, ly) = self.open_velocity_menu?;
+        let mut panel = div()
+            .absolute()
+            .left(px(lx.clamp(4.0, 260.0)))
+            .top(px(ly.clamp(4.0, 28.0)))
+            .w(px(150.0))
+            .max_h(px(LANE_H - 8.0))
+            .id("pr-velocity-menu")
+            .overflow_y_scroll()
+            .flex()
+            .flex_col()
+            .p(px(3.0))
+            .gap(px(1.0))
+            .rounded(px(6.0))
+            .bg(Colors::surface_card())
+            .border(px(1.0))
+            .border_color(Colors::border_subtle())
+            .shadow_lg()
+            .occlude()
+            .on_mouse_down(MouseButton::Left, |_, _window, cx| cx.stop_propagation())
+            .child(
+                div()
+                    .px(px(7.0))
+                    .py(px(3.0))
+                    .text_size(px(9.0))
+                    .text_color(Colors::text_muted())
+                    .child("Velocity"),
+            );
+        for (index, operation) in VelocityOperation::ALL.iter().enumerate() {
+            let operation = *operation;
+            panel = panel.child(
+                div()
+                    .id(("pr-velocity-operation", index))
+                    .flex()
+                    .items_center()
+                    .h(px(18.0))
+                    .px(px(7.0))
+                    .rounded(px(4.0))
+                    .text_size(px(10.0))
+                    .text_color(Colors::text_secondary())
+                    .hover(|style| style.bg(Colors::surface_hover()))
+                    .cursor(gpui::CursorStyle::PointingHand)
+                    .child(operation.label())
+                    .on_click(cx.listener(move |this, _event, _window, cx| {
+                        cx.stop_propagation();
+                        this.apply_velocity_operation(operation, cx);
+                    })),
+            );
+        }
+        Some(
+            deferred(panel.into_any_element())
+                .with_priority(PIANO_ROLL_MENU_PRIORITY)
+                .into_any_element(),
+        )
+    }
+
     pub(super) fn build_velocity_gesture_overlay(&self) -> Option<gpui::AnyElement> {
         match &self.drag {
             PianoDrag::VelocitySelect {
@@ -1419,6 +1476,7 @@ impl PianoRoll {
             let vel_grid = self.build_velocity_grid(start_beat, end_beat, bpb);
             let vel_bars = self.build_velocity_bars(cx, clip_id, track_color);
             let velocity_gesture_overlay = self.build_velocity_gesture_overlay();
+            let velocity_context_menu = self.build_velocity_context_menu(cx);
             let velocity_bounds = self.cc_bounds.clone();
             let velocity_bounds_canvas = canvas(
                 move |bounds, _w, _cx| velocity_bounds.set(Some(bounds)),
@@ -1467,12 +1525,19 @@ impl PianoRoll {
                             this.begin_velocity_lane_click(ev, window, cx);
                         }),
                     )
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener(|this, ev: &MouseDownEvent, window, cx| {
+                            this.open_velocity_context_menu(ev, window, cx);
+                        }),
+                    )
                     .child(velocity_bounds_canvas)
                     .children(vel_grid)
                     .children(vel_bars)
                     .children(velocity_gesture_overlay)
                     .children(velocity_empty)
                     .children(velocity_value_chip)
+                    .children(velocity_context_menu)
                     .into_any_element(),
             )
         } else {

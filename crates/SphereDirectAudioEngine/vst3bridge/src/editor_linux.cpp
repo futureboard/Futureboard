@@ -289,6 +289,37 @@ static void on_surface_layout(GdkSurface* /*surface*/,
 // close_editor_linux() from the close-request handler, which would g_idle_add()
 // and then block-wait on the GTK thread for an idle source that can only run
 // once the handler returns (self-deadlock). Idempotent.
+struct DestroyWindowTask {
+    GtkWidget*         window{nullptr};
+    LinuxRunLoopFrame* frame{nullptr};
+};
+
+// Idle destroy: never call gtk_window_destroy from inside close-request.
+// GTK4/GDK asserts if the surface still has an EGL native window (common when
+// a GL/XEmbed plug-in like Surge XT just detached) — flushing the main context
+// after removed() lets the plug-in drop its GL child first.
+static gboolean idle_destroy_editor_window(gpointer user_data) {
+    auto* task = static_cast<DestroyWindowTask*>(user_data);
+    // Let pending X11/unmap/GL teardown from IPlugView::removed() settle.
+    for (int i = 0; i < 8; ++i) {
+        if (!g_main_context_iteration(nullptr, FALSE)) break;
+    }
+    if (task->window) {
+        gtk_widget_set_visible(task->window, FALSE);
+        for (int i = 0; i < 4; ++i) {
+            if (!g_main_context_iteration(nullptr, FALSE)) break;
+        }
+        gtk_window_destroy(GTK_WINDOW(task->window));
+        g_object_unref(task->window); // matches g_object_ref in idle_open_editor
+        task->window = nullptr;
+    }
+    delete task->frame;
+    task->frame = nullptr;
+    delete task;
+    std::fprintf(stderr, "[SphereVST3/linux] editor closed\n");
+    return G_SOURCE_REMOVE;
+}
+
 static void close_editor_on_gtk_thread(SphereDauxVst3Processor* proc) {
     void* win_ptr = sphere_daux_editor_get_native_window(proc);
     if (!win_ptr) return;
@@ -297,28 +328,22 @@ static void close_editor_on_gtk_thread(SphereDauxVst3Processor* proc) {
     auto* frame = static_cast<LinuxRunLoopFrame*>(
         sphere_daux_editor_get_native_embed(proc));
 
-    sphere_daux_editor_clear_native(proc);       // zero first to prevent re-entrancy
+    sphere_daux_editor_clear_native(proc); // zero first to prevent re-entrancy
     // Steinberg order: setFrame(nullptr) then removed(). Plug-ins that clean up
     // unregister their IRunLoop handlers during these calls.
     sphere_daux_editor_set_frame(proc, nullptr);
     sphere_daux_editor_detach_view(proc);
 
-    // Disarm leftover GLib sources BEFORE destroying the GTK window / deleting
-    // the frame. Never release leftover handlers — they may already be freed
-    // inside removed() (JUCE/Surge).
+    // Disarm leftover GLib sources. Never release leftover handlers — they may
+    // already be freed inside removed() (JUCE/Surge).
     if (frame) {
         frame->disarm_sources(/*release_handlers=*/false);
     }
 
-    GtkWidget* window = static_cast<GtkWidget*>(win_ptr);
-    // clear_native() above makes a re-entrant close-request a no-op
-    // (get_native_window returns null), so destroy is safe from this handler.
-    gtk_window_destroy(GTK_WINDOW(window));
-    g_object_unref(window); // matches the g_object_ref in idle_open_editor
-
-    delete frame;
-
-    std::fprintf(stderr, "[SphereVST3/linux] editor closed\n");
+    // Defer GTK destroy off the close-request stack and after removed() so
+    // GDK's egl_native_window can clear (avoids gdksurface.c assertion abort).
+    auto* task = new DestroyWindowTask{static_cast<GtkWidget*>(win_ptr), frame};
+    g_idle_add(idle_destroy_editor_window, task);
 }
 
 // ── Open-task (executed on the GTK thread via g_idle_add) ─────────────────

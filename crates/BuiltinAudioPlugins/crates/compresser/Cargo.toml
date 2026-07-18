@@ -1,6 +1,13 @@
 [package]
 name = "compresser"
-version = "0.1.0"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Compresser — soft-knee VCA compressor DSP core"
 
 [dependencies]
+builtin-dsp-core.workspace = true
+
+[lints]
+workspace = true

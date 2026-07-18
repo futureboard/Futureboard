@@ -1,6 +1,13 @@
 [package]
 name = "fa2a"
-version = "0.1.0"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "FA-2A — optical compressor DSP core (LA-2A-style)"
 
 [dependencies]
+builtin-dsp-core.workspace = true
+
+[lints]
+workspace = true

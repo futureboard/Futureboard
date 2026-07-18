@@ -24,6 +24,15 @@ members = [
     "crates/SpherePlatform",
     "crates/SphereWebView",
     "crates/BuiltinAudioPlugins",
+    # Builtin stock DSP cores (engine integration deferred).
+    "crates/BuiltinAudioPlugins/crates/builtin_dsp_core",
+    "crates/BuiltinAudioPlugins/crates/equz8",
+    "crates/BuiltinAudioPlugins/crates/compresser",
+    "crates/BuiltinAudioPlugins/crates/fa2a",
+    "crates/BuiltinAudioPlugins/crates/echospace",
+    "crates/BuiltinAudioPlugins/crates/fa76",
+    "crates/BuiltinAudioPlugins/crates/c1073",
+    "crates/BuiltinAudioPlugins/crates/meowsyn",
 
     "xtask",
 ]
@@ -74,6 +83,23 @@ sphere-soundfont-player = { path = "crates/SphereSoundfontPlayer", package = "Sp
 sphere-discord-rpc = { path = "crates/SphereDiscordRPC", package = "SphereDiscordRPC" }
 sphere-platform = { path = "crates/SpherePlatform", package = "SpherePlatform" }
 sphere-webview = { path = "crates/SphereWebView", package = "SphereWebView" }
+
+# BuiltinAudioPlugins stock DSP cores (no DirectAudioEngine wiring yet).
+builtin-audio-plugins = { path = "crates/BuiltinAudioPlugins", package = "BuiltinAudioPlugins" }
+builtin-dsp-core = { path = "crates/BuiltinAudioPlugins/crates/builtin_dsp_core", package = "builtin_dsp_core" }
+equz8 = { path = "crates/BuiltinAudioPlugins/crates/equz8" }
+compresser = { path = "crates/BuiltinAudioPlugins/crates/compresser" }
+fa2a = { path = "crates/BuiltinAudioPlugins/crates/fa2a" }
+echospace = { path = "crates/BuiltinAudioPlugins/crates/echospace" }
+fa76 = { path = "crates/BuiltinAudioPlugins/crates/fa76" }
+c1073 = { path = "crates/BuiltinAudioPlugins/crates/c1073" }
+meowsyn = { path = "crates/BuiltinAudioPlugins/crates/meowsyn" }
+
+# MIT/Apache-2.0 DSP libraries used by BuiltinAudioPlugins.
+biquad = "0.6"
+# `std` required (fundsp no_std path currently misses Vec imports in resample).
+# Keep `files`/`fft` off to avoid pulling Symphonia into stock synth DSP.
+fundsp = { version = "0.23", default-features = false, features = ["std"] }
 
 # CEF 150.0.11 bindings have not reached crates.io yet. Keep the exact upstream
 # revision that declares workspace version 150.1.0+150.0.11.

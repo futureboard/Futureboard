@@ -1,14 +1,13 @@
 [package]
-name = "c1073"
+name = "builtin_dsp_core"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
-description = "C1073 — 3-band channel EQ + preamp drive DSP core"
+description = "Shared realtime-safe helpers for BuiltinAudioPlugins DSP cores"
 
 [dependencies]
 biquad.workspace = true
-builtin-dsp-core.workspace = true
 
 [lints]
 workspace = true

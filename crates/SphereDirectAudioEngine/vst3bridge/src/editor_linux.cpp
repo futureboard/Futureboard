@@ -112,10 +112,27 @@ public:
         : proc_(proc), window_(window) {}
 
     ~LinuxRunLoopFrame() {
-        // Defensive: drop any GLib sources the plug-in failed to unregister.
+        // Drop leftover GLib sources. Do NOT release handlers here: after
+        // IPlugView::removed() many plugins (JUCE / Surge XT) destroy their
+        // ITimerHandler / IEventHandler objects without unregistering, so
+        // handler->release() is a use-after-free (host SIGSEGV on editor close).
+        // Clean plugins already called unregister* and emptied regs_.
+        disarm_sources(/*release_handlers=*/false);
+    }
+
+    /// Remove every GLib fd/timer source. When `release_handlers` is false the
+    /// COM refs are abandoned (safe after removed()); when true they are
+    /// released (only safe while the plug-in still owns the handlers).
+    void disarm_sources(bool release_handlers) {
         for (auto* reg : regs_) {
-            if (reg->source_id) g_source_remove(reg->source_id);
-            if (reg->handler)   reg->handler->release();
+            if (reg->source_id) {
+                g_source_remove(reg->source_id);
+                reg->source_id = 0;
+            }
+            if (release_handlers && reg->handler) {
+                reg->handler->release();
+            }
+            reg->handler = nullptr;
             delete reg;
         }
         regs_.clear();
@@ -281,15 +298,24 @@ static void close_editor_on_gtk_thread(SphereDauxVst3Processor* proc) {
         sphere_daux_editor_get_native_embed(proc));
 
     sphere_daux_editor_clear_native(proc);       // zero first to prevent re-entrancy
-    sphere_daux_editor_set_frame(proc, nullptr); // setFrame(nullptr) before removed()
-    sphere_daux_editor_detach_view(proc);        // IPlugView::removed()
+    // Steinberg order: setFrame(nullptr) then removed(). Plug-ins that clean up
+    // unregister their IRunLoop handlers during these calls.
+    sphere_daux_editor_set_frame(proc, nullptr);
+    sphere_daux_editor_detach_view(proc);
+
+    // Disarm leftover GLib sources BEFORE destroying the GTK window / deleting
+    // the frame. Never release leftover handlers — they may already be freed
+    // inside removed() (JUCE/Surge).
+    if (frame) {
+        frame->disarm_sources(/*release_handlers=*/false);
+    }
 
     GtkWidget* window = static_cast<GtkWidget*>(win_ptr);
+    // clear_native() above makes a re-entrant close-request a no-op
+    // (get_native_window returns null), so destroy is safe from this handler.
     gtk_window_destroy(GTK_WINDOW(window));
     g_object_unref(window); // matches the g_object_ref in idle_open_editor
 
-    // Destroy the frame last — its dtor drops any leftover GLib fd/timer
-    // sources the plug-in did not unregister in removed().
     delete frame;
 
     std::fprintf(stderr, "[SphereVST3/linux] editor closed\n");

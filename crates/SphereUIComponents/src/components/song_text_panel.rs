@@ -11,7 +11,7 @@ use gpui::{
 use crate::components::edit::EditCommand;
 use crate::components::text_input::{text_field, TextInputAction, TextInputState};
 use crate::components::timeline::timeline_state::{
-    SongTextEvent, SongTextEventKind, SongTextEventType,
+    SongTextEvent, SongTextEventKind, SongTextEventType, TimeSignatureMap,
 };
 use crate::components::timeline::Timeline;
 use crate::theme::Colors;
@@ -44,7 +44,9 @@ pub struct SongTextPanelView {
     last_followed_event_id: Option<String>,
     manual_follow_until: Option<std::time::Instant>,
     cached_event_revision: u64,
+    cached_time_signature_map: TimeSignatureMap,
     cached_events: std::sync::Arc<Vec<SongTextEvent>>,
+    cached_position_labels: std::sync::Arc<Vec<String>>,
     _timeline_subscription: Subscription,
 }
 
@@ -72,7 +74,9 @@ impl SongTextPanelView {
             last_followed_event_id: None,
             manual_follow_until: None,
             cached_event_revision: u64::MAX,
+            cached_time_signature_map: TimeSignatureMap::with_default_4_4(),
             cached_events: std::sync::Arc::new(Vec::new()),
+            cached_position_labels: std::sync::Arc::new(Vec::new()),
             _timeline_subscription: subscription,
         }
     }
@@ -88,27 +92,33 @@ impl SongTextPanelView {
 
     fn refresh_event_cache(&mut self, cx: &Context<Self>) {
         let state = &self.timeline.read(cx).state;
-        if self.cached_event_revision == state.song_text_revision {
+        if self.cached_event_revision == state.song_text_revision
+            && self.cached_time_signature_map == state.time_signature_map
+        {
             return;
         }
-        self.cached_events = std::sync::Arc::new(
-            state
-                .song_text_events
+        let events: Vec<_> = state
+            .song_text_events
+            .iter()
+            .filter(|event| match self.kind {
+                SongTextPanelKind::ChordDisplay => event.event_type() == SongTextEventType::Chord,
+                SongTextPanelKind::LyricDisplay => matches!(
+                    event.event_type(),
+                    SongTextEventType::Lyric | SongTextEventType::Section
+                ),
+                SongTextPanelKind::LyricEditor => true,
+            })
+            .cloned()
+            .collect();
+        self.cached_position_labels = std::sync::Arc::new(
+            events
                 .iter()
-                .filter(|event| match self.kind {
-                    SongTextPanelKind::ChordDisplay => {
-                        event.event_type() == SongTextEventType::Chord
-                    }
-                    SongTextPanelKind::LyricDisplay => matches!(
-                        event.event_type(),
-                        SongTextEventType::Lyric | SongTextEventType::Section
-                    ),
-                    SongTextPanelKind::LyricEditor => true,
-                })
-                .cloned()
+                .map(|event| format!("[{}]", state.format_bar_beat_at(event.beat)))
                 .collect(),
         );
+        self.cached_events = std::sync::Arc::new(events);
         self.cached_event_revision = state.song_text_revision;
+        self.cached_time_signature_map = state.time_signature_map.clone();
     }
 
     fn follow_playback(&mut self, cx: &mut Context<Self>) {
@@ -554,6 +564,7 @@ impl Render for SongTextPanelView {
         self.sync_inputs_from_selection(cx);
         self.refresh_event_cache(cx);
         let events = self.cached_events.clone();
+        let position_labels = self.cached_position_labels.clone();
         let timeline = self.timeline.read(cx);
         let state = &timeline.state;
         let kind = self.kind;
@@ -603,6 +614,7 @@ impl Render for SongTextPanelView {
                 };
                 let row_count = events.len();
                 let list_events = events.clone();
+                let list_positions = position_labels.clone();
                 let list_entity = cx.entity().clone();
                 let active_id = active.map(|event| event.id.clone());
                 let rows = uniform_list(
@@ -616,9 +628,8 @@ impl Render for SongTextPanelView {
                                 let selected = selected_ids.iter().any(|selected| selected == &id);
                                 let is_active = active_id.as_deref() == Some(id.as_str());
                                 let row_entity = list_entity.clone();
-                                song_text_row(event, selected, is_active).on_mouse_down(
-                                    gpui::MouseButton::Left,
-                                    move |mouse, _, cx| {
+                                song_text_row(event, &list_positions[index], selected, is_active)
+                                    .on_mouse_down(gpui::MouseButton::Left, move |mouse, _, cx| {
                                         cx.stop_propagation();
                                         let additive = mouse.modifiers.control
                                             || mouse.modifiers.platform
@@ -626,8 +637,7 @@ impl Render for SongTextPanelView {
                                         let _ = row_entity.update(cx, |view, cx| {
                                             view.select(&id, additive, true, cx)
                                         });
-                                    },
-                                )
+                                    })
                             })
                             .collect()
                     },
@@ -668,6 +678,7 @@ impl Render for SongTextPanelView {
                 let can_add_both = can_add_chord && can_add_lyric;
 
                 let list_events = events.clone();
+                let list_positions = position_labels.clone();
                 let row_count = list_events.len();
                 let list_entity = cx.entity().clone();
                 let active_chord_id = active_chord.as_ref().map(|event| event.id.clone());
@@ -684,9 +695,8 @@ impl Render for SongTextPanelView {
                                 let active = active_chord_id.as_deref() == Some(id.as_str())
                                     || active_lyric_id.as_deref() == Some(id.as_str());
                                 let row_entity = list_entity.clone();
-                                song_text_row(event, selected, active).on_mouse_down(
-                                    gpui::MouseButton::Left,
-                                    move |mouse, _, cx| {
+                                song_text_row(event, &list_positions[index], selected, active)
+                                    .on_mouse_down(gpui::MouseButton::Left, move |mouse, _, cx| {
                                         cx.stop_propagation();
                                         let additive = mouse.modifiers.control
                                             || mouse.modifiers.platform
@@ -695,8 +705,7 @@ impl Render for SongTextPanelView {
                                         let _ = row_entity.update(cx, |view, cx| {
                                             view.select(&id, additive, seek, cx)
                                         });
-                                    },
-                                )
+                                    })
                             })
                             .collect()
                     },
@@ -935,7 +944,12 @@ fn active_summary(
         )
 }
 
-fn song_text_row(event: &SongTextEvent, selected: bool, active: bool) -> gpui::Stateful<gpui::Div> {
+fn song_text_row(
+    event: &SongTextEvent,
+    position_label: &str,
+    selected: bool,
+    active: bool,
+) -> gpui::Stateful<gpui::Div> {
     let event_type = event.event_type();
     let type_color = match event_type {
         SongTextEventType::Section => Colors::accent_success(),
@@ -968,10 +982,10 @@ fn song_text_row(event: &SongTextEvent, selected: bool, active: bool) -> gpui::S
         .hover(|style| style.bg(Colors::surface_hover()))
         .child(
             div()
-                .w(px(58.0))
+                .w(px(72.0))
                 .text_size(px(9.5))
                 .text_color(Colors::text_muted())
-                .child(format!("{:.3}", event.beat)),
+                .child(position_label.to_string()),
         )
         .child(
             div()

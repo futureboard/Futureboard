@@ -4,8 +4,21 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
+description = "Futureboard stock builtin audio plugin DSP cores (engine-agnostic)"
+
+[lib]
+name = "builtin_audio_plugins"
+path = "src/lib.rs"
 
 [dependencies]
+builtin-dsp-core.workspace = true
+equz8.workspace = true
+compresser.workspace = true
+fa2a.workspace = true
+echospace.workspace = true
+fa76.workspace = true
+c1073.workspace = true
+meowsyn.workspace = true
 
 [lints]
 workspace = true

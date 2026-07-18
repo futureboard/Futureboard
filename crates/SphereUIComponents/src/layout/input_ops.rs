@@ -257,6 +257,23 @@ impl StudioLayout {
         if event.is_held && !is_repeatable_edit_key(event) {
             return true;
         }
+        // Arrow up/down increment/decrement the numeric value (Shift = coarse
+        // ×10). Left/right stay as caret movement inside the field.
+        let key = event.keystroke.key.as_str();
+        if matches!(key, "up" | "arrow_up" | "down" | "arrow_down") {
+            let sign = if matches!(key, "up" | "arrow_up") {
+                1.0
+            } else {
+                -1.0
+            };
+            let coarse = if event.keystroke.modifiers.shift {
+                10.0
+            } else {
+                1.0
+            };
+            self.nudge_bpm_edit(sign * coarse, cx);
+            return true;
+        }
         let action = self
             .tempo_edit
             .bpm_input

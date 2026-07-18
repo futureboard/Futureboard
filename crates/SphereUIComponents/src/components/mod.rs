@@ -42,6 +42,7 @@ mod mixer_window;
 pub(crate) use mixer_window::{external_mixer_debug, external_mixer_debug_enabled};
 pub mod gpu_editor_diagnostics;
 pub mod native_editor_shell;
+pub mod numeric_edit;
 pub mod panel;
 mod performance_overlay;
 pub mod piano_roll;
@@ -130,6 +131,10 @@ pub use mixer_master_strip_view::MixerMasterStripView;
 pub use mixer_panel::mixer_panel;
 pub use mixer_panel_view::{docked_mixer_shell, MixerPanelView};
 pub use mixer_window::{open_mixer_window, MixerSnapshot, MixerWindow};
+pub use numeric_edit::{
+    is_intermediate_draft, parse_draft, CommitPolicy, CommitTrigger, NumberFormat,
+    NumericEditSession,
+};
 pub use panel::{inspector_debug, inspector_debug_enabled, right_panel};
 pub use performance_overlay::{performance_overlay, PerformanceOverlaySnapshot};
 pub use piano_roll::PianoRoll;

@@ -3,6 +3,7 @@ use gpui::{Context, Window};
 use std::sync::Arc;
 
 use crate::components;
+use crate::components::numeric_edit::NumericEditSession;
 use crate::components::text_input::TextInputState;
 use crate::components::{PerformanceOverlaySnapshot, StatusBarContent, StatusBarPerfMetrics};
 
@@ -26,6 +27,10 @@ pub(crate) struct TempoEditState {
     pub bpm_input: TextInputState,
     /// Whether the inline BPM editor is open.
     pub bpm_editing: bool,
+    /// Shared numeric edit session for the inline BPM editor. Owns the value
+    /// range/format/commit policy so typed edits and drag adjustments resolve
+    /// through one value source; the live draft stays in `bpm_input.value`.
+    pub bpm_session: Option<NumericEditSession>,
     /// Inline time-signature numerator field.
     pub ts_num_input: TextInputState,
     /// Inline time-signature denominator field.
@@ -43,6 +48,7 @@ impl TempoEditState {
         Self {
             bpm_input: TextInputState::new("transport-bpm-input", cx.focus_handle()),
             bpm_editing: false,
+            bpm_session: None,
             ts_num_input: TextInputState::new("transport-ts-num-input", cx.focus_handle()),
             ts_den_input: TextInputState::new("transport-ts-den-input", cx.focus_handle()),
             ts_editing: false,

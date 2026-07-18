@@ -2388,15 +2388,38 @@ impl StudioLayout {
         // A drag and an edit are mutually exclusive.
         self.end_bpm_drag();
         let bpm = self.timeline.read(cx).state.effective_bpm_at_playhead();
-        let text = if (bpm.fract()).abs() < 0.05 {
-            format!("{bpm:.0}")
-        } else {
-            format!("{bpm:.2}")
-        };
-        self.tempo_edit.bpm_input.set_value(text);
+        // The typed editor and the scrub drag both resolve through the effective
+        // BPM at the playhead, so they share one value source. The session owns
+        // range/format/commit policy; the draft text stays in `bpm_input.value`.
+        let format = crate::components::numeric_edit::NumberFormat::decimal(
+            components::BPM_MIN as f64,
+            components::BPM_MAX as f64,
+            2,
+        );
+        let session = crate::components::numeric_edit::NumericEditSession::begin(
+            bpm,
+            format,
+            crate::components::numeric_edit::CommitPolicy::OnEnter,
+        );
+        self.tempo_edit.bpm_input.set_value(session.original_text());
         self.tempo_edit.bpm_input.select_all();
+        self.tempo_edit.bpm_session = Some(session);
         self.tempo_edit.bpm_editing = true;
         cx.notify();
+    }
+
+    /// Nudge the inline BPM draft by `steps` arrow-key increments (fractional
+    /// multipliers allowed for coarse/fine). No-op unless the editor is open.
+    /// Returns `true` when the draft changed so the caller can consume the key.
+    pub(super) fn nudge_bpm_edit(&mut self, steps: f64, cx: &mut Context<Self>) -> bool {
+        let Some(session) = self.tempo_edit.bpm_session else {
+            return false;
+        };
+        let next = session.nudge_draft(&self.tempo_edit.bpm_input.value, steps);
+        self.tempo_edit.bpm_input.set_value(next);
+        self.tempo_edit.bpm_input.select_all();
+        cx.notify();
+        true
     }
 
     /// Commit the inline BPM editor: parse the field and apply to the active
@@ -2405,8 +2428,16 @@ impl StudioLayout {
         if !self.tempo_edit.bpm_editing {
             return;
         }
-        let parsed = self.tempo_edit.bpm_input.value.trim().parse::<f32>().ok();
+        // Parse + clamp through the shared numeric session so an invalid or
+        // intermediate draft ("", ".", "abc") commits nothing (no model
+        // mutation), and a valid draft yields exactly one clamped value.
+        let parsed = self
+            .tempo_edit
+            .bpm_session
+            .and_then(|session| session.commit(&self.tempo_edit.bpm_input.value))
+            .map(|bpm| bpm as f32);
         self.tempo_edit.bpm_editing = false;
+        self.tempo_edit.bpm_session = None;
         if let Some(bpm) = parsed {
             let target_point_id = {
                 let state = &self.timeline.read(cx).state;
@@ -2431,6 +2462,7 @@ impl StudioLayout {
             return;
         }
         self.tempo_edit.bpm_editing = false;
+        self.tempo_edit.bpm_session = None;
         cx.notify();
     }
 

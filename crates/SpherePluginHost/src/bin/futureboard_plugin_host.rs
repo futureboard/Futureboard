@@ -2168,12 +2168,24 @@ fn schedule_unified_editor_attach(
     eprintln!(
         "[editor-open] 06 instance_lookup ok insert_id={plugin_instance_id} plugin={display_title}"
     );
-    if !platform::is_window(parent_hwnd) {
+    // Host-owned / detached: `parent_hwnd` is only an optional owner/DPI
+    // reference for the host's own top-level window — never a SetParent target.
+    // On Linux the GTK editor ignores it entirely, so 0 (or a stale XID from a
+    // pure-Wayland GPUI surface) must not block OpenEditorWithParentHwnd →
+    // embed_editor → open_editor_linux. Legacy main-owned child embedding still
+    // requires a real parent window.
+    let detached_owner = editor_mode_prefers_async_attach(&editor_mode);
+    if !detached_owner && !platform::is_window(parent_hwnd) {
         eprintln!(
             "[editor-open] shell/parent invalid plugin={display_title} insert={plugin_instance_id} hwnd=0x{parent_hwnd:x} result=failed"
         );
         emit_attach_failed(out, plugin_instance_id, "parent_hwnd is not a valid window");
         return;
+    }
+    if detached_owner && parent_hwnd != 0 && !platform::is_window(parent_hwnd) {
+        eprintln!(
+            "[editor-open] host-owned owner_ref 0x{parent_hwnd:x} not a live window; continuing with host-owned top-level (Linux GTK / Win32 detached)"
+        );
     }
     if width < MIN_EDITOR_ATTACH_SIZE || height < MIN_EDITOR_ATTACH_SIZE {
         eprintln!(

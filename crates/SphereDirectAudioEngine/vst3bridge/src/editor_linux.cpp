@@ -1,6 +1,6 @@
 // editor_linux.cpp — GTK4 + X11 IPlugView embedding for Linux
 //
-// VST3 on Linux uses kPlatformTypeX11EmbedWindowID ("XcbWindow"):
+// VST3 on Linux uses kPlatformTypeX11EmbedWindowID ("X11EmbedWindowID"):
 // the host provides an X11 Window ID; the plugin uses the XEmbed protocol
 // to reparent its own window inside ours.
 //
@@ -15,7 +15,7 @@
 //    with a clear error message — VST3 Wayland embedding is not yet standard.
 //
 // VST3 spec reference:
-//   pluginterfaces/gui/iplugview.h — kPlatformTypeX11EmbedWindowID = "XcbWindow"
+//   pluginterfaces/gui/iplugview.h — kPlatformTypeX11EmbedWindowID = "X11EmbedWindowID"
 
 #include <condition_variable>
 #include <cstdio>
@@ -345,10 +345,18 @@ static gboolean idle_open_editor(gpointer user_data) {
     int editor_width  = task->width  > 0 ? task->width  : 820;
     int editor_height = task->height > 0 ? task->height : 560;
 
-    if (!sphere_daux_editor_create_view(proc, "XcbWindow",
+    // Official VST3 platform type string (NOT the incorrect "XcbWindow" alias
+    // some hosts historically used). Surge XT / VSTGUI / SDK editorhost all
+    // check isPlatformTypeSupported("X11EmbedWindowID").
+    // Use the literal: Steinberg::kPlatformTypeX11EmbedWindowID is a non-
+    // constexpr FIDString (= const char*) in the SDK headers.
+    const char* kLinuxPlatformType = Steinberg::kPlatformTypeX11EmbedWindowID;
+
+    if (!sphere_daux_editor_create_view(proc, kLinuxPlatformType,
                                         &editor_width, &editor_height)) {
         std::fprintf(stderr,
-                     "[SphereVST3/linux] create_view('XcbWindow') failed\n");
+                     "[SphereVST3/linux] create_view('%s') failed\n",
+                     kLinuxPlatformType);
         gtk_window_destroy(GTK_WINDOW(window));
         goto done;
     }
@@ -367,7 +375,7 @@ static gboolean idle_open_editor(gpointer user_data) {
 #endif
             sphere_daux_editor_set_error(
                 "DAUx VST3 editor: GDK backend is not X11 — "
-                "VST3 XEmbed requires an X11 display");
+                "VST3 XEmbed requires an X11 display (set GDK_BACKEND=x11)");
             std::fprintf(stderr,
                          "[SphereVST3/linux] GDK backend is not X11; "
                          "cannot obtain XID for VST3 embed\n");
@@ -382,8 +390,8 @@ static gboolean idle_open_editor(gpointer user_data) {
         // some GDK versions; gdk_x11_surface_get_xid forces it).
         Window xid = gdk_x11_surface_get_xid(surface);
         std::fprintf(stderr,
-                     "[SphereVST3/linux] X11 XID=0x%lx w=%d h=%d\n",
-                     xid, editor_width, editor_height);
+                     "[SphereVST3/linux] X11 XID=0x%lx w=%d h=%d platform=%s\n",
+                     xid, editor_width, editor_height, kLinuxPlatformType);
 
         // ── Install IPlugFrame + IRunLoop BEFORE attached() ───────────────
         // The plug-in queries the frame for Linux::IRunLoop during attached()
@@ -392,15 +400,19 @@ static gboolean idle_open_editor(gpointer user_data) {
         auto* frame = new LinuxRunLoopFrame(proc, GTK_WINDOW(window));
         sphere_daux_editor_set_frame(proc, frame);
 
+        // Map the host window before attach — Steinberg editorhost and VSTGUI
+        // XEmbed expect a mapped parent XID when the plug-in reparents.
+        gtk_window_present(GTK_WINDOW(window));
+
         // ── Attach IPlugView ──────────────────────────────────────────────
-        // kPlatformTypeX11EmbedWindowID = "XcbWindow"
-        // Pass the X11 Window ID cast to void*.
+        // Pass the X11 Window ID cast to void* (XEmbed parent).
         if (!sphere_daux_editor_attach_view(proc,
                                             reinterpret_cast<void*>(
                                                 static_cast<uintptr_t>(xid)),
-                                            "XcbWindow")) {
+                                            kLinuxPlatformType)) {
             std::fprintf(stderr,
-                         "[SphereVST3/linux] attach_view('XcbWindow') failed\n");
+                         "[SphereVST3/linux] attach_view('%s') failed\n",
+                         kLinuxPlatformType);
             sphere_daux_editor_set_frame(proc, nullptr);
             delete frame;
             gtk_window_destroy(GTK_WINDOW(window));
@@ -452,9 +464,6 @@ static gboolean idle_open_editor(gpointer user_data) {
             close_ctx,
             [](gpointer data, GClosure*) { delete static_cast<CloseCtx*>(data); },
             G_CONNECT_DEFAULT);
-
-        // ── Show the window ───────────────────────────────────────────────
-        gtk_window_present(GTK_WINDOW(window));
 
         std::fprintf(stderr,
                      "[SphereVST3/linux] editor opened handle=%llu "

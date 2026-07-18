@@ -33,7 +33,7 @@ void sphere_daux_editor_signal_user_close(SphereDauxVst3Processor* proc);
 /// Ask the IEditController to create a native view and query the plugin's
 /// preferred window size.
 ///
-/// platform_type  "NSView" on macOS | "XcbWindow" on Linux.
+/// platform_type  "NSView" on macOS | "X11EmbedWindowID" on Linux.
 /// out_width / out_height  updated to the plugin's preferred size when
 ///   available; left unchanged if the plugin has no preference.
 ///

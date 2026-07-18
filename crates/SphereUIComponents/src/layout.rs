@@ -2037,9 +2037,23 @@ impl StudioLayout {
             "midi:open-editor" | "editor:open-midi-window" => {
                 self.open_midi_editor_external_window(owner_bounds, cx)
             }
-            "midi:select-all" | "midi:delete-selected" | "midi:quantize" | "midi:fit-notes" => {
-                self.dispatch_midi_editor_menu_command(command_id, cx)
-            }
+            "midi:select-all"
+            | "midi:delete-selected"
+            | "midi:duplicate-selected"
+            | "midi:quantize"
+            | "midi:fit-notes"
+            | "midi:nudge-left"
+            | "midi:nudge-right"
+            | "midi:transpose-up"
+            | "midi:transpose-down"
+            | "midi:transpose-octave-up"
+            | "midi:transpose-octave-down"
+            | "midi:velocity-increase"
+            | "midi:velocity-decrease"
+            | "midi:toggle-snap"
+            | "midi:tool-select"
+            | "midi:tool-draw"
+            | "midi:tool-line" => self.dispatch_midi_editor_menu_command(command_id, cx),
             // Articulation assignment / lane commands route to whichever MIDI
             // editor (docked or floating) is active, like the entries above.
             cmd if cmd.starts_with("midi:articulation-") || cmd.starts_with("midi:lane-") => {

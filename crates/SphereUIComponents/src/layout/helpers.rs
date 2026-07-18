@@ -91,6 +91,7 @@ pub(super) fn is_midi_routable_edit_command(command_id: &str) -> bool {
             | "edit:paste"
             | "edit:duplicate"
             | "edit:delete"
+            | "edit:delete-backspace"
             | "clip:delete"
             | "clip:duplicate"
     )
@@ -285,6 +286,12 @@ mod transport_binding_tests {
     /// project-save path. If a refactor ever mapped a save id onto a transport
     /// action (or Record onto Save), clicking Save could toggle recording and
     /// clicking Record could save — the exact regression class this file guards.
+    #[test]
+    fn midi_focus_routes_both_delete_keys_to_the_editor() {
+        assert!(is_midi_routable_edit_command("edit:delete"));
+        assert!(is_midi_routable_edit_command("edit:delete-backspace"));
+    }
+
     #[test]
     fn save_command_ids_are_not_transport_actions() {
         for save_id in ["project:save", "project:save-as", "project:save-copy"] {

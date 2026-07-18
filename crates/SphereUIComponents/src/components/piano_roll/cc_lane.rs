@@ -213,6 +213,157 @@ impl PianoRoll {
         });
     }
 
+    pub(super) fn begin_cc_select(
+        &mut self,
+        clip_id: String,
+        kind: MidiControllerKind,
+        lx: f32,
+        ly: f32,
+        mode: MarqueeSelectionMode,
+        cx: &mut Context<Self>,
+    ) {
+        self.cc_selection_before_marquee = self.cc_selection.clone();
+        self.drag = PianoDrag::CcSelect {
+            clip_id,
+            kind,
+            start_x: lx,
+            start_y: ly,
+            current_x: lx,
+            current_y: ly,
+            mode,
+            dragging: false,
+        };
+        cx.notify();
+    }
+
+    pub(super) fn update_cc_select(&mut self, lx: f32, ly: f32, cx: &mut Context<Self>) {
+        let (clip_id, kind, start_x, start_y, mode, was_dragging) = match &self.drag {
+            PianoDrag::CcSelect {
+                clip_id,
+                kind,
+                start_x,
+                start_y,
+                mode,
+                dragging,
+                ..
+            } => (clip_id.clone(), *kind, *start_x, *start_y, *mode, *dragging),
+            _ => return,
+        };
+        let dx = lx - start_x;
+        let dy = ly - start_y;
+        let dragging = was_dragging || (dx * dx + dy * dy).sqrt() >= MARQUEE_DRAG_THRESHOLD;
+        if let PianoDrag::CcSelect {
+            current_x,
+            current_y,
+            dragging: state_dragging,
+            ..
+        } = &mut self.drag
+        {
+            *current_x = lx;
+            *current_y = ly;
+            *state_dragging = dragging;
+        }
+        if !dragging {
+            return;
+        }
+        let (view_w, view_h) = self.cc_view_size();
+        let rect = Self::normalized_marquee_rect(start_x, start_y, lx, ly, view_w, view_h);
+        let hits: HashSet<u64> = self
+            .timeline
+            .read(cx)
+            .state
+            .controller_lane_points(&clip_id, kind)
+            .map(|points| {
+                points
+                    .iter()
+                    .filter(|point| {
+                        let x = self.beat_to_x(point.beat);
+                        let y = Self::controller_y_for_value(point.value, view_h);
+                        x >= rect.0 && x <= rect.2 && y >= rect.1 && y <= rect.3
+                    })
+                    .map(|point| point.id)
+                    .collect()
+            })
+            .unwrap_or_default();
+        self.cc_selection =
+            Self::apply_marquee_mode(&self.cc_selection_before_marquee, &hits, mode);
+        cx.notify();
+    }
+
+    pub(super) fn delete_selected_cc_points(&mut self, cx: &mut Context<Self>) {
+        if self.cc_selection.is_empty() {
+            return;
+        }
+        let Some(clip_id) = self.editing_clip_id(cx) else {
+            return;
+        };
+        let kind = self.active_cc;
+        let prev = self
+            .timeline
+            .read(cx)
+            .state
+            .controller_points_snapshot(&clip_id, kind);
+        let selected = self.cc_selection.clone();
+        let next: Vec<MidiControllerPoint> = prev
+            .iter()
+            .filter(|point| !selected.contains(&point.id))
+            .cloned()
+            .collect();
+        self.cc_edit_prev = Some(prev);
+        self.cc_edit_target = Some((clip_id.clone(), kind));
+        self.timeline.update(cx, |timeline, tcx| {
+            timeline
+                .state
+                .set_controller_lane_points(&clip_id, kind, next);
+            tcx.notify();
+        });
+        self.cc_selection.clear();
+        self.commit_cc_edit(cx);
+        cx.notify();
+    }
+
+    pub(super) fn duplicate_selected_cc_points(&mut self, cx: &mut Context<Self>) {
+        if self.cc_selection.is_empty() {
+            return;
+        }
+        let Some(clip_id) = self.editing_clip_id(cx) else {
+            return;
+        };
+        let kind = self.active_cc;
+        let prev = self
+            .timeline
+            .read(cx)
+            .state
+            .controller_points_snapshot(&clip_id, kind);
+        let offset = self.step_beats().max(1.0e-3);
+        let mut next = prev.clone();
+        let mut new_ids = HashSet::new();
+        for point in prev
+            .iter()
+            .filter(|point| self.cc_selection.contains(&point.id))
+        {
+            let duplicate = MidiControllerPoint::new(point.beat + offset, point.value);
+            new_ids.insert(duplicate.id);
+            next.push(duplicate);
+        }
+        next.sort_by(|a, b| {
+            a.beat
+                .partial_cmp(&b.beat)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        self.cc_edit_prev = Some(prev);
+        self.cc_edit_target = Some((clip_id.clone(), kind));
+        self.timeline.update(cx, |timeline, tcx| {
+            timeline
+                .state
+                .set_controller_lane_points(&clip_id, kind, next);
+            tcx.notify();
+        });
+        self.cc_selection = new_ids;
+        self.commit_cc_edit(cx);
+        cx.notify();
+    }
+
     /// Generate a shaped CC curve over the selected points' beat span (or one
     /// bar from the click beat when nothing is selected). Replaces points in
     /// that span; commits as one `SetControllerPoints` undo entry.
@@ -275,6 +426,7 @@ impl PianoRoll {
             .into_iter()
             .filter(|p| p.beat < lo_beat - 1.0e-4 || p.beat > hi_beat + 1.0e-4)
             .collect();
+        let mut generated_ids = HashSet::new();
 
         if kind == CcCurveKind::Humanize {
             for p in prev
@@ -282,10 +434,9 @@ impl PianoRoll {
                 .filter(|p| p.beat >= lo_beat - 1.0e-4 && p.beat <= hi_beat + 1.0e-4)
             {
                 let jitter = (CcCurveKind::Humanize.sample(p.beat.fract(), 0.0, 1.0) - 0.5) * 0.12;
-                points.push(MidiControllerPoint::new(
-                    p.beat,
-                    (p.value + jitter).clamp(0.0, 1.0),
-                ));
+                let point = MidiControllerPoint::new(p.beat, (p.value + jitter).clamp(0.0, 1.0));
+                generated_ids.insert(point.id);
+                points.push(point);
             }
         } else {
             let span = (hi_beat - lo_beat).max(step);
@@ -298,7 +449,9 @@ impl PianoRoll {
                     (beat - lo_beat) / span
                 };
                 let value = kind.sample(t, from, to);
-                points.push(MidiControllerPoint::new(beat, value));
+                let point = MidiControllerPoint::new(beat, value);
+                generated_ids.insert(point.id);
+                points.push(point);
             }
         }
 
@@ -310,6 +463,7 @@ impl PianoRoll {
             tcx.notify();
         });
         self.commit_cc_edit(cx);
+        self.cc_selection = generated_ids;
         self.open_cc_curve_menu = None;
         cx.notify();
     }
@@ -320,6 +474,7 @@ impl PianoRoll {
         &mut self,
         lx: f32,
         ly: f32,
+        unsnap: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -338,12 +493,13 @@ impl PianoRoll {
                 .controller_points_snapshot(&clip_id, kind),
         );
         self.cc_edit_target = Some((clip_id.clone(), kind));
-        let anchor_beat = self.snap_beats(self.x_to_beat(lx)).max(0.0);
+        let anchor_beat = self.snap_beats_live(self.x_to_beat(lx), unsnap).max(0.0);
         let (_, cc_h) = self.cc_view_size();
         let anchor_value = (1.0 - (ly / cc_h.max(1.0))).clamp(0.0, 1.0);
         self.drag = PianoDrag::CcLine {
             anchor_beat,
             anchor_value,
+            unsnap,
         };
         self.cc_line_to(anchor_beat, anchor_value, lx, ly, cx);
         cx.notify();
@@ -367,7 +523,11 @@ impl PianoRoll {
             return;
         };
         let kind = self.active_cc;
-        let cur_beat = self.snap_beats(self.x_to_beat(lx)).max(0.0);
+        let unsnap = match &self.drag {
+            PianoDrag::CcLine { unsnap, .. } => *unsnap,
+            _ => false,
+        };
+        let cur_beat = self.snap_beats_live(self.x_to_beat(lx), unsnap).max(0.0);
         let (_, cc_h) = self.cc_view_size();
         let cur_value = (1.0 - (ly / cc_h.max(1.0))).clamp(0.0, 1.0);
         self.drag_value_status = Some(format!(
@@ -561,6 +721,36 @@ impl PianoRoll {
             .collect()
     }
 
+    fn build_cc_selection_overlay(&self) -> Option<gpui::AnyElement> {
+        let PianoDrag::CcSelect {
+            start_x,
+            start_y,
+            current_x,
+            current_y,
+            dragging: true,
+            ..
+        } = &self.drag
+        else {
+            return None;
+        };
+        let (view_w, view_h) = self.cc_view_size();
+        let (left, top, right, bottom) = Self::normalized_marquee_rect(
+            *start_x, *start_y, *current_x, *current_y, view_w, view_h,
+        );
+        Some(
+            div()
+                .absolute()
+                .left(px(left))
+                .top(px(top))
+                .w(px((right - left).max(1.0)))
+                .h(px((bottom - top).max(1.0)))
+                .bg(Colors::with_alpha(Colors::accent_primary(), 0.15))
+                .border(px(1.0))
+                .border_color(Colors::with_alpha(Colors::accent_primary(), 0.85))
+                .into_any_element(),
+        )
+    }
+
     /// The CC strip (right column) plus its captured bounds + interaction.
     pub(super) fn render_cc_lane(
         &mut self,
@@ -591,6 +781,7 @@ impl PianoRoll {
                 .child("Click to draw · Shift-drag line · Right-click curves")
         });
         let curve_menu = self.build_cc_curve_menu(cx);
+        let selection_overlay = self.build_cc_selection_overlay();
         let cc_bounds = self.cc_bounds.clone();
         let canvas = canvas(
             move |bounds, _w, _cx| cc_bounds.set(Some(bounds)),
@@ -612,6 +803,7 @@ impl PianoRoll {
             .children(grid)
             .child(line)
             .children(points)
+            .children(selection_overlay)
             .children(empty_state)
             .children(value_chip_el)
             .children(curve_menu)
@@ -623,16 +815,19 @@ impl PianoRoll {
                     if let Some((lx, ly)) = this.cc_local(ev.position) {
                         // The Line tool draws a ramp; Shift is retained as the
                         // established temporary line gesture from other tools.
-                        if this.tool == PianoTool::Line || ev.modifiers.shift {
-                            this.begin_cc_line(lx, ly, window, cx);
+                        if this.tool == PianoTool::Line
+                            || (ev.modifiers.shift && this.tool != PianoTool::Select)
+                        {
+                            let unsnap = this.tool == PianoTool::Line && ev.modifiers.shift;
+                            this.begin_cc_line(lx, ly, unsnap, window, cx);
                             return;
                         }
                         // Grab an existing point to move it; Ctrl/Cmd toggles
                         // multi-selection. Empty click clears selection and paints.
                         if let Some(cid) = this.editing_clip_id(cx) {
                             if let Some(id) = this.cc_point_at(cx, &cid, lx, ly) {
-                                let additive = ev.modifiers.control || ev.modifiers.platform;
-                                if additive {
+                                let toggle = ev.modifiers.control || ev.modifiers.platform;
+                                if toggle {
                                     if this.cc_selection.contains(&id) {
                                         this.cc_selection.remove(&id);
                                     } else {
@@ -641,12 +836,24 @@ impl PianoRoll {
                                     cx.notify();
                                     return;
                                 }
+                                if ev.modifiers.shift && this.tool == PianoTool::Select {
+                                    this.cc_selection.insert(id);
+                                    cx.notify();
+                                    return;
+                                }
                                 this.begin_cc_move(id, ev.modifiers.shift, window, cx);
                                 return;
                             }
                         }
-                        this.cc_selection.clear();
-                        this.begin_cc_paint(false, lx, ly, window, cx);
+                        if this.tool == PianoTool::Select {
+                            let mode = MarqueeSelectionMode::from_modifiers(&ev.modifiers);
+                            if let Some(clip_id) = this.editing_clip_id(cx) {
+                                this.begin_cc_select(clip_id, this.active_cc, lx, ly, mode, cx);
+                            }
+                        } else {
+                            this.cc_selection.clear();
+                            this.begin_cc_paint(false, lx, ly, window, cx);
+                        }
                     }
                 }),
             )

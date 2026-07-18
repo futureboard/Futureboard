@@ -562,6 +562,7 @@ enum PianoDrag {
         current_beat: f32,
         current_value: u8,
         curve: VelocityCurve,
+        unsnap: bool,
     },
     /// Range/lasso selection in the velocity lane. It updates the same note-id
     /// selection used by the piano grid; velocity has no separate selection.
@@ -632,6 +633,18 @@ enum PianoDrag {
     CcLine {
         anchor_beat: f32,
         anchor_value: f32,
+        unsnap: bool,
+    },
+    /// Marquee selection for points in the active controller lane.
+    CcSelect {
+        clip_id: String,
+        kind: MidiControllerKind,
+        start_x: f32,
+        start_y: f32,
+        current_x: f32,
+        current_y: f32,
+        mode: MarqueeSelectionMode,
+        dragging: bool,
     },
     /// Drag a direction articulation event (by transient id) to a new beat.
     /// Pre-drag events are snapshotted in `art_edit_prev`; one undo on release.
@@ -717,6 +730,8 @@ pub struct PianoRoll {
     cc_edit_target: Option<(String, MidiControllerKind)>,
     /// Selected CC point ids in the active controller lane (multi-edit).
     cc_selection: HashSet<u64>,
+    /// Point selection captured when a CC marquee starts.
+    cc_selection_before_marquee: HashSet<u64>,
     /// Right-click CC curve context menu (local strip px of the click).
     open_cc_curve_menu: Option<(f32, f32)>,
     /// Last clip the editor rendered — used to emit the `open_editor` debug log
@@ -911,6 +926,7 @@ impl PianoRoll {
             cc_edit_prev: None,
             cc_edit_target: None,
             cc_selection: HashSet::new(),
+            cc_selection_before_marquee: HashSet::new(),
             open_cc_curve_menu: None,
             last_editing_clip: None,
             active_preview_note: None,
@@ -946,6 +962,7 @@ impl PianoRoll {
             self.drag = PianoDrag::None;
             self.cc_edit_prev = None;
             self.cc_edit_target = None;
+            self.cc_selection_before_marquee.clear();
             self.art_edit_prev = None;
             self.selected_articulation = None;
             self.hover_beat = None;
@@ -989,6 +1006,7 @@ impl PianoRoll {
             | PianoDrag::CcPaint { .. }
             | PianoDrag::CcMove { .. }
             | PianoDrag::CcLine { .. }
+            | PianoDrag::CcSelect { .. }
             | PianoDrag::ArtMove { .. }
             | PianoDrag::RulerSeek
             | PianoDrag::Pan { .. } => false,
@@ -1098,6 +1116,13 @@ impl PianoRoll {
                 .drag_value_status
                 .clone()
                 .unwrap_or_else(|| "CC line".to_string()),
+            PianoDrag::CcSelect { mode, dragging, .. } => {
+                if *dragging {
+                    format!("CC select · {}", mode.label())
+                } else {
+                    "CC select".to_string()
+                }
+            }
             PianoDrag::ArtMove { .. } => self
                 .drag_value_status
                 .clone()
@@ -1190,22 +1215,75 @@ impl PianoRoll {
     /// Menu / command-bar actions for the MIDI editor (shared menu IDs).
     pub fn run_menu_command(&mut self, command_id: &str, cx: &mut Context<Self>) {
         match command_id {
-            "midi:select-all" => {
+            "midi:select-all" | "midi.select_all" => {
                 let Some(clip_id) = self.editing_clip_id(cx) else {
                     return;
                 };
-                let all: Vec<u64> = self
-                    .timeline
-                    .read(cx)
-                    .state
-                    .midi_clip_notes(&clip_id)
-                    .map(|notes| notes.iter().map(|n| n.id).collect())
-                    .unwrap_or_default();
-                self.selection = all.into_iter().collect();
+                if self.lane_view == PianoLaneView::Controller {
+                    self.cc_selection = self
+                        .timeline
+                        .read(cx)
+                        .state
+                        .controller_lane_points(&clip_id, self.active_cc)
+                        .map(|points| points.iter().map(|point| point.id).collect())
+                        .unwrap_or_default();
+                } else {
+                    self.selection = self
+                        .timeline
+                        .read(cx)
+                        .state
+                        .midi_clip_notes(&clip_id)
+                        .map(|notes| notes.iter().map(|note| note.id).collect())
+                        .unwrap_or_default();
+                }
                 cx.notify();
             }
-            "midi:delete-selected" => self.delete_selection(cx),
-            "midi:quantize" => self.quantize_selection(cx),
+            "midi:delete-selected" | "midi.delete" => {
+                if self.lane_view == PianoLaneView::Controller {
+                    self.delete_selected_cc_points(cx)
+                } else {
+                    self.delete_selection(cx)
+                }
+            }
+            "midi:duplicate-selected" | "midi.duplicate" => {
+                if self.lane_view == PianoLaneView::Controller {
+                    self.duplicate_selected_cc_points(cx)
+                } else {
+                    self.duplicate_selection(false, cx)
+                }
+            }
+            "midi:quantize" | "midi.quantize" => self.quantize_selection(cx),
+            "midi:nudge-left" => self.nudge_selected_start(-self.step_beats(), cx),
+            "midi:nudge-right" => self.nudge_selected_start(self.step_beats(), cx),
+            "midi:transpose-up" | "midi.transpose_up" => self.transpose_selection(1, cx),
+            "midi:transpose-down" | "midi.transpose_down" => self.transpose_selection(-1, cx),
+            "midi:transpose-octave-up" => self.transpose_selection(12, cx),
+            "midi:transpose-octave-down" => self.transpose_selection(-12, cx),
+            "midi:velocity-increase" | "midi.velocity_increase" => {
+                self.nudge_selected_velocity(1, cx)
+            }
+            "midi:velocity-decrease" | "midi.velocity_decrease" => {
+                self.nudge_selected_velocity(-1, cx)
+            }
+            "midi:toggle-snap" | "midi.toggle_snap" => {
+                self.snap_on = !self.snap_on;
+                cx.notify();
+            }
+            "midi:tool-select" | "midi.tool.select" => {
+                self.cancel_active_gesture(cx);
+                self.tool = PianoTool::Select;
+                cx.notify();
+            }
+            "midi:tool-draw" | "midi.tool.draw" => {
+                self.cancel_active_gesture(cx);
+                self.tool = PianoTool::Draw;
+                cx.notify();
+            }
+            "midi:tool-line" | "midi.tool.line" => {
+                self.cancel_active_gesture(cx);
+                self.tool = PianoTool::Line;
+                cx.notify();
+            }
             "midi:fit-notes" => {
                 if let Some(cid) = self.editing_clip_id(cx) {
                     self.fit_piano_roll_to_notes(cx, &cid);
@@ -1694,6 +1772,13 @@ impl PianoRoll {
         if matches!(self.drag, PianoDrag::VelocitySelect { .. }) {
             self.selection = self.selection_before_marquee.clone();
             self.selection_before_marquee.clear();
+            self.drag = PianoDrag::None;
+            cx.notify();
+            return;
+        }
+        if matches!(self.drag, PianoDrag::CcSelect { .. }) {
+            self.cc_selection = self.cc_selection_before_marquee.clone();
+            self.cc_selection_before_marquee.clear();
             self.drag = PianoDrag::None;
             cx.notify();
             return;
@@ -2492,7 +2577,9 @@ impl PianoRoll {
         };
         let selection_modifier =
             event.modifiers.shift || event.modifiers.control || event.modifiers.platform;
-        if self.tool == PianoTool::Select || selection_modifier {
+        if self.tool == PianoTool::Line {
+            self.begin_velocity_line(clip_id, lx, ly, event.modifiers.shift, cx);
+        } else if self.tool == PianoTool::Select || selection_modifier {
             let mode = MarqueeSelectionMode::from_modifiers(&event.modifiers);
             self.selection_before_marquee = self.selection.clone();
             self.drag = PianoDrag::VelocitySelect {
@@ -2505,8 +2592,6 @@ impl PianoRoll {
                 dragging: false,
             };
             cx.notify();
-        } else if self.tool == PianoTool::Line {
-            self.begin_velocity_line(clip_id, lx, ly, cx);
         } else {
             self.begin_velocity_paint(clip_id, lx, ly, cx);
         }
@@ -2618,8 +2703,15 @@ impl PianoRoll {
         });
     }
 
-    fn begin_velocity_line(&mut self, clip_id: String, lx: f32, ly: f32, cx: &mut Context<Self>) {
-        let anchor_beat = self.snap_beats(self.x_to_beat(lx));
+    fn begin_velocity_line(
+        &mut self,
+        clip_id: String,
+        lx: f32,
+        ly: f32,
+        unsnap: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let anchor_beat = self.snap_beats_live(self.x_to_beat(lx), unsnap);
         let anchor_value = self.velocity_from_local_y(ly);
         let original_notes = self.velocity_gesture_notes(cx, &clip_id);
         self.drag = PianoDrag::VelocityLine {
@@ -2631,13 +2723,18 @@ impl PianoRoll {
             current_beat: anchor_beat,
             current_value: anchor_value,
             curve: VelocityCurve::Linear,
+            unsnap,
         };
         self.update_velocity_line(lx, ly, cx);
         cx.notify();
     }
 
     fn update_velocity_line(&mut self, lx: f32, ly: f32, cx: &mut Context<Self>) {
-        let cursor_beat = self.snap_beats(self.x_to_beat(lx));
+        let unsnap = match &self.drag {
+            PianoDrag::VelocityLine { unsnap, .. } => *unsnap,
+            _ => false,
+        };
+        let cursor_beat = self.snap_beats_live(self.x_to_beat(lx), unsnap);
         let cursor_value = self.velocity_from_local_y(ly);
         let selection = self.selection.clone();
         let (clip_id, updates, affected): (String, Vec<(u64, u8)>, HashSet<u64>) = match &self.drag
@@ -2819,6 +2916,9 @@ impl PianoRoll {
                 return;
             }
             PianoDrag::VelocityLine { .. } => {
+                if let PianoDrag::VelocityLine { unsnap, .. } = &mut self.drag {
+                    *unsnap = event.modifiers.shift;
+                }
                 if let Some((lx, ly)) = self.cc_local(event.position) {
                     self.update_velocity_line(lx, ly, cx);
                 }
@@ -2827,6 +2927,12 @@ impl PianoRoll {
             PianoDrag::VelocitySelect { .. } => {
                 if let Some((lx, ly)) = self.cc_local(event.position) {
                     self.update_velocity_select(lx, ly, cx);
+                }
+                return;
+            }
+            PianoDrag::CcSelect { .. } => {
+                if let Some((lx, ly)) = self.cc_local(event.position) {
+                    self.update_cc_select(lx, ly, cx);
                 }
                 return;
             }
@@ -2848,7 +2954,11 @@ impl PianoRoll {
             PianoDrag::CcLine {
                 anchor_beat,
                 anchor_value,
+                ..
             } => {
+                if let PianoDrag::CcLine { unsnap, .. } = &mut self.drag {
+                    *unsnap = self.tool == PianoTool::Line && event.modifiers.shift;
+                }
                 if let Some((lx, ly)) = self.cc_local(event.position) {
                     self.cc_line_to(anchor_beat, anchor_value, lx, ly, cx);
                 }
@@ -3051,6 +3161,7 @@ impl PianoRoll {
             PianoDrag::CcPaint { .. }
             | PianoDrag::CcMove { .. }
             | PianoDrag::CcLine { .. }
+            | PianoDrag::CcSelect { .. }
             | PianoDrag::ArtMove { .. } => {}
             PianoDrag::RulerSeek | PianoDrag::Pan { .. } => {}
         }
@@ -3138,6 +3249,17 @@ impl PianoRoll {
             );
             self.piano_key_drag_active = false;
             self.key_lane_pressed_pitch = None;
+            cx.notify();
+            return;
+        }
+        if matches!(self.drag, PianoDrag::CcSelect { .. }) {
+            let drag = std::mem::replace(&mut self.drag, PianoDrag::None);
+            if let PianoDrag::CcSelect { mode, dragging, .. } = drag {
+                if !dragging && mode == MarqueeSelectionMode::Replace {
+                    self.cc_selection.clear();
+                }
+            }
+            self.cc_selection_before_marquee.clear();
             cx.notify();
             return;
         }
@@ -3343,6 +3465,7 @@ impl PianoRoll {
             PianoDrag::CcPaint { .. }
             | PianoDrag::CcMove { .. }
             | PianoDrag::CcLine { .. }
+            | PianoDrag::CcSelect { .. }
             | PianoDrag::ArtMove { .. } => {}
             PianoDrag::RulerSeek | PianoDrag::Pan { .. } => {}
         }
@@ -3367,6 +3490,12 @@ impl PianoRoll {
             // Articulation lane focus: Delete removes the selected direction
             // event; notes keep their own Delete handling below.
             "delete" | "backspace"
+                if self.lane_view == PianoLaneView::Controller && !self.cc_selection.is_empty() =>
+            {
+                cx.stop_propagation();
+                self.delete_selected_cc_points(cx);
+            }
+            "delete" | "backspace"
                 if self.lane_view == PianoLaneView::Articulations
                     && self.selected_articulation.is_some() =>
             {
@@ -3376,6 +3505,17 @@ impl PianoRoll {
             "delete" | "backspace" if !self.selection.is_empty() => {
                 cx.stop_propagation();
                 self.delete_selection(cx);
+            }
+            "a" if ctrl && self.lane_view == PianoLaneView::Controller => {
+                cx.stop_propagation();
+                self.cc_selection = self
+                    .timeline
+                    .read(cx)
+                    .state
+                    .controller_lane_points(&clip_id, self.active_cc)
+                    .map(|points| points.iter().map(|point| point.id).collect())
+                    .unwrap_or_default();
+                cx.notify();
             }
             "a" if ctrl => {
                 cx.stop_propagation();
@@ -3410,6 +3550,10 @@ impl PianoRoll {
                 cx.stop_propagation();
                 self.paste_clipboard(cx);
             }
+            "d" if ctrl && self.lane_view == PianoLaneView::Controller => {
+                cx.stop_propagation();
+                self.duplicate_selected_cc_points(cx);
+            }
             "d" if ctrl => {
                 cx.stop_propagation();
                 self.duplicate_selection(shift, cx);
@@ -3423,7 +3567,11 @@ impl PianoRoll {
                 if !matches!(self.drag, PianoDrag::None) {
                     self.cancel_active_gesture(cx);
                 } else {
-                    self.selection.clear();
+                    if self.lane_view == PianoLaneView::Controller {
+                        self.cc_selection.clear();
+                    } else {
+                        self.selection.clear();
+                    }
                     cx.notify();
                 }
             }

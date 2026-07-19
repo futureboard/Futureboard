@@ -180,7 +180,7 @@ pub(crate) use status_bar_view::status_content_signature;
 pub(crate) use status_bar_view::StatusBarView;
 pub use stem_extractor_dialog::{
     open_stem_extractor_window, StemExtractJobState, StemExtractJobSummary,
-    StemExtractorDialogDefaults, StemExtractorWindow, STEM_EXTRACTOR_WINDOW_WIDTH,
+    StemExtractorDialogDefaults, StemExtractorWindow, StemSourceClip, STEM_EXTRACTOR_WINDOW_WIDTH,
 };
 pub use text_input::{text_field, TextInputAction, TextInputState};
 pub use virtual_keyboard::{

@@ -825,7 +825,13 @@ impl StemExtractorWindow {
 
     fn model_status_row(&self, target: gpui::Entity<Self>) -> impl IntoElement {
         let package = self.params.model.package();
-        let status = if self.model_installed {
+        let downloading = self.is_downloading();
+        let status = if let ModelDownloadUi::Running(progress) = &self.download_ui {
+            format!(
+                "Downloading… {:.0}% · {}",
+                progress.percent, progress.file_name
+            )
+        } else if self.model_installed {
             format!(
                 "Installed · {} file(s) · {}",
                 package.file_count(),
@@ -838,7 +844,6 @@ impl StemExtractorWindow {
                 package.approx_size_label()
             )
         };
-        let downloading = self.is_downloading();
         let can_download = !self.model_installed
             && !downloading
             && !matches!(self.state, StemExtractJobState::Running(_));
@@ -852,7 +857,9 @@ impl StemExtractorWindow {
                     .flex_1()
                     .min_w(px(0.0))
                     .text_size(px(11.0))
-                    .text_color(if self.model_installed {
+                    .text_color(if downloading {
+                        Colors::accent_primary()
+                    } else if self.model_installed {
                         Colors::text_secondary()
                     } else {
                         Colors::text_muted()

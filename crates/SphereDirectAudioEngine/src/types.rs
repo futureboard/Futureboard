@@ -611,6 +611,11 @@ pub struct JsRecordingResult {
     pub metadata_path: String,
     /// PCM encoding for the internal recording file, currently "s32le".
     pub sample_format: String,
+    /// Measured audio round-trip latency (output play-out + input capture) in
+    /// seconds. The UI shifts the committed take earlier by this much so a live
+    /// overdub lines up with what the performer heard. `0.0` when the backend
+    /// reports no timestamp (no auto-compensation, matching the old behaviour).
+    pub latency_seconds: f64,
     pub success: bool,
     pub error: Option<String>,
 }

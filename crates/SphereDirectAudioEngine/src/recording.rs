@@ -477,10 +477,20 @@ fn build_f32_input_stream(
     device
         .build_input_stream::<f32, _, _>(
             config,
-            move |data: &[f32], _info| {
+            move |data: &[f32], info| {
                 let ch = channels.max(1);
                 let frames = data.len() / ch;
                 shared.input_cb_count.fetch_add(1, Ordering::Relaxed);
+
+                // Publish the capture latency (ADC → callback) so the committed
+                // take can be pulled earlier by the real input delay. One atomic
+                // store from cpal's own timestamps — realtime-safe.
+                let in_ts = info.timestamp();
+                if let Some(delay) = in_ts.callback.duration_since(&in_ts.capture) {
+                    shared
+                        .record_input_latency_secs
+                        .store(f32_store(delay.as_secs_f32()), Ordering::Relaxed);
+                }
                 shared
                     .input_frames_received
                     .fetch_add(frames as u64, Ordering::Relaxed);
@@ -1065,9 +1075,26 @@ pub fn stop_recording(
             SphereAudioError::NativeError(format!("Recording finalization timed out: {e}"))
         })?;
 
+    // Round-trip latency the take must shift earlier by: the output play-out
+    // delay the performer heard plus the ADC→callback capture delay. Both are
+    // published from cpal timestamps during the take; either is 0 when the
+    // backend gives no timestamp, in which case no compensation is applied.
+    let latency_seconds = {
+        let out =
+            crate::engine::f32_load(session.shared.output_latency_secs.load(Ordering::Relaxed));
+        let inp = crate::engine::f32_load(
+            session
+                .shared
+                .record_input_latency_secs
+                .load(Ordering::Relaxed),
+        );
+        (out + inp).clamp(0.0, 1.0) as f64
+    };
+
     eprintln!(
-        "[SphereAudio] Recording stopped: {} file(s) finalized",
-        results.len()
+        "[SphereAudio] Recording stopped: {} file(s) finalized (round-trip latency {:.1} ms)",
+        results.len(),
+        latency_seconds * 1000.0
     );
 
     if dropped_blocks > 0 {
@@ -1091,6 +1118,7 @@ pub fn stop_recording(
             channels: r.channels,
             metadata_path: r.metadata_path,
             sample_format: r.sample_format,
+            latency_seconds,
             success: r.success,
             error: r.error,
         })

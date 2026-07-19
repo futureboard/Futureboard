@@ -427,6 +427,15 @@ pub struct SharedState {
     pub output_xruns: AtomicU64,
     /// Peak of the record capture (pre-file) for diagnostics.
     pub record_peak: AtomicU32,
+    /// Measured output-stream latency (callback → play-out) in seconds, stored
+    /// as f32 bits. Published by the output render callback from the cpal
+    /// timestamp; read at record-stop to auto-compensate the take position.
+    pub output_latency_secs: AtomicU32,
+    /// Measured recording-input latency (capture → callback) in seconds, f32
+    /// bits. Published by the take's capture callback. Together with
+    /// `output_latency_secs` this is the round-trip a recorded clip must shift
+    /// earlier by so live overdubs line up with what the player heard.
+    pub record_input_latency_secs: AtomicU32,
     /// Peak actually mixed to the monitor output for diagnostics.
     pub monitor_output_peak: AtomicU32,
 
@@ -524,6 +533,8 @@ impl Default for SharedState {
             record_ring_overruns: AtomicU64::new(0),
             output_xruns: AtomicU64::new(0),
             record_peak: AtomicU32::new(f32_store(0.0)),
+            output_latency_secs: AtomicU32::new(f32_store(0.0)),
+            record_input_latency_secs: AtomicU32::new(f32_store(0.0)),
             monitor_output_peak: AtomicU32::new(f32_store(0.0)),
             preview_ring: crate::input_ring::PreviewPeakRing::default(),
             recording_preview_active: AtomicBool::new(false),
@@ -3831,11 +3842,21 @@ where
     let stream = device
         .build_output_stream::<T, _, _>(
             config,
-            move |data: &mut [T], _info: &cpal::OutputCallbackInfo| {
+            move |data: &mut [T], info: &cpal::OutputCallbackInfo| {
                 // Dropout watchdog: time the whole callback (atomics only). The
                 // legacy in-process callback previously had no timing — only the
                 // DAUx backend did — so realtime dropouts went undetected here.
                 let cb_started = std::time::Instant::now();
+
+                // Publish the output play-out latency (callback → DAC) so a live
+                // recording can shift its take earlier by the real round-trip.
+                // cpal already computes these instants; this is one atomic store.
+                let out_ts = info.timestamp();
+                if let Some(delay) = out_ts.playback.duration_since(&out_ts.callback) {
+                    shared
+                        .output_latency_secs
+                        .store(f32_store(delay.as_secs_f32()), Ordering::Relaxed);
+                }
                 if ch > 0 {
                     for track in &mut runtime.tracks {
                         track.midi_block_events.clear();

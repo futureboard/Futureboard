@@ -454,3 +454,31 @@ pub fn profile_label(profile_id: &str) -> &'static str {
         .map(|p| p.label)
         .unwrap_or("Default")
 }
+
+#[cfg(test)]
+mod default_binding_tests {
+    use super::*;
+
+    /// The bare transport keys the studio relies on must resolve under the
+    /// built-in default profile. Regression guard: a broken reverse index (or a
+    /// default.json that drops one of these) silently kills the shortcut because
+    /// only Space has a hard-coded fallback in the key handler.
+    #[test]
+    fn default_profile_binds_core_transport_keys() {
+        let manager = KeymapManager::new(std::env::temp_dir());
+        let reverse = manager.dispatch_reverse();
+        assert_eq!(
+            reverse.get("r").map(String::as_str),
+            Some("transport:record"),
+            "R must trigger record on the default profile"
+        );
+        assert_eq!(
+            reverse.get("space").map(String::as_str),
+            Some("transport:play-pause")
+        );
+        assert_eq!(
+            reverse.get("s").map(String::as_str),
+            Some("clip:split-at-playhead")
+        );
+    }
+}

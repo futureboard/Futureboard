@@ -113,6 +113,51 @@ impl StudioLayout {
             })
             .collect();
 
+        // Auto-arm the record target. Both the "R" shortcut and the transport
+        // Record button route here; the most common reason Record appears to do
+        // nothing is a selected-but-not-armed track, which then fails the armed
+        // check below and reports only into `last_error`. When nothing is armed,
+        // arm the selected track (if it can record) so the ordinary "click a
+        // track, press Record" flow just works instead of silently failing.
+        let already_armed = {
+            let timeline = self.timeline.read(cx);
+            timeline.state.tracks.iter().any(|t| {
+                t.armed
+                    && matches!(
+                        t.track_type,
+                        TrackType::Audio | TrackType::Midi | TrackType::Instrument
+                    )
+            })
+        };
+        if !already_armed {
+            let arm_target = {
+                let timeline = self.timeline.read(cx);
+                timeline
+                    .state
+                    .selection
+                    .selected_track_id
+                    .clone()
+                    .filter(|id| {
+                        timeline
+                            .state
+                            .find_track(id)
+                            .map(|t| {
+                                matches!(
+                                    t.track_type,
+                                    TrackType::Audio | TrackType::Midi | TrackType::Instrument
+                                )
+                            })
+                            .unwrap_or(false)
+                    })
+            };
+            if let Some(id) = arm_target {
+                self.timeline.update(cx, |timeline, cx| {
+                    timeline.state.toggle_track_arm(&id);
+                    cx.notify();
+                });
+            }
+        }
+
         let (bpm, start_beat, sample_rate, input_device_name, midi_tracks) = {
             let timeline = self.timeline.read(cx);
             let settings = self.settings.read(cx);
@@ -568,11 +613,31 @@ impl StudioLayout {
                     .and_then(|s| s.to_str())
                     .unwrap_or("Recording")
                     .to_string();
+                // Auto latency compensation: pull the take earlier by the
+                // engine-measured round-trip so an overdub lands where the
+                // performer heard it. The manual `recording_offset_ms` is layered
+                // on top for per-rig fine-tuning (it may be negative or positive).
+                let latency_beats = result.latency_seconds as f32 * bpm / 60.0;
+                let placed_beat =
+                    (result.start_beat as f32 - latency_beats + recording_offset_beats).max(0.0);
+                if latency_beats != 0.0
+                    && std::env::var_os("FUTUREBOARD_RECORDING_DEBUG").is_some()
+                {
+                    eprintln!(
+                        "[recording] latency comp track={} raw_start={:.3} latency={:.1}ms (-{:.3} beats) manual_offset={:.3} beats -> start={:.3}",
+                        result.track_id,
+                        result.start_beat,
+                        result.latency_seconds * 1000.0,
+                        latency_beats,
+                        recording_offset_beats,
+                        placed_beat
+                    );
+                }
                 let clip_id = timeline.state.insert_recorded_clip(
                     &result.track_id,
                     result.file_path.clone(),
                     clip_name,
-                    (result.start_beat as f32 + recording_offset_beats).max(0.0),
+                    placed_beat,
                     result.duration_seconds,
                     bpm,
                 );

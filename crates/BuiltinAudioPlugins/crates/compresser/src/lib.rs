@@ -4,7 +4,7 @@
 //! builds its optional sidechain HPF with the MIT/Apache [`biquad`] crate.
 
 use builtin_dsp_core::{
-    clamp, mix, ParamDescriptor, PluginCategory, PluginDescriptor, SoftKneeCompressor, StereoEffect,
+    ParamDescriptor, PluginCategory, PluginDescriptor, SoftKneeCompressor, StereoEffect, clamp, mix,
 };
 
 pub const PLUGIN_ID: &str = "futureboard.compresser";

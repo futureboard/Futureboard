@@ -128,7 +128,9 @@ fn configure_linux_plugin_host_display(command: &mut Command) {
     // Prefer the parent's DISPLAY when present; otherwise pick the first live
     // X11 socket under /tmp/.X11-unix (e.g. X1 → :1) so a Wayland-only GPUI
     // process can still spawn an X11 editor host.
-    let display = std::env::var("DISPLAY").ok().filter(|d| !d.trim().is_empty());
+    let display = std::env::var("DISPLAY")
+        .ok()
+        .filter(|d| !d.trim().is_empty());
     let display = display.or_else(discover_x11_display);
     match display {
         Some(d) => {

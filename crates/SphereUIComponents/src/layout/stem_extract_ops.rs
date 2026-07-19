@@ -115,7 +115,9 @@ impl StudioLayout {
                 let track_id = timeline.state.create_track(CreateTrackOptions {
                     track_type: TrackType::Audio,
                     name: track_name.clone(),
-                    color: timeline.state.track_color_for_index(timeline.state.tracks.len()),
+                    color: timeline
+                        .state
+                        .track_color_for_index(timeline.state.tracks.len()),
                     volume: volume::db_to_norm(0.0),
                     pan: 0.0,
                     armed: false,

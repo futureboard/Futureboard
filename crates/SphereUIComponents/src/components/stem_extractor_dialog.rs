@@ -34,9 +34,26 @@ const BUTTON_H: f32 = 28.0;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum SelectField {
+    Clip,
     Model,
     Device,
     Quality,
+}
+
+/// One resolvable audio clip on a track, offered as a Stem Extractor source.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StemSourceClip {
+    pub clip_id: String,
+    pub track_id: String,
+    pub track_name: String,
+    pub clip_name: String,
+    pub source_path: PathBuf,
+}
+
+impl StemSourceClip {
+    pub fn label(&self) -> String {
+        format!("{} · {}", self.track_name, self.clip_name)
+    }
 }
 
 pub enum StemExtractJobState {
@@ -70,14 +87,17 @@ struct ActiveJob {
 #[derive(Clone, Debug, Default)]
 pub struct StemExtractorDialogDefaults {
     pub project_name: String,
-    pub suggested_source: Option<PathBuf>,
+    /// Audio clips currently on arrangement tracks with a resolvable media path.
+    pub audio_clips: Vec<StemSourceClip>,
+    /// Preselected clip id (usually the timeline selection).
+    pub selected_clip_id: Option<String>,
     pub suggested_output_dir: Option<PathBuf>,
-    pub selected_clip_label: Option<String>,
 }
 
 pub struct StemExtractorWindow {
     defaults: StemExtractorDialogDefaults,
     params: SphereAudioProcessor::StemExtractParams,
+    selected_clip_id: Option<String>,
     source_path: Option<PathBuf>,
     output_dir: Option<PathBuf>,
     state: StemExtractJobState,
@@ -89,15 +109,22 @@ pub struct StemExtractorWindow {
 
 impl StemExtractorWindow {
     pub fn new(defaults: StemExtractorDialogDefaults, cx: &mut Context<Self>) -> Self {
-        let source_path = defaults.suggested_source.clone();
-        let output_dir = defaults.suggested_output_dir.clone().or_else(|| {
-            source_path
-                .as_ref()
-                .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+        let selected_clip_id = defaults
+            .selected_clip_id
+            .clone()
+            .or_else(|| defaults.audio_clips.first().map(|c| c.clip_id.clone()));
+        let source_path = selected_clip_id.as_ref().and_then(|id| {
+            defaults
+                .audio_clips
+                .iter()
+                .find(|c| &c.clip_id == id)
+                .map(|c| c.source_path.clone())
         });
+        let output_dir = defaults.suggested_output_dir.clone();
         Self {
             defaults,
             params: SphereAudioProcessor::default_stem_extract_params(),
+            selected_clip_id,
             source_path,
             output_dir,
             state: StemExtractJobState::Editing,
@@ -105,6 +132,29 @@ impl StemExtractorWindow {
             job: None,
             focus_handle: cx.focus_handle(),
             gpu_available: SphereAudioProcessor::gpu_available(),
+        }
+    }
+
+    fn selected_clip(&self) -> Option<&StemSourceClip> {
+        let id = self.selected_clip_id.as_ref()?;
+        self.defaults
+            .audio_clips
+            .iter()
+            .find(|clip| &clip.clip_id == id)
+    }
+
+    fn select_clip(&mut self, clip_id: &str) {
+        if clip_id.is_empty() || clip_id == "__none__" {
+            return;
+        }
+        if let Some(clip) = self
+            .defaults
+            .audio_clips
+            .iter()
+            .find(|clip| clip.clip_id == clip_id)
+        {
+            self.selected_clip_id = Some(clip.clip_id.clone());
+            self.source_path = Some(clip.source_path.clone());
         }
     }
 
@@ -150,55 +200,11 @@ impl StemExtractorWindow {
     }
 
     fn can_extract(&self) -> bool {
-        self.source_path.is_some()
+        self.selected_clip().is_some()
+            && self.source_path.is_some()
             && self.output_dir.is_some()
             && self.params.validate().is_ok()
             && !self.params.stems.is_empty()
-    }
-
-    fn browse_source(&mut self, cx: &mut Context<Self>) {
-        #[cfg(feature = "native-dialogs")]
-        {
-            let entity = cx.entity().clone();
-            let start = self
-                .source_path
-                .as_ref()
-                .and_then(|p| p.parent().map(|d| d.to_path_buf()))
-                .or_else(|| self.output_dir.clone())
-                .unwrap_or_else(std::env::temp_dir);
-            cx.spawn(async move |_this, cx| {
-                let result = rfd::AsyncFileDialog::new()
-                    .set_title("Choose Source Audio")
-                    .set_directory(&start)
-                    .add_filter(
-                        "Audio",
-                        &["wav", "flac", "mp3", "aiff", "aif", "ogg", "m4a", "rauf"],
-                    )
-                    .pick_file()
-                    .await;
-                if let Some(handle) = result {
-                    let path = handle.path().to_path_buf();
-                    let _ = entity.update(cx, |this, cx| {
-                        this.source_path = Some(path.clone());
-                        if this.output_dir.is_none() {
-                            this.output_dir = path.parent().map(|d| d.to_path_buf());
-                        }
-                        if matches!(this.state, StemExtractJobState::Failed(_)) {
-                            this.state = StemExtractJobState::Editing;
-                        }
-                        cx.notify();
-                    });
-                }
-            })
-            .detach();
-        }
-        #[cfg(not(feature = "native-dialogs"))]
-        {
-            self.state = StemExtractJobState::Failed(
-                "Native file dialogs are unavailable in this build.".into(),
-            );
-            cx.notify();
-        }
     }
 
     fn browse_output(&mut self, cx: &mut Context<Self>) {
@@ -243,11 +249,22 @@ impl StemExtractorWindow {
             cx.notify();
             return;
         }
-        let Some(source_path) = self.source_path.clone() else {
-            self.state = StemExtractJobState::Failed("Choose a source audio file.".into());
+        let Some(clip) = self.selected_clip().cloned() else {
+            self.state = StemExtractJobState::Failed(
+                "Select an audio clip on a track as the source.".into(),
+            );
             cx.notify();
             return;
         };
+        let source_path = clip.source_path.clone();
+        if !source_path.exists() {
+            self.state = StemExtractJobState::Failed(format!(
+                "Audio clip media is missing: {}",
+                source_path.display()
+            ));
+            cx.notify();
+            return;
+        }
         let Some(output_dir) = self.output_dir.clone() else {
             self.state = StemExtractJobState::Failed("Choose an output folder.".into());
             cx.notify();
@@ -267,10 +284,7 @@ impl StemExtractorWindow {
         ));
 
         let params = self.params.clone();
-        let source_stem = source_path
-            .file_stem()
-            .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "stem".to_string());
+        let source_stem = sanitize_file_stem(&clip.clip_name);
         let worker_shared = shared.clone();
         std::thread::Builder::new()
             .name("fb-stem-extract".to_string())
@@ -404,6 +418,7 @@ impl StemExtractorWindow {
 
     fn apply_select(&mut self, field: SelectField, value: &str) {
         match field {
+            SelectField::Clip => self.select_clip(value),
             SelectField::Model => {
                 if let Some(model) = SphereAudioProcessor::StemModel::parse(value) {
                     self.params.set_model(model);
@@ -425,7 +440,10 @@ impl StemExtractorWindow {
 
 impl Render for StemExtractorWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let _ = window;
+        // Keep dialog key focus so Escape/Enter route here (not the studio).
+        if !self.focus_handle.is_focused(window) {
+            self.focus_handle.focus(window, cx);
+        }
         let target = cx.entity().clone();
         let body = match &self.state {
             StemExtractJobState::Editing | StemExtractJobState::Failed(_) => {
@@ -493,15 +511,10 @@ impl Render for StemExtractorWindow {
 
 impl StemExtractorWindow {
     fn subtitle(&self) -> String {
-        if let Some(label) = &self.defaults.selected_clip_label {
-            format!("Source clip · {label}")
-        } else if let Some(path) = &self.source_path {
-            format!(
-                "MDX-NET stem separation · {}",
-                path.file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| path.display().to_string())
-            )
+        if let Some(clip) = self.selected_clip() {
+            format!("Source clip · {}", clip.label())
+        } else if self.defaults.audio_clips.is_empty() {
+            "MDX-NET · select an audio clip on a track".to_string()
         } else {
             "MDX-NET stem separation · CPU / GPU".to_string()
         }
@@ -516,20 +529,7 @@ impl StemExtractorWindow {
             .py(px(BODY_PAD))
             .gap(px(ROW_GAP))
             .child(section_label("SOURCE"))
-            .child(self.path_row(
-                "Source",
-                self.source_path
-                    .as_ref()
-                    .map(|p| p.display().to_string())
-                    .unwrap_or_else(|| "No file selected".to_string()),
-                "stem-source-browse",
-                {
-                    let target = target.clone();
-                    move |_window, cx| {
-                        let _ = target.update(cx, |this, cx| this.browse_source(cx));
-                    }
-                },
-            ))
+            .child(self.clip_row(target.clone()))
             .child(self.path_row(
                 "Output",
                 self.output_dir
@@ -560,14 +560,50 @@ impl StemExtractorWindow {
 
         if let StemExtractJobState::Failed(message) = &self.state {
             col = col.child(error_banner(message.clone()));
+        } else if self.defaults.audio_clips.is_empty() {
+            col = col.child(hint_banner(
+                "No audio clips on tracks. Import or record audio first.".into(),
+            ));
         } else if !self.can_extract() {
             col = col.child(hint_banner(
-                "Choose a source file, output folder, and at least one stem.".into(),
+                "Select an audio clip, output folder, and at least one stem.".into(),
             ));
         }
 
         col = col.child(self.footer(self.can_extract(), target));
         col.into_any_element()
+    }
+
+    fn clip_row(&self, target: gpui::Entity<Self>) -> impl IntoElement {
+        let empty = self.defaults.audio_clips.is_empty();
+        let options = if empty {
+            vec![SelectOption::new("__none__", "No audio clips on tracks").disabled(true)]
+        } else {
+            self.defaults
+                .audio_clips
+                .iter()
+                .map(|clip| {
+                    let file_name = clip
+                        .source_path
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| clip.source_path.display().to_string());
+                    SelectOption::new(clip.clip_id.clone(), clip.label()).description(file_name)
+                })
+                .collect()
+        };
+        let selected = self
+            .selected_clip_id
+            .clone()
+            .unwrap_or_else(|| {
+                if empty {
+                    "__none__".to_string()
+                } else {
+                    String::new()
+                }
+            });
+        let control = self.dropdown(SelectField::Clip, "stem-clip", selected, options, target);
+        self.labeled("Clip", control)
     }
 
     fn model_row(&self, target: gpui::Entity<Self>) -> impl IntoElement {

@@ -7,10 +7,13 @@
 //! audio callback.
 
 pub use sphere_stem_extractor::{
-    create_mdx_net_backend, extract_stems, gpu_available, resolve_device, InferBackendKind,
-    InferDevice, StemExtractCancelToken, StemExtractError, StemExtractInput, StemExtractOutput,
-    StemExtractParams, StemExtractProgress, StemExtractQuality, StemExtractResult, StemExtractStage,
-    StemInferBackend, StemKind, StemModel, StemModelInfo, StemSet, STEM_MODELS,
+    create_mdx_net_backend, default_models_dir, download_model, ensure_models_dir, extract_stems,
+    gpu_available, model_installed, resolve_device, resolve_installed_model_files,
+    InferBackendKind, InferDevice, StemExtractCancelToken, StemExtractError, StemExtractInput,
+    StemExtractOutput, StemExtractParams, StemExtractProgress, StemExtractQuality,
+    StemExtractResult, StemExtractStage, StemInferBackend, StemKind, StemModel,
+    StemModelDownloadProgress, StemModelFile, StemModelInfo, StemModelPackage, StemSet,
+    STEM_MODELS, UVR_MODEL_RELEASE_BASE,
 };
 
 /// Convenience constructor matching the Stem Extractor dialog defaults:

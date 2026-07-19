@@ -11,8 +11,10 @@ name = "SphereStemExtractor"
 path = "src/lib.rs"
 
 [dependencies]
+dirs.workspace = true
 serde.workspace = true
 thiserror.workspace = true
+ureq.workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true

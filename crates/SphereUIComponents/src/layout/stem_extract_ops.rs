@@ -47,6 +47,9 @@ impl StudioLayout {
             .folder_path
             .as_ref()
             .map(|p| p.to_path_buf());
+        let paths = crate::paths::FutureboardPaths::resolve();
+        let _ = paths.ensure_user_dirs();
+        let models_dir = Some(paths.models.clone());
 
         let audio_clips = collect_audio_source_clips(&tl_state);
         let selected_clip_id = tl_state
@@ -62,6 +65,7 @@ impl StudioLayout {
             audio_clips,
             selected_clip_id,
             project_root,
+            models_dir,
         };
 
         let owner_bounds = crate::window_position::resolve_owner_bounds_with_preferred(

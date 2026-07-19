@@ -25,7 +25,7 @@ use crate::theme::{self, Colors};
 use crate::window_position::{apply_owner_display, centered_window_bounds};
 
 pub const STEM_EXTRACTOR_WINDOW_WIDTH: f32 = 520.0;
-const STEM_EXTRACTOR_WINDOW_HEIGHT: f32 = 480.0;
+const STEM_EXTRACTOR_WINDOW_HEIGHT: f32 = 560.0;
 const BODY_PAD: f32 = 14.0;
 const ROW_GAP: f32 = 9.0;
 const LABEL_W: f32 = 96.0;
@@ -103,6 +103,23 @@ struct ActiveJob {
     cancel: SphereAudioProcessor::StemExtractCancelToken,
 }
 
+#[derive(Default)]
+struct SharedDownloadJob {
+    progress: Option<SphereAudioProcessor::StemModelDownloadProgress>,
+    done: Option<Result<(), String>>,
+}
+
+struct ActiveDownload {
+    shared: Arc<Mutex<SharedDownloadJob>>,
+    cancel: SphereAudioProcessor::StemExtractCancelToken,
+}
+
+enum ModelDownloadUi {
+    Idle,
+    Running(SphereAudioProcessor::StemModelDownloadProgress),
+    Failed(String),
+}
+
 /// Plain data captured when the dialog opens — never a live entity borrow.
 #[derive(Clone, Debug, Default)]
 pub struct StemExtractorDialogDefaults {
@@ -113,6 +130,8 @@ pub struct StemExtractorDialogDefaults {
     pub selected_clip_id: Option<String>,
     /// Project root used for rendered stem WAV files (`Rendered/Stems`).
     pub project_root: Option<PathBuf>,
+    /// ONNX install folder (`Documents/Futureboard Studio/Utilities/Models`).
+    pub models_dir: Option<PathBuf>,
 }
 
 pub struct StemExtractorWindow {
@@ -123,6 +142,10 @@ pub struct StemExtractorWindow {
     state: StemExtractJobState,
     open_select: Option<SelectField>,
     job: Option<ActiveJob>,
+    download: Option<ActiveDownload>,
+    download_ui: ModelDownloadUi,
+    models_dir: PathBuf,
+    model_installed: bool,
     focus_handle: FocusHandle,
     gpu_available: bool,
     on_apply: Arc<dyn Fn(StemExtractApplyRequest, &mut App) + 'static>,
@@ -146,19 +169,40 @@ impl StemExtractorWindow {
                 .find(|c| &c.clip_id == id)
                 .map(|c| c.source_path.clone())
         });
+        let models_dir = defaults
+            .models_dir
+            .clone()
+            .unwrap_or_else(SphereAudioProcessor::default_models_dir);
+        let _ = SphereAudioProcessor::ensure_models_dir(&models_dir);
+        let params = SphereAudioProcessor::default_stem_extract_params();
+        let model_installed =
+            SphereAudioProcessor::model_installed(params.model, &models_dir);
         Self {
             defaults,
-            params: SphereAudioProcessor::default_stem_extract_params(),
+            params,
             selected_clip_id,
             source_path,
             state: StemExtractJobState::Editing,
             open_select: None,
             job: None,
+            download: None,
+            download_ui: ModelDownloadUi::Idle,
+            models_dir,
+            model_installed,
             focus_handle: cx.focus_handle(),
             gpu_available: SphereAudioProcessor::gpu_available(),
             on_apply,
             applied: false,
         }
+    }
+
+    fn refresh_model_installed(&mut self) {
+        self.model_installed =
+            SphereAudioProcessor::model_installed(self.params.model, &self.models_dir);
+    }
+
+    fn is_downloading(&self) -> bool {
+        self.download.is_some() || matches!(self.download_ui, ModelDownloadUi::Running(_))
     }
 
     fn selected_clip(&self) -> Option<&StemSourceClip> {
@@ -188,6 +232,9 @@ impl StemExtractorWindow {
         if let Some(job) = &self.job {
             job.cancel.cancel();
         }
+        if let Some(download) = &self.download {
+            download.cancel.cancel();
+        }
         window.remove_window();
     }
 
@@ -203,6 +250,8 @@ impl StemExtractorWindow {
                 if self.open_select.is_some() {
                     self.open_select = None;
                     cx.notify();
+                } else if self.is_downloading() {
+                    self.request_cancel_download(cx);
                 } else if matches!(self.state, StemExtractJobState::Running(_)) {
                     self.request_cancel(cx);
                 } else {
@@ -210,7 +259,9 @@ impl StemExtractorWindow {
                 }
                 true
             }
-            "enter" if matches!(self.state, StemExtractJobState::Editing) => {
+            "enter"
+                if matches!(self.state, StemExtractJobState::Editing) && !self.is_downloading() =>
+            {
                 self.start_extract(cx);
                 true
             }
@@ -225,11 +276,127 @@ impl StemExtractorWindow {
         cx.notify();
     }
 
+    fn request_cancel_download(&mut self, cx: &mut Context<Self>) {
+        if let Some(download) = &self.download {
+            download.cancel.cancel();
+        }
+        cx.notify();
+    }
+
     fn can_extract(&self) -> bool {
-        self.selected_clip().is_some()
+        !self.is_downloading()
+            && self.selected_clip().is_some()
             && self.source_path.is_some()
             && self.params.validate().is_ok()
             && !self.params.stems.is_empty()
+    }
+
+    fn start_download(&mut self, cx: &mut Context<Self>) {
+        if self.is_downloading() || matches!(self.state, StemExtractJobState::Running(_)) {
+            return;
+        }
+        if self.model_installed {
+            return;
+        }
+        let models_dir = self.models_dir.clone();
+        let model = self.params.model;
+        let shared = Arc::new(Mutex::new(SharedDownloadJob::default()));
+        let cancel = SphereAudioProcessor::StemExtractCancelToken::new();
+        self.download = Some(ActiveDownload {
+            shared: shared.clone(),
+            cancel: cancel.clone(),
+        });
+        self.download_ui = ModelDownloadUi::Running(
+            SphereAudioProcessor::StemModelDownloadProgress::new(
+                model,
+                model.package().files.first().map(|f| f.file_name).unwrap_or("model"),
+                0,
+                model.package().file_count().max(1),
+                0,
+                None,
+                0.0,
+                format!("Starting {} download…", model.label()),
+            ),
+        );
+
+        let worker_shared = shared.clone();
+        std::thread::Builder::new()
+            .name("fb-stem-model-dl".to_string())
+            .spawn(move || {
+                let progress_shared = worker_shared.clone();
+                let mut on_progress =
+                    move |progress: SphereAudioProcessor::StemModelDownloadProgress| {
+                        if let Ok(mut guard) = progress_shared.lock() {
+                            guard.progress = Some(progress);
+                        }
+                    };
+                let result = SphereAudioProcessor::download_model(
+                    model,
+                    &models_dir,
+                    &cancel,
+                    &mut on_progress,
+                )
+                .map_err(|e| e.user_message());
+                if let Ok(mut guard) = worker_shared.lock() {
+                    guard.done = Some(result);
+                }
+            })
+            .ok();
+
+        cx.spawn(async move |this, cx| {
+            let executor = cx.background_executor().clone();
+            loop {
+                if crate::shutdown::ShutdownState::global().is_shutting_down() {
+                    break;
+                }
+                executor.timer(std::time::Duration::from_millis(50)).await;
+                let keep_going = this
+                    .update(cx, |this, cx| this.poll_download(cx))
+                    .unwrap_or(false);
+                if !keep_going {
+                    break;
+                }
+            }
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn poll_download(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(job) = &self.download else {
+            return false;
+        };
+        let (progress, done) = {
+            let Ok(mut guard) = job.shared.lock() else {
+                return true;
+            };
+            (guard.progress.take(), guard.done.take())
+        };
+        if let Some(done) = done {
+            match done {
+                Ok(()) => {
+                    self.refresh_model_installed();
+                    self.download_ui = ModelDownloadUi::Idle;
+                }
+                Err(message)
+                    if job.cancel.is_cancelled()
+                        || message.to_ascii_lowercase().contains("cancel") =>
+                {
+                    self.download_ui = ModelDownloadUi::Idle;
+                }
+                Err(message) => {
+                    self.download_ui = ModelDownloadUi::Failed(message);
+                }
+            }
+            self.download = None;
+            cx.notify();
+            return false;
+        }
+        if let Some(progress) = progress {
+            self.download_ui = ModelDownloadUi::Running(progress);
+            cx.notify();
+        }
+        true
     }
 
     fn start_extract(&mut self, cx: &mut Context<Self>) {
@@ -436,6 +603,10 @@ impl StemExtractorWindow {
             SelectField::Model => {
                 if let Some(model) = SphereAudioProcessor::StemModel::parse(value) {
                     self.params.set_model(model);
+                    self.refresh_model_installed();
+                    if !matches!(self.download_ui, ModelDownloadUi::Running(_)) {
+                        self.download_ui = ModelDownloadUi::Idle;
+                    }
                 }
             }
             SelectField::Device => {
@@ -555,6 +726,7 @@ impl StemExtractorWindow {
             )
             .child(section_label("MODEL"))
             .child(self.model_row(target.clone()))
+            .child(self.model_status_row(target.clone()))
             .child(self.device_row(target.clone()))
             .child(self.quality_row(target.clone()))
             .child(section_label("STEMS"))
@@ -563,9 +735,19 @@ impl StemExtractorWindow {
                 div()
                     .text_size(px(10.0))
                     .text_color(Colors::text_faint())
-                    .child(model_hint(&self.params)),
+                    .child(model_hint(
+                        &self.params,
+                        self.model_installed,
+                        &self.models_dir,
+                    )),
             )
             .child(div().flex_1());
+
+        if let ModelDownloadUi::Failed(message) = &self.download_ui {
+            col = col.child(error_banner(message.clone()));
+        } else if let ModelDownloadUi::Running(progress) = &self.download_ui {
+            col = col.child(self.render_download_progress(progress.clone(), target.clone()));
+        }
 
         if let StemExtractJobState::Failed(message) = &self.state {
             col = col.child(error_banner(message.clone()));
@@ -573,7 +755,7 @@ impl StemExtractorWindow {
             col = col.child(hint_banner(
                 "No audio clips on tracks. Import or record audio first.".into(),
             ));
-        } else if !self.can_extract() {
+        } else if !self.can_extract() && !self.is_downloading() {
             col = col.child(hint_banner(
                 "Select an audio clip and at least one stem.".into(),
             ));
@@ -616,9 +798,20 @@ impl StemExtractorWindow {
     }
 
     fn model_row(&self, target: gpui::Entity<Self>) -> impl IntoElement {
+        let models_dir = self.models_dir.clone();
         let options = SphereAudioProcessor::STEM_MODELS
             .iter()
-            .map(|info| SelectOption::new(info.id, info.label))
+            .map(|info| {
+                let package = info.model.package();
+                let installed =
+                    SphereAudioProcessor::model_installed(info.model, &models_dir);
+                let status = if installed { "Installed" } else { "Not installed" };
+                SelectOption::new(info.id, info.label).description(format!(
+                    "{} · {} · {status}",
+                    info.description,
+                    package.approx_size_label()
+                ))
+            })
             .collect::<Vec<_>>();
         let control = self.dropdown(
             SelectField::Model,
@@ -628,6 +821,128 @@ impl StemExtractorWindow {
             target,
         );
         self.labeled("Model", control)
+    }
+
+    fn model_status_row(&self, target: gpui::Entity<Self>) -> impl IntoElement {
+        let package = self.params.model.package();
+        let status = if self.model_installed {
+            format!(
+                "Installed · {} file(s) · {}",
+                package.file_count(),
+                package.approx_size_label()
+            )
+        } else {
+            format!(
+                "Not installed · {} · {}",
+                package.source_label,
+                package.approx_size_label()
+            )
+        };
+        let downloading = self.is_downloading();
+        let can_download = !self.model_installed
+            && !downloading
+            && !matches!(self.state, StemExtractJobState::Running(_));
+        let control = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(8.0))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w(px(0.0))
+                    .text_size(px(11.0))
+                    .text_color(if self.model_installed {
+                        Colors::text_secondary()
+                    } else {
+                        Colors::text_muted()
+                    })
+                    .truncate()
+                    .child(status),
+            )
+            .child(fb_button(
+                "stem-model-download",
+                if downloading { "Downloading…" } else { "Download" },
+                FbButtonKind::Default,
+                can_download,
+                {
+                    let target = target.clone();
+                    move |_, _window, cx| {
+                        let _ = target.update(cx, |this, cx| this.start_download(cx));
+                    }
+                },
+            ));
+        self.labeled("Weights", control)
+    }
+
+    fn render_download_progress(
+        &self,
+        progress: SphereAudioProcessor::StemModelDownloadProgress,
+        target: gpui::Entity<Self>,
+    ) -> impl IntoElement {
+        let percent = format!("{:.0}%", progress.percent);
+        let detail = if progress.file_count > 1 {
+            format!(
+                "{} ({}/{}) · {}",
+                progress.detail,
+                progress.file_index + 1,
+                progress.file_count,
+                progress.file_name
+            )
+        } else {
+            format!("{} · {}", progress.detail, progress.file_name)
+        };
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(6.0))
+            .px(px(10.0))
+            .py(px(8.0))
+            .rounded(px(5.0))
+            .bg(Colors::surface_panel_alt())
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_between()
+                    .child(
+                        div()
+                            .text_size(px(11.0))
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_color(Colors::text_primary())
+                            .child(format!("Downloading {}", progress.model.label())),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(11.0))
+                            .text_color(Colors::accent_primary())
+                            .child(percent),
+                    ),
+            )
+            .child(progress_bar(ProgressBarValue::value(
+                progress.percent / 100.0,
+            )))
+            .child(
+                div()
+                    .text_size(px(10.0))
+                    .text_color(Colors::text_muted())
+                    .child(detail),
+            )
+            .child(
+                div().flex().flex_row().justify_end().child(fb_button(
+                    "stem-download-cancel",
+                    "Cancel Download",
+                    FbButtonKind::Default,
+                    true,
+                    {
+                        let target = target.clone();
+                        move |_, _window, cx| {
+                            let _ = target.update(cx, |this, cx| this.request_cancel_download(cx));
+                        }
+                    },
+                )),
+            )
     }
 
     fn device_row(&self, target: gpui::Entity<Self>) -> impl IntoElement {
@@ -974,7 +1289,11 @@ impl StemExtractorWindow {
     }
 }
 
-fn model_hint(params: &SphereAudioProcessor::StemExtractParams) -> String {
+fn model_hint(
+    params: &SphereAudioProcessor::StemExtractParams,
+    installed: bool,
+    models_dir: &std::path::Path,
+) -> String {
     let device = if params.device == SphereAudioProcessor::InferDevice::Gpu {
         if SphereAudioProcessor::gpu_available() {
             "GPU"
@@ -986,8 +1305,13 @@ fn model_hint(params: &SphereAudioProcessor::StemExtractParams) -> String {
     } else {
         "CPU"
     };
+    let weights = if installed {
+        format!("weights in {}", models_dir.display())
+    } else {
+        "weights not installed — Download saves to Utilities/Models".to_string()
+    };
     format!(
-        "{} · {device} · {}",
+        "{} · {device} · {} · {weights}",
         params.model.description(),
         params.quality.label()
     )

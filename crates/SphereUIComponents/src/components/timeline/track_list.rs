@@ -62,6 +62,7 @@ pub fn track_list(
     on_erase_clip: Option<
         std::sync::Arc<dyn Fn(&String, &mut gpui::Window, &mut gpui::App) + 'static>,
     >,
+    on_cut_clip: Option<crate::components::timeline::audio_clip::AudioClipCutCb>,
     erase_preview_ids: Option<&std::collections::HashSet<String>>,
     on_audio_clip_process_preview: AudioClipProcessPreviewCb,
     on_audio_clip_process_commit: AudioClipProcessCommitCb,
@@ -228,6 +229,7 @@ pub fn track_list(
                                 on_range_start.clone(),
                                 on_erase_start.clone(),
                                 on_erase_clip.clone(),
+                                on_cut_clip.clone(),
                                 erase_preview_ids,
                                 on_audio_clip_process_preview.clone(),
                                 on_audio_clip_process_commit.clone(),

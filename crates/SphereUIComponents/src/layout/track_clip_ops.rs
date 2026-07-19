@@ -613,62 +613,12 @@ impl StudioLayout {
     }
 
     pub(super) fn split_selected_audio_clip_at_playhead(&mut self, cx: &mut Context<Self>) {
-        let mut did_split = false;
-        let _ = self.timeline.update(cx, |timeline, cx| {
+        let did_split = self.timeline.update(cx, |timeline, cx| {
             let Some(clip_id) = timeline.state.selection.selected_clip_ids.first().cloned() else {
-                return;
+                return false;
             };
-            let Some(snapshot) = ClipSnapshot::capture(&timeline.state, &clip_id) else {
-                return;
-            };
-            if !matches!(
-                snapshot.clip.clip_type,
-                crate::components::timeline::timeline_state::ClipType::Audio { .. }
-            ) {
-                return;
-            }
             let split_beat = timeline.state.transport.playhead_beats;
-            let clip_start = snapshot.clip.start_beat;
-            let clip_end = snapshot.clip.start_beat + snapshot.clip.duration_beats;
-            let min_len = 0.25_f32;
-            if split_beat <= clip_start + min_len || split_beat >= clip_end - min_len {
-                return;
-            }
-
-            let left_len = split_beat - clip_start;
-            let right_len = clip_end - split_beat;
-            let right_offset = snapshot.clip.offset_beats + left_len;
-            let next_id = timeline.state.next_clip_id();
-            let next_next_id = next_clip_id_after(&next_id);
-
-            let mut left = timeline.state.clone_clip_for_insert(
-                &snapshot.clip,
-                next_id,
-                snapshot.clip.name.clone(),
-                clip_start,
-            );
-            left.duration_beats = left_len;
-
-            let mut right = timeline.state.clone_clip_for_insert(
-                &snapshot.clip,
-                next_next_id,
-                format!("{} Split", snapshot.clip.name),
-                split_beat,
-            );
-            right.duration_beats = right_len;
-            right.offset_beats = right_offset;
-
-            timeline.run_edit_command(
-                EditCommand::ReplaceClipWithClips {
-                    clips: vec![
-                        (snapshot.track_id.clone(), left),
-                        (snapshot.track_id.clone(), right),
-                    ],
-                    snapshot,
-                },
-                cx,
-            );
-            did_split = true;
+            timeline.split_audio_clip_at_beat(&clip_id, split_beat, cx)
         });
         if did_split {
             self.mark_dirty();
@@ -842,11 +792,4 @@ impl StudioLayout {
         self.mark_dirty();
         self.close_context_menu(cx);
     }
-}
-
-fn next_clip_id_after(id: &str) -> String {
-    id.strip_prefix("clip-")
-        .and_then(|rest| rest.parse::<u32>().ok())
-        .map(|n| format!("clip-{}", n + 1))
-        .unwrap_or_else(|| format!("{id}-split"))
 }

@@ -176,6 +176,59 @@ impl TimelineState {
         format!("clip-{}", next_clip_id_number(&self.tracks))
     }
 
+    /// Deterministic id one past `id`, used when a single operation inserts two
+    /// fresh clips (e.g. a split) before either is committed, so [`next_clip_id`]
+    /// alone would hand back the same number twice.
+    pub fn next_clip_id_after(&self, id: &str) -> String {
+        id.strip_prefix("clip-")
+            .and_then(|rest| rest.parse::<u32>().ok())
+            .map(|n| format!("clip-{}", n + 1))
+            .unwrap_or_else(|| format!("{id}-split"))
+    }
+
+    /// Minimum length (beats) either side of an audio-clip split must keep. A
+    /// hair-thin fragment is never useful and rounds toward a zero-length clip.
+    pub const MIN_CLIP_SPLIT_BEATS: f32 = 0.25;
+
+    /// Build the two abutting clips a split of `clip` at `split_beat` (absolute
+    /// timeline beats) would produce: `(left, right)`. Pure — the caller records
+    /// the undoable edit. `None` when `clip` is not audio or `split_beat` lands
+    /// within [`MIN_CLIP_SPLIT_BEATS`] of either edge.
+    ///
+    /// The right clip inherits `offset_beats + left_len` so its source content
+    /// continues seamlessly from where the left clip ends.
+    pub fn plan_audio_clip_split(
+        &self,
+        clip: &ClipState,
+        split_beat: f32,
+    ) -> Option<(ClipState, ClipState)> {
+        if !matches!(clip.clip_type, ClipType::Audio { .. }) {
+            return None;
+        }
+        let clip_start = clip.start_beat;
+        let clip_end = clip.start_beat + clip.duration_beats;
+        if split_beat <= clip_start + Self::MIN_CLIP_SPLIT_BEATS
+            || split_beat >= clip_end - Self::MIN_CLIP_SPLIT_BEATS
+        {
+            return None;
+        }
+
+        let left_len = split_beat - clip_start;
+        let right_len = clip_end - split_beat;
+        let left_id = self.next_clip_id();
+        let right_id = self.next_clip_id_after(&left_id);
+
+        let mut left = self.clone_clip_for_insert(clip, left_id, clip.name.clone(), clip_start);
+        left.duration_beats = left_len;
+
+        let mut right =
+            self.clone_clip_for_insert(clip, right_id, format!("{} Split", clip.name), split_beat);
+        right.duration_beats = right_len;
+        right.offset_beats = clip.offset_beats + left_len;
+
+        Some((left, right))
+    }
+
     /// Length of a clip in beats, if it exists.
     pub fn clip_duration_beats(&self, clip_id: &str) -> Option<f32> {
         for track in &self.tracks {

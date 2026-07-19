@@ -1688,3 +1688,81 @@ mod midi_output_routing_tests {
         assert_eq!(state.effective_instrument_track_id(&midi_id), None);
     }
 }
+
+#[cfg(test)]
+mod audio_clip_split_tests {
+    use super::*;
+
+    fn audio_clip(id: &str, start_beat: f32, duration_beats: f32, offset_beats: f32) -> ClipState {
+        ClipState {
+            id: id.to_string(),
+            name: "Take".to_string(),
+            start_beat,
+            duration_beats,
+            source_duration_seconds: Some(30.0),
+            offset_beats,
+            gain: 1.0,
+            clip_type: ClipType::Audio {
+                file_id: "asset-1".to_string(),
+                source_path: Some("/proj/Assets/take.wav".to_string()),
+            },
+            muted: false,
+            audio_import: AudioImportState::Pending,
+            stretch: AudioClipStretchState::default(),
+        }
+    }
+
+    #[test]
+    fn split_divides_length_and_carries_offset() {
+        let state = TimelineState::default();
+        let clip = audio_clip("clip-5", 4.0, 8.0, 2.0);
+        let (left, right) = state
+            .plan_audio_clip_split(&clip, 8.0)
+            .expect("split inside the clip should produce two clips");
+
+        // Left keeps the origin; right begins at the split beat.
+        assert_eq!(left.start_beat, 4.0);
+        assert_eq!(left.duration_beats, 4.0);
+        assert_eq!(right.start_beat, 8.0);
+        assert_eq!(right.duration_beats, 4.0);
+        // Durations still cover the original span with no gap/overlap.
+        assert_eq!(
+            left.duration_beats + right.duration_beats,
+            clip.duration_beats
+        );
+        // Right's source continues from where the left ended (offset + left len).
+        assert_eq!(right.offset_beats, 6.0);
+        assert_eq!(left.offset_beats, 2.0);
+        // Fresh, distinct ids for both halves.
+        assert_ne!(left.id, right.id);
+        assert_ne!(left.id, clip.id);
+    }
+
+    #[test]
+    fn split_is_a_noop_near_edges_and_for_non_audio() {
+        let state = TimelineState::default();
+        let clip = audio_clip("clip-1", 0.0, 4.0, 0.0);
+        // Within MIN_CLIP_SPLIT_BEATS of either edge → no split.
+        assert!(state.plan_audio_clip_split(&clip, 0.1).is_none());
+        assert!(state.plan_audio_clip_split(&clip, 3.95).is_none());
+        // Exactly on an edge → no split.
+        assert!(state.plan_audio_clip_split(&clip, 0.0).is_none());
+
+        let mut midi = clip.clone();
+        midi.clip_type = ClipType::Midi {
+            notes: Vec::new(),
+            controller_lanes: Vec::new(),
+            sysex_events: Vec::new(),
+            articulations: Vec::new(),
+        };
+        assert!(state.plan_audio_clip_split(&midi, 2.0).is_none());
+    }
+
+    #[test]
+    fn next_clip_id_after_increments_numeric_suffix() {
+        let state = TimelineState::default();
+        assert_eq!(state.next_clip_id_after("clip-7"), "clip-8");
+        // Non-numeric ids fall back to a stable, distinct suffix.
+        assert_eq!(state.next_clip_id_after("weird"), "weird-split");
+    }
+}

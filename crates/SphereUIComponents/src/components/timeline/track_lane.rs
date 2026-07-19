@@ -38,6 +38,7 @@ pub fn track_lane(
     on_erase_clip: Option<
         std::sync::Arc<dyn Fn(&String, &mut gpui::Window, &mut gpui::App) + 'static>,
     >,
+    on_cut_clip: Option<crate::components::timeline::audio_clip::AudioClipCutCb>,
     erase_preview_ids: Option<&std::collections::HashSet<String>>,
     on_audio_clip_process_preview: AudioClipProcessPreviewCb,
     on_audio_clip_process_commit: AudioClipProcessCommitCb,
@@ -81,6 +82,7 @@ pub fn track_lane(
             let on_clip_context = on_clip_context_menu.clone();
             let on_open = on_open_editor.clone();
             let on_del = on_erase_clip.clone();
+            let on_cut = on_cut_clip.clone();
             let erase_target = erase_preview_ids
                 .map(|s| s.contains(&clip.id))
                 .unwrap_or(false);
@@ -99,6 +101,7 @@ pub fn track_lane(
                     on_open,
                     on_clip_context,
                     on_del,
+                    on_cut,
                     erase_target,
                     auto_crossfade_in,
                     auto_crossfade_out,

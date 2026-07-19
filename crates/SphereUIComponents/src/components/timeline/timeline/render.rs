@@ -417,6 +417,20 @@ impl Render for Timeline {
             this.begin_erase_at(beat, Some(clip_id.clone()), cx);
         });
 
+        // Cut/razor tool: split the clicked audio clip at the cursor. The clip
+        // element forwards the raw window x (it stops propagation, so the lane
+        // never sees the click); resolve + snap it here where the timeline
+        // geometry lives, then re-sync media so the split is audible.
+        let on_cut_clip = cx.listener(
+            |this, (clip_id, window_x, bypass): &(String, f32, bool), _window, cx| {
+                let beat = this.beat_from_window_x(*window_x);
+                let snapped = this.snap_beat_with_bypass(beat, *bypass);
+                if this.split_audio_clip_at_beat(clip_id, snapped, cx) {
+                    this.mark_media_changed(cx);
+                }
+            },
+        );
+
         let on_edit_mouse_move = cx.listener(|this, event: &gpui::MouseMoveEvent, _window, cx| {
             if event.pressed_button == Some(gpui::MouseButton::Left) {
                 if let Some((anchor, start)) = this.floating_toolbar_drag_anchor {
@@ -878,6 +892,8 @@ impl Render for Timeline {
         let on_erase_clip: std::sync::Arc<
             dyn Fn(&String, &mut gpui::Window, &mut gpui::App) + 'static,
         > = std::sync::Arc::new(on_erase_clip);
+        let on_cut_clip: crate::components::timeline::audio_clip::AudioClipCutCb =
+            std::sync::Arc::new(on_cut_clip);
         let on_zoom_in: std::sync::Arc<dyn Fn(&(), &mut gpui::Window, &mut gpui::App) + 'static> =
             std::sync::Arc::new(on_zoom_in);
         let on_zoom_out: std::sync::Arc<dyn Fn(&(), &mut gpui::Window, &mut gpui::App) + 'static> =
@@ -1792,6 +1808,7 @@ impl Render for Timeline {
                 Some(on_range_start.clone()),
                 Some(on_erase_start.clone()),
                 Some(on_erase_clip.clone()),
+                Some(on_cut_clip.clone()),
                 Some(&self.erase_preview_ids),
                 on_audio_clip_process_preview.clone(),
                 on_audio_clip_process_commit.clone(),

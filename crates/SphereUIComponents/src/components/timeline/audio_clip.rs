@@ -1,5 +1,5 @@
 use crate::components::timeline::timeline_state::{
-    ClipDragItem, ClipEdge, ClipResizeDrag, ClipState, StretchMode, TimelineState,
+    ClipDragItem, ClipEdge, ClipResizeDrag, ClipState, StretchMode, TimelineState, TimelineTool,
 };
 use crate::components::timeline::waveform_canvas::waveform_canvas;
 use crate::{custom_cursors, theme::Colors};
@@ -21,6 +21,12 @@ pub type AudioClipProcessPreviewCb = std::sync::Arc<
 >;
 pub type AudioClipProcessCommitCb =
     std::sync::Arc<dyn Fn(&(String, ClipState), &mut gpui::Window, &mut gpui::App) + 'static>;
+
+/// Cut/razor request: `(clip_id, window_x, bypass_snap)`. The timeline resolves
+/// `window_x` to a snapped beat and splits the clip there. Optional so callers
+/// that never enable the Cut tool can pass `None`.
+pub type AudioClipCutCb =
+    std::sync::Arc<dyn Fn(&(String, f32, bool), &mut gpui::Window, &mut gpui::App) + 'static>;
 
 #[derive(Clone, Debug)]
 struct AudioClipProcessDrag {
@@ -312,6 +318,7 @@ pub fn audio_clip(
     on_erase_clip: Option<
         std::sync::Arc<dyn Fn(&String, &mut gpui::Window, &mut gpui::App) + 'static>,
     >,
+    on_cut_clip: Option<AudioClipCutCb>,
     erase_target: bool,
     auto_crossfade_in_beats: f32,
     auto_crossfade_out_beats: f32,
@@ -384,6 +391,9 @@ pub fn audio_clip(
     let open_editor = on_open_editor.clone();
     let clip_for_erase = clip.id.clone();
     let erase_cb = on_erase_clip.clone();
+    let active_tool = state.active_tool;
+    let cut_cb = on_cut_clip.clone();
+    let clip_for_cut = clip.id.clone();
     let resize_left = ClipResizeDrag {
         clip_id: clip.id.clone(),
         edge: ClipEdge::Left,
@@ -423,12 +433,31 @@ pub fn audio_clip(
         } else {
             Colors::timeline_audio_clip_border(track_color, selected)
         })
-        .cursor(custom_cursors::move_clip())
+        .cursor(if active_tool == TimelineTool::Cut {
+            // Cut tool: a click splits (never drags), so drop the move cursor.
+            custom_cursors::timeline_tool(active_tool)
+        } else {
+            custom_cursors::move_clip()
+        })
         .id(("audio-clip", id_num))
         .on_mouse_down(
             gpui::MouseButton::Left,
             move |event: &gpui::MouseDownEvent, window, cx| {
                 cx.stop_propagation();
+                // Cut/razor tool: a click splits the clip at the cursor instead
+                // of selecting/opening it. The timeline resolves the window x to
+                // a snapped beat (Shift bypasses snap, matching the lane tools).
+                if active_tool == TimelineTool::Cut {
+                    if let Some(cut) = cut_cb.as_ref() {
+                        let x: f32 = event.position.x.into();
+                        cut(
+                            &(clip_for_cut.clone(), x, event.modifiers.shift),
+                            window,
+                            cx,
+                        );
+                    }
+                    return;
+                }
                 let additive = event.modifiers.control || event.modifiers.platform;
                 on_select(
                     &(clip_id.clone(), additive, event.modifiers.alt),

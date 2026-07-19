@@ -315,6 +315,39 @@ impl Timeline {
         self.run_edit_command(EditCommand::DeleteClip { snapshot }, cx);
     }
 
+    /// Split an audio clip into two abutting clips at `split_beat` (absolute
+    /// timeline beats). Returns `true` when a split was recorded. Shared by the
+    /// Split-at-Playhead command and the Cut/razor tool click, so both routes
+    /// produce one identical, undoable `ReplaceClipWithClips`.
+    ///
+    /// A no-op when the clip is missing, is not audio, or `split_beat` lands
+    /// within `MIN_SPLIT_LEN_BEATS` of either edge (a hair-thin fragment is
+    /// never useful and would round to a zero-length clip).
+    pub fn split_audio_clip_at_beat(
+        &mut self,
+        clip_id: &str,
+        split_beat: f32,
+        cx: &mut gpui::Context<Self>,
+    ) -> bool {
+        let Some(snapshot) = ClipSnapshot::capture(&self.state, clip_id) else {
+            return false;
+        };
+        let Some((left, right)) = self.state.plan_audio_clip_split(&snapshot.clip, split_beat)
+        else {
+            return false;
+        };
+
+        let track_id = snapshot.track_id.clone();
+        self.run_edit_command(
+            EditCommand::ReplaceClipWithClips {
+                clips: vec![(track_id.clone(), left), (track_id, right)],
+                snapshot,
+            },
+            cx,
+        );
+        true
+    }
+
     pub(super) fn beat_from_window_x(&self, x: f32) -> f32 {
         let click_x = x - SIDEBAR_WIDTH - HEADER_WIDTH;
         self.state.x_to_beats(click_x)

@@ -105,7 +105,60 @@ fn sanitize_child_env(command: &mut Command) {
     command.env("FUTUREBOARD_PLUGIN_EDITOR_MODE", editor_mode);
     eprintln!("[plugin-bridge] child_env_set FUTUREBOARD_PROCESS_ROLE=plugin_host");
     eprintln!("[plugin-bridge] child_env_set FUTUREBOARD_PLUGIN_EDITOR_MODE={editor_mode}");
+
+    // Linux VST3 editors need an X11/XEmbed parent (GTK4 + GDK X11 backend).
+    // The GPUI studio may run under pure Wayland (`env -u DISPLAY`), but the
+    // plugin-host child must still reach an X11 display (often the outer nested
+    // compositor's X server, or XWayland). Force GDK onto X11 and restore a
+    // DISPLAY when the parent cleared it.
+    #[cfg(target_os = "linux")]
+    {
+        configure_linux_plugin_host_display(command);
+    }
+
     eprintln!("[plugin-host-env] sanitized=true");
+}
+
+/// Ensure the Linux plugin-host child can open GTK4/X11 VST3 editors.
+#[cfg(target_os = "linux")]
+fn configure_linux_plugin_host_display(command: &mut Command) {
+    command.env("GDK_BACKEND", "x11");
+    eprintln!("[plugin-bridge] child_env_set GDK_BACKEND=x11");
+
+    // Prefer the parent's DISPLAY when present; otherwise pick the first live
+    // X11 socket under /tmp/.X11-unix (e.g. X1 → :1) so a Wayland-only GPUI
+    // process can still spawn an X11 editor host.
+    let display = std::env::var("DISPLAY").ok().filter(|d| !d.trim().is_empty());
+    let display = display.or_else(discover_x11_display);
+    match display {
+        Some(d) => {
+            command.env("DISPLAY", &d);
+            eprintln!("[plugin-bridge] child_env_set DISPLAY={d}");
+        }
+        None => {
+            eprintln!(
+                "[plugin-bridge] WARNING no DISPLAY for plugin host; VST3 X11 editors will fail"
+            );
+        }
+    }
+
+    // Keep GTK from preferring Wayland when both sockets are visible.
+    command.env_remove("WAYLAND_DISPLAY");
+    eprintln!("[plugin-bridge] child_env_remove WAYLAND_DISPLAY");
+}
+
+#[cfg(target_os = "linux")]
+fn discover_x11_display() -> Option<String> {
+    let dir = std::fs::read_dir("/tmp/.X11-unix").ok()?;
+    let mut sockets: Vec<u32> = dir
+        .filter_map(|entry| {
+            let name = entry.ok()?.file_name().into_string().ok()?;
+            let num = name.strip_prefix('X')?.parse::<u32>().ok()?;
+            Some(num)
+        })
+        .collect();
+    sockets.sort_unstable();
+    sockets.first().map(|n| format!(":{n}"))
 }
 
 fn binary_name(dir: &Path) -> PathBuf {

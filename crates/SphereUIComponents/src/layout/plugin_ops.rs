@@ -993,28 +993,29 @@ impl StudioLayout {
             // GetWindowRect / GetDpiForWindow are non-blocking cross-process
             // queries) — never a parent, so no input-queue coupling. One
             // non-blocking IPC frame; the host replies EditorAttached async.
+            //
+            // On Linux the host opens a top-level GTK/X11 editor and ignores
+            // parent_hwnd as a real parent. Allow owner_ref=0 when the GPUI
+            // window has no X11 handle (pure Wayland) so IPC still reaches the
+            // host; the GTK path reports a clear error if X11 is unavailable.
             let dpi = shell.shell_dpi();
-            match owner_hwnd {
-                Some(parent) => {
-                    eprintln!(
-                        "[plugin-bridge] sending OpenEditorWithParentHwnd (host-owned) instance={instance_id} owner_ref=0x{parent:x} size={content_w}x{content_h} dpi={dpi}"
-                    );
-                    runtime
-                        .lock()
-                        .map_err(|_| "bridge runtime lock poisoned".to_string())
-                        .and_then(|mut r| {
-                            r.open_editor_with_parent(
-                                instance_id.to_string(),
-                                parent,
-                                content_w as u32,
-                                content_h as u32,
-                                dpi,
-                            )
-                            .map_err(|e| e.to_string())
-                        })
-                }
-                None => Err("host-owned editor open requires the main window handle".to_string()),
-            }
+            let parent = owner_hwnd.unwrap_or(0);
+            eprintln!(
+                "[plugin-bridge] sending OpenEditorWithParentHwnd (host-owned) instance={instance_id} owner_ref=0x{parent:x} size={content_w}x{content_h} dpi={dpi}"
+            );
+            runtime
+                .lock()
+                .map_err(|_| "bridge runtime lock poisoned".to_string())
+                .and_then(|mut r| {
+                    r.open_editor_with_parent(
+                        instance_id.to_string(),
+                        parent,
+                        content_w as u32,
+                        content_h as u32,
+                        dpi,
+                    )
+                    .map_err(|e| e.to_string())
+                })
         } else {
             eprintln!(
                 "[plugin-bridge] sending PrepareEditorView instance={instance_id} shell_content=0x{content_hwnd:x} size={cw}x{ch}"

@@ -1,6 +1,6 @@
 // editor_linux.cpp — GTK4 + X11 IPlugView embedding for Linux
 //
-// VST3 on Linux uses kPlatformTypeX11EmbedWindowID ("XcbWindow"):
+// VST3 on Linux uses kPlatformTypeX11EmbedWindowID ("X11EmbedWindowID"):
 // the host provides an X11 Window ID; the plugin uses the XEmbed protocol
 // to reparent its own window inside ours.
 //
@@ -15,7 +15,7 @@
 //    with a clear error message — VST3 Wayland embedding is not yet standard.
 //
 // VST3 spec reference:
-//   pluginterfaces/gui/iplugview.h — kPlatformTypeX11EmbedWindowID = "XcbWindow"
+//   pluginterfaces/gui/iplugview.h — kPlatformTypeX11EmbedWindowID = "X11EmbedWindowID"
 
 #include <condition_variable>
 #include <cstdio>
@@ -112,10 +112,27 @@ public:
         : proc_(proc), window_(window) {}
 
     ~LinuxRunLoopFrame() {
-        // Defensive: drop any GLib sources the plug-in failed to unregister.
+        // Drop leftover GLib sources. Do NOT release handlers here: after
+        // IPlugView::removed() many plugins (JUCE / Surge XT) destroy their
+        // ITimerHandler / IEventHandler objects without unregistering, so
+        // handler->release() is a use-after-free (host SIGSEGV on editor close).
+        // Clean plugins already called unregister* and emptied regs_.
+        disarm_sources(/*release_handlers=*/false);
+    }
+
+    /// Remove every GLib fd/timer source. When `release_handlers` is false the
+    /// COM refs are abandoned (safe after removed()); when true they are
+    /// released (only safe while the plug-in still owns the handlers).
+    void disarm_sources(bool release_handlers) {
         for (auto* reg : regs_) {
-            if (reg->source_id) g_source_remove(reg->source_id);
-            if (reg->handler)   reg->handler->release();
+            if (reg->source_id) {
+                g_source_remove(reg->source_id);
+                reg->source_id = 0;
+            }
+            if (release_handlers && reg->handler) {
+                reg->handler->release();
+            }
+            reg->handler = nullptr;
             delete reg;
         }
         regs_.clear();
@@ -272,6 +289,37 @@ static void on_surface_layout(GdkSurface* /*surface*/,
 // close_editor_linux() from the close-request handler, which would g_idle_add()
 // and then block-wait on the GTK thread for an idle source that can only run
 // once the handler returns (self-deadlock). Idempotent.
+struct DestroyWindowTask {
+    GtkWidget*         window{nullptr};
+    LinuxRunLoopFrame* frame{nullptr};
+};
+
+// Idle destroy: never call gtk_window_destroy from inside close-request.
+// GTK4/GDK asserts if the surface still has an EGL native window (common when
+// a GL/XEmbed plug-in like Surge XT just detached) — flushing the main context
+// after removed() lets the plug-in drop its GL child first.
+static gboolean idle_destroy_editor_window(gpointer user_data) {
+    auto* task = static_cast<DestroyWindowTask*>(user_data);
+    // Let pending X11/unmap/GL teardown from IPlugView::removed() settle.
+    for (int i = 0; i < 8; ++i) {
+        if (!g_main_context_iteration(nullptr, FALSE)) break;
+    }
+    if (task->window) {
+        gtk_widget_set_visible(task->window, FALSE);
+        for (int i = 0; i < 4; ++i) {
+            if (!g_main_context_iteration(nullptr, FALSE)) break;
+        }
+        gtk_window_destroy(GTK_WINDOW(task->window));
+        g_object_unref(task->window); // matches g_object_ref in idle_open_editor
+        task->window = nullptr;
+    }
+    delete task->frame;
+    task->frame = nullptr;
+    delete task;
+    std::fprintf(stderr, "[SphereVST3/linux] editor closed\n");
+    return G_SOURCE_REMOVE;
+}
+
 static void close_editor_on_gtk_thread(SphereDauxVst3Processor* proc) {
     void* win_ptr = sphere_daux_editor_get_native_window(proc);
     if (!win_ptr) return;
@@ -280,19 +328,22 @@ static void close_editor_on_gtk_thread(SphereDauxVst3Processor* proc) {
     auto* frame = static_cast<LinuxRunLoopFrame*>(
         sphere_daux_editor_get_native_embed(proc));
 
-    sphere_daux_editor_clear_native(proc);       // zero first to prevent re-entrancy
-    sphere_daux_editor_set_frame(proc, nullptr); // setFrame(nullptr) before removed()
-    sphere_daux_editor_detach_view(proc);        // IPlugView::removed()
+    sphere_daux_editor_clear_native(proc); // zero first to prevent re-entrancy
+    // Steinberg order: setFrame(nullptr) then removed(). Plug-ins that clean up
+    // unregister their IRunLoop handlers during these calls.
+    sphere_daux_editor_set_frame(proc, nullptr);
+    sphere_daux_editor_detach_view(proc);
 
-    GtkWidget* window = static_cast<GtkWidget*>(win_ptr);
-    gtk_window_destroy(GTK_WINDOW(window));
-    g_object_unref(window); // matches the g_object_ref in idle_open_editor
+    // Disarm leftover GLib sources. Never release leftover handlers — they may
+    // already be freed inside removed() (JUCE/Surge).
+    if (frame) {
+        frame->disarm_sources(/*release_handlers=*/false);
+    }
 
-    // Destroy the frame last — its dtor drops any leftover GLib fd/timer
-    // sources the plug-in did not unregister in removed().
-    delete frame;
-
-    std::fprintf(stderr, "[SphereVST3/linux] editor closed\n");
+    // Defer GTK destroy off the close-request stack and after removed() so
+    // GDK's egl_native_window can clear (avoids gdksurface.c assertion abort).
+    auto* task = new DestroyWindowTask{static_cast<GtkWidget*>(win_ptr), frame};
+    g_idle_add(idle_destroy_editor_window, task);
 }
 
 // ── Open-task (executed on the GTK thread via g_idle_add) ─────────────────
@@ -345,10 +396,18 @@ static gboolean idle_open_editor(gpointer user_data) {
     int editor_width  = task->width  > 0 ? task->width  : 820;
     int editor_height = task->height > 0 ? task->height : 560;
 
-    if (!sphere_daux_editor_create_view(proc, "XcbWindow",
+    // Official VST3 platform type string (NOT the incorrect "XcbWindow" alias
+    // some hosts historically used). Surge XT / VSTGUI / SDK editorhost all
+    // check isPlatformTypeSupported("X11EmbedWindowID").
+    // Use the literal: Steinberg::kPlatformTypeX11EmbedWindowID is a non-
+    // constexpr FIDString (= const char*) in the SDK headers.
+    const char* kLinuxPlatformType = Steinberg::kPlatformTypeX11EmbedWindowID;
+
+    if (!sphere_daux_editor_create_view(proc, kLinuxPlatformType,
                                         &editor_width, &editor_height)) {
         std::fprintf(stderr,
-                     "[SphereVST3/linux] create_view('XcbWindow') failed\n");
+                     "[SphereVST3/linux] create_view('%s') failed\n",
+                     kLinuxPlatformType);
         gtk_window_destroy(GTK_WINDOW(window));
         goto done;
     }
@@ -367,7 +426,7 @@ static gboolean idle_open_editor(gpointer user_data) {
 #endif
             sphere_daux_editor_set_error(
                 "DAUx VST3 editor: GDK backend is not X11 — "
-                "VST3 XEmbed requires an X11 display");
+                "VST3 XEmbed requires an X11 display (set GDK_BACKEND=x11)");
             std::fprintf(stderr,
                          "[SphereVST3/linux] GDK backend is not X11; "
                          "cannot obtain XID for VST3 embed\n");
@@ -382,8 +441,8 @@ static gboolean idle_open_editor(gpointer user_data) {
         // some GDK versions; gdk_x11_surface_get_xid forces it).
         Window xid = gdk_x11_surface_get_xid(surface);
         std::fprintf(stderr,
-                     "[SphereVST3/linux] X11 XID=0x%lx w=%d h=%d\n",
-                     xid, editor_width, editor_height);
+                     "[SphereVST3/linux] X11 XID=0x%lx w=%d h=%d platform=%s\n",
+                     xid, editor_width, editor_height, kLinuxPlatformType);
 
         // ── Install IPlugFrame + IRunLoop BEFORE attached() ───────────────
         // The plug-in queries the frame for Linux::IRunLoop during attached()
@@ -392,15 +451,19 @@ static gboolean idle_open_editor(gpointer user_data) {
         auto* frame = new LinuxRunLoopFrame(proc, GTK_WINDOW(window));
         sphere_daux_editor_set_frame(proc, frame);
 
+        // Map the host window before attach — Steinberg editorhost and VSTGUI
+        // XEmbed expect a mapped parent XID when the plug-in reparents.
+        gtk_window_present(GTK_WINDOW(window));
+
         // ── Attach IPlugView ──────────────────────────────────────────────
-        // kPlatformTypeX11EmbedWindowID = "XcbWindow"
-        // Pass the X11 Window ID cast to void*.
+        // Pass the X11 Window ID cast to void* (XEmbed parent).
         if (!sphere_daux_editor_attach_view(proc,
                                             reinterpret_cast<void*>(
                                                 static_cast<uintptr_t>(xid)),
-                                            "XcbWindow")) {
+                                            kLinuxPlatformType)) {
             std::fprintf(stderr,
-                         "[SphereVST3/linux] attach_view('XcbWindow') failed\n");
+                         "[SphereVST3/linux] attach_view('%s') failed\n",
+                         kLinuxPlatformType);
             sphere_daux_editor_set_frame(proc, nullptr);
             delete frame;
             gtk_window_destroy(GTK_WINDOW(window));
@@ -452,9 +515,6 @@ static gboolean idle_open_editor(gpointer user_data) {
             close_ctx,
             [](gpointer data, GClosure*) { delete static_cast<CloseCtx*>(data); },
             G_CONNECT_DEFAULT);
-
-        // ── Show the window ───────────────────────────────────────────────
-        gtk_window_present(GTK_WINDOW(window));
 
         std::fprintf(stderr,
                      "[SphereVST3/linux] editor opened handle=%llu "

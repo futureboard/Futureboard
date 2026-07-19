@@ -521,15 +521,51 @@ fn instrument_plugin_options(plugins: &[RegistryPlugin]) -> Vec<SelectOption> {
         return vec![SelectOption::new("", "No Instrument")
             .description("Open Plugin Manager to scan instruments")];
     }
-    let mut options = vec![SelectOption::new("", "No Instrument")];
-    options.extend(plugins.iter().map(|plugin| {
-        let vendor = plugin.vendor.trim();
-        let description = if vendor.is_empty() {
-            plugin_format_label(plugin.format).to_string()
-        } else {
-            format!("{} / {}", vendor, plugin_format_label(plugin.format))
+    // Prefer VST3 when the same instrument ships as CLAP/LV2 too — native
+    // host-owned editors are VST3-only today, and identical display names made
+    // the dropdown pick CLAP first during Surge XT testing.
+    let mut sorted: Vec<&RegistryPlugin> = plugins.iter().collect();
+    sorted.sort_by(|a, b| {
+        let fmt_rank = |f: PluginFormat| match f {
+            PluginFormat::Vst3 => 0u8,
+            PluginFormat::Clap => 1,
+            PluginFormat::Au => 2,
+            PluginFormat::Lv2 => 3,
+            PluginFormat::Unknown => 4,
         };
-        SelectOption::new(plugin.id.clone(), plugin.name.clone()).description(description)
+        a.name
+            .to_ascii_lowercase()
+            .cmp(&b.name.to_ascii_lowercase())
+            .then_with(|| fmt_rank(a.format).cmp(&fmt_rank(b.format)))
+            .then_with(|| a.id.cmp(&b.id))
+    });
+    let mut name_counts: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
+    for plugin in &sorted {
+        *name_counts
+            .entry(plugin.name.to_ascii_lowercase())
+            .or_default() += 1;
+    }
+    let mut options = vec![SelectOption::new("", "No Instrument")];
+    options.extend(sorted.into_iter().map(|plugin| {
+        let vendor = plugin.vendor.trim();
+        let fmt = plugin_format_label(plugin.format);
+        let description = if vendor.is_empty() {
+            fmt.to_string()
+        } else {
+            format!("{vendor} / {fmt}")
+        };
+        let label = if name_counts
+            .get(&plugin.name.to_ascii_lowercase())
+            .copied()
+            .unwrap_or(0)
+            > 1
+        {
+            format!("{} ({fmt})", plugin.name)
+        } else {
+            plugin.name.clone()
+        };
+        SelectOption::new(plugin.id.clone(), label).description(description)
     }));
     options
 }

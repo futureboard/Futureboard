@@ -2,13 +2,26 @@
 name = "xtask"
 version = "0.1.0"
 edition = "2024"
-description = "Futureboard workspace task runner — chains the per-edition cargo aliases"
+description = "Futureboard workspace task runner — cross-edition build chaining and binary packaging/staging"
 license.workspace = true
 publish = false
 
 [[bin]]
 name = "xtask"
 path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+# Parse `cargo build --message-format=json` artifact messages to discover the
+# real executable path instead of guessing target/<profile>/FutureboardNative.
+cargo_metadata = "0.18"
+
+[dev-dependencies]
+tempfile.workspace = true
 
 [lints]
 workspace = true

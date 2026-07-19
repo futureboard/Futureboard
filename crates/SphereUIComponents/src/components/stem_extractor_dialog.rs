@@ -174,7 +174,8 @@ impl StemExtractorWindow {
             .clone()
             .unwrap_or_else(SphereAudioProcessor::default_models_dir);
         let _ = SphereAudioProcessor::ensure_models_dir(&models_dir);
-        let params = SphereAudioProcessor::default_stem_extract_params();
+        // Auto-select GPU when the startup probe found one (CPU fallback).
+        let params = SphereAudioProcessor::auto_stem_extract_params();
         let model_installed = SphereAudioProcessor::model_installed(params.model, &models_dir);
         Self {
             defaults,

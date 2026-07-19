@@ -9,6 +9,7 @@ fn main() {
     println!("cargo:rerun-if-changed=../../../.discordrpcsecret");
 
     stage_exclusive_sources();
+    download_onnxruntime();
 
     // Keep the local Discord application id out of source control while still
     // making it available to `option_env!` in the native binary. An explicit
@@ -34,6 +35,195 @@ fn main() {
         )
         .manifest_required()
         .unwrap();
+    }
+}
+
+/// Default ONNX Runtime release fetched for the real MDX-NET stem backend.
+/// Override with `FUTUREBOARD_ORT_VERSION`.
+const ORT_DEFAULT_VERSION: &str = "1.27.1";
+
+/// Download the ONNX Runtime shared library from the microsoft/onnxruntime
+/// GitHub release and place it next to the built binary, so the Stem Extractor
+/// can load it at runtime (`{appdir}/onnxruntime.dll` · `libonnxruntime.so` ·
+/// `libonnxruntime.dylib`).
+///
+/// Only runs with `--features stem-onnx`. Failures are non-fatal: the app still
+/// builds and simply falls back to the spectral stub at runtime. Set
+/// `FUTUREBOARD_ORT_SKIP_DOWNLOAD=1` to skip (e.g. offline / air-gapped builds).
+fn download_onnxruntime() {
+    println!("cargo:rerun-if-env-changed=FUTUREBOARD_ORT_VERSION");
+    println!("cargo:rerun-if-env-changed=FUTUREBOARD_ORT_SKIP_DOWNLOAD");
+
+    if std::env::var_os("CARGO_FEATURE_STEM_ONNX").is_none() {
+        return;
+    }
+    if std::env::var_os("FUTUREBOARD_ORT_SKIP_DOWNLOAD").is_some() {
+        println!("cargo:warning=ONNX Runtime download skipped (FUTUREBOARD_ORT_SKIP_DOWNLOAD set)");
+        return;
+    }
+
+    let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    let target_arch = std::env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default();
+    let cuda = std::env::var_os("CARGO_FEATURE_STEM_CUDA").is_some();
+    let directml = std::env::var_os("CARGO_FEATURE_STEM_DIRECTML").is_some();
+
+    let version =
+        std::env::var("FUTUREBOARD_ORT_VERSION").unwrap_or_else(|_| ORT_DEFAULT_VERSION.to_string());
+
+    // Where the binary ends up: OUT_DIR is target/<profile>/build/<pkg>/out.
+    let out_dir = PathBuf::from(std::env::var_os("OUT_DIR").expect("OUT_DIR is set by Cargo"));
+    let profile_dir = out_dir
+        .ancestors()
+        .nth(3)
+        .map(Path::to_path_buf)
+        .unwrap_or(out_dir.clone());
+
+    let (lib_name, dest_name) = match target_os.as_str() {
+        "windows" => ("onnxruntime.dll", "onnxruntime.dll"),
+        "macos" => ("libonnxruntime", "libonnxruntime.dylib"),
+        "linux" => ("libonnxruntime.so", "libonnxruntime.so"),
+        other => {
+            println!("cargo:warning=ONNX Runtime auto-download unsupported for OS `{other}`");
+            return;
+        }
+    };
+    let dest = profile_dir.join(dest_name);
+    if dest.is_file() {
+        return; // Cached from a previous build.
+    }
+
+    let (platform, ext) = match (target_os.as_str(), target_arch.as_str()) {
+        ("windows", "x86_64") => ("win-x64", "zip"),
+        ("windows", "aarch64") => ("win-arm64", "zip"),
+        ("linux", "x86_64") => ("linux-x64", "tgz"),
+        ("linux", "aarch64") => ("linux-aarch64", "tgz"),
+        // universal2 covers both Apple Silicon and Intel.
+        ("macos", _) => ("osx-universal2", "tgz"),
+        _ => {
+            println!(
+                "cargo:warning=ONNX Runtime auto-download unsupported for {target_os}/{target_arch}"
+            );
+            return;
+        }
+    };
+    // Preferred assets in priority order. DirectML/GPU packages only exist for
+    // x64 desktop; a CPU package is always the final fallback. GitHub currently
+    // ships DirectML only via NuGet, so the DirectML candidate typically 404s
+    // and we fall back to CPU (the DirectML EP then degrades to CPU at runtime).
+    let mut assets: Vec<String> = Vec::new();
+    if directml && platform == "win-x64" {
+        assets.push(format!("onnxruntime-{platform}-directml-{version}.{ext}"));
+    }
+    if cuda && matches!(platform, "win-x64" | "linux-x64") {
+        assets.push(format!("onnxruntime-{platform}-gpu-{version}.{ext}"));
+    }
+    assets.push(format!("onnxruntime-{platform}-{version}.{ext}"));
+
+    for asset in &assets {
+        let url =
+            format!("https://github.com/microsoft/onnxruntime/releases/download/v{version}/{asset}");
+        println!("cargo:warning=Downloading ONNX Runtime {version} ({asset})...");
+        let bytes = match http_get(&url) {
+            Ok(bytes) => bytes,
+            Err(err) => {
+                println!("cargo:warning=  {asset} unavailable ({err})");
+                continue;
+            }
+        };
+        let extracted = if ext == "zip" {
+            extract_lib_from_zip(&bytes, lib_name)
+        } else {
+            extract_lib_from_tgz(&bytes, lib_name)
+        };
+        match extracted {
+            Some(lib) => match std::fs::write(&dest, lib) {
+                Ok(()) => {
+                    println!("cargo:warning=ONNX Runtime staged at {}", dest.display());
+                    return;
+                }
+                Err(err) => println!("cargo:warning=Could not write {}: {err}", dest.display()),
+            },
+            None => println!("cargo:warning=  {lib_name} not found inside {asset}"),
+        }
+    }
+
+    println!(
+        "cargo:warning=ONNX Runtime not staged; Stem Extractor will use the spectral stub. \
+         Place {dest_name} beside the app or set ORT_DYLIB_PATH to enable real MDX-NET."
+    );
+}
+
+/// GET `url` into memory, following redirects (GitHub → object storage).
+fn http_get(url: &str) -> Result<Vec<u8>, String> {
+    use std::io::Read;
+    let response = ureq::get(url)
+        .call()
+        .map_err(|e| format!("request error: {e}"))?;
+    let mut buf = Vec::new();
+    response
+        .into_body()
+        .into_reader()
+        .read_to_end(&mut buf)
+        .map_err(|e| format!("read error: {e}"))?;
+    Ok(buf)
+}
+
+/// Extract the regular file whose name matches `lib_name` from a zip archive.
+fn extract_lib_from_zip(bytes: &[u8], lib_name: &str) -> Option<Vec<u8>> {
+    use std::io::{Cursor, Read};
+    let mut archive = zip::ZipArchive::new(Cursor::new(bytes)).ok()?;
+    for i in 0..archive.len() {
+        let mut file = archive.by_index(i).ok()?;
+        if !file.is_file() {
+            continue;
+        }
+        let name = file.name().rsplit('/').next().unwrap_or("").to_string();
+        if lib_matches(&name, lib_name) {
+            let mut out = Vec::with_capacity(file.size() as usize);
+            file.read_to_end(&mut out).ok()?;
+            return Some(out);
+        }
+    }
+    None
+}
+
+/// Extract the regular file whose name matches `lib_name` from a gzip+tar
+/// archive.
+fn extract_lib_from_tgz(bytes: &[u8], lib_name: &str) -> Option<Vec<u8>> {
+    use std::io::{Cursor, Read};
+    let decoder = flate2::read::GzDecoder::new(Cursor::new(bytes));
+    let mut archive = tar::Archive::new(decoder);
+    for entry in archive.entries().ok()? {
+        let mut entry = entry.ok()?;
+        if !entry.header().entry_type().is_file() {
+            continue;
+        }
+        let name = entry
+            .path()
+            .ok()
+            .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+            .unwrap_or_default();
+        if lib_matches(&name, lib_name) {
+            let mut out = Vec::with_capacity(entry.size() as usize);
+            entry.read_to_end(&mut out).ok()?;
+            return Some(out);
+        }
+    }
+    None
+}
+
+/// Whether an archive entry file name is the ONNX Runtime library. Handles
+/// versioned unix sonames (`libonnxruntime.so.1.27.1`, `libonnxruntime.1.27.1.dylib`).
+fn lib_matches(entry_name: &str, lib_name: &str) -> bool {
+    if entry_name == lib_name {
+        return true;
+    }
+    match lib_name {
+        "libonnxruntime.so" => entry_name.starts_with("libonnxruntime.so"),
+        "libonnxruntime" => {
+            entry_name.starts_with("libonnxruntime") && entry_name.ends_with(".dylib")
+        }
+        _ => false,
     }
 }
 

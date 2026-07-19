@@ -1,46 +1,115 @@
-//! Cross-edition task runner (cargo-xtask pattern).
+//! Futureboard workspace task runner (cargo-xtask pattern).
 //!
-//! Cargo aliases cannot chain commands, and the two editions must build into
-//! separate target directories (cargo unifies features within one build
-//! graph, so a shared directory would overwrite or reuse app artifacts).
-//! `cargo xtask build-all` runs each edition's existing alias from
-//! `.cargo/config.toml` in sequence, keeping those aliases the single source
-//! of truth for edition flags.
+//! Two responsibilities:
+//!
+//! * `build-all` / `check-all` — chain the per-edition cargo aliases from
+//!   `.cargo/config.toml` (Cargo aliases cannot chain commands, and the two
+//!   editions must build into separate target directories).
+//! * `package` — build `FutureboardNative` and stage a clean, runnable
+//!   application tree into `out/`, separate from the Cargo `target/` cache.
+//!
+//! Packaging deliberately lives here, not in `build.rs`: `build.rs` runs inside
+//! every compilation and must stay hermetic, whereas packaging is an explicit,
+//! post-build workflow that copies files, writes metadata and publishes output.
 
-use std::env;
+mod cargo_build;
+mod metadata;
+mod package;
+mod platform;
+mod staging;
+mod validation;
+
+use std::path::PathBuf;
 use std::process::{Command, ExitCode};
 
-const USAGE: &str = "\
-Usage: cargo xtask <command> [cargo args...]
+use clap::{Parser, Subcommand};
 
-Commands:
-  build-all   cargo build-ce, then cargo build-exclusive-win
-  check-all   cargo check-ce, then cargo check-exclusive-win
+use platform::Edition;
 
-Extra arguments are forwarded to every underlying cargo invocation,
-e.g. `cargo xtask build-all --release`.";
+#[derive(Parser)]
+#[command(
+    name = "xtask",
+    about = "Futureboard workspace task runner",
+    disable_help_subcommand = true
+)]
+struct Cli {
+    #[command(subcommand)]
+    command: XtaskCommand,
+}
+
+#[derive(Subcommand)]
+enum XtaskCommand {
+    /// Build and stage a runnable application into `out/`.
+    Package(PackageArgs),
+
+    /// Run `build-ce`, then `build-exclusive-win` (extra args forwarded).
+    BuildAll {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// Run `check-ce`, then `check-exclusive-win` (extra args forwarded).
+    CheckAll {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+}
+
+#[derive(clap::Args)]
+struct PackageArgs {
+    /// Cargo profile to build (e.g. `dev`, `release`).
+    #[arg(long, default_value = "dev")]
+    profile: String,
+
+    /// Cargo target triple (defaults to the host target).
+    #[arg(long)]
+    target: Option<String>,
+
+    /// Which edition to build and stage.
+    #[arg(long, default_value = "community")]
+    edition: Edition,
+
+    /// Root output directory for staged packages.
+    #[arg(long, default_value = "out")]
+    out: PathBuf,
+
+    /// Also copy debug symbols (`.pdb`) into a `symbols/` directory.
+    #[arg(long)]
+    symbols: bool,
+}
 
 fn main() -> ExitCode {
-    let mut args = env::args().skip(1);
-    let Some(command) = args.next() else {
-        eprintln!("{USAGE}");
-        return ExitCode::FAILURE;
+    let cli = Cli::parse();
+    match cli.command {
+        XtaskCommand::Package(args) => run_package(args),
+        XtaskCommand::BuildAll { args } => run_aliases(&["build-ce", "build-exclusive-win"], &args),
+        XtaskCommand::CheckAll { args } => run_aliases(&["check-ce", "check-exclusive-win"], &args),
+    }
+}
+
+fn run_package(args: PackageArgs) -> ExitCode {
+    let options = package::PackageOptions {
+        profile: args.profile,
+        target: args.target,
+        edition: args.edition,
+        out_root: args.out,
+        symbols: args.symbols,
     };
-    let forwarded: Vec<String> = args.collect();
-    let aliases: &[&str] = match command.as_str() {
-        "build-all" => &["build-ce", "build-exclusive-win"],
-        "check-all" => &["check-ce", "check-exclusive-win"],
-        "help" | "--help" | "-h" => {
-            println!("{USAGE}");
-            return ExitCode::SUCCESS;
+    match package::run(&options) {
+        Ok(path) => {
+            println!("Packaged into {}", path.display());
+            ExitCode::SUCCESS
         }
-        _ => {
-            eprintln!("error: unknown xtask command `{command}`\n\n{USAGE}");
-            return ExitCode::FAILURE;
+        Err(error) => {
+            eprintln!("error: {error:#}");
+            ExitCode::FAILURE
         }
-    };
+    }
+}
+
+fn run_aliases(aliases: &[&str], forwarded: &[String]) -> ExitCode {
     for alias in aliases {
-        if let Err(code) = run_cargo_alias(alias, &forwarded) {
+        if let Err(code) = run_cargo_alias(alias, forwarded) {
             return code;
         }
     }
@@ -48,12 +117,10 @@ fn main() -> ExitCode {
 }
 
 fn run_cargo_alias(alias: &str, forwarded: &[String]) -> Result<(), ExitCode> {
-    // Run from the workspace root so the aliases in .cargo/config.toml
-    // resolve regardless of where `cargo xtask` was invoked.
+    // Run from the workspace root so the aliases in .cargo/config.toml resolve
+    // regardless of where `cargo xtask` was invoked.
     let root = concat!(env!("CARGO_MANIFEST_DIR"), "/..");
-    // Cargo exports its own path as $CARGO for subprocesses; fall back to
-    // PATH lookup when the binary is run directly.
-    let cargo = env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
+    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
     eprintln!("[xtask] cargo {} {}", alias, forwarded.join(" "));
     let status = Command::new(&cargo)
         .arg(alias)

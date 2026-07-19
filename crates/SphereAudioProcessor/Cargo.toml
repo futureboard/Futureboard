@@ -15,7 +15,23 @@ crate-type = ["rlib", "cdylib"]
 serde.workspace = true
 thiserror.workspace = true
 log.workspace = true
+rustfft.workspace = true
 sphere-stem-extractor.workspace = true
+
+# Optional learned instrument classifier (pure-Rust ONNX, CPU). Off by default.
+# `tract-onnx` re-exports `tract_ndarray` via its prelude.
+tract-onnx = { workspace = true, optional = true }
+
+[features]
+default = []
+# Enable the ONNX-backed instrument classifier in `analysis::onnx`.
+onnx = ["dep:tract-onnx"]
+# Enable real GPU-capable MDX-NET stem inference in SphereStemExtractor.
+stem-onnx = ["sphere-stem-extractor/onnx"]
+# Select the GPU execution provider used by `stem-onnx`.
+stem-cuda = ["sphere-stem-extractor/cuda"]
+stem-directml = ["sphere-stem-extractor/directml"]
+stem-coreml = ["sphere-stem-extractor/coreml"]
 
 [build-dependencies]
 cc.workspace = true

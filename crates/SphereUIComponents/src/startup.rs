@@ -90,6 +90,45 @@ pub fn log_startup_phase(phase: StartupPhase) {
     crate::boot::log(&format!("startup phase: {}", phase.label()));
 }
 
+/// Result of the startup GPU enumeration.
+#[derive(Debug, Clone)]
+pub struct GpuProbe {
+    /// Names of detected hardware GPUs (software/CPU adapters excluded).
+    pub devices: Vec<String>,
+    /// One-line status suitable for the splash screen.
+    pub summary: String,
+    pub has_gpu: bool,
+}
+
+/// Enumerate GPU adapters (wgpu) and record availability for the audio stack so
+/// stem extraction can automatically prefer GPU inference. Safe to call without
+/// the `gpu-renderer` feature (returns "no GPU"). Never panics — enumeration is
+/// already `catch_unwind`-guarded.
+pub fn probe_gpus() -> GpuProbe {
+    let devices: Vec<String> = crate::components::timeline::render::list_available_gpu_devices()
+        .into_iter()
+        // wgpu reports software/WARP/llvmpipe fallbacks as `Cpu`; exclude those.
+        .filter(|d| d.device_type.as_deref() != Some("Cpu"))
+        .map(|d| d.name)
+        .collect();
+    let has_gpu = !devices.is_empty();
+
+    // Authoritative signal for `SphereAudioProcessor::gpu_available()`.
+    SphereAudioProcessor::set_gpu_detected(has_gpu);
+
+    let summary = if has_gpu {
+        format!("GPU: {}", devices.join(", "))
+    } else {
+        "GPU: none detected — using CPU".to_string()
+    };
+    crate::boot::log(&format!("startup GPU probe: {summary}"));
+    GpuProbe {
+        devices,
+        summary,
+        has_gpu,
+    }
+}
+
 /// Lightweight boot work shared by Welcome and direct-to-studio launches.
 /// Runs while the splash window is visible.
 pub async fn run_lightweight_boot(cx: &mut AsyncApp) -> StartupPlan {

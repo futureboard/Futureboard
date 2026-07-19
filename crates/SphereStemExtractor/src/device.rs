@@ -1,6 +1,19 @@
+use std::sync::atomic::{AtomicU8, Ordering};
+
 use serde::{Deserialize, Serialize};
 
 use crate::error::StemExtractError;
+
+/// Application-provided GPU probe result: 0 = not probed, 1 = none, 2 = present.
+static GPU_PROBE: AtomicU8 = AtomicU8::new(0);
+
+/// Record whether the application detected a usable hardware GPU (e.g. from
+/// wgpu adapter enumeration during startup). Once set, this is the
+/// authoritative answer for [`gpu_available`], enabling automatic GPU stem
+/// extraction without a per-machine heuristic guess.
+pub fn set_gpu_detected(present: bool) {
+    GPU_PROBE.store(if present { 2 } else { 1 }, Ordering::Relaxed);
+}
 
 /// Inference device for MDX-NET stem extraction.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
@@ -47,7 +60,14 @@ pub fn gpu_available() -> bool {
     if std::env::var_os("FUTUREBOARD_STEM_FORCE_NO_GPU").is_some() {
         return false;
     }
-    // Lightweight hints only — no CUDA/DirectML library load on the UI path.
+    // The application's startup GPU enumeration is authoritative once it runs.
+    match GPU_PROBE.load(Ordering::Relaxed) {
+        2 => return true,
+        1 => return false,
+        _ => {}
+    }
+    // Lightweight hints only (before the app probes) — no CUDA/DirectML library
+    // load on the UI path.
     std::path::Path::new("/dev/nvidia0").exists()
         || std::path::Path::new("/dev/dxg").exists()
         || std::env::var_os("CUDA_PATH").is_some()

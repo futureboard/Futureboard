@@ -47,6 +47,9 @@ rand = { workspace = true, optional = true }
 [target.'cfg(target_os = "windows")'.dependencies]
 # Windows GPUI backend.
 gpui_windows.workspace = true
+# Real MDX-NET stem separation with the DirectML GPU execution provider is a
+# default on Windows (auto-used when a GPU is detected, CPU fallback otherwise).
+sphere_ui_components = { workspace = true, features = ["stem-directml"] }
 # Exclusive Edition's private source registers this host at startup. Keeping
 # the dependency here lets the public Community manifest remain valid when the
 # ignored `crates/ExclusiveEdition` directory is absent.
@@ -71,8 +74,17 @@ gpui = { workspace = true, features = ["wayland", "x11"] }
 gpui_linux = { workspace = true, features = ["wayland", "x11"] }
 
 [features]
-default = ["gpu-renderer"]
+default = ["gpu-renderer", "stem-onnx"]
 gpu-renderer = ["sphere_ui_components/gpu-renderer"]
+# Real MDX-NET stem separation via ONNX Runtime. CPU by default and
+# cross-platform; the onnxruntime library is loaded at runtime from
+# ORT_DYLIB_PATH, falling back to the spectral stub when absent.
+stem-onnx = ["sphere_ui_components/stem-onnx"]
+# GPU execution providers — opt-in and platform-specific (do not add to
+# `default`): DirectML on Windows, CUDA on Linux/Windows, CoreML on macOS.
+stem-cuda = ["sphere_ui_components/stem-cuda"]
+stem-directml = ["sphere_ui_components/stem-directml"]
+stem-coreml = ["sphere_ui_components/stem-coreml"]
 # Developer builds only: allow Studio to start when elevated. Never enable for
 # Community or Exclusive production/distribution builds.
 allow_elevated_for_testing = ["sphere-platform/allow_elevated_for_testing"]
@@ -95,3 +107,9 @@ exclusive = [
 
 [build-dependencies]
 embed-resource.workspace = true
+# Build-time ONNX Runtime download (feature = "stem-onnx"): fetch + extract the
+# platform library next to the built binary.
+ureq.workspace = true
+zip.workspace = true
+flate2.workspace = true
+tar.workspace = true

@@ -3,4 +3,10 @@ name = "rodharerist"
 version = "0.1.0"
 edition = "2024"
 
+[lib]
+name = "rodharerist"
+crate-type = ["dylib"]
+
 [dependencies]
+builtin_dsp_core.workspace = true
+builtin_plugin_api.workspace = true

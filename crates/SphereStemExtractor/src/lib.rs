@@ -7,10 +7,13 @@
 //!
 //! Classification: scanner/offline path (worker thread only).
 //!
-//! The current default backend is a deterministic spectral stub used to wire
-//! the UI/job pipeline until ONNX MDX-NET weights are installed. Real MDX-NET
-//! inference will replace [`backend::SpectralStubBackend`] without changing the
-//! public params surface.
+//! When built with the `onnx` feature and the model's ONNX weights are
+//! installed, real MDX-NET inference runs through ONNX Runtime
+//! ([`backend::OnnxMdxBackend`]) on CPU or, with the `cuda` / `directml` /
+//! `coreml` features, GPU. Otherwise it falls back to a deterministic spectral
+//! stub ([`backend::SpectralStubBackend`]) so the UI/job pipeline still runs.
+//! The ONNX Runtime shared library is loaded dynamically; set `ORT_DYLIB_PATH`
+//! to a (optionally GPU-enabled) `onnxruntime` build to select it at runtime.
 
 pub mod backend;
 pub mod device;
@@ -23,7 +26,7 @@ pub mod progress;
 pub mod stems;
 
 pub use backend::{InferBackendKind, StemInferBackend, create_mdx_net_backend};
-pub use device::{InferDevice, gpu_available, resolve_device};
+pub use device::{InferDevice, gpu_available, resolve_device, set_gpu_detected};
 pub use download::{
     StemModelDownloadProgress, UVR_MODEL_RELEASE_BASE, default_models_dir, download_model,
     ensure_models_dir, model_installed, resolve_installed_model_files,

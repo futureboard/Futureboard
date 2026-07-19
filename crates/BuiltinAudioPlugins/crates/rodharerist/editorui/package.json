@@ -1,0 +1,26 @@
+{
+  "name": "editorui",
+  "module": "src/Editor.tsx",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "@types/react": "^19.2.17",
+    "@types/react-dom": "^19.2.3",
+    "typescript": "^5.9.3",
+    "vite": "^8.1.5",
+    "vite-plugin-singlefile": "^2.3.3"
+  },
+  "dependencies": {
+    "@tailwindcss/vite": "^4.3.3",
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7",
+    "tailwindcss": "^4.3.3"
+  }
+}

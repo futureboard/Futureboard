@@ -98,6 +98,16 @@ pub fn setup(cx: &mut App) {
     };
 
     cx.spawn(async move |cx| {
+        // Reading the GPU list first: enumerate adapters and record availability
+        // so stem extraction can auto-select GPU (DirectML on Windows).
+        if let Some(splash) = splash.as_ref() {
+            let _ = cx.update(|app| splash.set_status(app, "Reading GPU list…"));
+        }
+        let gpu_summary = cx.update(|_app| sphere_ui_components::startup::probe_gpus().summary);
+        if let Some(splash) = splash.as_ref() {
+            let _ = cx.update(|app| splash.set_status(app, gpu_summary.clone()));
+        }
+
         let plan = run_lightweight_boot(cx).await;
         boot::log(&format!(
             "startup route resolved: {:?} (show_welcome={})",
@@ -106,6 +116,13 @@ pub fn setup(cx: &mut App) {
 
         // Open the next surface before closing splash so Windows does not quit
         // on LastWindowClosed while transitioning.
+        if let Some(splash) = splash.as_ref() {
+            let opening = match plan.route {
+                StartupRoute::Welcome => "Opening Welcome…",
+                _ => "Opening Studio…",
+            };
+            let _ = cx.update(|app| splash.set_status(app, opening));
+        }
         match plan.route {
             StartupRoute::Welcome => {
                 log_startup_phase(StartupPhase::OpeningWelcome);

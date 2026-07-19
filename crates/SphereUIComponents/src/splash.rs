@@ -4,8 +4,8 @@
 //! Displays only the splash artwork at logical 670×350 (source PNG is @2x).
 
 use gpui::{
-    div, img, px, App, AppContext, Context, IntoElement, ObjectFit, ParentElement, Render,
-    SharedString, Styled, StyledImage, Window, WindowBackgroundAppearance, WindowBounds,
+    div, img, px, rgb, rgba, App, AppContext, Context, IntoElement, ObjectFit, ParentElement,
+    Render, SharedString, Styled, StyledImage, Window, WindowBackgroundAppearance, WindowBounds,
     WindowHandle, WindowKind, WindowOptions,
 };
 
@@ -23,6 +23,7 @@ pub const SPLASH_HEIGHT: f32 = 350.0;
 pub struct SplashWindow {
     image_path: &'static str,
     image_available: bool,
+    status: SharedString,
 }
 
 impl SplashWindow {
@@ -42,7 +43,13 @@ impl SplashWindow {
         Self {
             image_path,
             image_available,
+            status: SharedString::default(),
         }
+    }
+
+    /// Update the boot status line shown at the bottom of the splash.
+    pub fn set_status(&mut self, status: impl Into<SharedString>) {
+        self.status = status.into();
     }
 }
 
@@ -63,33 +70,62 @@ fn splash_image_path_for_edition(info: Option<&EditionInfo>) -> &'static str {
 
 impl Render for SplashWindow {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        let mut root = div()
+            .size_full()
+            .relative()
+            .overflow_hidden()
+            .bg(gpui::transparent_black())
+            .font(theme::ui_font());
+
         if self.image_available {
-            div()
-                .size_full()
-                .overflow_hidden()
-                .bg(gpui::transparent_black())
-                .child(
-                    img(SharedString::from(self.image_path))
-                        .w(px(SPLASH_WIDTH))
-                        .h(px(SPLASH_HEIGHT))
-                        .object_fit(ObjectFit::Contain),
-                )
+            root = root.child(
+                img(SharedString::from(self.image_path))
+                    .w(px(SPLASH_WIDTH))
+                    .h(px(SPLASH_HEIGHT))
+                    .object_fit(ObjectFit::Contain),
+            );
         } else {
-            div()
-                .size_full()
-                .flex()
-                .items_center()
-                .justify_center()
-                .bg(Colors::surface_base())
-                .font(theme::ui_font())
-                .child(
-                    div()
-                        .text_size(px(16.0))
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .text_color(Colors::text_primary())
-                        .child("Futureboard Studio"),
-                )
+            root = root.child(
+                div()
+                    .size_full()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .bg(Colors::surface_base())
+                    .child(
+                        div()
+                            .text_size(px(16.0))
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_color(Colors::text_primary())
+                            .child("Futureboard Studio"),
+                    ),
+            );
         }
+
+        if !self.status.is_empty() {
+            // Bottom-centered status pill, legible over the artwork.
+            root = root.child(
+                div()
+                    .absolute()
+                    .bottom(px(10.0))
+                    .left_0()
+                    .right_0()
+                    .flex()
+                    .justify_center()
+                    .child(
+                        div()
+                            .px(px(10.0))
+                            .py(px(3.0))
+                            .rounded(px(6.0))
+                            .bg(rgba(0x0b0f18cc))
+                            .text_size(px(11.0))
+                            .text_color(rgb(0xd7dbe6))
+                            .child(self.status.clone()),
+                    ),
+            );
+        }
+
+        root
     }
 }
 
@@ -124,6 +160,15 @@ impl SplashWindowHandle {
             .map_err(|e| e.to_string())?;
         crate::boot::log("splash window shown");
         Ok(Self { window: handle })
+    }
+
+    /// Update the splash boot status line (e.g. "Reading GPU list…").
+    pub fn set_status(&self, cx: &mut App, status: impl Into<SharedString>) {
+        let status = status.into();
+        let _ = self.window.update(cx, |splash, _window, cx| {
+            splash.set_status(status);
+            cx.notify();
+        });
     }
 
     pub fn close(self, cx: &mut App) {

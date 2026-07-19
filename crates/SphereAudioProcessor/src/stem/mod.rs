@@ -13,7 +13,7 @@ pub use sphere_stem_extractor::{
     StemModelDownloadProgress, StemModelFile, StemModelInfo, StemModelPackage, StemSet,
     UVR_MODEL_RELEASE_BASE, create_mdx_net_backend, default_models_dir, download_model,
     ensure_models_dir, extract_stems, gpu_available, model_installed, resolve_device,
-    resolve_installed_model_files,
+    resolve_installed_model_files, set_gpu_detected,
 };
 
 /// Convenience constructor matching the Stem Extractor dialog defaults:
@@ -25,6 +25,17 @@ pub fn default_stem_extract_params() -> StemExtractParams {
 /// Convenience constructor for MDX-NET on GPU (falls back to CPU when allowed).
 pub fn mdx_net_gpu_params() -> StemExtractParams {
     StemExtractParams::mdx_net_gpu()
+}
+
+/// Startup default that automatically prefers GPU when one is available (with
+/// CPU fallback), else CPU. Uses the application's GPU probe via
+/// [`gpu_available`] / [`set_gpu_detected`].
+pub fn auto_stem_extract_params() -> StemExtractParams {
+    if gpu_available() {
+        StemExtractParams::mdx_net_gpu()
+    } else {
+        StemExtractParams::mdx_net_cpu()
+    }
 }
 
 #[cfg(test)]

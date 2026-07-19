@@ -184,6 +184,220 @@ pub unsafe extern "C" fn sphere_stretch_process_stereo(
     result.unwrap_or(-4)
 }
 
+// ============================================================================
+// Offline analysis FFI (BPM / key / instrument classification).
+//
+// This is an offline/control-thread surface. It allocates and runs FFTs; never
+// call it from a realtime audio callback.
+// ============================================================================
+
+use crate::analysis::{
+    AnalysisOptions, InstrumentCategory, KeyMode, PitchClass, analyze_mono,
+};
+
+/// Plain-old-data analysis result for the C ABI.
+///
+/// `has_*` flags report whether the corresponding estimate is valid. Enum
+/// fields use the integer codes documented below; `-1` means "no estimate".
+///
+/// `key_tonic`: 0..=11 (0 = C ... 11 = B). `key_mode`: 0 = major, 1 = minor.
+/// `instrument`: 0 Vocal, 1 Bass, 2 Drums, 3 Keys, 4 Guitar, 5 Strings,
+/// 6 Synth, 7 Other.
+#[repr(C)]
+pub struct SphereAnalysisResult {
+    pub has_bpm: bool,
+    pub bpm: f32,
+    pub bpm_confidence: f32,
+
+    pub has_key: bool,
+    pub key_tonic: i32,
+    pub key_mode: i32,
+    pub key_confidence: f32,
+
+    pub has_instrument: bool,
+    pub instrument: i32,
+    pub instrument_confidence: f32,
+
+    pub duration_secs: f32,
+}
+
+impl SphereAnalysisResult {
+    fn empty() -> Self {
+        Self {
+            has_bpm: false,
+            bpm: 0.0,
+            bpm_confidence: 0.0,
+            has_key: false,
+            key_tonic: -1,
+            key_mode: -1,
+            key_confidence: 0.0,
+            has_instrument: false,
+            instrument: -1,
+            instrument_confidence: 0.0,
+            duration_secs: 0.0,
+        }
+    }
+}
+
+fn pitch_class_code(pc: PitchClass) -> i32 {
+    match pc {
+        PitchClass::C => 0,
+        PitchClass::Cs => 1,
+        PitchClass::D => 2,
+        PitchClass::Ds => 3,
+        PitchClass::E => 4,
+        PitchClass::F => 5,
+        PitchClass::Fs => 6,
+        PitchClass::G => 7,
+        PitchClass::Gs => 8,
+        PitchClass::A => 9,
+        PitchClass::As => 10,
+        PitchClass::B => 11,
+    }
+}
+
+fn instrument_code(cat: InstrumentCategory) -> i32 {
+    match cat {
+        InstrumentCategory::Vocal => 0,
+        InstrumentCategory::Bass => 1,
+        InstrumentCategory::Drums => 2,
+        InstrumentCategory::Keys => 3,
+        InstrumentCategory::Guitar => 4,
+        InstrumentCategory::Strings => 5,
+        InstrumentCategory::Synth => 6,
+        InstrumentCategory::Other => 7,
+    }
+}
+
+/// Analyse a mono buffer and fill `out`. Returns 0 on success, negative on
+/// error (invalid arguments or a caught panic). On error, `out` is untouched.
+///
+/// # Safety
+/// `samples` must point to `frames` valid `f32` values, and `out` must point to
+/// a writable `SphereAnalysisResult`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sphere_analyze_mono(
+    samples: *const f32,
+    frames: usize,
+    sample_rate: f32,
+    out: *mut SphereAnalysisResult,
+) -> i32 {
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        if out.is_null() || samples.is_null() || frames == 0 {
+            return -1;
+        }
+        if !sample_rate.is_finite() || sample_rate <= 0.0 {
+            return -2;
+        }
+
+        let input = unsafe { std::slice::from_raw_parts(samples, frames) };
+        let analysis = analyze_mono(input, sample_rate, AnalysisOptions::default());
+
+        let mut ffi = SphereAnalysisResult::empty();
+        ffi.duration_secs = analysis.duration_secs;
+        if let Some(bpm) = analysis.bpm {
+            ffi.has_bpm = true;
+            ffi.bpm = bpm.bpm;
+            ffi.bpm_confidence = bpm.confidence;
+        }
+        if let Some(key) = analysis.key {
+            ffi.has_key = true;
+            ffi.key_tonic = pitch_class_code(key.tonic);
+            ffi.key_mode = match key.mode {
+                KeyMode::Major => 0,
+                KeyMode::Minor => 1,
+            };
+            ffi.key_confidence = key.confidence;
+        }
+        if let Some(inst) = analysis.instrument {
+            ffi.has_instrument = true;
+            ffi.instrument = instrument_code(inst.category);
+            ffi.instrument_confidence = inst.confidence;
+        }
+
+        unsafe { ptr::write(out, ffi) };
+        0
+    }));
+
+    result.unwrap_or(-4)
+}
+
+/// Analyse a mono buffer using a learned ONNX classifier for the instrument
+/// field (BPM and key still use the built-in DSP). `model_path` is UTF-8 of
+/// length `model_path_len` (not NUL-terminated).
+///
+/// Returns 0 on success, negative on error. On model-load failure the call
+/// returns an error and leaves `out` untouched; per-block inference failures
+/// fall back to the heuristic classifier inside the analysis.
+///
+/// Only available when the crate is built with the `onnx` feature.
+///
+/// # Safety
+/// `samples` must point to `frames` valid `f32`; `model_path` must point to
+/// `model_path_len` valid bytes; `out` must be a writable pointer.
+#[cfg(feature = "onnx")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sphere_analyze_mono_onnx(
+    samples: *const f32,
+    frames: usize,
+    sample_rate: f32,
+    model_path: *const u8,
+    model_path_len: usize,
+    out: *mut SphereAnalysisResult,
+) -> i32 {
+    use crate::analysis::{OnnxClassifier, analyze_mono_with};
+
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        if out.is_null() || samples.is_null() || frames == 0 || model_path.is_null() {
+            return -1;
+        }
+        if !sample_rate.is_finite() || sample_rate <= 0.0 {
+            return -2;
+        }
+
+        let path_bytes = unsafe { std::slice::from_raw_parts(model_path, model_path_len) };
+        let Ok(path) = std::str::from_utf8(path_bytes) else {
+            return -3;
+        };
+
+        let classifier = match OnnxClassifier::from_path(path) {
+            Ok(classifier) => classifier,
+            Err(_) => return -5,
+        };
+
+        let input = unsafe { std::slice::from_raw_parts(samples, frames) };
+        let analysis =
+            analyze_mono_with(input, sample_rate, AnalysisOptions::default(), &classifier);
+
+        let mut ffi = SphereAnalysisResult::empty();
+        ffi.duration_secs = analysis.duration_secs;
+        if let Some(bpm) = analysis.bpm {
+            ffi.has_bpm = true;
+            ffi.bpm = bpm.bpm;
+            ffi.bpm_confidence = bpm.confidence;
+        }
+        if let Some(key) = analysis.key {
+            ffi.has_key = true;
+            ffi.key_tonic = pitch_class_code(key.tonic);
+            ffi.key_mode = match key.mode {
+                KeyMode::Major => 0,
+                KeyMode::Minor => 1,
+            };
+            ffi.key_confidence = key.confidence;
+        }
+        if let Some(inst) = analysis.instrument {
+            ffi.has_instrument = true;
+            ffi.instrument = instrument_code(inst.category);
+            ffi.instrument_confidence = inst.confidence;
+        }
+
+        unsafe { ptr::write(out, ffi) };
+        0
+    }));
+
+    result.unwrap_or(-4)
+}
+
 fn build_params(
     mode: u32,
     algorithm: u32,

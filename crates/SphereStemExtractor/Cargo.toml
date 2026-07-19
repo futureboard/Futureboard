@@ -15,6 +15,22 @@ dirs.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 ureq.workspace = true
+log.workspace = true
+
+# Real MDX-NET ONNX inference (optional, feature = "onnx").
+ort = { workspace = true, optional = true }
+ndarray = { workspace = true, optional = true }
+rustfft = { workspace = true, optional = true }
+rubato = { workspace = true, optional = true }
+
+[features]
+default = []
+# Enable the real ONNX MDX-NET backend (ONNX Runtime). CPU by default.
+onnx = ["dep:ort", "dep:ndarray", "dep:rustfft", "dep:rubato"]
+# GPU execution providers for the ONNX backend (each requires `onnx`).
+cuda = ["onnx", "ort/cuda"]
+directml = ["onnx", "ort/directml"]
+coreml = ["onnx", "ort/coreml"]
 
 [dev-dependencies]
 serde_json.workspace = true

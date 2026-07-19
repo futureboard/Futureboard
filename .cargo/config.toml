@@ -56,6 +56,47 @@ test-ce = [
 #   cargo xtask check-all               → check-ce, then check-exclusive-win
 xtask = ["run", "--package", "xtask", "--"]
 
+# Binary packaging / staging into `out/` (see xtask/README.md). These build the
+# app and stage a clean runnable tree separate from the Cargo `target/` cache.
+#   cargo package-dev         → out/dev/<platform>
+#   cargo package-ce          → out/release/community/<platform>
+#   cargo package-exclusive   → out/release/exclusive/<platform>
+# The host target triple is used by default; pass `--target <triple>` to cross
+# the mapping to another platform folder.
+package-dev = [
+    "run",
+    "--package",
+    "xtask",
+    "--",
+    "package",
+    "--profile",
+    "dev",
+    "--edition",
+    "community",
+]
+package-ce = [
+    "run",
+    "--package",
+    "xtask",
+    "--",
+    "package",
+    "--profile",
+    "release",
+    "--edition",
+    "community",
+]
+package-exclusive = [
+    "run",
+    "--package",
+    "xtask",
+    "--",
+    "package",
+    "--profile",
+    "release",
+    "--edition",
+    "exclusive",
+]
+
 [env]
 # bindgen, used by asio-sys, loads libclang.dll from this directory.
 LIBCLANG_PATH = { value = ".bin/bin", relative = true, force = false }

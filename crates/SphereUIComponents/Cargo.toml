@@ -14,6 +14,12 @@ default = ["gpu-renderer", "native-dialogs"]
 gpu-renderer = ["dep:pollster", "dep:raw-window-handle", "dep:wgpu"]
 native-dialogs = ["dep:rfd"]
 plugin-host-bin = ["sphere-plugin-host/plugin-host-bin"]
+# Real MDX-NET stem separation via ONNX Runtime (CPU; loads onnxruntime at
+# runtime via ORT_DYLIB_PATH). GPU EPs are opt-in below.
+stem-onnx = ["sphere-audio-processor/stem-onnx"]
+stem-cuda = ["sphere-audio-processor/stem-cuda"]
+stem-directml = ["sphere-audio-processor/stem-directml"]
+stem-coreml = ["sphere-audio-processor/stem-coreml"]
 
 [dependencies]
 # NOTE: `default-features = false` opts out of gpui's `windows-manifest` feature.

@@ -1,0 +1,188 @@
+//! Drive Cargo and discover the real executable paths.
+//!
+//! We never assume `target/<profile>/FutureboardNative.exe`. Cargo is run with
+//! `--message-format=json-render-diagnostics`; the emitted `compiler-artifact`
+//! messages tell us exactly where each binary landed, which keeps working across
+//! custom target triples, profiles and per-edition target directories.
+//!
+//! The application ships more than one executable: at runtime
+//! `FutureboardNative.exe` spawns two sidecar processes it resolves *next to
+//! itself* — the out-of-process plugin/editor host (`FutureboardPluginHostX64`)
+//! and the isolated plugin scanner (`FutureboardPluginScanner`). Both are
+//! `[[bin]]` targets of the `sphere-plugin-host` package, so we build all three
+//! bins in one invocation and stage them together.
+
+use std::collections::BTreeMap;
+use std::io::BufReader;
+use std::path::PathBuf;
+use std::process::{Command, Stdio};
+
+use anyhow::{Context, Result, anyhow, bail};
+use cargo_metadata::{Artifact, Message};
+
+use crate::platform::Edition;
+
+/// The application package and its primary binary.
+pub const APP_PACKAGE: &str = "futureboard_native";
+pub const APP_BINARY: &str = "FutureboardNative";
+
+/// Package that owns the runtime sidecar executables.
+const SIDECAR_PACKAGE: &str = "sphere-plugin-host";
+
+/// Sidecar binaries `FutureboardNative` spawns from its own directory. These are
+/// separate `[[bin]]` targets, so building the app package alone does not
+/// produce them — they must be requested explicitly.
+pub const SIDECAR_BINARIES: &[&str] = &["FutureboardPluginHostX64", "FutureboardPluginScanner"];
+
+/// Feature flags that unlock the sidecar `[[bin]]` targets (their
+/// `required-features`).
+const SIDECAR_FEATURES: &[&str] = &[
+    "sphere-plugin-host/plugin-host-bin",
+    "sphere-plugin-host/plugin-scanner-bin",
+];
+
+/// Result of a successful build: every executable Cargo produced that the
+/// package needs.
+#[derive(Debug, Clone)]
+pub struct BuildOutput {
+    /// Absolute path to the primary application binary.
+    pub app_executable: PathBuf,
+    /// Absolute paths to the runtime sidecar executables, in the order of
+    /// [`SIDECAR_BINARIES`].
+    pub sidecar_executables: Vec<PathBuf>,
+}
+
+/// Build the application and its sidecars for the requested profile / target /
+/// edition, returning the actual executable paths parsed from Cargo's output.
+pub fn build(profile: &str, target: Option<&str>, edition: Edition) -> Result<BuildOutput> {
+    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
+
+    let mut command = Command::new(&cargo);
+    command
+        .arg("build")
+        .arg("--message-format=json-render-diagnostics")
+        .args(["--package", APP_PACKAGE])
+        .args(["--package", SIDECAR_PACKAGE])
+        .args(["--bin", APP_BINARY])
+        .args(["--profile", profile])
+        .args(["--target-dir", edition.target_dir()]);
+
+    for bin in SIDECAR_BINARIES {
+        command.args(["--bin", bin]);
+    }
+    if let Some(target) = target {
+        command.args(["--target", target]);
+    }
+
+    // Merge the edition features with the sidecar bin features into one
+    // `--features`, so a single build graph unifies shared-dependency features
+    // (no rebuild thrash between the app and its sidecars).
+    let features = merged_features(edition);
+    if !features.is_empty() {
+        command.args(["--features", &features]);
+    }
+
+    eprintln!(
+        "[xtask] building {APP_BINARY} + sidecars (edition={edition}, profile={profile}, target={})",
+        target.unwrap_or("<host>")
+    );
+
+    // Artifacts arrive as JSON on stdout; let rendered diagnostics/progress
+    // stream to the inherited stderr so the developer sees a normal build.
+    command.stdout(Stdio::piped()).stderr(Stdio::inherit());
+
+    let mut child = command
+        .spawn()
+        .with_context(|| format!("failed to spawn `{cargo} build`"))?;
+
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| anyhow!("cargo produced no stdout stream"))?;
+
+    let mut executables: BTreeMap<String, PathBuf> = BTreeMap::new();
+    for message in Message::parse_stream(BufReader::new(stdout)) {
+        let message = message.context("failed to parse a cargo JSON message")?;
+        if let Message::CompilerArtifact(artifact) = message {
+            if let Some((name, path)) = wanted_executable(&artifact) {
+                executables.insert(name, path);
+            }
+        }
+    }
+
+    let status = child.wait().context("failed to wait on cargo build")?;
+    if !status.success() {
+        bail!("cargo build failed with {status}");
+    }
+
+    let app_executable = executables.remove(APP_BINARY).ok_or_else(|| {
+        anyhow!(
+            "cargo build succeeded but emitted no executable artifact for `{APP_BINARY}`; \
+             is the `{APP_PACKAGE}` package still producing a `[[bin]]` named `{APP_BINARY}`?"
+        )
+    })?;
+
+    let mut sidecar_executables = Vec::with_capacity(SIDECAR_BINARIES.len());
+    for bin in SIDECAR_BINARIES {
+        let path = executables.remove(*bin).ok_or_else(|| {
+            anyhow!(
+                "cargo build succeeded but emitted no executable artifact for sidecar `{bin}`; \
+                 the app spawns it at runtime and it must ship in the package"
+            )
+        })?;
+        sidecar_executables.push(path);
+    }
+
+    Ok(BuildOutput {
+        app_executable,
+        sidecar_executables,
+    })
+}
+
+/// Comma-joined `--features` value combining edition features (if any) with the
+/// sidecar bin features.
+fn merged_features(edition: Edition) -> String {
+    let mut features: Vec<&str> = Vec::new();
+    if let Some(edition_features) = edition.cargo_features() {
+        features.push(edition_features);
+    }
+    features.extend_from_slice(SIDECAR_FEATURES);
+    features.join(",")
+}
+
+/// Return `(binary_name, executable_path)` if this artifact is one of the
+/// executables we asked Cargo to build.
+fn wanted_executable(artifact: &Artifact) -> Option<(String, PathBuf)> {
+    let name = artifact.target.name.as_str();
+    let is_wanted = (name == APP_BINARY || SIDECAR_BINARIES.contains(&name))
+        && artifact.target.kind.iter().any(|kind| kind.as_str() == "bin");
+    if !is_wanted {
+        return None;
+    }
+    artifact
+        .executable
+        .as_ref()
+        .map(|path| (name.to_string(), PathBuf::from(path.as_std_path())))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn community_features_are_sidecar_only() {
+        assert_eq!(
+            merged_features(Edition::Community),
+            "sphere-plugin-host/plugin-host-bin,sphere-plugin-host/plugin-scanner-bin"
+        );
+    }
+
+    #[test]
+    fn exclusive_features_prepend_edition_flags() {
+        assert_eq!(
+            merged_features(Edition::Exclusive),
+            "futureboard_native/exclusive,sphere_directaudioengine/asio,\
+sphere-plugin-host/plugin-host-bin,sphere-plugin-host/plugin-scanner-bin"
+        );
+    }
+}

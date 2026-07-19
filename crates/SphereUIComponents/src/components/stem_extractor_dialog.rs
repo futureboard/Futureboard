@@ -10,8 +10,8 @@ use std::sync::{Arc, Mutex};
 
 use gpui::{
     div, px, size, App, AppContext, Bounds, Context, FocusHandle, InteractiveElement, IntoElement,
-    KeyDownEvent, ParentElement, Render, SharedString, Styled, Window,
-    WindowBackgroundAppearance, WindowBounds, WindowHandle, WindowKind,
+    KeyDownEvent, ParentElement, Render, SharedString, Styled, Window, WindowBackgroundAppearance,
+    WindowBounds, WindowHandle, WindowKind,
 };
 use sphere_encoder::{
     create_encoder, AudioEncodeOptions, AudioEncodeSpec, AudioFileFormat, AudioSampleFormat,
@@ -175,8 +175,7 @@ impl StemExtractorWindow {
             .unwrap_or_else(SphereAudioProcessor::default_models_dir);
         let _ = SphereAudioProcessor::ensure_models_dir(&models_dir);
         let params = SphereAudioProcessor::default_stem_extract_params();
-        let model_installed =
-            SphereAudioProcessor::model_installed(params.model, &models_dir);
+        let model_installed = SphereAudioProcessor::model_installed(params.model, &models_dir);
         Self {
             defaults,
             params,
@@ -306,18 +305,22 @@ impl StemExtractorWindow {
             shared: shared.clone(),
             cancel: cancel.clone(),
         });
-        self.download_ui = ModelDownloadUi::Running(
-            SphereAudioProcessor::StemModelDownloadProgress::new(
+        self.download_ui =
+            ModelDownloadUi::Running(SphereAudioProcessor::StemModelDownloadProgress::new(
                 model,
-                model.package().files.first().map(|f| f.file_name).unwrap_or("model"),
+                model
+                    .package()
+                    .files
+                    .first()
+                    .map(|f| f.file_name)
+                    .unwrap_or("model"),
                 0,
                 model.package().file_count().max(1),
                 0,
                 None,
                 0.0,
                 format!("Starting {} download…", model.label()),
-            ),
-        );
+            ));
 
         let worker_shared = shared.clone();
         std::thread::Builder::new()
@@ -425,9 +428,8 @@ impl StemExtractorWindow {
         }
         let output_dir = resolve_render_dir(self.defaults.project_root.as_deref());
         if let Err(err) = std::fs::create_dir_all(&output_dir) {
-            self.state = StemExtractJobState::Failed(format!(
-                "Could not create stem render folder: {err}"
-            ));
+            self.state =
+                StemExtractJobState::Failed(format!("Could not create stem render folder: {err}"));
             cx.notify();
             return;
         }
@@ -783,16 +785,13 @@ impl StemExtractorWindow {
                 })
                 .collect()
         };
-        let selected = self
-            .selected_clip_id
-            .clone()
-            .unwrap_or_else(|| {
-                if empty {
-                    "__none__".to_string()
-                } else {
-                    String::new()
-                }
-            });
+        let selected = self.selected_clip_id.clone().unwrap_or_else(|| {
+            if empty {
+                "__none__".to_string()
+            } else {
+                String::new()
+            }
+        });
         let control = self.dropdown(SelectField::Clip, "stem-clip", selected, options, target);
         self.labeled("Clip", control)
     }
@@ -803,9 +802,12 @@ impl StemExtractorWindow {
             .iter()
             .map(|info| {
                 let package = info.model.package();
-                let installed =
-                    SphereAudioProcessor::model_installed(info.model, &models_dir);
-                let status = if installed { "Installed" } else { "Not installed" };
+                let installed = SphereAudioProcessor::model_installed(info.model, &models_dir);
+                let status = if installed {
+                    "Installed"
+                } else {
+                    "Not installed"
+                };
                 SelectOption::new(info.id, info.label).description(format!(
                     "{} · {} · {status}",
                     info.description,
@@ -869,7 +871,11 @@ impl StemExtractorWindow {
             )
             .child(fb_button(
                 "stem-model-download",
-                if downloading { "Downloading…" } else { "Download" },
+                if downloading {
+                    "Downloading…"
+                } else {
+                    "Download"
+                },
                 FbButtonKind::Default,
                 can_download,
                 {
@@ -936,20 +942,18 @@ impl StemExtractorWindow {
                     .text_color(Colors::text_muted())
                     .child(detail),
             )
-            .child(
-                div().flex().flex_row().justify_end().child(fb_button(
-                    "stem-download-cancel",
-                    "Cancel Download",
-                    FbButtonKind::Default,
-                    true,
-                    {
-                        let target = target.clone();
-                        move |_, _window, cx| {
-                            let _ = target.update(cx, |this, cx| this.request_cancel_download(cx));
-                        }
-                    },
-                )),
-            )
+            .child(div().flex().flex_row().justify_end().child(fb_button(
+                "stem-download-cancel",
+                "Cancel Download",
+                FbButtonKind::Default,
+                true,
+                {
+                    let target = target.clone();
+                    move |_, _window, cx| {
+                        let _ = target.update(cx, |this, cx| this.request_cancel_download(cx));
+                    }
+                },
+            )))
     }
 
     fn device_row(&self, target: gpui::Entity<Self>) -> impl IntoElement {
@@ -1000,7 +1004,8 @@ impl StemExtractorWindow {
                     true,
                     move |_, _window, cx| {
                         let _ = target.update(cx, |this, cx| {
-                            this.params.set_stem(stem, !this.params.stems.contains(stem));
+                            this.params
+                                .set_stem(stem, !this.params.stems.contains(stem));
                             if matches!(this.state, StemExtractJobState::Failed(_)) {
                                 this.state = StemExtractJobState::Editing;
                             }
@@ -1172,20 +1177,18 @@ impl StemExtractorWindow {
                     )),
             )
             .child(div().flex_1())
-            .child(
-                div().flex().flex_row().justify_end().child(fb_button(
-                    "stem-cancel-run",
-                    "Cancel",
-                    FbButtonKind::Default,
-                    true,
-                    {
-                        let target = target.clone();
-                        move |_, _window, cx| {
-                            let _ = target.update(cx, |this, cx| this.request_cancel(cx));
-                        }
-                    },
-                )),
-            )
+            .child(div().flex().flex_row().justify_end().child(fb_button(
+                "stem-cancel-run",
+                "Cancel",
+                FbButtonKind::Default,
+                true,
+                {
+                    let target = target.clone();
+                    move |_, _window, cx| {
+                        let _ = target.update(cx, |this, cx| this.request_cancel(cx));
+                    }
+                },
+            )))
             .into_any_element()
     }
 
@@ -1243,20 +1246,18 @@ impl StemExtractorWindow {
                     .child(format!("Backend · {}", summary.backend.label())),
             )
             .child(div().flex_1())
-            .child(
-                div().flex().flex_row().justify_end().child(fb_button(
-                    "stem-close",
-                    "Close",
-                    FbButtonKind::Primary,
-                    true,
-                    {
-                        let target = target.clone();
-                        move |_, window, cx| {
-                            let _ = target.update(cx, |this, cx| this.close(window, cx));
-                        }
-                    },
-                )),
-            )
+            .child(div().flex().flex_row().justify_end().child(fb_button(
+                "stem-close",
+                "Close",
+                FbButtonKind::Primary,
+                true,
+                {
+                    let target = target.clone();
+                    move |_, window, cx| {
+                        let _ = target.update(cx, |this, cx| this.close(window, cx));
+                    }
+                },
+            )))
             .into_any_element()
     }
 

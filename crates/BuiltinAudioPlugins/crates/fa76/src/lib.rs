@@ -4,8 +4,8 @@
 //! Dynamics use `SoftKneeCompressor` (sidechain HPF via [`biquad`]).
 
 use builtin_dsp_core::{
-    clamp, db_to_linear, mix, ParamDescriptor, PluginCategory, PluginDescriptor,
-    SoftKneeCompressor, StereoEffect,
+    ParamDescriptor, PluginCategory, PluginDescriptor, SoftKneeCompressor, StereoEffect, clamp,
+    db_to_linear, mix,
 };
 
 pub const PLUGIN_ID: &str = "futureboard.fa76";

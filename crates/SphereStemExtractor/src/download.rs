@@ -93,10 +93,7 @@ pub fn model_installed(model: StemModel, models_dir: &Path) -> bool {
 }
 
 /// Absolute paths for installed model files, or `None` if incomplete.
-pub fn resolve_installed_model_files(
-    model: StemModel,
-    models_dir: &Path,
-) -> Option<Vec<PathBuf>> {
+pub fn resolve_installed_model_files(model: StemModel, models_dir: &Path) -> Option<Vec<PathBuf>> {
     if !model_installed(model, models_dir) {
         return None;
     }
@@ -129,7 +126,11 @@ pub fn download_model(
     if model_installed(model, models_dir) {
         on_progress(StemModelDownloadProgress::new(
             model,
-            package.files.first().map(|f| f.file_name).unwrap_or("model"),
+            package
+                .files
+                .first()
+                .map(|f| f.file_name)
+                .unwrap_or("model"),
             package.file_count().saturating_sub(1),
             package.file_count().max(1),
             package.approx_bytes,
@@ -184,11 +185,7 @@ pub fn download_model(
     }
     on_progress(StemModelDownloadProgress::new(
         model,
-        package
-            .files
-            .last()
-            .map(|f| f.file_name)
-            .unwrap_or("model"),
+        package.files.last().map(|f| f.file_name).unwrap_or("model"),
         file_count.saturating_sub(1),
         file_count,
         package.approx_bytes,
@@ -224,9 +221,9 @@ fn download_one_file(
         format!("Connecting to {}", package.source_label),
     ));
 
-    let response = ureq::get(&url).call().map_err(|e| {
-        StemExtractError::Backend(format!("download failed for {file_name}: {e}"))
-    })?;
+    let response = ureq::get(&url)
+        .call()
+        .map_err(|e| StemExtractError::Backend(format!("download failed for {file_name}: {e}")))?;
 
     let content_length = response
         .headers()
@@ -292,10 +289,7 @@ fn download_one_file(
     }
 
     fs::rename(&partial, dest).map_err(|e| {
-        StemExtractError::Backend(format!(
-            "could not finalize {}: {e}",
-            dest.display()
-        ))
+        StemExtractError::Backend(format!("could not finalize {}: {e}", dest.display()))
     })?;
     Ok(())
 }
@@ -341,17 +335,12 @@ mod tests {
         let dir = default_models_dir();
         ensure_models_dir(&dir).unwrap();
         let cancel = crate::progress::StemExtractCancelToken::new();
-        download_model(
-            StemModel::MdxNetKaraoke,
-            &dir,
-            &cancel,
-            &mut |progress| {
-                eprintln!(
-                    "[dl] {:.0}% {} ({})",
-                    progress.percent, progress.detail, progress.file_name
-                );
-            },
-        )
+        download_model(StemModel::MdxNetKaraoke, &dir, &cancel, &mut |progress| {
+            eprintln!(
+                "[dl] {:.0}% {} ({})",
+                progress.percent, progress.detail, progress.file_name
+            );
+        })
         .unwrap();
         assert!(model_installed(StemModel::MdxNetKaraoke, &dir));
         let path = dir.join("UVR_MDXNET_KARA.onnx");

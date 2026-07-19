@@ -91,7 +91,10 @@ impl StemInferBackend for SpectralStubBackend {
                 StemKind::Bass => low_emphasis(interleaved, channels, frames),
                 StemKind::Other => residual_other(interleaved, channels, frames),
             };
-            outputs.push(SeparatedStem { kind: stem, samples });
+            outputs.push(SeparatedStem {
+                kind: stem,
+                samples,
+            });
         }
 
         on_progress(StemExtractProgress::new(

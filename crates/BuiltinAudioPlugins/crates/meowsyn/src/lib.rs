@@ -7,7 +7,7 @@
 use std::fmt;
 
 use builtin_dsp_core::{
-    clamp, db_to_linear, Instrument, ParamDescriptor, PluginCategory, PluginDescriptor,
+    Instrument, ParamDescriptor, PluginCategory, PluginDescriptor, clamp, db_to_linear,
 };
 use fundsp::prelude32::*;
 
@@ -143,7 +143,12 @@ impl Voice {
     }
 }
 
-fn build_unit(shape: OscShape, freq_hz: f32, detune_cents: f32, sample_rate: f32) -> Box<dyn AudioUnit> {
+fn build_unit(
+    shape: OscShape,
+    freq_hz: f32,
+    detune_cents: f32,
+    sample_rate: f32,
+) -> Box<dyn AudioUnit> {
     let detune = 2.0f32.powf(detune_cents / 1200.0);
     let f1 = freq_hz;
     let f2 = freq_hz * detune;

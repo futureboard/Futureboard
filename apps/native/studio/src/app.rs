@@ -279,11 +279,7 @@ fn open_welcome_window(cx: &mut App) {
                 welcome_window.remove_window();
             }
             WelcomeAction::OpenRecent(path) => {
-                begin_load_project_from_welcome(
-                    path,
-                    ProjectOpenOptions { from_recent: true },
-                    cx,
-                );
+                begin_load_project_from_welcome(path, ProjectOpenOptions { from_recent: true }, cx);
                 welcome_window.remove_window();
             }
             other => {

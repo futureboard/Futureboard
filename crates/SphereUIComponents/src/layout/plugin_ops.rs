@@ -3783,7 +3783,7 @@ fn studio_native_hwnd(window: &Window) -> Option<u64> {
     let handle = HasWindowHandle::window_handle(window).ok()?;
     match handle.as_raw() {
         RawWindowHandle::Xcb(w) => Some(w.window.get() as u64),
-        RawWindowHandle::Xlib(w) => Some(w.window as u64),
+        RawWindowHandle::Xlib(w) => Some(u64::from(w.window)),
         _ => None,
     }
 }

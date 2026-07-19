@@ -1,4 +1,4 @@
-use crate::backend::{create_mdx_net_backend, InferBackendKind, SeparatedStem};
+use crate::backend::{InferBackendKind, SeparatedStem, create_mdx_net_backend};
 use crate::device::resolve_device;
 use crate::error::StemExtractError;
 use crate::params::StemExtractParams;
@@ -23,10 +23,7 @@ impl StemExtractInput {
     }
 
     pub fn frames(&self) -> usize {
-        self.samples
-            .len()
-            .checked_div(self.channels)
-            .unwrap_or(0)
+        self.samples.len().checked_div(self.channels).unwrap_or(0)
     }
 }
 
@@ -130,7 +127,8 @@ mod tests {
     fn extract_mdx_net_cpu_returns_four_stems() {
         let input = StemExtractInput::new(48_000, 2, vec![0.1; 48_000 * 2]);
         let params = StemExtractParams::mdx_net_cpu();
-        let result = extract_stems(&input, &params, &StemExtractCancelToken::new(), |_| {}).unwrap();
+        let result =
+            extract_stems(&input, &params, &StemExtractCancelToken::new(), |_| {}).unwrap();
         assert_eq!(result.model, StemModel::MdxNet);
         assert_eq!(result.device, InferDevice::Cpu);
         assert_eq!(result.stems.len(), 4);
@@ -141,13 +139,8 @@ mod tests {
         let input = StemExtractInput::new(48_000, 1, vec![0.1; 128]);
         let cancel = StemExtractCancelToken::new();
         cancel.cancel();
-        let err = extract_stems(
-            &input,
-            &StemExtractParams::default(),
-            &cancel,
-            |_| {},
-        )
-        .unwrap_err();
+        let err =
+            extract_stems(&input, &StemExtractParams::default(), &cancel, |_| {}).unwrap_err();
         assert_eq!(err, StemExtractError::Cancelled);
     }
 }

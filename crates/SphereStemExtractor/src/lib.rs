@@ -22,15 +22,15 @@ pub mod params;
 pub mod progress;
 pub mod stems;
 
-pub use backend::{create_mdx_net_backend, InferBackendKind, StemInferBackend};
-pub use device::{gpu_available, resolve_device, InferDevice};
+pub use backend::{InferBackendKind, StemInferBackend, create_mdx_net_backend};
+pub use device::{InferDevice, gpu_available, resolve_device};
 pub use download::{
-    default_models_dir, download_model, ensure_models_dir, model_installed,
-    resolve_installed_model_files, StemModelDownloadProgress, UVR_MODEL_RELEASE_BASE,
+    StemModelDownloadProgress, UVR_MODEL_RELEASE_BASE, default_models_dir, download_model,
+    ensure_models_dir, model_installed, resolve_installed_model_files,
 };
 pub use error::StemExtractError;
-pub use extractor::{extract_stems, StemExtractInput, StemExtractOutput, StemExtractResult};
-pub use model::{StemModel, StemModelFile, StemModelInfo, StemModelPackage, STEM_MODELS};
+pub use extractor::{StemExtractInput, StemExtractOutput, StemExtractResult, extract_stems};
+pub use model::{STEM_MODELS, StemModel, StemModelFile, StemModelInfo, StemModelPackage};
 pub use params::{StemExtractParams, StemExtractQuality};
 pub use progress::{StemExtractCancelToken, StemExtractProgress, StemExtractStage};
 pub use stems::{StemKind, StemSet};

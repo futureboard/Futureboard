@@ -54,10 +54,20 @@ impl StemModelDownloadProgress {
 
 /// Default install directory: `~/Documents/Futureboard Studio/Utilities/Models/`.
 pub fn default_models_dir() -> PathBuf {
-    let doc = dirs::document_dir().unwrap_or_else(|| PathBuf::from("."));
-    doc.join("Futureboard Studio")
+    documents_dir()
+        .join("Futureboard Studio")
         .join("Utilities")
         .join("Models")
+}
+
+fn documents_dir() -> PathBuf {
+    if let Some(dir) = dirs::document_dir() {
+        return dir;
+    }
+    if let Some(home) = dirs::home_dir() {
+        return home.join("Documents");
+    }
+    PathBuf::from("Documents")
 }
 
 /// Ensure the models directory exists.
@@ -316,5 +326,37 @@ mod tests {
     fn default_models_dir_ends_with_utilities_models() {
         let dir = default_models_dir();
         assert!(dir.ends_with(Path::new("Utilities").join("Models")));
+        assert!(
+            !dir.starts_with("."),
+            "models dir must not resolve to a relative CWD path: {}",
+            dir.display()
+        );
+    }
+
+    #[test]
+    fn live_download_karaoke_when_enabled() {
+        if std::env::var_os("STEM_LIVE_DL").is_none() {
+            return;
+        }
+        let dir = default_models_dir();
+        ensure_models_dir(&dir).unwrap();
+        let cancel = crate::progress::StemExtractCancelToken::new();
+        download_model(
+            StemModel::MdxNetKaraoke,
+            &dir,
+            &cancel,
+            &mut |progress| {
+                eprintln!(
+                    "[dl] {:.0}% {} ({})",
+                    progress.percent, progress.detail, progress.file_name
+                );
+            },
+        )
+        .unwrap();
+        assert!(model_installed(StemModel::MdxNetKaraoke, &dir));
+        let path = dir.join("UVR_MDXNET_KARA.onnx");
+        let len = fs::metadata(&path).unwrap().len();
+        eprintln!("downloaded bytes={len} path={}", path.display());
+        assert!(len > 1_000_000);
     }
 }

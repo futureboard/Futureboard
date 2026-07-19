@@ -115,7 +115,14 @@ impl FutureboardPaths {
     /// Call [`ensure_user_dirs()`] afterwards to create directories.
     pub fn resolve() -> Self {
         // ── User document root ────────────────────────────────────────────
-        let doc_dir = dirs::document_dir().unwrap_or_else(|| PathBuf::from("."));
+        // Prefer `dirs::document_dir()`, but fall back to `$HOME/Documents`
+        // (never `.`) so Utilities/Models and Projects stay under the real
+        // user Documents tree even when XDG user-dirs are unset.
+        let doc_dir = dirs::document_dir().unwrap_or_else(|| {
+            dirs::home_dir()
+                .map(|home| home.join("Documents"))
+                .unwrap_or_else(|| PathBuf::from("Documents"))
+        });
         let user_root = doc_dir.join(APP_NAME);
 
         let projects = user_root.join("Projects");

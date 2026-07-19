@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 
 use gpui::{
     div, px, size, App, AppContext, Bounds, Context, FocusHandle, InteractiveElement, IntoElement,
-    KeyDownEvent, ParentElement, Render, SharedString, StatefulInteractiveElement, Styled, Window,
+    KeyDownEvent, ParentElement, Render, SharedString, Styled, Window,
     WindowBackgroundAppearance, WindowBounds, WindowHandle, WindowKind,
 };
 use sphere_encoder::{
@@ -25,12 +25,10 @@ use crate::theme::{self, Colors};
 use crate::window_position::{apply_owner_display, centered_window_bounds};
 
 pub const STEM_EXTRACTOR_WINDOW_WIDTH: f32 = 520.0;
-const STEM_EXTRACTOR_WINDOW_HEIGHT: f32 = 520.0;
+const STEM_EXTRACTOR_WINDOW_HEIGHT: f32 = 480.0;
 const BODY_PAD: f32 = 14.0;
 const ROW_GAP: f32 = 9.0;
 const LABEL_W: f32 = 96.0;
-const CONTROL_H: f32 = 28.0;
-const BUTTON_H: f32 = 28.0;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum SelectField {
@@ -41,13 +39,16 @@ enum SelectField {
 }
 
 /// One resolvable audio clip on a track, offered as a Stem Extractor source.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct StemSourceClip {
     pub clip_id: String,
     pub track_id: String,
     pub track_name: String,
     pub clip_name: String,
     pub source_path: PathBuf,
+    pub start_beat: f32,
+    pub duration_beats: f32,
+    pub source_duration_seconds: Option<f64>,
 }
 
 impl StemSourceClip {
@@ -64,12 +65,31 @@ pub enum StemExtractJobState {
     Cancelled,
 }
 
+/// One rendered stem ready to place on a new arrangement track.
+#[derive(Clone, Debug)]
+pub struct StemExtractResultStem {
+    pub kind: SphereAudioProcessor::StemKind,
+    pub path: PathBuf,
+}
+
+/// Result handed to StudioLayout after a successful extract job.
+#[derive(Clone, Debug)]
+pub struct StemExtractApplyRequest {
+    pub source_track_id: String,
+    pub source_clip_id: String,
+    pub source_clip_name: String,
+    pub start_beat: f32,
+    pub duration_beats: f32,
+    pub source_duration_seconds: Option<f64>,
+    pub stems: Vec<StemExtractResultStem>,
+}
+
 #[derive(Clone, Debug)]
 pub struct StemExtractJobSummary {
     pub model: SphereAudioProcessor::StemModel,
     pub device: SphereAudioProcessor::InferDevice,
     pub backend: SphereAudioProcessor::InferBackendKind,
-    pub output_paths: Vec<PathBuf>,
+    pub apply: StemExtractApplyRequest,
 }
 
 #[derive(Default)]
@@ -91,7 +111,8 @@ pub struct StemExtractorDialogDefaults {
     pub audio_clips: Vec<StemSourceClip>,
     /// Preselected clip id (usually the timeline selection).
     pub selected_clip_id: Option<String>,
-    pub suggested_output_dir: Option<PathBuf>,
+    /// Project root used for rendered stem WAV files (`Rendered/Stems`).
+    pub project_root: Option<PathBuf>,
 }
 
 pub struct StemExtractorWindow {
@@ -99,16 +120,21 @@ pub struct StemExtractorWindow {
     params: SphereAudioProcessor::StemExtractParams,
     selected_clip_id: Option<String>,
     source_path: Option<PathBuf>,
-    output_dir: Option<PathBuf>,
     state: StemExtractJobState,
     open_select: Option<SelectField>,
     job: Option<ActiveJob>,
     focus_handle: FocusHandle,
     gpu_available: bool,
+    on_apply: Arc<dyn Fn(StemExtractApplyRequest, &mut App) + 'static>,
+    applied: bool,
 }
 
 impl StemExtractorWindow {
-    pub fn new(defaults: StemExtractorDialogDefaults, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        defaults: StemExtractorDialogDefaults,
+        on_apply: Arc<dyn Fn(StemExtractApplyRequest, &mut App) + 'static>,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let selected_clip_id = defaults
             .selected_clip_id
             .clone()
@@ -120,18 +146,18 @@ impl StemExtractorWindow {
                 .find(|c| &c.clip_id == id)
                 .map(|c| c.source_path.clone())
         });
-        let output_dir = defaults.suggested_output_dir.clone();
         Self {
             defaults,
             params: SphereAudioProcessor::default_stem_extract_params(),
             selected_clip_id,
             source_path,
-            output_dir,
             state: StemExtractJobState::Editing,
             open_select: None,
             job: None,
             focus_handle: cx.focus_handle(),
             gpu_available: SphereAudioProcessor::gpu_available(),
+            on_apply,
+            applied: false,
         }
     }
 
@@ -202,48 +228,13 @@ impl StemExtractorWindow {
     fn can_extract(&self) -> bool {
         self.selected_clip().is_some()
             && self.source_path.is_some()
-            && self.output_dir.is_some()
             && self.params.validate().is_ok()
             && !self.params.stems.is_empty()
     }
 
-    fn browse_output(&mut self, cx: &mut Context<Self>) {
-        #[cfg(feature = "native-dialogs")]
-        {
-            let entity = cx.entity().clone();
-            let start = self
-                .output_dir
-                .clone()
-                .unwrap_or_else(std::env::temp_dir);
-            cx.spawn(async move |_this, cx| {
-                let result = rfd::AsyncFileDialog::new()
-                    .set_title("Choose Stem Output Folder")
-                    .set_directory(&start)
-                    .pick_folder()
-                    .await;
-                if let Some(handle) = result {
-                    let _ = entity.update(cx, |this, cx| {
-                        this.output_dir = Some(handle.path().to_path_buf());
-                        if matches!(this.state, StemExtractJobState::Failed(_)) {
-                            this.state = StemExtractJobState::Editing;
-                        }
-                        cx.notify();
-                    });
-                }
-            })
-            .detach();
-        }
-        #[cfg(not(feature = "native-dialogs"))]
-        {
-            self.state = StemExtractJobState::Failed(
-                "Native file dialogs are unavailable in this build.".into(),
-            );
-            cx.notify();
-        }
-    }
-
     fn start_extract(&mut self, cx: &mut Context<Self>) {
         self.open_select = None;
+        self.applied = false;
         if let Err(err) = self.params.validate() {
             self.state = StemExtractJobState::Failed(err.user_message());
             cx.notify();
@@ -265,11 +256,14 @@ impl StemExtractorWindow {
             cx.notify();
             return;
         }
-        let Some(output_dir) = self.output_dir.clone() else {
-            self.state = StemExtractJobState::Failed("Choose an output folder.".into());
+        let output_dir = resolve_render_dir(self.defaults.project_root.as_deref());
+        if let Err(err) = std::fs::create_dir_all(&output_dir) {
+            self.state = StemExtractJobState::Failed(format!(
+                "Could not create stem render folder: {err}"
+            ));
             cx.notify();
             return;
-        };
+        }
 
         let shared = Arc::new(Mutex::new(SharedJob::default()));
         let cancel = SphereAudioProcessor::StemExtractCancelToken::new();
@@ -285,6 +279,15 @@ impl StemExtractorWindow {
 
         let params = self.params.clone();
         let source_stem = sanitize_file_stem(&clip.clip_name);
+        let apply_meta = StemExtractApplyRequest {
+            source_track_id: clip.track_id.clone(),
+            source_clip_id: clip.clip_id.clone(),
+            source_clip_name: clip.clip_name.clone(),
+            start_beat: clip.start_beat,
+            duration_beats: clip.duration_beats,
+            source_duration_seconds: clip.source_duration_seconds,
+            stems: Vec::new(),
+        };
         let worker_shared = shared.clone();
         std::thread::Builder::new()
             .name("fb-stem-extract".to_string())
@@ -325,9 +328,8 @@ impl StemExtractorWindow {
                         return Err("cancelled".into());
                     }
 
-                    std::fs::create_dir_all(&output_dir).map_err(|e| e.to_string())?;
                     let total = extracted.stems.len().max(1);
-                    let mut output_paths = Vec::with_capacity(extracted.stems.len());
+                    let mut stems = Vec::with_capacity(extracted.stems.len());
                     for (index, stem) in extracted.stems.iter().enumerate() {
                         if cancel.is_cancelled() {
                             return Err("cancelled".into());
@@ -337,24 +339,30 @@ impl StemExtractorWindow {
                             SphereAudioProcessor::StemExtractProgress::new(
                                 SphereAudioProcessor::StemExtractStage::Writing,
                                 percent,
-                                format!("Writing {}.wav", stem.kind.as_str()),
+                                format!("Rendering {}.wav", stem.kind.as_str()),
                             )
                             .with_stem(stem.kind),
                         );
-                        let path = output_dir.join(format!(
-                            "{}_{}.wav",
-                            sanitize_file_stem(&source_stem),
-                            stem.kind.file_stem_suffix()
-                        ));
+                        let path = unique_stem_path(
+                            &output_dir,
+                            &source_stem,
+                            stem.kind.file_stem_suffix(),
+                        );
                         write_stem_wav(&path, stem)?;
-                        output_paths.push(path);
+                        stems.push(StemExtractResultStem {
+                            kind: stem.kind,
+                            path,
+                        });
                     }
 
                     Ok(StemExtractJobSummary {
                         model: extracted.model,
                         device: extracted.device,
                         backend: extracted.backend,
-                        output_paths,
+                        apply: StemExtractApplyRequest {
+                            stems,
+                            ..apply_meta
+                        },
                     })
                 })();
 
@@ -396,7 +404,13 @@ impl StemExtractorWindow {
         };
         if let Some(done) = done {
             self.state = match done {
-                Ok(summary) => StemExtractJobState::Complete(summary),
+                Ok(summary) => {
+                    if !self.applied {
+                        (self.on_apply)(summary.apply.clone(), cx);
+                        self.applied = true;
+                    }
+                    StemExtractJobState::Complete(summary)
+                }
                 Err(message)
                     if job.cancel.is_cancelled()
                         || message.to_ascii_lowercase().contains("cancel") =>
@@ -530,20 +544,15 @@ impl StemExtractorWindow {
             .gap(px(ROW_GAP))
             .child(section_label("SOURCE"))
             .child(self.clip_row(target.clone()))
-            .child(self.path_row(
-                "Output",
-                self.output_dir
-                    .as_ref()
-                    .map(|p| p.display().to_string())
-                    .unwrap_or_else(|| "No folder selected".to_string()),
-                "stem-output-browse",
-                {
-                    let target = target.clone();
-                    move |_window, cx| {
-                        let _ = target.update(cx, |this, cx| this.browse_output(cx));
-                    }
-                },
-            ))
+            .child(
+                div()
+                    .text_size(px(10.0))
+                    .text_color(Colors::text_faint())
+                    .child(
+                        "Stems render to new tracks. The original source track is muted."
+                            .to_string(),
+                    ),
+            )
             .child(section_label("MODEL"))
             .child(self.model_row(target.clone()))
             .child(self.device_row(target.clone()))
@@ -566,7 +575,7 @@ impl StemExtractorWindow {
             ));
         } else if !self.can_extract() {
             col = col.child(hint_banner(
-                "Select an audio clip, output folder, and at least one stem.".into(),
+                "Select an audio clip and at least one stem.".into(),
             ));
         }
 
@@ -746,56 +755,6 @@ impl StemExtractorWindow {
             )
     }
 
-    fn path_row(
-        &self,
-        label: &str,
-        path_label: String,
-        browse_id: &'static str,
-        on_browse: impl Fn(&mut Window, &mut App) + 'static,
-    ) -> impl IntoElement {
-        let control = div()
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(6.0))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w(px(0.0))
-                    .h(px(CONTROL_H))
-                    .px(px(8.0))
-                    .flex()
-                    .items_center()
-                    .rounded_md()
-                    .border(px(1.0))
-                    .border_color(Colors::border_subtle())
-                    .bg(Colors::surface_input())
-                    .text_size(px(11.0))
-                    .text_color(Colors::text_primary())
-                    .truncate()
-                    .child(path_label),
-            )
-            .child(
-                div()
-                    .id(browse_id)
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .h(px(BUTTON_H))
-                    .px(px(10.0))
-                    .rounded(px(5.0))
-                    .border(px(1.0))
-                    .border_color(Colors::border_subtle())
-                    .text_size(px(11.0))
-                    .text_color(Colors::text_secondary())
-                    .cursor(gpui::CursorStyle::PointingHand)
-                    .hover(|s| s.bg(Colors::surface_control_hover()))
-                    .on_click(move |_, window, cx| on_browse(window, cx))
-                    .child("Browse…"),
-            );
-        self.labeled(label, control)
-    }
-
     fn footer(&self, can_extract: bool, target: gpui::Entity<Self>) -> impl IntoElement {
         div()
             .flex()
@@ -913,16 +872,14 @@ impl StemExtractorWindow {
         summary: StemExtractJobSummary,
         target: gpui::Entity<Self>,
     ) -> gpui::AnyElement {
-        let count = summary.output_paths.len();
-        let first = summary
-            .output_paths
-            .first()
-            .map(|p| p.display().to_string())
-            .unwrap_or_default();
-        let folder = summary
-            .output_paths
-            .first()
-            .and_then(|p| p.parent().map(|d| d.to_path_buf()));
+        let count = summary.apply.stems.len();
+        let stem_names = summary
+            .apply
+            .stems
+            .iter()
+            .map(|stem| stem.kind.label())
+            .collect::<Vec<_>>()
+            .join(", ");
         div()
             .flex()
             .flex_col()
@@ -942,7 +899,7 @@ impl StemExtractorWindow {
                     .text_size(px(11.0))
                     .text_color(Colors::text_primary())
                     .child(format!(
-                        "{count} stem file(s) · {} · {}",
+                        "{count} stem track(s) created · {} · {}",
                         summary.model.label(),
                         summary.device.label()
                     )),
@@ -951,8 +908,11 @@ impl StemExtractorWindow {
                 div()
                     .text_size(px(10.0))
                     .text_color(Colors::text_muted())
-                    .truncate()
-                    .child(first),
+                    .child(if stem_names.is_empty() {
+                        "Original source track muted.".to_string()
+                    } else {
+                        format!("{stem_names} · original source track muted")
+                    }),
             )
             .child(
                 div()
@@ -962,34 +922,18 @@ impl StemExtractorWindow {
             )
             .child(div().flex_1())
             .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .justify_end()
-                    .gap(px(8.0))
-                    .child(fb_button(
-                        "stem-reveal",
-                        "Open Folder",
-                        FbButtonKind::Default,
-                        folder.is_some(),
-                        move |_, _window, _cx| {
-                            if let Some(dir) = &folder {
-                                let _ = open_in_file_manager(dir);
-                            }
-                        },
-                    ))
-                    .child(fb_button(
-                        "stem-close",
-                        "Close",
-                        FbButtonKind::Primary,
-                        true,
-                        {
-                            let target = target.clone();
-                            move |_, window, cx| {
-                                let _ = target.update(cx, |this, cx| this.close(window, cx));
-                            }
-                        },
-                    )),
+                div().flex().flex_row().justify_end().child(fb_button(
+                    "stem-close",
+                    "Close",
+                    FbButtonKind::Primary,
+                    true,
+                    {
+                        let target = target.clone();
+                        move |_, window, cx| {
+                            let _ = target.update(cx, |this, cx| this.close(window, cx));
+                        }
+                    },
+                )),
             )
             .into_any_element()
     }
@@ -1124,26 +1068,40 @@ fn sanitize_file_stem(name: &str) -> String {
     }
 }
 
-fn open_in_file_manager(dir: &std::path::Path) -> std::io::Result<()> {
-    #[cfg(target_os = "windows")]
-    {
-        std::process::Command::new("explorer").arg(dir).spawn()?;
+fn resolve_render_dir(project_root: Option<&std::path::Path>) -> PathBuf {
+    if let Some(root) = project_root {
+        root.join("Rendered").join("Stems")
+    } else {
+        std::env::temp_dir().join("futureboard-stems")
     }
-    #[cfg(target_os = "macos")]
-    {
-        std::process::Command::new("open").arg(dir).spawn()?;
+}
+
+fn unique_stem_path(dir: &std::path::Path, source_stem: &str, suffix: &str) -> PathBuf {
+    let base = format!("{}_{}", sanitize_file_stem(source_stem), suffix);
+    let candidate = dir.join(format!("{base}.wav"));
+    if !candidate.exists() {
+        return candidate;
     }
-    #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
-    {
-        std::process::Command::new("xdg-open").arg(dir).spawn()?;
+    for index in 2..10_000 {
+        let path = dir.join(format!("{base}_{index}.wav"));
+        if !path.exists() {
+            return path;
+        }
     }
-    Ok(())
+    dir.join(format!(
+        "{base}_{}.wav",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0)
+    ))
 }
 
 /// Open the Stem Extractor dialog centered over `owner_bounds`.
 pub fn open_stem_extractor_window(
     owner_bounds: Option<Bounds<gpui::Pixels>>,
     defaults: StemExtractorDialogDefaults,
+    on_apply: Arc<dyn Fn(StemExtractApplyRequest, &mut App) + 'static>,
     cx: &mut App,
 ) -> Result<WindowHandle<StemExtractorWindow>, String> {
     let height = TITLEBAR_HEIGHT + STEM_EXTRACTOR_WINDOW_HEIGHT;
@@ -1162,7 +1120,7 @@ pub fn open_stem_extractor_window(
     apply_owner_display(&mut options, owner_bounds, cx);
 
     cx.open_window(options, move |_window, cx| {
-        cx.new(|cx| StemExtractorWindow::new(defaults, cx))
+        cx.new(|cx| StemExtractorWindow::new(defaults, on_apply, cx))
     })
     .map_err(|e| e.to_string())
 }

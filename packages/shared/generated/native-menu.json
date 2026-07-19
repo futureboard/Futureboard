@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "generatedAt": "2026-07-18T09:23:58.407Z",
+  "generatedAt": "2026-07-19T04:35:19.637Z",
   "menus": [
     {
       "id": "file",
@@ -907,6 +907,27 @@
           "checked": false,
           "danger": false,
           "description": "Scan for installed VST3 and CLAP plug-ins",
+          "children": []
+        },
+        {
+          "id": "audio.sep.tools",
+          "kind": "separator",
+          "enabled": true,
+          "visible": true
+        },
+        {
+          "id": "audio.stem_extractor",
+          "kind": "normal",
+          "label": "Stem Extractor...",
+          "icon": "audio-lines",
+          "shortcut": null,
+          "command": "audio:stem-extractor",
+          "role": null,
+          "enabled": true,
+          "visible": true,
+          "checked": false,
+          "danger": false,
+          "description": "Separate a mix into stems with MDX-NET (CPU/GPU)",
           "children": []
         },
         {

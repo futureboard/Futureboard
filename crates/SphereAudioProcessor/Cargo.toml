@@ -15,6 +15,7 @@ crate-type = ["rlib", "cdylib"]
 serde.workspace = true
 thiserror.workspace = true
 log.workspace = true
+sphere-stem-extractor.workspace = true
 
 [build-dependencies]
 cc.workspace = true

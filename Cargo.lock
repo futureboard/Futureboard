@@ -26,6 +26,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "SphereFBStemExtractor"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "SphereMidiService"
 version = "0.1.0"
 dependencies = [
@@ -6947,6 +6956,7 @@ dependencies = [
 name = "sphere-audio-processor"
 version = "0.1.0"
 dependencies = [
+ "SphereFBStemExtractor",
  "cc",
  "log",
  "serde",

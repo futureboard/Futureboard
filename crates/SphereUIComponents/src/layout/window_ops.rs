@@ -186,6 +186,9 @@ pub(crate) struct ExternalWindows {
         Option<gpui::WindowHandle<crate::components::plugin_manager::PluginManagerWindow>>,
     /// Export Arrangement window.
     pub export_arrangement: Option<gpui::WindowHandle<crate::export::ExportArrangementWindow>>,
+    /// Stem Extractor (MDX-NET) dialog window.
+    pub stem_extractor:
+        Option<gpui::WindowHandle<crate::components::stem_extractor_dialog::StemExtractorWindow>>,
     /// Keymap / keyboard shortcuts editor window.
     pub keymap: Option<gpui::WindowHandle<crate::components::keymap_window::KeymapWindow>>,
     /// Built-in Soundfont Player MDI window.

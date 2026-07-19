@@ -496,6 +496,17 @@ export const APP_MENUS: AppMenuGroup[] = [
       },
       {
         type: "separator",
+        id: "audio.sep.tools",
+      },
+      {
+        id: "audio.stem_extractor",
+        label: "Stem Extractor...",
+        icon: "audio-lines",
+        action: "audio:stem-extractor",
+        description: "Separate a mix into stems with MDX-NET (CPU/GPU)",
+      },
+      {
+        type: "separator",
         id: "audio.sep.routing",
       },
       {

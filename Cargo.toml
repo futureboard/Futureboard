@@ -19,6 +19,7 @@ members = [
     "crates/SpherePackageInstaller",
     "apps/native/apakinstaller",
     "crates/SphereAudioProcessor",
+    "crates/SphereStemExtractor",
     "crates/SphereMidiService",
     "crates/SphereDiscordRPC",
     "crates/SpherePlatform",
@@ -53,7 +54,6 @@ exclude = [
     "crates/SphereMediaUtils",
     "crates/SphereNoiseRemover",
     "crates/SphereSettings",
-    "crates/SphereStemExtractor",
     "crates/SphereVoiceTune",
 ]
 
@@ -73,6 +73,7 @@ publish = false
 sphere_ui_components = { path = "crates/SphereUIComponents", default-features = false }
 sphere_directaudioengine = { path = "crates/SphereDirectAudioEngine", default-features = false }
 sphere-audio-processor = { path = "crates/SphereAudioProcessor" }
+sphere-stem-extractor = { path = "crates/SphereStemExtractor", package = "SphereFBStemExtractor" }
 sphere-audio-editor = { path = "crates/SphereAudioEditor" }
 sphere-audio-plugins = { path = "crates/SphereAudioPlugins" }
 sphere-encoder = { path = "crates/SphereEncoder" }

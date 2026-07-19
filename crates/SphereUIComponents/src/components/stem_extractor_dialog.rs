@@ -425,7 +425,10 @@ impl StemExtractorWindow {
 
 impl Render for StemExtractorWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let _ = window;
+        // Keep dialog key focus so Escape/Enter route here (not the studio).
+        if !self.focus_handle.is_focused(window) {
+            self.focus_handle.focus(window, cx);
+        }
         let target = cx.entity().clone();
         let body = match &self.state {
             StemExtractJobState::Editing | StemExtractJobState::Failed(_) => {

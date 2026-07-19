@@ -9,31 +9,118 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 
+use crate::cef::{LOCALES_DIR, required_runtime_files};
+use crate::platform::dynamic_library_extension;
 use crate::staging::{BUILD_INFO_FILE, PLUGINS_DIR, RESOURCES_DIR, SYMBOLS_DIR};
 
 /// File extensions that must never appear in a distributable package — Cargo
-/// intermediates and dev-only artifacts.
-const FORBIDDEN_EXTENSIONS: &[&str] = &["pdb", "lib", "exp", "d", "rlib", "rmeta"];
+/// intermediates and dev-only artifacts. `.lib`/`.pdb` are still allowed only
+/// under the opt-in `symbols/` directory (handled separately).
+const FORBIDDEN_EXTENSIONS: &[&str] = &["exp", "d", "rlib", "rmeta"];
+
+/// `.pdb`/`.lib` are legitimate only inside `symbols/`; flagged anywhere else.
+const SYMBOL_ONLY_EXTENSIONS: &[&str] = &["pdb", "lib"];
 
 /// Directory names that indicate the Cargo target tree leaked into staging.
 const FORBIDDEN_DIRS: &[&str] = &["incremental", "deps", "examples", "build"];
 
-/// Run all pre-publish checks on `staging_dir`.
-pub fn validate_staging(
-    staging_dir: &Path,
-    binary_name: &str,
-    sidecars: &[String],
-    symbols_enabled: bool,
-) -> Result<()> {
-    check_executable(staging_dir, binary_name)?;
-    for sidecar in sidecars {
+/// Directory names that must never be created by the packager: CEF ships flat
+/// (never in a `CEF/` subdir) and the embedded-UI design forbids a deployed
+/// `PluginUI/` folder.
+const BANNED_LAYOUT_DIRS: &[&str] = &["CEF", "PluginUI"];
+
+/// Everything a validation pass needs to know about the staged package.
+pub struct ValidationInputs<'a> {
+    pub staging_dir: &'a Path,
+    pub binary_name: &'a str,
+    pub sidecars: &'a [String],
+    pub symbols_enabled: bool,
+    /// Effective target triple (drives dynamic-library and CEF file names).
+    pub triple: &'a str,
+    /// Whether the shared CEF runtime was staged into this package.
+    pub cef_staged: bool,
+}
+
+/// Run all pre-publish checks on the staged package.
+pub fn validate_staging(inputs: &ValidationInputs<'_>) -> Result<()> {
+    let staging_dir = inputs.staging_dir;
+    check_executable(staging_dir, inputs.binary_name)?;
+    for sidecar in inputs.sidecars {
         check_executable(staging_dir, sidecar)
             .with_context(|| format!("required sidecar `{sidecar}` missing or empty"))?;
     }
     check_required_dirs(staging_dir)?;
     check_build_info(staging_dir)?;
-    check_no_forbidden_artifacts(staging_dir, symbols_enabled)?;
+    check_no_forbidden_artifacts(staging_dir, inputs.symbols_enabled)?;
+    check_no_banned_layout_dirs(staging_dir)?;
+    check_plugin_naming(staging_dir, inputs.triple)?;
+    if inputs.cef_staged {
+        check_cef_layout(staging_dir, inputs.triple)?;
+    }
     check_all_within_root(staging_dir)?;
+    Ok(())
+}
+
+/// No `CEF/` or `PluginUI/` directory exists anywhere in the package.
+fn check_no_banned_layout_dirs(staging_dir: &Path) -> Result<()> {
+    for entry in walk(staging_dir)? {
+        if !entry.is_dir() {
+            continue;
+        }
+        if let Some(name) = entry.file_name().and_then(|n| n.to_str()) {
+            if BANNED_LAYOUT_DIRS.contains(&name) {
+                bail!(
+                    "banned layout directory `{name}/` found in package: {} \
+                     (CEF must ship flat; embedded UI must not be deployed as PluginUI/)",
+                    entry.display()
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Every file under `Plugins/` carries the platform-correct dynamic-library
+/// extension. An empty `Plugins/` is allowed (a package may ship no plugins yet).
+fn check_plugin_naming(staging_dir: &Path, triple: &str) -> Result<()> {
+    let plugins = staging_dir.join(PLUGINS_DIR);
+    if !plugins.is_dir() {
+        return Ok(());
+    }
+    let expected = dynamic_library_extension(triple);
+    for entry in fs::read_dir(&plugins)? {
+        let path = entry?.path();
+        if !path.is_file() {
+            continue;
+        }
+        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or_default();
+        if ext != expected {
+            bail!(
+                "plugin `{}` has extension `.{ext}` but target {triple} requires `.{expected}`",
+                path.display()
+            );
+        }
+    }
+    Ok(())
+}
+
+/// The shared CEF runtime is present flat beside the binary, with a populated
+/// `locales/`.
+fn check_cef_layout(staging_dir: &Path, triple: &str) -> Result<()> {
+    for required in required_runtime_files(triple) {
+        let path = staging_dir.join(&required);
+        if !path.is_file() {
+            bail!("required CEF runtime file missing beside binary: {}", path.display());
+        }
+    }
+    let locales = staging_dir.join(LOCALES_DIR);
+    let populated = locales.is_dir()
+        && fs::read_dir(&locales)
+            .map(|mut entries| entries.next().is_some())
+            .unwrap_or(false);
+    if !populated {
+        bail!("required CEF `locales/` directory missing or empty: {}", locales.display());
+    }
     Ok(())
 }
 
@@ -95,12 +182,19 @@ fn check_no_forbidden_artifacts(staging_dir: &Path, symbols_enabled: bool) -> Re
 }
 
 /// Whether a staged entry name is a forbidden intermediate artifact.
+///
+/// `.pdb`/`.lib` are treated as forbidden here (they are only allowed under
+/// `symbols/`, which the caller excludes before calling this).
 pub fn is_forbidden_artifact(name: &str, is_dir: bool) -> bool {
     if is_dir {
         return FORBIDDEN_DIRS.contains(&name);
     }
     match name.rsplit_once('.') {
-        Some((_, ext)) => FORBIDDEN_EXTENSIONS.contains(&ext.to_ascii_lowercase().as_str()),
+        Some((_, ext)) => {
+            let ext = ext.to_ascii_lowercase();
+            FORBIDDEN_EXTENSIONS.contains(&ext.as_str())
+                || SYMBOL_ONLY_EXTENSIONS.contains(&ext.as_str())
+        }
         None => false,
     }
 }
@@ -146,6 +240,8 @@ mod tests {
     use super::*;
     use crate::staging;
 
+    const TRIPLE: &str = "x86_64-pc-windows-msvc";
+
     /// Build a minimally valid staged package for the happy-path checks.
     fn valid_package(dir: &Path) {
         fs::write(dir.join("FutureboardNative.exe"), b"MZ binary").unwrap();
@@ -154,12 +250,39 @@ mod tests {
         fs::write(dir.join(BUILD_INFO_FILE), "{\"schemaVersion\":1}").unwrap();
     }
 
+    /// Stage the flat CEF runtime files a Windows package must carry.
+    fn add_cef(dir: &Path) {
+        for f in required_runtime_files(TRIPLE) {
+            fs::write(dir.join(f), b"x").unwrap();
+        }
+        fs::create_dir_all(dir.join(LOCALES_DIR)).unwrap();
+        fs::write(dir.join(LOCALES_DIR).join("en-US.pak"), b"x").unwrap();
+    }
+
+    fn inputs<'a>(
+        dir: &'a Path,
+        binary: &'a str,
+        sidecars: &'a [String],
+        symbols: bool,
+        cef: bool,
+    ) -> ValidationInputs<'a> {
+        ValidationInputs {
+            staging_dir: dir,
+            binary_name: binary,
+            sidecars,
+            symbols_enabled: symbols,
+            triple: TRIPLE,
+            cef_staged: cef,
+        }
+    }
+
     #[test]
     fn forbidden_artifact_detection() {
         assert!(is_forbidden_artifact("libcore.rlib", false));
         assert!(is_forbidden_artifact("FutureboardNative.pdb", false));
         assert!(is_forbidden_artifact("thing.d", false));
         assert!(is_forbidden_artifact("mod.rmeta", false));
+        assert!(is_forbidden_artifact("rodharerist.lib", false));
         assert!(is_forbidden_artifact("deps", true));
         assert!(is_forbidden_artifact("incremental", true));
 
@@ -173,7 +296,7 @@ mod tests {
     fn valid_package_passes() {
         let temp = tempfile::tempdir().unwrap();
         valid_package(temp.path());
-        validate_staging(temp.path(), "FutureboardNative.exe", &[], false).unwrap();
+        validate_staging(&inputs(temp.path(), "FutureboardNative.exe", &[], false, false)).unwrap();
     }
 
     #[test]
@@ -186,20 +309,23 @@ mod tests {
             "FutureboardPluginHostX64.exe".to_string(),
             "FutureboardPluginScanner.exe".to_string(),
         ];
-        validate_staging(temp.path(), "FutureboardNative.exe", &sidecars, false).unwrap();
+        validate_staging(&inputs(temp.path(), "FutureboardNative.exe", &sidecars, false, false))
+            .unwrap();
     }
 
     #[test]
     fn missing_required_sidecar_fails() {
         let temp = tempfile::tempdir().unwrap();
         valid_package(temp.path());
-        // Only one of the two required sidecars is present.
         fs::write(temp.path().join("FutureboardPluginHostX64.exe"), b"MZ").unwrap();
         let sidecars = [
             "FutureboardPluginHostX64.exe".to_string(),
             "FutureboardPluginScanner.exe".to_string(),
         ];
-        assert!(validate_staging(temp.path(), "FutureboardNative.exe", &sidecars, false).is_err());
+        assert!(
+            validate_staging(&inputs(temp.path(), "FutureboardNative.exe", &sidecars, false, false))
+                .is_err()
+        );
     }
 
     #[test]
@@ -207,7 +333,10 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         valid_package(temp.path());
         fs::write(temp.path().join("FutureboardNative.exe"), b"").unwrap();
-        assert!(validate_staging(temp.path(), "FutureboardNative.exe", &[], false).is_err());
+        assert!(
+            validate_staging(&inputs(temp.path(), "FutureboardNative.exe", &[], false, false))
+                .is_err()
+        );
     }
 
     #[test]
@@ -215,7 +344,10 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         valid_package(temp.path());
         fs::remove_dir_all(temp.path().join(PLUGINS_DIR)).unwrap();
-        assert!(validate_staging(temp.path(), "FutureboardNative.exe", &[], false).is_err());
+        assert!(
+            validate_staging(&inputs(temp.path(), "FutureboardNative.exe", &[], false, false))
+                .is_err()
+        );
     }
 
     #[test]
@@ -223,7 +355,10 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         valid_package(temp.path());
         fs::write(temp.path().join(BUILD_INFO_FILE), "not json {").unwrap();
-        assert!(validate_staging(temp.path(), "FutureboardNative.exe", &[], false).is_err());
+        assert!(
+            validate_staging(&inputs(temp.path(), "FutureboardNative.exe", &[], false, false))
+                .is_err()
+        );
     }
 
     #[test]
@@ -231,7 +366,10 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         valid_package(temp.path());
         fs::write(temp.path().join("libjunk.rlib"), b"junk").unwrap();
-        assert!(validate_staging(temp.path(), "FutureboardNative.exe", &[], false).is_err());
+        assert!(
+            validate_staging(&inputs(temp.path(), "FutureboardNative.exe", &[], false, false))
+                .is_err()
+        );
     }
 
     #[test]
@@ -241,9 +379,68 @@ mod tests {
         let sym = temp.path().join(staging::SYMBOLS_DIR);
         fs::create_dir_all(&sym).unwrap();
         fs::write(sym.join("FutureboardNative.pdb"), b"pdb").unwrap();
-        // Allowed when symbols were requested...
-        validate_staging(temp.path(), "FutureboardNative.exe", &[], true).unwrap();
-        // ...but flagged otherwise.
-        assert!(validate_staging(temp.path(), "FutureboardNative.exe", &[], false).is_err());
+        validate_staging(&inputs(temp.path(), "FutureboardNative.exe", &[], true, false)).unwrap();
+        assert!(
+            validate_staging(&inputs(temp.path(), "FutureboardNative.exe", &[], false, false))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn cef_subdirectory_layout_is_rejected() {
+        let temp = tempfile::tempdir().unwrap();
+        valid_package(temp.path());
+        fs::create_dir_all(temp.path().join("CEF")).unwrap();
+        fs::write(temp.path().join("CEF/libcef.dll"), b"x").unwrap();
+        assert!(
+            validate_staging(&inputs(temp.path(), "FutureboardNative.exe", &[], false, false))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn plugin_ui_deployment_is_rejected() {
+        let temp = tempfile::tempdir().unwrap();
+        valid_package(temp.path());
+        fs::create_dir_all(temp.path().join("PluginUI")).unwrap();
+        assert!(
+            validate_staging(&inputs(temp.path(), "FutureboardNative.exe", &[], false, false))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn flat_cef_layout_passes_and_incomplete_fails() {
+        let temp = tempfile::tempdir().unwrap();
+        valid_package(temp.path());
+        add_cef(temp.path());
+        // Flat, complete CEF beside the binary passes.
+        validate_staging(&inputs(temp.path(), "FutureboardNative.exe", &[], false, true)).unwrap();
+        // Missing a required CEF file fails when CEF is expected.
+        fs::remove_file(temp.path().join("icudtl.dat")).unwrap();
+        assert!(
+            validate_staging(&inputs(temp.path(), "FutureboardNative.exe", &[], false, true))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn wrong_plugin_extension_is_rejected() {
+        let temp = tempfile::tempdir().unwrap();
+        valid_package(temp.path());
+        // A `.so` under Plugins/ is wrong for a Windows target.
+        fs::write(temp.path().join(PLUGINS_DIR).join("librodharerist.so"), b"x").unwrap();
+        assert!(
+            validate_staging(&inputs(temp.path(), "FutureboardNative.exe", &[], false, false))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn correct_plugin_extension_passes() {
+        let temp = tempfile::tempdir().unwrap();
+        valid_package(temp.path());
+        fs::write(temp.path().join(PLUGINS_DIR).join("rodharerist.dll"), b"MZ").unwrap();
+        validate_staging(&inputs(temp.path(), "FutureboardNative.exe", &[], false, false)).unwrap();
     }
 }

@@ -9,6 +9,7 @@ import {
   type Param,
 } from "./data";
 import { Layout } from "./Layout";
+import { postEnabled, postModel, postParam } from "./bridge";
 import "./Styles/Editor.css";
 
 type VuState = {
@@ -96,7 +97,10 @@ function RodhareistEditor() {
   const selectCategory = useCallback((cat: CategoryId) => {
     setActiveCat(cat);
     const first = models[cat]?.[0];
-    if (first) setActiveModelId(first.id);
+    if (first) {
+      setActiveModelId(first.id);
+      postModel(categories[cat].node, first.id);
+    }
   }, []);
 
   const loadPreset = useCallback((id: string) => {
@@ -129,19 +133,26 @@ function RodhareistEditor() {
     [currentPresetId, loadPreset],
   );
 
-  const selectModel = useCallback((id: string) => {
-    setActiveModelId(id);
-  }, []);
+  const selectModel = useCallback(
+    (id: string) => {
+      setActiveModelId(id);
+      postModel(categories[activeCat].node, id);
+    },
+    [activeCat],
+  );
 
   const toggleBypass = useCallback(() => {
-    setBypassed((prev) => ({
-      ...prev,
-      [activeCat]: !prev[activeCat],
-    }));
+    setBypassed((prev) => {
+      const enabled = !prev[activeCat]; // next bypassed state
+      // Bridge sends "enabled" (the inverse of bypassed).
+      postEnabled(categories[activeCat].node, !enabled);
+      return { ...prev, [activeCat]: enabled };
+    });
   }, [activeCat]);
 
   const onParamChange = useCallback(
     (id: string, value: number) => {
+      postParam(id, value);
       setParameters((prev) => {
         const modelParams = prev[activeModelId];
         if (!modelParams) return prev;

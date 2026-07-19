@@ -1,12 +1,20 @@
 [package]
 name = "rodharerist"
-version = "0.1.0"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Rodhareist — flagship guitar multi-effect DSP core"
 
 [lib]
 name = "rodharerist"
-crate-type = ["dylib"]
+# `rlib` for workspace unit tests; `cdylib` for the eventual Built-in Plugin
+# dynamic library (C entry points + embedded editor UI are a later slice).
+crate-type = ["rlib", "cdylib"]
 
 [dependencies]
-builtin_dsp_core.workspace = true
-builtin_plugin_api.workspace = true
+biquad.workspace = true
+builtin-dsp-core.workspace = true
+
+[lints]
+workspace = true

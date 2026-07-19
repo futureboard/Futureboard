@@ -108,14 +108,25 @@ impl RegistryPlugin {
         )
     }
 
-    /// Insert onto a track is supported when format is wired and preset exists.
+    /// Whether this row is a Futureboard built-in (stock) plug-in.
+    pub fn is_builtin(&self) -> bool {
+        crate::builtin::is_builtin_id(&self.id)
+    }
+
+    /// Insert onto a track is supported for wired formats (or any built-in) once
+    /// the preset is ready.
     pub fn supports_insert(&self) -> bool {
-        matches!(self.format, PluginFormat::Vst3 | PluginFormat::Clap)
+        (self.is_builtin() || matches!(self.format, PluginFormat::Vst3 | PluginFormat::Clap))
             && self.status == PluginStatus::PresetReady
     }
 
-    /// Native editor window (VST3 only today, matching Electron lifecycle).
+    /// Editor window: built-ins use the embedded CEF (`mikoplugin://`) editor;
+    /// external plug-ins use the native host-owned window (VST3 only today,
+    /// matching the Electron lifecycle).
     pub fn supports_editor(&self) -> bool {
+        if self.is_builtin() {
+            return crate::builtin::builtin_has_editor(&self.id);
+        }
         self.format == PluginFormat::Vst3 && self.supports_insert()
     }
 }

@@ -88,6 +88,40 @@ pub fn platform_folder(triple: &str) -> String {
     }
 }
 
+/// The dynamic-library file extension (without dot) for a target triple's OS:
+/// `dll` on Windows, `dylib` on Apple, `so` elsewhere.
+pub fn dynamic_library_extension(triple: &str) -> &'static str {
+    if triple.contains("windows") {
+        "dll"
+    } else if triple.contains("apple") || triple.contains("darwin") {
+        "dylib"
+    } else {
+        "so"
+    }
+}
+
+/// The dynamic-library file-name prefix for a target triple's OS: empty on
+/// Windows, `lib` on Unix-likes (Linux/macOS).
+pub fn dynamic_library_prefix(triple: &str) -> &'static str {
+    if triple.contains("windows") {
+        ""
+    } else {
+        "lib"
+    }
+}
+
+/// The platform-correct dynamic-library file name for a crate `base_name`
+/// (Cargo's `[lib] name`), e.g. `rodharerist` → `rodharerist.dll` /
+/// `librodharerist.so` / `librodharerist.dylib`.
+pub fn dynamic_library_file_name(base_name: &str, triple: &str) -> String {
+    format!(
+        "{}{}.{}",
+        dynamic_library_prefix(triple),
+        base_name,
+        dynamic_library_extension(triple)
+    )
+}
+
 /// Turn an arbitrary triple into a lower-case `[a-z0-9-]` slug so it is always
 /// a valid directory name on every supported filesystem.
 fn normalize_folder(triple: &str) -> String {
@@ -140,6 +174,30 @@ mod tests {
         // Collapses runs of non-alphanumerics and trims edges.
         assert_eq!(platform_folder("Weird__Target!!"), "weird-target");
         assert_eq!(platform_folder("///"), "unknown-target");
+    }
+
+    #[test]
+    fn dynamic_library_naming_matches_platform() {
+        assert_eq!(dynamic_library_extension("x86_64-pc-windows-msvc"), "dll");
+        assert_eq!(dynamic_library_extension("x86_64-unknown-linux-gnu"), "so");
+        assert_eq!(dynamic_library_extension("aarch64-apple-darwin"), "dylib");
+
+        assert_eq!(dynamic_library_prefix("x86_64-pc-windows-msvc"), "");
+        assert_eq!(dynamic_library_prefix("x86_64-unknown-linux-gnu"), "lib");
+        assert_eq!(dynamic_library_prefix("aarch64-apple-darwin"), "lib");
+
+        assert_eq!(
+            dynamic_library_file_name("rodharerist", "x86_64-pc-windows-msvc"),
+            "rodharerist.dll"
+        );
+        assert_eq!(
+            dynamic_library_file_name("rodharerist", "x86_64-unknown-linux-gnu"),
+            "librodharerist.so"
+        );
+        assert_eq!(
+            dynamic_library_file_name("rodharerist", "aarch64-apple-darwin"),
+            "librodharerist.dylib"
+        );
     }
 
     #[test]

@@ -7,6 +7,13 @@
 #![allow(non_snake_case)]
 
 pub mod au_scanner;
+/// Curated catalog of Futureboard's built-in (stock) DSP plug-ins, surfaced to
+/// the plug-in manager / Add-Track UI as ordinary [`registry::RegistryPlugin`]
+/// rows (identified by a `builtin:` id).
+pub mod builtin;
+/// Control-thread manager for live built-in instances and the one shared CEF
+/// editor binding per plug-in type.
+pub mod instance_manager;
 /// Stage 2 lock-free shared-memory audio bridge layout (audio in/out, MIDI ring,
 /// parameter-automation ring, status/latency/meter block) shared by the engine
 /// and the `FutureboardPluginHostX64` process.
@@ -55,6 +62,11 @@ pub use preset::{
     clear_all_presets, clear_plugin_cache, ensure_preset_folders, load_cached_plugins,
     read_preset_file, register_plugin, validate_plugin_for_registration, write_preset,
 };
+pub use builtin::{
+    builtin_catalog, builtin_editor_url, builtin_id, is_builtin_id, with_builtins,
+    BUILTIN_ID_PREFIX,
+};
+pub use instance_manager::{InsertSlot, InstanceId, InstanceManager, PluginInstance};
 pub use registry::{
     classify_kind, default_preset_root, default_scan_paths, display_category, native_host_status,
     registry_plugin_from_scan, CatalogLoad, NativeHostStatus, PluginFormat, PluginKind,

@@ -13,9 +13,11 @@
 //! post-build workflow that copies files, writes metadata and publishes output.
 
 mod cargo_build;
+mod cef;
 mod metadata;
 mod package;
 mod platform;
+mod plugins;
 mod staging;
 mod validation;
 
@@ -76,6 +78,15 @@ struct PackageArgs {
     /// Also copy debug symbols (`.pdb`) into a `symbols/` directory.
     #[arg(long)]
     symbols: bool,
+
+    /// Build and stage Built-in Plugin dynamic libraries into `Plugins/`.
+    /// Off by default while the plugin cdylibs are still being wired up.
+    #[arg(long)]
+    plugins: bool,
+
+    /// Skip staging the shared CEF runtime even when `build/cef` is present.
+    #[arg(long)]
+    no_cef: bool,
 }
 
 fn main() -> ExitCode {
@@ -94,6 +105,8 @@ fn run_package(args: PackageArgs) -> ExitCode {
         edition: args.edition,
         out_root: args.out,
         symbols: args.symbols,
+        plugins: args.plugins,
+        stage_cef: !args.no_cef,
     };
     match package::run(&options) {
         Ok(path) => {

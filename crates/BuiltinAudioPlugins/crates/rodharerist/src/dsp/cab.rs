@@ -1,0 +1,71 @@
+//! Cabinet simulation — an IR-free 4x12 voicing built from a short cascade of
+//! biquads (low-cut, cabinet resonance bump, presence peak, speaker roll-off).
+//! Mic position brightens the top; distance rolls it off and trims level.
+
+use builtin_dsp_core::make_eq_biquad;
+
+use super::StereoBiquad;
+
+#[derive(Debug, Clone)]
+pub(super) struct Cabinet {
+    sample_rate: f32,
+    hpf: StereoBiquad,
+    body: StereoBiquad,
+    presence: StereoBiquad,
+    lpf: StereoBiquad,
+    level: f32,
+}
+
+impl Cabinet {
+    pub(super) fn new(sample_rate: f32) -> Self {
+        Self {
+            sample_rate: sample_rate.max(1.0),
+            hpf: StereoBiquad::none(),
+            body: StereoBiquad::none(),
+            presence: StereoBiquad::none(),
+            lpf: StereoBiquad::none(),
+            level: 1.0,
+        }
+    }
+
+    pub(super) fn set_sample_rate(&mut self, sample_rate: f32) {
+        self.sample_rate = sample_rate.max(1.0);
+    }
+
+    pub(super) fn reset(&mut self) {
+        self.hpf.reset();
+        self.body.reset();
+        self.presence.reset();
+        self.lpf.reset();
+    }
+
+    /// `mic` and `dist` are the editor's 0..100 % knobs.
+    pub(super) fn configure(&mut self, mic: f32, dist: f32) {
+        let sr = self.sample_rate;
+        let m = (mic / 100.0).clamp(0.0, 1.0); // brighter when closer to the cone
+        let d = (dist / 100.0).clamp(0.0, 1.0); // darker/quieter with distance
+
+        // Fixed low-cut and cabinet body resonance.
+        self.hpf.set(make_eq_biquad("highpass", 80.0, 0.0, 0.707, sr));
+        self.body.set(make_eq_biquad("bell", 120.0, 3.0, 0.9, sr));
+
+        // Presence peak: emphasised on-axis, tamed off-axis.
+        let presence_db = 1.0 + m * 4.0 - d * 1.5;
+        self.presence.set(make_eq_biquad("bell", 2_600.0, presence_db, 1.1, sr));
+
+        // Speaker roll-off: 4x12s fall off hard past ~4–5 kHz.
+        let cutoff = (3_000.0 + m * 2_500.0 - d * 1_200.0).clamp(2_000.0, sr * 0.45);
+        self.lpf.set(make_eq_biquad("lowpass", cutoff, 0.0, 0.707, sr));
+
+        self.level = 1.0 - d * 0.2;
+    }
+
+    #[inline]
+    pub(super) fn process(&mut self, left: f32, right: f32) -> (f32, f32) {
+        let (mut l, mut r) = self.hpf.run(left, right);
+        (l, r) = self.body.run(l, r);
+        (l, r) = self.presence.run(l, r);
+        (l, r) = self.lpf.run(l, r);
+        (l * self.level, r * self.level)
+    }
+}

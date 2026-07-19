@@ -14,6 +14,7 @@ dependencies = [
  "fa2a",
  "fa76",
  "meowsyn",
+ "tempfile",
 ]
 
 [[package]]
@@ -6637,6 +6638,14 @@ dependencies = [
  "libc",
  "untrusted",
  "windows-sys 0.52.0",
+]
+
+[[package]]
+name = "rodharerist"
+version = "0.1.0"
+dependencies = [
+ "biquad",
+ "builtin_dsp_core",
 ]
 
 [[package]]

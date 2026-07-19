@@ -1,0 +1,194 @@
+//! Built-in (stock) plugin catalog.
+//!
+//! Futureboard's own DSP cores (`crates/BuiltinAudioPlugins`) are surfaced to the
+//! plug-in manager and Add-Track dialog as ordinary [`RegistryPlugin`] rows, so
+//! the existing `Vec<RegistryPlugin>` UI pipelines list them next to scanned
+//! VST3/CLAP plug-ins with **no new [`PluginFormat`] variant** (that enum is
+//! matched exhaustively in ~150 places). Built-ins are identified by a
+//! `builtin:` id prefix via [`is_builtin_id`] / [`RegistryPlugin::is_builtin`].
+//!
+//! Each built-in with a React editor is served to CEF through the shared
+//! `mikoplugin://<plugin>/index.html` scheme; [`builtin_editor_url`] builds it.
+//! This module is pure data + string mapping — no DSP crate dependency, so the
+//! host crate stays lean.
+
+use crate::registry::{PluginFormat, PluginKind, PluginStatus, RegistryPlugin};
+use crate::plugin_db::PluginScanStatus;
+
+/// Id prefix that marks a registry row as a Futureboard built-in.
+pub const BUILTIN_ID_PREFIX: &str = "builtin:";
+
+/// Custom URL scheme the shared CEF host uses for embedded plugin editors. Must
+/// stay in sync with `builtin_audio_plugins::ui::PLUGIN_URL_SCHEME` (kept as a
+/// literal here so the host crate does not depend on the DSP umbrella crate).
+pub const PLUGIN_URL_SCHEME: &str = "mikoplugin";
+
+/// One entry in the curated built-in catalog.
+struct BuiltinEntry {
+    /// Library / plugin id stem (also the `mikoplugin://<stem>` origin).
+    stem: &'static str,
+    name: &'static str,
+    category: &'static str,
+    kind: PluginKind,
+    /// Whether the plugin ships an embeddable React editor (`editorui/`).
+    has_editor: bool,
+}
+
+/// The curated built-in catalog. Mirrors the workspace members under
+/// `crates/BuiltinAudioPlugins/crates`.
+const CATALOG: &[BuiltinEntry] = &[
+    BuiltinEntry { stem: "rodharerist", name: "Rodhareist", category: "Multi-FX", kind: PluginKind::Effect, has_editor: true },
+    BuiltinEntry { stem: "equz8", name: "EQ-Z8", category: "EQ", kind: PluginKind::Effect, has_editor: false },
+    BuiltinEntry { stem: "compresser", name: "Compresser", category: "Dynamics", kind: PluginKind::Effect, has_editor: false },
+    BuiltinEntry { stem: "fa2a", name: "FA-2A", category: "Dynamics", kind: PluginKind::Effect, has_editor: false },
+    BuiltinEntry { stem: "echospace", name: "EchoSpace", category: "Delay", kind: PluginKind::Effect, has_editor: false },
+    BuiltinEntry { stem: "fa76", name: "FA-76", category: "Dynamics", kind: PluginKind::Effect, has_editor: false },
+    BuiltinEntry { stem: "c1073", name: "C1073", category: "EQ", kind: PluginKind::Effect, has_editor: false },
+    BuiltinEntry { stem: "meowsyn", name: "MeowSyn", category: "Instrument", kind: PluginKind::Instrument, has_editor: false },
+];
+
+const VENDOR: &str = "Futureboard";
+
+/// The registry id for a built-in stem, e.g. `builtin:rodharerist`.
+pub fn builtin_id(stem: &str) -> String {
+    format!("{BUILTIN_ID_PREFIX}{stem}")
+}
+
+/// Whether a registry id denotes a built-in plug-in.
+pub fn is_builtin_id(id: &str) -> bool {
+    id.starts_with(BUILTIN_ID_PREFIX)
+}
+
+/// The stem (`rodharerist`) for a built-in id (`builtin:rodharerist`).
+pub fn builtin_stem(id: &str) -> Option<&str> {
+    id.strip_prefix(BUILTIN_ID_PREFIX)
+}
+
+/// The `mikoplugin://<stem>/index.html` editor URL for a built-in id, or `None`
+/// when the id is not a built-in or that built-in ships no editor.
+pub fn builtin_editor_url(id: &str) -> Option<String> {
+    let stem = builtin_stem(id)?;
+    let entry = CATALOG.iter().find(|e| e.stem == stem)?;
+    entry
+        .has_editor
+        .then(|| format!("{PLUGIN_URL_SCHEME}://{stem}/index.html"))
+}
+
+/// Whether a built-in id has an embeddable editor.
+pub fn builtin_has_editor(id: &str) -> bool {
+    builtin_editor_url(id).is_some()
+}
+
+/// Build the built-in catalog as `RegistryPlugin` rows the existing UI consumes.
+///
+/// `scanned_at_ms` is stamped so built-ins sort/merge consistently with scanned
+/// rows. Built-ins are always `PresetReady` (they need no `.pst` on disk) and
+/// carry the `Builtin`-less `Unknown` format with a `builtin:` id.
+pub fn builtin_catalog(scanned_at_ms: i64) -> Vec<RegistryPlugin> {
+    CATALOG
+        .iter()
+        .map(|entry| RegistryPlugin {
+            id: builtin_id(entry.stem),
+            name: entry.name.to_string(),
+            vendor: VENDOR.to_string(),
+            format: PluginFormat::Unknown,
+            category: entry.category.to_string(),
+            raw_category: Some(entry.category.to_string()),
+            sub_categories: None,
+            kind: entry.kind,
+            path: std::path::PathBuf::new(),
+            class_id: Some(entry.stem.to_string()),
+            version: Some(env!("CARGO_PKG_VERSION").to_string()),
+            sdk_metadata_loaded: true,
+            preset_path: std::path::PathBuf::new(),
+            scanned_at_ms,
+            status: PluginStatus::PresetReady,
+            scan_status: PluginScanStatus::Success,
+            error_message: None,
+        })
+        .collect()
+}
+
+/// Merge the built-in catalog into a scanned catalog, de-duplicating by id so a
+/// re-merge is idempotent. Built-ins are prepended (they lead the list).
+pub fn with_builtins(mut scanned: Vec<RegistryPlugin>, scanned_at_ms: i64) -> Vec<RegistryPlugin> {
+    scanned.retain(|plugin| !is_builtin_id(&plugin.id));
+    let mut merged = builtin_catalog(scanned_at_ms);
+    merged.extend(scanned);
+    merged
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn catalog_ids_are_prefixed_and_unique() {
+        let rows = builtin_catalog(0);
+        assert_eq!(rows.len(), CATALOG.len());
+        let mut ids: Vec<_> = rows.iter().map(|p| p.id.clone()).collect();
+        assert!(ids.iter().all(|id| is_builtin_id(id)));
+        ids.sort();
+        let before = ids.len();
+        ids.dedup();
+        assert_eq!(before, ids.len(), "duplicate built-in id");
+    }
+
+    #[test]
+    fn builtins_are_insertable() {
+        for plugin in builtin_catalog(0) {
+            assert!(plugin.is_builtin());
+            assert!(plugin.supports_insert(), "{} should be insertable", plugin.name);
+        }
+    }
+
+    #[test]
+    fn only_rodhareist_has_editor_today() {
+        assert_eq!(
+            builtin_editor_url(&builtin_id("rodharerist")).as_deref(),
+            Some("mikoplugin://rodharerist/index.html")
+        );
+        assert!(builtin_editor_url(&builtin_id("equz8")).is_none());
+        assert!(builtin_editor_url("vst3:whatever").is_none());
+    }
+
+    #[test]
+    fn stem_round_trips() {
+        assert_eq!(builtin_stem(&builtin_id("meowsyn")), Some("meowsyn"));
+        assert!(builtin_stem("clap:foo").is_none());
+    }
+
+    #[test]
+    fn merge_is_idempotent() {
+        let once = with_builtins(Vec::new(), 5);
+        let twice = with_builtins(once.clone(), 5);
+        assert_eq!(once.len(), twice.len());
+        assert_eq!(once.len(), CATALOG.len());
+    }
+
+    #[test]
+    fn merge_keeps_scanned_rows_after_builtins() {
+        let scanned = vec![RegistryPlugin {
+            id: "vst3:acme.synth".to_string(),
+            name: "Acme".to_string(),
+            vendor: "Acme".to_string(),
+            format: PluginFormat::Vst3,
+            category: "Instrument".to_string(),
+            raw_category: None,
+            sub_categories: None,
+            kind: PluginKind::Instrument,
+            path: std::path::PathBuf::from("acme.vst3"),
+            class_id: None,
+            version: None,
+            sdk_metadata_loaded: true,
+            preset_path: std::path::PathBuf::new(),
+            scanned_at_ms: 1,
+            status: PluginStatus::PresetReady,
+            scan_status: PluginScanStatus::Success,
+            error_message: None,
+        }];
+        let merged = with_builtins(scanned, 0);
+        assert!(merged.first().unwrap().is_builtin());
+        assert_eq!(merged.last().unwrap().id, "vst3:acme.synth");
+    }
+}

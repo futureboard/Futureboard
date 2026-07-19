@@ -9,6 +9,12 @@
 //! - Phase 2 (medium): `echospace`, `fa76`
 //! - Phase 3 (hard): `c1073`, `meowsyn`
 
+/// BuildInHelper: embedded UI asset infrastructure shared by every Built-in
+/// Plugin dynamic library. See [`ui`] for the runtime lookup API and
+/// [`ui::generate`] (behind the `ui-generate` feature) for the build-time table
+/// generator. This module is deliberately CEF-free.
+pub mod ui;
+
 pub use builtin_dsp_core as core;
 
 pub use c1073;

@@ -1,0 +1,679 @@
+//! Rodhareist — flagship guitar multi-effect DSP core.
+//!
+//! A realtime-safe stereo pedalboard/amp chain, engine-agnostic like the other
+//! `BuiltinAudioPlugins` cores. The signal path mirrors the React editor's
+//! signal chain exactly:
+//!
+//! ```text
+//! Gate → Drive → Amp → Chorus → Tape Delay → Plate Reverb → Cabinet
+//! ```
+//!
+//! ## Realtime rules
+//!
+//! Every buffer (delay lines, reverb combs/allpasses) is preallocated in
+//! [`Dsp::new`] / [`Dsp::set_sample_rate`]. [`StereoEffect::process_stereo`]
+//! performs no allocation, logging, or locking. Control-thread updates go through
+//! [`Dsp::set_params`] / [`Dsp::apply_ui_param`], which recompute coefficients
+//! outside the audio callback.
+//!
+//! Only the MIT/Apache [`biquad`] crate is used for filtering; every waveshaper,
+//! delay and reverb is hand-written here (no extra third-party runtime deps).
+
+mod amp;
+mod cab;
+mod chorus;
+mod delay;
+mod drive;
+mod gate;
+mod reverb;
+
+use builtin_dsp_core::{
+    ParamDescriptor, PluginCategory, PluginDescriptor, StereoEffect, clamp,
+};
+
+use amp::Amp;
+use cab::Cabinet;
+use chorus::Chorus;
+use delay::TapeDelay;
+use drive::Drive;
+use gate::NoiseGate;
+use reverb::PlateReverb;
+
+pub const PLUGIN_ID: &str = "futureboard.rodharerist";
+
+/// Overdrive/boost voicing, matching the editor's `dist` models.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DriveModel {
+    /// "Green Screamer" — mid-boosted tube-screamer style overdrive.
+    Screamer,
+    /// "Minotaur Boost" — cleaner, near-transparent analog boost.
+    Minotaur,
+}
+
+impl DriveModel {
+    /// Map the editor model id (`screamer` / `minotaur`).
+    pub fn from_model_id(id: &str) -> Option<Self> {
+        match id {
+            "screamer" => Some(Self::Screamer),
+            "minotaur" => Some(Self::Minotaur),
+            _ => None,
+        }
+    }
+}
+
+/// Amplifier voicing, matching the editor's `amp` models.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AmpModel {
+    /// "Mandarin 80" — warm, mid-forward British tube head.
+    Mandarin,
+    /// "Brit Plexi 100" — bright, open plexiglass Super Lead.
+    Plexi,
+}
+
+impl AmpModel {
+    pub fn from_model_id(id: &str) -> Option<Self> {
+        match id {
+            "mandarin" => Some(Self::Mandarin),
+            "plexi" => Some(Self::Plexi),
+            _ => None,
+        }
+    }
+}
+
+/// Full parameter set. Knob ranges match `editorui/src/data.ts` one-to-one so the
+/// React UI and the bridge speak the same units.
+#[derive(Debug, Clone)]
+pub struct Params {
+    pub power: bool,
+
+    // Per-stage enables (editor "bypass" toggles, inverted).
+    pub gate_on: bool,
+    pub drive_on: bool,
+    pub amp_on: bool,
+    pub mod_on: bool,
+    pub delay_on: bool,
+    pub reverb_on: bool,
+    pub cab_on: bool,
+
+    pub drive_model: DriveModel,
+    pub amp_model: AmpModel,
+
+    /// Noise gate threshold (dB, -80..0).
+    pub gate_thresh_db: f32,
+
+    // Drive (0..10).
+    pub drive_gain: f32,
+    pub drive_tone: f32,
+    pub drive_level: f32,
+
+    // Amp tonestack (0..10).
+    pub amp_gain: f32,
+    pub amp_bass: f32,
+    pub amp_middle: f32,
+    pub amp_treble: f32,
+    pub amp_presence: f32,
+    pub amp_master: f32,
+
+    // Chorus.
+    pub chorus_rate: f32,  // 0..10
+    pub chorus_depth: f32, // 0..10
+    pub chorus_mix: f32,   // 0..100 %
+
+    // Tape delay.
+    pub delay_time_ms: f32, // 40..1200
+    pub delay_fb: f32,      // 0..100 %
+    pub delay_mix: f32,     // 0..100 %
+
+    // Plate reverb.
+    pub reverb_decay_s: f32, // 0.5..15
+    pub reverb_mix: f32,     // 0..100 %
+
+    // Cabinet.
+    pub cab_mic: f32,  // 0..100 % (mic position / brightness)
+    pub cab_dist: f32, // 0..100 % (distance / roll-off)
+}
+
+/// Defaults mirror the editor's `parameterDefaults` (Mandarin patch, "06D").
+pub fn default_params() -> Params {
+    Params {
+        power: true,
+        gate_on: true,
+        drive_on: true,
+        amp_on: true,
+        mod_on: true,
+        delay_on: true,
+        reverb_on: true,
+        cab_on: true,
+        drive_model: DriveModel::Screamer,
+        amp_model: AmpModel::Mandarin,
+        gate_thresh_db: -55.0,
+        drive_gain: 6.0,
+        drive_tone: 5.5,
+        drive_level: 6.5,
+        amp_gain: 6.0,
+        amp_bass: 5.1,
+        amp_middle: 4.8,
+        amp_treble: 4.8,
+        amp_presence: 5.0,
+        amp_master: 3.5,
+        chorus_rate: 4.0,
+        chorus_depth: 5.5,
+        chorus_mix: 40.0,
+        delay_time_ms: 420.0,
+        delay_fb: 35.0,
+        delay_mix: 30.0,
+        reverb_decay_s: 8.5,
+        reverb_mix: 55.0,
+        cab_mic: 20.0,
+        cab_dist: 40.0,
+    }
+}
+
+/// Host-facing descriptor. Exposes the headline parameters (ids match `data.ts`).
+pub fn descriptor() -> PluginDescriptor {
+    PluginDescriptor {
+        id: PLUGIN_ID,
+        name: "Rodhareist",
+        vendor: "Futureboard",
+        category: PluginCategory::Effect,
+        version: env!("CARGO_PKG_VERSION"),
+        params: &[
+            ParamDescriptor { id: "power", name: "Power", default_value: 1.0, min: 0.0, max: 1.0, unit: "bool" },
+            ParamDescriptor { id: "gate_thresh", name: "Gate", default_value: -55.0, min: -80.0, max: 0.0, unit: "dB" },
+            ParamDescriptor { id: "drive_gain", name: "Drive", default_value: 6.0, min: 0.0, max: 10.0, unit: "" },
+            ParamDescriptor { id: "drive_tone", name: "Drive Tone", default_value: 5.5, min: 0.0, max: 10.0, unit: "" },
+            ParamDescriptor { id: "drive_level", name: "Drive Level", default_value: 6.5, min: 0.0, max: 10.0, unit: "" },
+            ParamDescriptor { id: "amp_gain", name: "Amp Drive", default_value: 6.0, min: 0.0, max: 10.0, unit: "" },
+            ParamDescriptor { id: "amp_bass", name: "Bass", default_value: 5.1, min: 0.0, max: 10.0, unit: "" },
+            ParamDescriptor { id: "amp_middle", name: "Middle", default_value: 4.8, min: 0.0, max: 10.0, unit: "" },
+            ParamDescriptor { id: "amp_treble", name: "Treble", default_value: 4.8, min: 0.0, max: 10.0, unit: "" },
+            ParamDescriptor { id: "amp_presence", name: "Presence", default_value: 5.0, min: 0.0, max: 10.0, unit: "" },
+            ParamDescriptor { id: "amp_master", name: "Master", default_value: 3.5, min: 0.0, max: 10.0, unit: "" },
+            ParamDescriptor { id: "chorus_rate", name: "Chorus Rate", default_value: 4.0, min: 0.0, max: 10.0, unit: "" },
+            ParamDescriptor { id: "chorus_depth", name: "Chorus Depth", default_value: 5.5, min: 0.0, max: 10.0, unit: "" },
+            ParamDescriptor { id: "chorus_mix", name: "Chorus Mix", default_value: 40.0, min: 0.0, max: 100.0, unit: "%" },
+            ParamDescriptor { id: "delay_time", name: "Delay Time", default_value: 420.0, min: 40.0, max: 1200.0, unit: "ms" },
+            ParamDescriptor { id: "delay_fb", name: "Delay FB", default_value: 35.0, min: 0.0, max: 100.0, unit: "%" },
+            ParamDescriptor { id: "delay_mix", name: "Delay Mix", default_value: 30.0, min: 0.0, max: 100.0, unit: "%" },
+            ParamDescriptor { id: "reverb_decay", name: "Reverb Decay", default_value: 8.5, min: 0.5, max: 15.0, unit: "s" },
+            ParamDescriptor { id: "reverb_mix", name: "Reverb Mix", default_value: 55.0, min: 0.0, max: 100.0, unit: "%" },
+            ParamDescriptor { id: "cab_mic", name: "Cab Mic", default_value: 20.0, min: 0.0, max: 100.0, unit: "%" },
+            ParamDescriptor { id: "cab_dist", name: "Cab Distance", default_value: 40.0, min: 0.0, max: 100.0, unit: "%" },
+        ],
+    }
+}
+
+/// The full guitar chain.
+#[derive(Debug, Clone)]
+pub struct Dsp {
+    sample_rate: f32,
+    params: Params,
+    gate: NoiseGate,
+    drive: Drive,
+    amp: Amp,
+    chorus: Chorus,
+    delay: TapeDelay,
+    reverb: PlateReverb,
+    cab: Cabinet,
+    in_peak: f32,
+    out_peak: f32,
+}
+
+impl Dsp {
+    pub fn new(sample_rate: f32) -> Self {
+        let sr = sample_rate.max(1.0);
+        let mut dsp = Self {
+            sample_rate: sr,
+            params: default_params(),
+            gate: NoiseGate::new(sr),
+            drive: Drive::new(sr),
+            amp: Amp::new(sr),
+            chorus: Chorus::new(sr),
+            delay: TapeDelay::new(sr),
+            reverb: PlateReverb::new(sr),
+            cab: Cabinet::new(sr),
+            in_peak: 0.0,
+            out_peak: 0.0,
+        };
+        dsp.apply_params();
+        dsp
+    }
+
+    pub fn params(&self) -> &Params {
+        &self.params
+    }
+
+    /// Latest input/output peak levels (0..1), for editor VU telemetry. Decays
+    /// each block; never blocks the audio thread.
+    pub fn meter_levels(&self) -> (f32, f32) {
+        (self.in_peak, self.out_peak)
+    }
+
+    /// Replace the whole parameter set (clamps to legal ranges) and recompute.
+    pub fn set_params(&mut self, params: Params) {
+        self.params = Params {
+            power: params.power,
+            gate_on: params.gate_on,
+            drive_on: params.drive_on,
+            amp_on: params.amp_on,
+            mod_on: params.mod_on,
+            delay_on: params.delay_on,
+            reverb_on: params.reverb_on,
+            cab_on: params.cab_on,
+            drive_model: params.drive_model,
+            amp_model: params.amp_model,
+            gate_thresh_db: clamp(params.gate_thresh_db, -80.0, 0.0),
+            drive_gain: clamp(params.drive_gain, 0.0, 10.0),
+            drive_tone: clamp(params.drive_tone, 0.0, 10.0),
+            drive_level: clamp(params.drive_level, 0.0, 10.0),
+            amp_gain: clamp(params.amp_gain, 0.0, 10.0),
+            amp_bass: clamp(params.amp_bass, 0.0, 10.0),
+            amp_middle: clamp(params.amp_middle, 0.0, 10.0),
+            amp_treble: clamp(params.amp_treble, 0.0, 10.0),
+            amp_presence: clamp(params.amp_presence, 0.0, 10.0),
+            amp_master: clamp(params.amp_master, 0.0, 10.0),
+            chorus_rate: clamp(params.chorus_rate, 0.0, 10.0),
+            chorus_depth: clamp(params.chorus_depth, 0.0, 10.0),
+            chorus_mix: clamp(params.chorus_mix, 0.0, 100.0),
+            delay_time_ms: clamp(params.delay_time_ms, 40.0, 1200.0),
+            delay_fb: clamp(params.delay_fb, 0.0, 100.0),
+            delay_mix: clamp(params.delay_mix, 0.0, 100.0),
+            reverb_decay_s: clamp(params.reverb_decay_s, 0.5, 15.0),
+            reverb_mix: clamp(params.reverb_mix, 0.0, 100.0),
+            cab_mic: clamp(params.cab_mic, 0.0, 100.0),
+            cab_dist: clamp(params.cab_dist, 0.0, 100.0),
+        };
+        self.apply_params();
+    }
+
+    /// Route a single editor parameter (`data.ts` id) to the matching field, then
+    /// recompute. Also accepts stage enable ids (`gate_on`, `drive_on`, …) and
+    /// model selects (`drive_model`=0/1, `amp_model`=0/1). Returns `false` for an
+    /// unknown id so a bridge can flag mismatches. Control-thread only.
+    pub fn apply_ui_param(&mut self, id: &str, value: f32) -> bool {
+        let mut p = self.params.clone();
+        let on = value >= 0.5;
+        match id {
+            "power" => p.power = on,
+            "gate_on" => p.gate_on = on,
+            "drive_on" => p.drive_on = on,
+            "amp_on" => p.amp_on = on,
+            "mod_on" => p.mod_on = on,
+            "delay_on" => p.delay_on = on,
+            "reverb_on" => p.reverb_on = on,
+            "cab_on" => p.cab_on = on,
+            "drive_model" => {
+                p.drive_model = if on { DriveModel::Minotaur } else { DriveModel::Screamer }
+            }
+            "amp_model" => p.amp_model = if on { AmpModel::Plexi } else { AmpModel::Mandarin },
+            "gate_thresh" => p.gate_thresh_db = value,
+            "drive_gain" => p.drive_gain = value,
+            "drive_tone" => p.drive_tone = value,
+            "drive_level" => p.drive_level = value,
+            "amp_gain" => p.amp_gain = value,
+            "amp_bass" => p.amp_bass = value,
+            "amp_middle" => p.amp_middle = value,
+            "amp_treble" => p.amp_treble = value,
+            "amp_presence" => p.amp_presence = value,
+            "amp_master" => p.amp_master = value,
+            "chorus_rate" => p.chorus_rate = value,
+            "chorus_depth" => p.chorus_depth = value,
+            "chorus_mix" => p.chorus_mix = value,
+            "delay_time" => p.delay_time_ms = value,
+            "delay_fb" => p.delay_fb = value,
+            "delay_mix" => p.delay_mix = value,
+            "reverb_decay" => p.reverb_decay_s = value,
+            "reverb_mix" => p.reverb_mix = value,
+            "cab_mic" => p.cab_mic = value,
+            "cab_dist" => p.cab_dist = value,
+            _ => return false,
+        }
+        self.set_params(p);
+        true
+    }
+
+    /// Push clamped params into each stage (control-thread only).
+    fn apply_params(&mut self) {
+        let p = &self.params;
+        self.gate.set_threshold_db(p.gate_thresh_db);
+        self.drive.configure(p.drive_model, p.drive_gain, p.drive_tone, p.drive_level);
+        self.amp.configure(
+            p.amp_model,
+            p.amp_gain,
+            p.amp_bass,
+            p.amp_middle,
+            p.amp_treble,
+            p.amp_presence,
+            p.amp_master,
+        );
+        self.chorus.configure(p.chorus_rate, p.chorus_depth, p.chorus_mix);
+        self.delay.configure(p.delay_time_ms, p.delay_fb, p.delay_mix);
+        self.reverb.configure(p.reverb_decay_s, p.reverb_mix);
+        self.cab.configure(p.cab_mic, p.cab_dist);
+    }
+}
+
+impl StereoEffect for Dsp {
+    fn reset(&mut self) {
+        self.gate.reset();
+        self.drive.reset();
+        self.amp.reset();
+        self.chorus.reset();
+        self.delay.reset();
+        self.reverb.reset();
+        self.cab.reset();
+        self.in_peak = 0.0;
+        self.out_peak = 0.0;
+    }
+
+    fn set_sample_rate(&mut self, sample_rate: f32) {
+        let sr = sample_rate.max(1.0);
+        self.sample_rate = sr;
+        self.gate.set_sample_rate(sr);
+        self.drive.set_sample_rate(sr);
+        self.amp.set_sample_rate(sr);
+        self.chorus.set_sample_rate(sr);
+        self.delay.set_sample_rate(sr);
+        self.reverb.set_sample_rate(sr);
+        self.cab.set_sample_rate(sr);
+        self.apply_params();
+    }
+
+    fn process_stereo(&mut self, left: f32, right: f32) -> (f32, f32) {
+        if !self.params.power {
+            return (left, right);
+        }
+
+        // Input metering (peak with a gentle per-sample decay).
+        let in_level = left.abs().max(right.abs());
+        self.in_peak = in_level.max(self.in_peak - self.in_peak * 0.0005);
+
+        let (mut l, mut r) = (left, right);
+        if self.params.gate_on {
+            (l, r) = self.gate.process(l, r);
+        }
+        if self.params.drive_on {
+            (l, r) = self.drive.process(l, r);
+        }
+        if self.params.amp_on {
+            (l, r) = self.amp.process(l, r);
+        }
+        if self.params.mod_on {
+            (l, r) = self.chorus.process(l, r);
+        }
+        if self.params.delay_on {
+            (l, r) = self.delay.process(l, r);
+        }
+        if self.params.reverb_on {
+            (l, r) = self.reverb.process(l, r);
+        }
+        if self.params.cab_on {
+            (l, r) = self.cab.process(l, r);
+        }
+
+        // Guard against denormals / NaNs escaping into the engine.
+        if !l.is_finite() {
+            l = 0.0;
+        }
+        if !r.is_finite() {
+            r = 0.0;
+        }
+
+        let out_level = l.abs().max(r.abs());
+        self.out_peak = out_level.max(self.out_peak - self.out_peak * 0.0005);
+        (l, r)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Shared realtime-safe building blocks used by the stage modules.
+// ---------------------------------------------------------------------------
+
+use biquad::{Biquad, DirectForm1};
+
+/// A biquad with independent left/right state but shared coefficients, so a
+/// stereo stage filters each channel correctly (a single instance cannot serve
+/// both channels — its state would be stepped at twice the rate).
+#[derive(Debug, Clone, Default)]
+pub(crate) struct StereoBiquad {
+    left: Option<DirectForm1<f32>>,
+    right: Option<DirectForm1<f32>>,
+}
+
+impl StereoBiquad {
+    pub(crate) fn none() -> Self {
+        Self { left: None, right: None }
+    }
+
+    /// Install (or clear) the filter for both channels. `DirectForm1` is `Copy`,
+    /// so both channels start from identical coefficients and state.
+    pub(crate) fn set(&mut self, filter: Option<DirectForm1<f32>>) {
+        self.left = filter;
+        self.right = filter;
+    }
+
+    pub(crate) fn reset(&mut self) {
+        if let Some(f) = self.left.as_mut() {
+            f.reset_state();
+        }
+        if let Some(f) = self.right.as_mut() {
+            f.reset_state();
+        }
+    }
+
+    #[inline]
+    pub(crate) fn run(&mut self, left: f32, right: f32) -> (f32, f32) {
+        let l = self.left.as_mut().map(|f| f.run(left)).unwrap_or(left);
+        let r = self.right.as_mut().map(|f| f.run(right)).unwrap_or(right);
+        (l, r)
+    }
+}
+
+/// A fractional-read circular delay line (preallocated). Used by chorus and the
+/// tape delay for modulated / interpolated taps.
+#[derive(Debug, Clone)]
+pub(crate) struct InterpDelay {
+    buffer: Vec<f32>,
+    write: usize,
+}
+
+impl InterpDelay {
+    pub(crate) fn new(capacity: usize) -> Self {
+        Self {
+            buffer: vec![0.0; capacity.max(2)],
+            write: 0,
+        }
+    }
+
+    pub(crate) fn clear(&mut self) {
+        self.buffer.fill(0.0);
+        self.write = 0;
+    }
+
+    #[inline]
+    pub(crate) fn write_sample(&mut self, sample: f32) {
+        self.buffer[self.write] = sample;
+        self.write += 1;
+        if self.write >= self.buffer.len() {
+            self.write = 0;
+        }
+    }
+
+    /// Linearly-interpolated read `delay_samples` behind the write head.
+    #[inline]
+    pub(crate) fn read_interp(&self, delay_samples: f32) -> f32 {
+        let len = self.buffer.len();
+        let max_delay = (len - 2) as f32;
+        let d = delay_samples.clamp(1.0, max_delay);
+        let mut read_pos = self.write as f32 - d;
+        while read_pos < 0.0 {
+            read_pos += len as f32;
+        }
+        let base = read_pos.floor();
+        let frac = read_pos - base;
+        let i0 = base as usize % len;
+        let i1 = (i0 + 1) % len;
+        self.buffer[i0] * (1.0 - frac) + self.buffer[i1] * frac
+    }
+}
+
+/// A minimal sine LFO with a stable per-sample increment.
+#[derive(Debug, Clone)]
+pub(crate) struct Lfo {
+    phase: f32,
+    increment: f32,
+}
+
+impl Lfo {
+    pub(crate) fn new() -> Self {
+        Self {
+            phase: 0.0,
+            increment: 0.0,
+        }
+    }
+
+    pub(crate) fn set_rate(&mut self, rate_hz: f32, sample_rate: f32) {
+        self.increment = (rate_hz.max(0.0) / sample_rate.max(1.0)).min(0.5);
+    }
+
+    pub(crate) fn set_phase(&mut self, phase01: f32) {
+        self.phase = phase01.rem_euclid(1.0);
+    }
+
+    /// Advance and return a sine in [-1, 1].
+    #[inline]
+    pub(crate) fn tick(&mut self) -> f32 {
+        let value = (self.phase * std::f32::consts::TAU).sin();
+        self.phase += self.increment;
+        if self.phase >= 1.0 {
+            self.phase -= 1.0;
+        }
+        value
+    }
+
+    pub(crate) fn reset(&mut self) {
+        self.phase = 0.0;
+    }
+}
+
+/// Cheap, stable soft clipper (`tanh` approximation is fine here — `tanh` itself
+/// is used where accuracy matters).
+#[inline]
+pub(crate) fn soft_clip(x: f32) -> f32 {
+    x.tanh()
+}
+
+/// Asymmetric tube-ish saturation: even-harmonic bias plus soft clipping.
+#[inline]
+pub(crate) fn tube_stage(x: f32, bias: f32, drive: f32) -> f32 {
+    let biased = x * drive + bias;
+    (biased.tanh() - bias.tanh()) / drive.max(1.0e-6)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn silence_tail_is_finite(dsp: &mut Dsp) {
+        for _ in 0..8_000 {
+            let (l, r) = dsp.process_stereo(0.0, 0.0);
+            assert!(l.is_finite() && r.is_finite());
+        }
+    }
+
+    #[test]
+    fn full_chain_stays_finite_and_bounded() {
+        let mut dsp = Dsp::new(48_000.0);
+        let mut worst = 0.0f32;
+        for n in 0..48_000 {
+            // A gnarly test signal: decaying pluck + noise-ish alternation.
+            let t = n as f32 / 48_000.0;
+            let x = (t * 220.0 * std::f32::consts::TAU).sin() * (-t * 3.0).exp()
+                + if n % 2 == 0 { 0.05 } else { -0.05 };
+            let (l, r) = dsp.process_stereo(x, x);
+            assert!(l.is_finite() && r.is_finite());
+            worst = worst.max(l.abs()).max(r.abs());
+        }
+        // The chain must not explode (reverb + delay feedback stay stable).
+        assert!(worst < 8.0, "output blew up: peak={worst}");
+    }
+
+    #[test]
+    fn power_off_is_bit_transparent() {
+        let mut dsp = Dsp::new(48_000.0);
+        let mut p = default_params();
+        p.power = false;
+        dsp.set_params(p);
+        for n in 0..1_000 {
+            let x = (n as f32 * 0.01).sin();
+            assert_eq!(dsp.process_stereo(x, -x), (x, -x));
+        }
+    }
+
+    #[test]
+    fn apply_ui_param_covers_data_ts_ids() {
+        let mut dsp = Dsp::new(48_000.0);
+        // Every id present in editorui/src/data.ts must be routable.
+        for id in [
+            "gate_thresh",
+            "drive_gain",
+            "drive_tone",
+            "drive_level",
+            "amp_gain",
+            "amp_bass",
+            "amp_middle",
+            "amp_treble",
+            "amp_presence",
+            "amp_master",
+            "chorus_rate",
+            "chorus_depth",
+            "chorus_mix",
+            "delay_time",
+            "delay_fb",
+            "delay_mix",
+            "reverb_decay",
+            "reverb_mix",
+            "cab_mic",
+            "cab_dist",
+        ] {
+            assert!(dsp.apply_ui_param(id, 5.0), "id `{id}` was not routed");
+        }
+        assert!(!dsp.apply_ui_param("does_not_exist", 1.0));
+    }
+
+    #[test]
+    fn model_selection_switches_voicing() {
+        let mut dsp = Dsp::new(48_000.0);
+        assert!(dsp.apply_ui_param("amp_model", 1.0));
+        assert_eq!(dsp.params().amp_model, AmpModel::Plexi);
+        assert!(dsp.apply_ui_param("drive_model", 1.0));
+        assert_eq!(dsp.params().drive_model, DriveModel::Minotaur);
+    }
+
+    #[test]
+    fn reverb_tail_decays_to_silence() {
+        let mut dsp = Dsp::new(48_000.0);
+        // Isolate the reverb so we can assert the tail dies out.
+        let mut p = default_params();
+        p.gate_on = false;
+        p.drive_on = false;
+        p.amp_on = false;
+        p.mod_on = false;
+        p.delay_on = false;
+        p.cab_on = false;
+        p.reverb_decay_s = 2.0;
+        p.reverb_mix = 100.0;
+        dsp.set_params(p);
+        // Excite, then run a long silent tail.
+        for _ in 0..64 {
+            let _ = dsp.process_stereo(0.5, 0.5);
+        }
+        silence_tail_is_finite(&mut dsp);
+        let mut tail = 0.0f32;
+        for _ in 0..2_000 {
+            let (l, r) = dsp.process_stereo(0.0, 0.0);
+            tail = tail.max(l.abs()).max(r.abs());
+        }
+        assert!(tail < 0.2, "reverb tail did not decay: {tail}");
+    }
+}

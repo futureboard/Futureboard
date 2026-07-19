@@ -6,10 +6,12 @@ use anyhow::{Context, Result, anyhow};
 use cargo_metadata::MetadataCommand;
 
 use crate::cargo_build::{self, APP_PACKAGE};
+use crate::cef;
 use crate::metadata::{BuildInfo, MetadataInputs};
 use crate::platform::{Edition, platform_folder};
+use crate::plugins;
 use crate::staging::{self, StagingPlan};
-use crate::validation;
+use crate::validation::{self, ValidationInputs};
 
 /// Everything the `package` subcommand needs.
 pub struct PackageOptions {
@@ -20,6 +22,10 @@ pub struct PackageOptions {
     pub out_root: PathBuf,
     /// Also stage debug symbols into `symbols/`.
     pub symbols: bool,
+    /// Build and stage Built-in Plugin dynamic libraries into `Plugins/`.
+    pub plugins: bool,
+    /// Stage the shared CEF runtime flat beside the binary when available.
+    pub stage_cef: bool,
 }
 
 /// Run the full package pipeline and return the published directory.
@@ -62,6 +68,60 @@ pub fn run(options: &PackageOptions) -> Result<PathBuf> {
     // 4. Create expected directories.
     staging::create_layout_dirs(&plan.staging_dir)?;
 
+    // 4a. Stage the shared CEF runtime flat beside the binary (never a CEF/
+    //     subdir). Skipped (with a warning) when the workspace has no prepared
+    //     distribution, so a developer build without CEF installed still packages.
+    let mut cef_staged = false;
+    if options.stage_cef {
+        match cef::locate_cef_dist(&workspace_root()) {
+            Some(dist) => {
+                let report = cef::stage_cef(&plan.staging_dir, &dist, &target_triple)
+                    .context("failed to stage the CEF runtime")?;
+                eprintln!(
+                    "[xtask] staged CEF runtime flat: {} files + {} locales",
+                    report.runtime_files.len(),
+                    report.locale_count
+                );
+                cef_staged = true;
+            }
+            None => eprintln!(
+                "[xtask] no CEF distribution at build/cef — skipping CEF staging \
+                 (run SphereWebView's install_cef to populate it)"
+            ),
+        }
+    }
+
+    // 4b. Optionally build and stage Built-in Plugin dynamic libraries.
+    if options.plugins {
+        let discovered = plugin_packages()?;
+        // Report UI embedding state per plugin: a plugin with an `editorui/` whose
+        // `dist/index.html` is missing will embed an empty table (see Part 2/3).
+        for plugin in &discovered {
+            if plugins::has_editor_ui(&plugin.crate_dir) && !plugins::editor_ui_built(&plugin.crate_dir)
+            {
+                eprintln!(
+                    "[xtask] plugin `{}` has editorui/ but no built dist/index.html — \
+                     its embedded UI table will be empty (run its editorui build first)",
+                    plugin.name
+                );
+            }
+        }
+        let packages: Vec<String> = discovered.iter().map(|p| p.name.clone()).collect();
+        let built = plugins::build_plugins(
+            &packages,
+            &options.profile,
+            options.target.as_deref(),
+            options.edition,
+        )?;
+        let staged = plugins::stage_plugins(&plan.staging_dir, &built, &target_triple)?;
+        if staged.is_empty() {
+            eprintln!("[xtask] --plugins requested but no plugin cdylibs were produced");
+        }
+        for name in &staged {
+            eprintln!("[xtask] staged plugin: Plugins/{name}");
+        }
+    }
+
     // 5. Optional symbols.
     if options.symbols {
         let staged = staging::stage_symbols(&plan.staging_dir, executable)?;
@@ -87,12 +147,14 @@ pub fn run(options: &PackageOptions) -> Result<PathBuf> {
     staging::write_build_info(&plan.staging_dir, &info.to_json()?)?;
 
     // 7. Validate the staged application before publishing.
-    validation::validate_staging(
-        &plan.staging_dir,
-        &binary_name,
-        &sidecar_names,
-        options.symbols,
-    )
+    validation::validate_staging(&ValidationInputs {
+        staging_dir: &plan.staging_dir,
+        binary_name: &binary_name,
+        sidecars: &sidecar_names,
+        symbols_enabled: options.symbols,
+        triple: &target_triple,
+        cef_staged,
+    })
     .context("staged package failed validation; previous output left untouched")?;
 
     // 8. Optional non-GUI smoke check on Windows (does not launch the GUI).
@@ -105,6 +167,54 @@ pub fn run(options: &PackageOptions) -> Result<PathBuf> {
     eprintln!("[xtask] published package: {}", plan.final_dir.display());
 
     Ok(plan.final_dir)
+}
+
+/// The Futureboard workspace root (xtask lives at `<root>/xtask`).
+fn workspace_root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("xtask must live under the workspace root")
+        .to_path_buf()
+}
+
+/// A discovered Built-in Plugin package (name + crate directory).
+struct DiscoveredPlugin {
+    name: String,
+    crate_dir: PathBuf,
+}
+
+/// Workspace member packages that build a Built-in Plugin dynamic library
+/// (`cdylib`/`dylib`) and live under `crates/BuiltinAudioPlugins/crates`.
+fn plugin_packages() -> Result<Vec<DiscoveredPlugin>> {
+    let metadata = MetadataCommand::new()
+        .no_deps()
+        .exec()
+        .context("failed to query cargo metadata for plugin discovery")?;
+    // Normalize to forward slashes so the directory match is OS-independent.
+    let marker = plugins::PLUGIN_CRATES_DIR; // "crates/BuiltinAudioPlugins/crates"
+    let mut packages = Vec::new();
+    for package in &metadata.packages {
+        let manifest = package.manifest_path.as_std_path();
+        let in_plugin_dir = manifest.to_string_lossy().replace('\\', "/").contains(marker);
+        let produces_dylib = package.targets.iter().any(|target| {
+            target
+                .kind
+                .iter()
+                .any(|kind| matches!(kind.as_str(), "cdylib" | "dylib"))
+        });
+        if in_plugin_dir && produces_dylib {
+            let crate_dir = manifest
+                .parent()
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|| PathBuf::from("."));
+            packages.push(DiscoveredPlugin {
+                name: package.name.to_string(),
+                crate_dir,
+            });
+        }
+    }
+    packages.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(packages)
 }
 
 /// Read the `futureboard_native` package version from workspace metadata,

@@ -338,6 +338,22 @@ export const parameterDefaults: Record<string, Param[]> = {
       unit: "",
     },
     {
+      id: "amp_treble",
+      name: "Treble",
+      min: 0,
+      max: 10,
+      val: 6.5,
+      unit: "",
+    },
+    {
+      id: "amp_presence",
+      name: "Presence",
+      min: 0,
+      max: 10,
+      val: 6.0,
+      unit: "",
+    },
+    {
       id: "amp_master",
       name: "Master",
       min: 0,

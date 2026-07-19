@@ -10,6 +10,14 @@ description = "Futureboard stock builtin audio plugin DSP cores (engine-agnostic
 name = "builtin_audio_plugins"
 path = "src/lib.rs"
 
+[features]
+default = []
+# Build-time embedded-UI table generator (`ui::generate`). Enable this in a
+# plugin crate's `[build-dependencies]` so its `build.rs` can emit the table;
+# plugin *runtime* deps should leave it off — the generator is std-only but has
+# no place in the shipped binary's build graph.
+ui-generate = []
+
 [dependencies]
 builtin-dsp-core.workspace = true
 equz8.workspace = true
@@ -19,6 +27,10 @@ echospace.workspace = true
 fa76.workspace = true
 c1073.workspace = true
 meowsyn.workspace = true
+
+[dev-dependencies]
+# Temp-dir fixtures for the `ui::generate` tests (run with `--features ui-generate`).
+tempfile.workspace = true
 
 [lints]
 workspace = true

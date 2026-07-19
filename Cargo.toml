@@ -34,6 +34,7 @@ members = [
     "crates/BuiltinAudioPlugins/crates/fa76",
     "crates/BuiltinAudioPlugins/crates/c1073",
     "crates/BuiltinAudioPlugins/crates/meowsyn",
+    "crates/BuiltinAudioPlugins/crates/rodharerist",
 
     "xtask",
 ]
@@ -95,6 +96,7 @@ echospace = { path = "crates/BuiltinAudioPlugins/crates/echospace" }
 fa76 = { path = "crates/BuiltinAudioPlugins/crates/fa76" }
 c1073 = { path = "crates/BuiltinAudioPlugins/crates/c1073" }
 meowsyn = { path = "crates/BuiltinAudioPlugins/crates/meowsyn" }
+rodharerist = { path = "crates/BuiltinAudioPlugins/crates/rodharerist" }
 
 # MIT/Apache-2.0 DSP libraries used by BuiltinAudioPlugins.
 biquad = "0.6"

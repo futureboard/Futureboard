@@ -37,8 +37,17 @@ out/
 │     ├─ FutureboardNative.exe
 │     ├─ FutureboardPluginHostX64.exe # out-of-process plugin/editor host (spawned by the app)
 │     ├─ FutureboardPluginScanner.exe # isolated plugin scanner (spawned by the app)
+│     ├─ libcef.dll                   # shared CEF runtime, staged FLAT (never a CEF/ subdir)
+│     ├─ chrome_elf.dll
+│     ├─ icudtl.dat
+│     ├─ resources.pak
+│     ├─ chrome_100_percent.pak
+│     ├─ chrome_200_percent.pak
+│     ├─ v8_context_snapshot.bin
+│     ├─ locales/                     # the one CEF subdirectory Chromium requires
 │     ├─ onnxruntime.dll              # staged only if present beside the binary
-│     ├─ Plugins/                     # empty for now; future binary plugins land here
+│     ├─ Plugins/                     # Built-in Plugin dynamic libraries (with `--plugins`)
+│     │  └─ rodharerist.dll           # each embeds its compiled React UI (no CEF, no PluginUI/)
 │     ├─ Resources/
 │     └─ build-info.json
 └─ release/
@@ -47,6 +56,11 @@ out/
    └─ exclusive/
       └─ windows-x64/         # cargo package-exclusive
 ```
+
+There is deliberately **no `CEF/` folder and no `PluginUI/` folder** — CEF ships
+flat beside the executable (its default resolution base), and each plugin's React
+UI is embedded inside the plugin's own dynamic library. Package validation
+actively rejects either directory.
 
 - `dev` profile → `out/dev/<platform>` (edition omitted).
 - any other profile → `out/<profile>/<edition>/<platform>`.
@@ -92,6 +106,67 @@ Optional flags:
 - `--target <triple>` — cross to another platform folder (default: host triple).
 - `--out <dir>` — root output directory (default: `out`).
 - `--symbols` — also copy the `.pdb` into a separate `symbols/` directory.
+- `--plugins` — build the Built-in Plugin dynamic libraries and stage them into
+  `Plugins/`. Off by default while the plugin cdylibs are being wired up.
+- `--no-cef` — skip staging the shared CEF runtime even when `build/cef` exists.
+
+## CEF runtime staging (shared, flat)
+
+CEF is a single shared runtime, not one copy per plugin. Packaging copies it from
+the repository's already-prepared distribution at `build/cef` (populated by
+`SphereWebView`'s `install_cef` example — packaging never downloads another
+runtime) into the application root:
+
+- `build/cef/Release/*` (minus `.lib`/loader artifacts) → app root
+- `build/cef/Resources/*` (paks, `icudtl.dat`) → app root
+- `build/cef/Resources/locales/*` → `locales/`
+
+`src/cef.rs` verifies the flat layout is complete before publishing. If `build/cef`
+is absent, CEF staging is skipped with a warning so a developer build without CEF
+installed still packages.
+
+## Built-in Plugin embedded UI (BuildInHelper)
+
+Each Built-in Plugin embeds its compiled React/Vite UI (`editorui/dist`) as
+immutable `&'static [u8]` bytes inside its own dynamic library. The reusable
+infrastructure lives in the `BuiltinAudioPlugins` crate (the *BuildInHelper*):
+
+- `builtin_audio_plugins::ui` — runtime lookup (`EmbeddedUiAsset`,
+  `EmbeddedUiAssetTable`, `EmbeddedPluginUi`, path normalization, MIME). CEF-free.
+- `builtin_audio_plugins::ui::generate` — build-time table generator (behind the
+  `ui-generate` feature) that a plugin `build.rs` runs against `editorui/dist`.
+
+To wire a plugin's editor UI (e.g. `rodharerist`):
+
+1. `crate-type = ["cdylib"]` and add
+   `builtin-audio-plugins.workspace = true` (runtime) plus
+   `[build-dependencies] builtin-audio-plugins = { workspace = true, features = ["ui-generate"] }`.
+2. `build.rs`:
+
+   ```rust
+   fn main() {
+       let out = std::path::PathBuf::from(std::env::var("OUT_DIR").unwrap());
+       let dist = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("editorui/dist");
+       builtin_audio_plugins::ui::generate::generate(
+           &builtin_audio_plugins::ui::generate::GenerateOptions::from_out_dir(dist, out),
+       ).expect("embed editor UI");
+   }
+   ```
+
+3. In the crate: `include!(concat!(env!("OUT_DIR"), "/embedded_ui_assets.rs"));`
+   then expose `EmbeddedUiAssetTable::new(EMBEDDED_UI_ASSETS)` via `EmbeddedPluginUi`.
+
+The editor UI is built into a single self-contained `dist/index.html` (Vite +
+`vite-plugin-singlefile` inlines all JS/CSS/assets), so a plugin embeds just one
+asset. Build it first (`bun install && bun run build` in `editorui/`); a missing
+`dist/` produces an empty table so the crate still compiles.
+
+At runtime the shared CEF host loads the editor via the `mikoplugin://` custom
+scheme — `mikoplugin://<plugin>/index.html` — and resolves it through the loaded
+plugin's asset provider (one origin per plugin). `builtin_audio_plugins::ui`
+provides `PLUGIN_URL_SCHEME`, `parse_plugin_url` and `build_plugin_url` for the
+handler. The bun build orchestration and the native CEF resource handler itself
+are the remaining integration slices — see the task notes.
 
 ## How the binary path is discovered
 
@@ -119,8 +194,10 @@ Runtime files are staged explicitly, not by scraping `target/`:
   (this is how `onnxruntime.dll` is picked up).
 - **Resource files** — copy them into the `Resources/` directory during staging
   (extend `create_layout_dirs` / add a copy step in `src/package.rs`).
-- **Binary plugins** — the empty `Plugins/` directory is reserved for future
-  binary plugins. Nothing is staged there yet.
+- **Binary plugins** — Built-in Plugin dynamic libraries are discovered from
+  Cargo metadata (workspace members under `crates/BuiltinAudioPlugins/crates`
+  that build a `cdylib`/`dylib`), built via the JSON artifact stream, and staged
+  into `Plugins/` when `--plugins` is passed. See `src/plugins.rs`.
 
 ## build-info.json
 

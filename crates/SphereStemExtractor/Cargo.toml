@@ -3,5 +3,19 @@ name = "SphereFBStemExtractor"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+description = "Offline MDX-NET stem extraction API for Futureboard Studio"
+publish.workspace = true
+
+[lib]
+name = "SphereStemExtractor"
+path = "src/lib.rs"
 
 [dependencies]
+serde.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+
+[lints]
+workspace = true

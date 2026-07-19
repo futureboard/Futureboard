@@ -45,6 +45,7 @@ mod context_menu_ops;
 pub(crate) mod engine_snapshot;
 mod export_ops;
 mod frame_diagnostics;
+mod stem_extract_ops;
 mod helpers;
 mod input_ops;
 mod inspector_ops;
@@ -1977,6 +1978,9 @@ impl StudioLayout {
             }
             "file:export-arrangement" => {
                 self.open_export_arrangement_external_window(owner_bounds, cx)
+            }
+            "audio:stem-extractor" | "tools:stem-extractor" => {
+                self.open_stem_extractor_external_window(owner_bounds, cx)
             }
             "track:rename" => {
                 if let Some(track_id) = self.context_track_id_or_selected(cx) {

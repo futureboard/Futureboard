@@ -12,11 +12,13 @@ pub mod stem;
 pub mod stretching;
 
 pub use stem::{
-    create_mdx_net_backend, default_stem_extract_params, extract_stems, gpu_available,
-    mdx_net_gpu_params, resolve_device, InferBackendKind, InferDevice, StemExtractCancelToken,
-    StemExtractError, StemExtractInput, StemExtractOutput, StemExtractParams, StemExtractProgress,
-    StemExtractQuality, StemExtractResult, StemExtractStage, StemInferBackend, StemKind, StemModel,
-    StemModelInfo, StemSet, STEM_MODELS,
+    create_mdx_net_backend, default_models_dir, default_stem_extract_params, download_model,
+    ensure_models_dir, extract_stems, gpu_available, mdx_net_gpu_params, model_installed,
+    resolve_device, resolve_installed_model_files, InferBackendKind, InferDevice,
+    StemExtractCancelToken, StemExtractError, StemExtractInput, StemExtractOutput,
+    StemExtractParams, StemExtractProgress, StemExtractQuality, StemExtractResult,
+    StemExtractStage, StemInferBackend, StemKind, StemModel, StemModelDownloadProgress,
+    StemModelFile, StemModelInfo, StemModelPackage, StemSet, STEM_MODELS, UVR_MODEL_RELEASE_BASE,
 };
 pub use stretching::{
     StretchAlgorithm, StretchBackend, StretchError, StretchMode, StretchParams, StretchProcessor,

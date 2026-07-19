@@ -57,6 +57,10 @@ pub struct FutureboardPaths {
     pub loops: PathBuf,
     /// `~/Documents/Futureboard Studio/Exports/`
     pub exports: PathBuf,
+    /// `~/Documents/Futureboard Studio/Utilities/`
+    pub utilities: PathBuf,
+    /// `~/Documents/Futureboard Studio/Utilities/Models/` — MDX-NET / UVR ONNX packs.
+    pub models: PathBuf,
 
     // ── AppData ────────────────────────────────────────────────────────────
     /// Platform application data directory:
@@ -111,7 +115,14 @@ impl FutureboardPaths {
     /// Call [`ensure_user_dirs()`] afterwards to create directories.
     pub fn resolve() -> Self {
         // ── User document root ────────────────────────────────────────────
-        let doc_dir = dirs::document_dir().unwrap_or_else(|| PathBuf::from("."));
+        // Prefer `dirs::document_dir()`, but fall back to `$HOME/Documents`
+        // (never `.`) so Utilities/Models and Projects stay under the real
+        // user Documents tree even when XDG user-dirs are unset.
+        let doc_dir = dirs::document_dir().unwrap_or_else(|| {
+            dirs::home_dir()
+                .map(|home| home.join("Documents"))
+                .unwrap_or_else(|| PathBuf::from("Documents"))
+        });
         let user_root = doc_dir.join(APP_NAME);
 
         let projects = user_root.join("Projects");
@@ -122,6 +133,8 @@ impl FutureboardPaths {
         let templates = user_root.join("Templates");
         let loops = user_root.join("Loops");
         let exports = user_root.join("Exports");
+        let utilities = user_root.join("Utilities");
+        let models = utilities.join("Models");
 
         // ── Factory (installer-managed) ───────────────────────────────────
         let factory_content = user_root.join("Factory Content");
@@ -163,6 +176,8 @@ impl FutureboardPaths {
             templates,
             loops,
             exports,
+            utilities,
+            models,
             app_data,
             settings_file,
             studio_window_file,
@@ -199,6 +214,8 @@ impl FutureboardPaths {
             &self.templates,
             &self.loops,
             &self.exports,
+            &self.utilities,
+            &self.models,
         ];
         for dir in &user_dirs {
             fs::create_dir_all(dir)?;

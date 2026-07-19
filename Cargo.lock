@@ -29,9 +29,11 @@ dependencies = [
 name = "SphereFBStemExtractor"
 version = "0.1.0"
 dependencies = [
+ "dirs 5.0.1",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
+ "ureq",
 ]
 
 [[package]]

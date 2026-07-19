@@ -263,6 +263,17 @@ impl TimelineState {
         false
     }
 
+    /// Set mute without toggling. Returns `true` when the stored value changed.
+    pub fn set_track_mute(&mut self, track_id: &str, muted: bool) -> bool {
+        if let Some(t) = self.tracks.iter_mut().find(|t| t.id == track_id) {
+            if t.muted != muted {
+                t.muted = muted;
+                return true;
+            }
+        }
+        false
+    }
+
     pub fn toggle_track_solo(&mut self, track_id: &str) -> bool {
         if let Some(t) = self.tracks.iter_mut().find(|t| t.id == track_id) {
             t.solo = !t.solo;

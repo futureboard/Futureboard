@@ -1,15 +1,22 @@
 //! StudioLayout integration for the Stem Extractor dialog.
 //!
 //! Captures audio clips currently on arrangement tracks (plain owned data),
-//! then opens the external Stem Extractor window. The window owns the
-//! background MDX-NET job — StudioLayout holds only the window handle.
+//! then opens the external Stem Extractor window. On success the layout creates
+//! one new audio track per stem (aligned to the source clip), mutes the
+//! original source track, and syncs the engine.
+
+use std::path::PathBuf;
+use std::sync::Arc;
 
 use gpui::{Bounds, Context};
 
 use super::StudioLayout;
-use crate::components::timeline::timeline_state::ClipType;
+use crate::components::timeline::timeline_state::{
+    volume, ClipType, CreateTrackOptions, InputMonitorMode, TrackType,
+};
 use crate::components::{
-    open_stem_extractor_window, StemExtractorDialogDefaults, StemSourceClip,
+    open_stem_extractor_window, StemExtractApplyRequest, StemExtractorDialogDefaults,
+    StemSourceClip,
 };
 
 impl StudioLayout {
@@ -50,17 +57,11 @@ impl StudioLayout {
             .cloned()
             .or_else(|| audio_clips.first().map(|clip| clip.clip_id.clone()));
 
-        let suggested_output_dir = project_root.as_ref().map(|root| {
-            let dir = root.join("Rendered").join("Stems");
-            let _ = std::fs::create_dir_all(&dir);
-            dir
-        });
-
         let defaults = StemExtractorDialogDefaults {
             project_name,
             audio_clips,
             selected_clip_id,
-            suggested_output_dir,
+            project_root,
         };
 
         let owner_bounds = crate::window_position::resolve_owner_bounds_with_preferred(
@@ -69,10 +70,105 @@ impl StudioLayout {
             cx,
         );
 
-        match open_stem_extractor_window(owner_bounds, defaults, cx) {
+        let layout = cx.entity().clone();
+        let on_apply: Arc<dyn Fn(StemExtractApplyRequest, &mut gpui::App) + 'static> =
+            Arc::new(move |request, cx| {
+                let _ = layout.update(cx, |this, cx| {
+                    this.apply_stem_extract_result(request, cx);
+                });
+            });
+
+        match open_stem_extractor_window(owner_bounds, defaults, on_apply, cx) {
             Ok(handle) => self.external_windows.stem_extractor = Some(handle),
             Err(err) => eprintln!("[stem-extractor] failed to open window: {err}"),
         }
+    }
+
+    fn apply_stem_extract_result(
+        &mut self,
+        request: StemExtractApplyRequest,
+        cx: &mut Context<Self>,
+    ) {
+        if request.stems.is_empty() {
+            return;
+        }
+
+        let timeline = self.timeline.clone();
+        let mut import_jobs: Vec<(PathBuf, String)> = Vec::new();
+        let muted_source = self.timeline.update(cx, |timeline, cx| {
+            let source_index = timeline
+                .state
+                .tracks
+                .iter()
+                .position(|track| track.id == request.source_track_id)
+                .unwrap_or(timeline.state.tracks.len().saturating_sub(1));
+
+            let mut insert_at = source_index + 1;
+            let mut created_ids = Vec::new();
+            for stem in &request.stems {
+                let path_string = stem.path.to_string_lossy().into_owned();
+                let track_name = stem.kind.label().to_string();
+                let track_id = timeline.state.create_track(CreateTrackOptions {
+                    track_type: TrackType::Audio,
+                    name: track_name.clone(),
+                    color: timeline.state.track_color_for_index(timeline.state.tracks.len()),
+                    volume: volume::db_to_norm(0.0),
+                    pan: 0.0,
+                    armed: false,
+                    input_monitor: InputMonitorMode::Off,
+                });
+                let _ = timeline.state.reorder_track(&track_id, insert_at);
+                insert_at += 1;
+
+                let clip_name = format!(
+                    "{}_{}",
+                    sanitize_stem_clip_name(&request.source_clip_name),
+                    stem.kind.file_stem_suffix()
+                );
+                let _ = timeline.state.insert_audio_clip_with_duration(
+                    track_id.clone(),
+                    path_string.clone(),
+                    clip_name,
+                    request.start_beat,
+                    request.duration_beats,
+                    request.source_duration_seconds,
+                );
+                created_ids.push(track_id);
+                import_jobs.push((stem.path.clone(), path_string));
+            }
+
+            let muted = timeline
+                .state
+                .set_track_mute(&request.source_track_id, true);
+            if let Some(last) = created_ids.last() {
+                timeline.state.select_track(last);
+            }
+            eprintln!(
+                "[stem-extractor] applied stems={} muted_source={} source_track={} created={:?}",
+                request.stems.len(),
+                muted,
+                request.source_track_id,
+                created_ids
+            );
+            cx.notify();
+            muted.then_some(request.source_track_id.clone())
+        });
+
+        if let Some(source_track_id) = muted_source {
+            if let Some(engine) = self.audio_bridge.engine.as_ref() {
+                let _ = engine.update_track_param(&source_track_id, "muted", 1.0);
+            }
+        }
+
+        for (path, path_key) in import_jobs {
+            self.spawn_timeline_audio_import_jobs(cx, timeline.clone(), path, path_key);
+        }
+
+        self.mark_dirty();
+        self.mark_engine_media_dirty();
+        self.schedule_audio_project_sync(cx, true, "stem_extract_apply");
+        self.push_mixer_snapshot_to_window(cx);
+        cx.notify();
     }
 }
 
@@ -89,7 +185,7 @@ fn collect_audio_source_clips(
             else {
                 continue;
             };
-            let path = std::path::PathBuf::from(path);
+            let path = PathBuf::from(path);
             if !path.exists() {
                 continue;
             }
@@ -99,10 +195,22 @@ fn collect_audio_source_clips(
                 track_name: track.name.clone(),
                 clip_name: clip.name.clone(),
                 source_path: path,
+                start_beat: clip.start_beat,
+                duration_beats: clip.duration_beats,
+                source_duration_seconds: clip.source_duration_seconds,
             });
         }
     }
     clips
+}
+
+fn sanitize_stem_clip_name(name: &str) -> String {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        "stem".into()
+    } else {
+        trimmed.to_string()
+    }
 }
 
 #[cfg(test)]
@@ -161,6 +269,7 @@ mod tests {
         assert_eq!(clips.len(), 1);
         assert_eq!(clips[0].clip_id, "clip-b");
         assert_eq!(clips[0].label(), "Drums · Loop B");
+        assert_eq!(clips[0].start_beat, 4.0);
         let _ = std::fs::remove_file(std::env::temp_dir().join("fb-stem-source-test.wav"));
     }
 }

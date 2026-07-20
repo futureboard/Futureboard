@@ -648,24 +648,11 @@ impl StudioLayout {
         let available_input_channels = initial_device_lists.input_channels.clone();
         let available_output_channels = initial_device_lists.output_channels.clone();
 
-        // Only list backends that actually exist on this build target — a
+        // Only list backends that actually exist on this build/edition — a
         // Windows-only option like "WASAPI Shared" must never be selectable
-        // (or shown as selected) on Linux/macOS, since it cannot resolve to a
-        // real driver there.
-        #[cfg(target_os = "windows")]
-        let mut available_backends = vec![
-            "WASAPI Shared".to_string(),
-            "WASAPI Exclusive".to_string(),
-            "WDM-KS".to_string(),
-        ];
-        #[cfg(target_os = "windows")]
-        if DirectAudio::asio_support_enabled() {
-            available_backends.push("ASIO".to_string());
-        }
-        #[cfg(target_os = "macos")]
-        let available_backends = vec!["Auto".to_string(), "CoreAudio".to_string()];
-        #[cfg(all(unix, not(target_os = "macos")))]
-        let available_backends = vec!["Auto".to_string(), "ALSA".to_string()];
+        // on Linux/macOS, and Exclusive-only ASIO must never appear on
+        // Community (or an Exclusive build without ASIO entitlement).
+        let available_backends = crate::settings::available_audio_driver_types();
 
         let on_update: OnSettingUpdate = Arc::new(move |updater, cx| {
             let _ = owner.update(cx, |this, cx| {

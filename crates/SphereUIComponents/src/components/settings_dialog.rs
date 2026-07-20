@@ -670,7 +670,9 @@ fn build_settings_content(
             on_toggle.clone(),
         );
 
-        let is_asio = schema.hardware.audio.driver_type == "ASIO";
+        // Use the effective (edition-sanitized) driver — a latent Exclusive
+        // `"ASIO"` pin must not keep the ASIO-only device UI alive on Community.
+        let is_asio = driver_label == "ASIO";
         let input_label = if schema.hardware.audio.device_in.trim().is_empty()
             || !available_inputs.contains(&schema.hardware.audio.device_in)
         {

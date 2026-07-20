@@ -1,9 +1,24 @@
 ; Futureboard Studio Installer
 ; Generated for Inno Setup 6.x
-; Source build output (Community Edition by default; build-installer.ps1
-; overrides MySourceDir via /D for other editions):
-;   ..\..\target\community\release\*.exe
-;   ..\..\target\community\release\*.dll
+;
+; Package source:
+;   ..\..\out\release\community\windows-x64
+;
+; The entire staged directory tree is copied into the installation directory:
+;   - FutureboardNative.exe
+;   - helper executables
+;   - runtime DLLs
+;   - CEF runtime files
+;   - ONNX Runtime
+;   - Plugins\
+;   - locales\
+;   - Resources\
+;   - any additional runtime files or directories
+;
+; Recommended package command:
+;   cargo xtask package --profile release --edition community --plugin all
+;
+; build-installer.ps1 may override MySourceDir and MyAppVersion using /D.
 ;
 ; Install targets:
 ;   Per-user:  %LOCALAPPDATA%\Programs\Futureboard Studio\Studio
@@ -13,15 +28,17 @@
 #define MyAppPublisher "Futureboard"
 #define MyAppExeName "FutureboardNative.exe"
 #define MyAppIcon "..\..\packages\shared\app\icons\icon.ico"
+
 #ifndef MySourceDir
-#define MySourceDir "..\..\target\community\release"
+#define MySourceDir "..\..\out\release\community\windows-x64"
 #endif
-#define MyAppUserDir "{localappdata}\Programs\Futureboard Studio\Studio"
-#define MyAppMachineDir "{commonpf64}\Futureboard Studio\Studio"
 
 #ifndef MyAppVersion
 #define MyAppVersion "2026.7.2"
 #endif
+
+#define MyAppUserDir "{localappdata}\Programs\Futureboard Studio\Studio"
+#define MyAppMachineDir "{commonpf64}\Futureboard Studio\Studio"
 
 [Setup]
 AppId={{9A56EFD0-B65D-4A48-9B0F-F6214A69F001}
@@ -29,23 +46,32 @@ AppName={#MyAppName}
 AppVersion={#MyAppVersion}
 AppVerName={#MyAppName} {#MyAppVersion}
 AppPublisher={#MyAppPublisher}
+
 DefaultDirName={code:GetDefaultDir}
 DefaultGroupName=Futureboard Studio\Studio
+
 SetupIconFile={#MyAppIcon}
 UninstallDisplayIcon={app}\{#MyAppExeName}
+
 OutputDir=..\..\target\installer
 OutputBaseFilename=FutureboardStudioSetup
+
 Compression=lzma2/ultra64
 SolidCompression=yes
 WizardStyle=modern
+
 ArchitecturesAllowed=x64
 ArchitecturesInstallIn64BitMode=x64
+
 DisableProgramGroupPage=yes
+AllowNoIcons=yes
+
 UsePreviousAppDir=yes
 UsePreviousSetupType=yes
+
 PrivilegesRequired=lowest
 PrivilegesRequiredOverridesAllowed=dialog commandline
-AllowNoIcons=yes
+
 CloseApplications=yes
 RestartApplications=no
 SetupLogging=yes
@@ -55,36 +81,91 @@ ChangesAssociations=yes
 Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Tasks]
-Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription: "Additional shortcuts:"; Flags: unchecked
-Name: "fileassoc_apak"; Description: "Associate .apak packages with APAK Installer"; GroupDescription: "File associations:"; Flags: checkedonce
+Name: "desktopicon"; \
+    Description: "Create a desktop shortcut"; \
+    GroupDescription: "Additional shortcuts:"; \
+    Flags: unchecked
+
+Name: "fileassoc_apak"; \
+    Description: "Associate .apak packages with APAK Installer"; \
+    GroupDescription: "File associations:"; \
+    Flags: checkedonce
 
 [Files]
-; Main app + helper executables (xtask is the workspace task runner, not a
-; runtime binary)
-Source: "{#MySourceDir}\*.exe"; DestDir: "{app}"; Excludes: "xtask.exe"; Flags: ignoreversion
-
-; Runtime / engine / bridge DLLs
-Source: "{#MySourceDir}\*.dll"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
+; Copy the entire xtask-staged package tree into the application directory.
+;
+; The wildcard matches all files at the package root.
+; recursesubdirs copies every nested directory.
+; createallsubdirs preserves empty and nested directory structure where possible.
+;
+; No extension-specific globbing is required.
+; No runtime file needs to be listed manually.
+Source: "{#MySourceDir}\*"; \
+    DestDir: "{app}"; \
+    Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
-Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{app}"; IconFilename: "{app}\{#MyAppExeName}"
+Name: "{group}\{#MyAppName}"; \
+    Filename: "{app}\{#MyAppExeName}"; \
+    WorkingDir: "{app}"; \
+    IconFilename: "{app}\{#MyAppExeName}"
 
-Name: "{group}\APAK Installer"; Filename: "{app}\apakinstaller.exe"; WorkingDir: "{app}"; IconFilename: "{app}\apakinstaller.exe"; Check: FileExists(ExpandConstant('{app}\apakinstaller.exe'))
+Name: "{group}\APAK Installer"; \
+    Filename: "{app}\apakinstaller.exe"; \
+    WorkingDir: "{app}"; \
+    IconFilename: "{app}\apakinstaller.exe"; \
+    Check: FileExists(ExpandConstant('{app}\apakinstaller.exe'))
 
-Name: "{group}\Uninstall {#MyAppName}"; Filename: "{uninstallexe}"
+Name: "{group}\Uninstall {#MyAppName}"; \
+    Filename: "{uninstallexe}"
 
-Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{app}"; IconFilename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
+Name: "{autodesktop}\{#MyAppName}"; \
+    Filename: "{app}\{#MyAppExeName}"; \
+    WorkingDir: "{app}"; \
+    IconFilename: "{app}\{#MyAppExeName}"; \
+    Tasks: desktopicon
 
 [Registry]
-; .apak file association.
-; This is per-user when running non-elevated and HKLM when elevated by install mode.
-Root: HKA; Subkey: "Software\Classes\.apak"; ValueType: string; ValueName: ""; ValueData: "Futureboard.APAK"; Flags: uninsdeletevalue; Tasks: fileassoc_apak
-Root: HKA; Subkey: "Software\Classes\Futureboard.APAK"; ValueType: string; ValueName: ""; ValueData: "Futureboard Audio Package"; Flags: uninsdeletekey; Tasks: fileassoc_apak
-Root: HKA; Subkey: "Software\Classes\Futureboard.APAK\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: "{app}\apakinstaller.exe,0"; Tasks: fileassoc_apak
-Root: HKA; Subkey: "Software\Classes\Futureboard.APAK\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\apakinstaller.exe"" ""%1"""; Tasks: fileassoc_apak
+; Associate .apak files with APAK Installer.
+;
+; HKA resolves to:
+;   HKCU for per-user installation
+;   HKLM for all-users installation
+
+Root: HKA; \
+    Subkey: "Software\Classes\.apak"; \
+    ValueType: string; \
+    ValueName: ""; \
+    ValueData: "Futureboard.APAK"; \
+    Flags: uninsdeletevalue; \
+    Tasks: fileassoc_apak
+
+Root: HKA; \
+    Subkey: "Software\Classes\Futureboard.APAK"; \
+    ValueType: string; \
+    ValueName: ""; \
+    ValueData: "Futureboard Audio Package"; \
+    Flags: uninsdeletekey; \
+    Tasks: fileassoc_apak
+
+Root: HKA; \
+    Subkey: "Software\Classes\Futureboard.APAK\DefaultIcon"; \
+    ValueType: string; \
+    ValueName: ""; \
+    ValueData: "{app}\apakinstaller.exe,0"; \
+    Tasks: fileassoc_apak
+
+Root: HKA; \
+    Subkey: "Software\Classes\Futureboard.APAK\shell\open\command"; \
+    ValueType: string; \
+    ValueName: ""; \
+    ValueData: """{app}\apakinstaller.exe"" ""%1"""; \
+    Tasks: fileassoc_apak
 
 [Run]
-Filename: "{app}\{#MyAppExeName}"; Description: "Launch {#MyAppName}"; Flags: nowait postinstall skipifsilent runasoriginaluser
+Filename: "{app}\{#MyAppExeName}"; \
+    Description: "Launch {#MyAppName}"; \
+    Flags: nowait postinstall skipifsilent runasoriginaluser
 
 [UninstallDelete]
 Type: filesandordirs; Name: "{app}\logs"

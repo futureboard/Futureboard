@@ -19,6 +19,7 @@ pub struct FilterCounts {
     pub vst3: usize,
     pub clap: usize,
     pub au: usize,
+    pub builtin: usize,
     pub failed: usize,
 }
 
@@ -71,8 +72,15 @@ pub fn compute_filter_result(
         if !matches_sidebar(&filters.sidebar, plugin, prefs, debug_mode) {
             continue;
         }
+        // Sidebar Format / Built-in already owns format identity. A stale
+        // secondary `filters.format` (e.g. leftover VST3 pin) must not empty
+        // the Built-in or CLAP lists while their sidebar counts stay nonzero.
+        let sidebar_owns_format = matches!(
+            filters.sidebar,
+            PickerFilter::Format(_) | PickerFilter::Builtin
+        );
         if let Some(fmt) = filters.format {
-            if plugin.format != fmt {
+            if !sidebar_owns_format && plugin.format != fmt {
                 continue;
             }
         }
@@ -128,11 +136,15 @@ fn update_counts(
     } else {
         counts.effects += 1;
     }
-    match plugin.format {
-        PluginFormat::Vst3 => counts.vst3 += 1,
-        PluginFormat::Clap => counts.clap += 1,
-        PluginFormat::Au => counts.au += 1,
-        _ => {}
+    if plugin.is_builtin() {
+        counts.builtin += 1;
+    } else {
+        match plugin.format {
+            PluginFormat::Vst3 => counts.vst3 += 1,
+            PluginFormat::Clap => counts.clap += 1,
+            PluginFormat::Au => counts.au += 1,
+            _ => {}
+        }
     }
     if debug_mode && is_failed_plugin(plugin) {
         counts.failed += 1;
@@ -159,7 +171,8 @@ fn matches_sidebar(
         PickerFilter::RecentlyUsed => prefs.recent.contains(&plugin.id),
         PickerFilter::Instruments => plugin.kind == PluginKind::Instrument,
         PickerFilter::Effects => plugin.kind == PluginKind::Effect,
-        PickerFilter::Format(fmt) => plugin.format == *fmt,
+        PickerFilter::Format(fmt) => !plugin.is_builtin() && plugin.format == *fmt,
+        PickerFilter::Builtin => plugin.is_builtin(),
         PickerFilter::Vendor(v) => plugin.vendor.eq_ignore_ascii_case(v),
         PickerFilter::Category(c) => normalized_category_label(plugin).eq_ignore_ascii_case(c),
         PickerFilter::Failed => debug_mode && is_failed_plugin(plugin),
@@ -175,6 +188,48 @@ pub fn vendor_counts(plugins: &[RegistryPlugin]) -> BTreeMap<String, usize> {
         *map.entry(plugin.vendor.clone()).or_insert(0) += 1;
     }
     map
+}
+
+#[cfg(test)]
+mod builtin_filter_tests {
+    use super::*;
+    use crate::components::plugin_picker::search_index::PluginSearchIndex;
+    use crate::components::plugin_picker::state::PickerFilter;
+    use SpherePluginHost::with_builtins;
+
+    #[test]
+    fn builtin_sidebar_lists_stock_plugins() {
+        let index = PluginSearchIndex::from_plugins(with_builtins(Vec::new(), 0));
+        let prefs = PluginPickerPrefs::default_with_size();
+        let filters = PluginFilterState {
+            sidebar: PickerFilter::Builtin,
+            format: None,
+            ..Default::default()
+        };
+        let result = compute_filter_result(&index, "", &filters, &prefs, false);
+        assert_eq!(result.counts.builtin, 8);
+        assert_eq!(result.indices.len(), 8);
+        assert!(result
+            .indices
+            .iter()
+            .all(|&i| index.plugin_at(i).is_some_and(|p| p.is_builtin())));
+    }
+
+    #[test]
+    fn stale_vst3_secondary_format_must_not_hide_builtins() {
+        // Regression: open_insert_picker used to pin filters.format=Vst3, which
+        // zeroed the Built-in list while the sidebar count stayed at 8.
+        let index = PluginSearchIndex::from_plugins(with_builtins(Vec::new(), 0));
+        let prefs = PluginPickerPrefs::default_with_size();
+        let filters = PluginFilterState {
+            sidebar: PickerFilter::Builtin,
+            format: Some(PluginFormat::Vst3),
+            ..Default::default()
+        };
+        let result = compute_filter_result(&index, "", &filters, &prefs, false);
+        assert_eq!(result.counts.builtin, 8);
+        assert_eq!(result.indices.len(), 8);
+    }
 }
 
 #[cfg(test)]

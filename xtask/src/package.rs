@@ -13,6 +13,51 @@ use crate::plugins;
 use crate::staging::{self, StagingPlan};
 use crate::validation::{self, ValidationInputs};
 
+/// Which Built-in Plugins to build and stage.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PluginSelection {
+    /// Do not build any plugins (default).
+    None,
+    /// Build every discovered Built-in Plugin.
+    All,
+    /// Build only the named plugin crates (e.g. `rodharerist`, `equz8`).
+    Only(Vec<String>),
+}
+
+impl PluginSelection {
+    /// Resolve the CLI inputs: `--plugin <spec>` (`all` / `none` / comma list),
+    /// or the legacy `--plugins` bool (= `all`). `--plugin` wins when both given.
+    pub fn parse(plugin: Option<&str>, plugins_flag: bool) -> Self {
+        if let Some(spec) = plugin {
+            return match spec.trim().to_ascii_lowercase().as_str() {
+                "all" | "*" => Self::All,
+                "" | "none" => Self::None,
+                _ => {
+                    let names: Vec<String> = spec
+                        .split(',')
+                        .map(|name| name.trim().to_string())
+                        .filter(|name| !name.is_empty())
+                        .collect();
+                    if names.is_empty() {
+                        Self::None
+                    } else {
+                        Self::Only(names)
+                    }
+                }
+            };
+        }
+        if plugins_flag {
+            Self::All
+        } else {
+            Self::None
+        }
+    }
+
+    fn is_enabled(&self) -> bool {
+        !matches!(self, Self::None)
+    }
+}
+
 /// Everything the `package` subcommand needs.
 pub struct PackageOptions {
     pub profile: String,
@@ -22,8 +67,8 @@ pub struct PackageOptions {
     pub out_root: PathBuf,
     /// Also stage debug symbols into `symbols/`.
     pub symbols: bool,
-    /// Build and stage Built-in Plugin dynamic libraries into `Plugins/`.
-    pub plugins: bool,
+    /// Which Built-in Plugin dynamic libraries to build and stage.
+    pub plugins: PluginSelection,
     /// Stage the shared CEF runtime flat beside the binary when available.
     pub stage_cef: bool,
 }
@@ -92,11 +137,31 @@ pub fn run(options: &PackageOptions) -> Result<PathBuf> {
     }
 
     // 4b. Optionally build and stage Built-in Plugin dynamic libraries.
-    if options.plugins {
+    if options.plugins.is_enabled() {
         let discovered = plugin_packages()?;
+        // Resolve the requested selection to actual discovered packages.
+        let selected: Vec<&DiscoveredPlugin> = match &options.plugins {
+            PluginSelection::None => Vec::new(),
+            PluginSelection::All => discovered.iter().collect(),
+            PluginSelection::Only(names) => {
+                for requested in names {
+                    if !discovered.iter().any(|p| &p.name == requested) {
+                        eprintln!(
+                            "[xtask] warning: requested plugin `{requested}` is not a \
+                             Built-in Plugin cdylib crate — skipping"
+                        );
+                    }
+                }
+                discovered
+                    .iter()
+                    .filter(|p| names.iter().any(|n| n == &p.name))
+                    .collect()
+            }
+        };
+
         // Report UI embedding state per plugin: a plugin with an `editorui/` whose
         // `dist/index.html` is missing will embed an empty table (see Part 2/3).
-        for plugin in &discovered {
+        for plugin in &selected {
             if plugins::has_editor_ui(&plugin.crate_dir) && !plugins::editor_ui_built(&plugin.crate_dir)
             {
                 eprintln!(
@@ -106,7 +171,7 @@ pub fn run(options: &PackageOptions) -> Result<PathBuf> {
                 );
             }
         }
-        let packages: Vec<String> = discovered.iter().map(|p| p.name.clone()).collect();
+        let packages: Vec<String> = selected.iter().map(|p| p.name.clone()).collect();
         let built = plugins::build_plugins(
             &packages,
             &options.profile,
@@ -115,10 +180,21 @@ pub fn run(options: &PackageOptions) -> Result<PathBuf> {
         )?;
         let staged = plugins::stage_plugins(&plan.staging_dir, &built, &target_triple)?;
         if staged.is_empty() {
-            eprintln!("[xtask] --plugins requested but no plugin cdylibs were produced");
+            eprintln!("[xtask] plugin build requested but no plugin cdylibs were produced");
         }
         for name in &staged {
             eprintln!("[xtask] staged plugin: Plugins/{name}");
+        }
+        // Completeness check only when building the full set (a subset omits the
+        // rest on purpose).
+        if options.plugins == PluginSelection::All {
+            let missing = plugins::missing_builtin_plugins(&staged, &target_triple);
+            if !missing.is_empty() {
+                eprintln!(
+                    "[xtask] warning: expected built-in plugin(s) not staged: {}",
+                    missing.join(", ")
+                );
+            }
         }
     }
 
@@ -269,3 +345,37 @@ fn smoke_check(exe: &Path) {
 #[cfg(not(windows))]
 #[allow(dead_code)]
 fn smoke_check(_exe: &Path) {}
+
+#[cfg(test)]
+mod tests {
+    use super::PluginSelection;
+
+    #[test]
+    fn plugin_selection_all_and_none() {
+        assert_eq!(PluginSelection::parse(Some("all"), false), PluginSelection::All);
+        assert_eq!(PluginSelection::parse(Some("ALL"), false), PluginSelection::All);
+        assert_eq!(PluginSelection::parse(Some("*"), false), PluginSelection::All);
+        assert_eq!(PluginSelection::parse(Some("none"), false), PluginSelection::None);
+        assert_eq!(PluginSelection::parse(Some(""), true), PluginSelection::None);
+    }
+
+    #[test]
+    fn plugin_selection_list_is_trimmed() {
+        assert_eq!(
+            PluginSelection::parse(Some("rodharerist, equz8 ,,fa76"), false),
+            PluginSelection::Only(vec![
+                "rodharerist".to_string(),
+                "equz8".to_string(),
+                "fa76".to_string(),
+            ])
+        );
+    }
+
+    #[test]
+    fn legacy_plugins_flag_means_all_and_default_is_none() {
+        assert_eq!(PluginSelection::parse(None, true), PluginSelection::All);
+        assert_eq!(PluginSelection::parse(None, false), PluginSelection::None);
+        // Explicit --plugin wins over the legacy bool.
+        assert_eq!(PluginSelection::parse(Some("none"), true), PluginSelection::None);
+    }
+}

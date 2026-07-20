@@ -22,6 +22,8 @@ pub enum PickerFilter {
     Instruments,
     Effects,
     Format(PluginFormat),
+    /// Futureboard built-in (stock) plug-ins (`builtin:` id).
+    Builtin,
     Vendor(String),
     Category(String),
     Failed,
@@ -137,6 +139,9 @@ impl PluginPickerState {
 
     pub fn set_sidebar_filter(&mut self, filter: PickerFilter) {
         self.filters.sidebar = filter;
+        // Sidebar Format / Built-in entries own format selection; clear any
+        // latent secondary format so facets cannot AND against a stale value.
+        self.filters.format = None;
         self.reset_selection_for_filter_change();
     }
 }

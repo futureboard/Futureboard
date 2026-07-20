@@ -372,6 +372,19 @@ impl AudioEngine {
     /// Build a new engine handle. Does **not** open or start the audio
     /// stream — call [`AudioEngine::start`] when ready.
     pub fn new(config: EngineConfig) -> Result<Self, SphereAudioError> {
+        let mut config = config;
+        let requested = config.backend;
+        config.backend = config.backend.sanitize_for_current_build();
+        if config.backend != requested {
+            eprintln!(
+                "[audio] EngineConfig backend {:?} unavailable; falling back to {:?}",
+                requested, config.backend
+            );
+            // An ASIO (or other edition-scoped) device id is never valid on the
+            // fallback backend — drop it so Auto/WASAPI uses the system default.
+            config.output_device = None;
+            config.input_device = None;
+        }
         Ok(Self {
             inner: Arc::new(EngineInner::new()),
             config,
@@ -574,7 +587,17 @@ impl AudioEngine {
     /// Re-open the active stream with a new native config while keeping the
     /// same engine/runtime handle alive. This is a control-thread operation for
     /// Settings changes; it never runs on the realtime callback.
-    pub fn reopen_with_config(&mut self, config: EngineConfig) -> Result<(), SphereAudioError> {
+    pub fn reopen_with_config(&mut self, mut config: EngineConfig) -> Result<(), SphereAudioError> {
+        let requested = config.backend;
+        config.backend = config.backend.sanitize_for_current_build();
+        if config.backend != requested {
+            eprintln!(
+                "[audio] reopen backend {:?} unavailable; falling back to {:?}",
+                requested, config.backend
+            );
+            config.output_device = None;
+            config.input_device = None;
+        }
         if config.backend == AudioBackend::Asio {
             self.ensure_asio_device_cache()?;
         }

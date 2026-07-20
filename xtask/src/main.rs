@@ -80,7 +80,12 @@ struct PackageArgs {
     symbols: bool,
 
     /// Build and stage Built-in Plugin dynamic libraries into `Plugins/`.
-    /// Off by default while the plugin cdylibs are still being wired up.
+    /// Accepts `all`, `none`, or a comma-separated list of plugin crate names
+    /// (e.g. `rodharerist,equz8`). Off by default.
+    #[arg(long, value_name = "SPEC")]
+    plugin: Option<String>,
+
+    /// Legacy alias for `--plugin all`.
     #[arg(long)]
     plugins: bool,
 
@@ -105,7 +110,7 @@ fn run_package(args: PackageArgs) -> ExitCode {
         edition: args.edition,
         out_root: args.out,
         symbols: args.symbols,
-        plugins: args.plugins,
+        plugins: package::PluginSelection::parse(args.plugin.as_deref(), args.plugins),
         stage_cef: !args.no_cef,
     };
     match package::run(&options) {

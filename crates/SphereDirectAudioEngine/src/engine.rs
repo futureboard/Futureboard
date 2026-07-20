@@ -2664,7 +2664,18 @@ impl EngineInner {
     pub fn open_daux(&self, config: JsDauxConfig) -> Result<(), SphereAudioError> {
         self.close_device_inner();
 
-        let backend = BackendKind::from_id(&config.backend_id);
+        // Sanitize before open so a persisted Exclusive ASIO id cannot reach
+        // the ASIO arm on Community / unentitled builds — fall back to Auto
+        // (WASAPI Shared on Windows) instead of failing closed with no stream.
+        let requested = BackendKind::from_id(&config.backend_id);
+        let backend = BackendKind::sanitize_for_current_platform(requested.clone());
+        if backend != requested {
+            eprintln!(
+                "[DAUx] open_daux: backend {} unavailable; falling back to {}",
+                requested.id(),
+                backend.id()
+            );
+        }
         let daux_cfg = DauxDeviceConfig {
             backend: backend.clone(),
             output_device_id: config.output_device_id.filter(|s| !s.is_empty()),

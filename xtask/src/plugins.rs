@@ -22,6 +22,40 @@ use crate::staging::{PLUGINS_DIR, copy_into};
 /// Directory (relative to the workspace root) that holds the plugin crates.
 pub const PLUGIN_CRATES_DIR: &str = "crates/BuiltinAudioPlugins/crates";
 
+/// Futureboard's built-in plugin crate stems — every crate under
+/// [`PLUGIN_CRATES_DIR`] that builds a `cdylib` Built-in Plugin. Kept in sync
+/// with `SpherePluginHost::builtin` so packaging can warn when an expected
+/// built-in failed to build. Discovery is still dynamic (via Cargo metadata);
+/// this list is only the *expected* set used for a completeness check.
+pub const BUILTIN_PLUGIN_CRATES: &[&str] = &[
+    "c1073",
+    "compresser",
+    "echospace",
+    "equz8",
+    "fa2a",
+    "fa76",
+    "meowsyn",
+    "rodharerist",
+];
+
+/// The platform-correct dynamic-library file names every built-in plugin is
+/// expected to produce (e.g. `rodharerist.dll` / `librodharerist.so`).
+pub fn expected_builtin_plugin_files(triple: &str) -> Vec<String> {
+    BUILTIN_PLUGIN_CRATES
+        .iter()
+        .map(|stem| crate::platform::dynamic_library_file_name(stem, triple))
+        .collect()
+}
+
+/// Built-in plugin file names in `expected_builtin_plugin_files` that are absent
+/// from `staged`, so packaging can warn about a built-in that did not build.
+pub fn missing_builtin_plugins(staged: &[String], triple: &str) -> Vec<String> {
+    expected_builtin_plugin_files(triple)
+        .into_iter()
+        .filter(|expected| !staged.iter().any(|name| name == expected))
+        .collect()
+}
+
 /// A plugin dynamic library produced by Cargo.
 #[derive(Debug, Clone)]
 pub struct PluginArtifact {
@@ -209,6 +243,29 @@ mod tests {
         }];
         // A `.so` cannot be staged for a Windows target.
         assert!(stage_plugins(&staging, &plugins, "x86_64-pc-windows-msvc").is_err());
+    }
+
+    #[test]
+    fn expected_builtin_files_track_platform() {
+        let win = expected_builtin_plugin_files("x86_64-pc-windows-msvc");
+        assert!(win.contains(&"rodharerist.dll".to_string()));
+        assert!(win.contains(&"compresser.dll".to_string()));
+        assert_eq!(win.len(), BUILTIN_PLUGIN_CRATES.len());
+
+        let linux = expected_builtin_plugin_files("x86_64-unknown-linux-gnu");
+        assert!(linux.contains(&"librodharerist.so".to_string()));
+    }
+
+    #[test]
+    fn missing_builtins_are_reported() {
+        let triple = "x86_64-pc-windows-msvc";
+        // Everything staged → nothing missing.
+        let all = expected_builtin_plugin_files(triple);
+        assert!(missing_builtin_plugins(&all, triple).is_empty());
+        // Drop one → it is reported missing.
+        let mut partial = all.clone();
+        partial.retain(|name| name != "meowsyn.dll");
+        assert_eq!(missing_builtin_plugins(&partial, triple), vec!["meowsyn.dll".to_string()]);
     }
 
     #[test]

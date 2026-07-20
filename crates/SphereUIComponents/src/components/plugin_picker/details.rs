@@ -7,7 +7,7 @@ use crate::components::plugin_picker::category::normalized_category_label;
 use crate::components::plugin_picker::insert::{
     validate_insert, InsertValidation, PluginInsertTarget,
 };
-use crate::components::plugin_picker::list_view::{format_badge, scan_status_label};
+use crate::components::plugin_picker::list_view::{format_badge_for, scan_status_label};
 use crate::theme::Colors;
 use SpherePluginHost::{PluginKind, RegistryPlugin};
 
@@ -53,7 +53,14 @@ pub fn plugin_details_panel(
                 .py(px(10.0))
                 .child(detail_row("Name", &plugin.name))
                 .child(detail_row("Vendor", &plugin.vendor))
-                .child(detail_row("Format", plugin.format.label()))
+                .child(detail_row(
+                    "Format",
+                    if plugin.is_builtin() {
+                        "Built-in"
+                    } else {
+                        plugin.format.label()
+                    },
+                ))
                 .child(detail_row("Category", &normalized_category_label(plugin)))
                 .child(detail_row("Kind", kind))
                 .child(detail_row("Path", &plugin.path.display().to_string()))
@@ -67,7 +74,7 @@ pub fn plugin_details_panel(
                 .when_some(plugin.error_message.as_deref(), |panel, error| {
                     panel.child(detail_row("Error", error))
                 })
-                .child(div().pt(px(4.0)).child(format_badge(plugin.format)))
+                .child(div().pt(px(4.0)).child(format_badge_for(plugin)))
                 .when(validation != InsertValidation::Ok, |panel| {
                     panel.child(
                         div()

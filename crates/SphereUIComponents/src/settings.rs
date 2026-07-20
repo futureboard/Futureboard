@@ -142,6 +142,51 @@ fn default_audio_driver_type() -> String {
     }
 }
 
+/// Driver types this build/edition can actually open. Mirrors the Settings
+/// Audio Driver dropdown so a Community Edition process never keeps an
+/// Exclusive-only selection (notably `"ASIO"`) alive after settings load.
+pub fn available_audio_driver_types() -> Vec<String> {
+    #[cfg(target_os = "windows")]
+    {
+        let mut backends = vec![
+            "WASAPI Shared".to_string(),
+            "WASAPI Exclusive".to_string(),
+            "WDM-KS".to_string(),
+        ];
+        if DirectAudio::asio_support_enabled() {
+            backends.push("ASIO".to_string());
+        }
+        backends
+    }
+    #[cfg(target_os = "macos")]
+    {
+        vec!["Auto".to_string(), "CoreAudio".to_string()]
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        vec!["Auto".to_string(), "ALSA".to_string()]
+    }
+}
+
+/// Map a persisted `driver_type` onto a backend this build can drive.
+///
+/// Exclusive Edition may write `"ASIO"` into the shared `settings.json`. When
+/// Community Edition (or an Exclusive build without ASIO entitlement) loads
+/// that file, the selection must fall back to the platform default — typically
+/// WASAPI Shared on Windows — instead of leaving a latent ASIO pin that the UI
+/// only half-sanitizes for display.
+pub fn sanitize_audio_driver_type(driver_type: &str) -> String {
+    let available = available_audio_driver_types();
+    if available.iter().any(|backend| backend == driver_type) {
+        driver_type.to_string()
+    } else {
+        available
+            .into_iter()
+            .next()
+            .unwrap_or_else(default_audio_driver_type)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AudioHardwareSettings {
     pub driver_type: String,
@@ -649,7 +694,7 @@ impl SettingsSchema {
     pub fn load_from_disk() -> Self {
         let path = FutureboardPaths::resolve().settings_file;
         let mut schema = SettingsModel::load_from_path(&path);
-        schema.validate_and_clamp();
+        persist_sanitized_audio_driver(&path, &mut schema);
         schema
     }
 
@@ -701,6 +746,23 @@ impl SettingsSchema {
             self.appearance.ui_scale = 0.5;
         } else if self.appearance.ui_scale > 2.5 {
             self.appearance.ui_scale = 2.5;
+        }
+
+        // Exclusive → Community (or entitlement lost): remap unavailable audio
+        // backends before the engine/UI read the schema. Clearing device picks
+        // mirrors Settings' own driver-change behavior so an ASIO driver name
+        // cannot stick under WASAPI Shared.
+        let sanitized_driver = sanitize_audio_driver_type(&self.hardware.audio.driver_type);
+        if sanitized_driver != self.hardware.audio.driver_type {
+            eprintln!(
+                "[settings] audio driver {:?} unavailable on this edition; falling back to {sanitized_driver}",
+                self.hardware.audio.driver_type
+            );
+            self.hardware.audio.driver_type = sanitized_driver;
+            self.hardware.audio.device_in.clear();
+            self.hardware.audio.device_out.clear();
+            self.hardware.audio.active_inputs = vec![0, 1];
+            self.hardware.audio.active_outputs = vec![0, 1];
         }
 
         sphere_midi_service::migrate_legacy_midi_settings(&mut self.hardware.midi);
@@ -769,11 +831,35 @@ pub fn install_settings_change_listener(listener: SettingsChangeListener) {
     let _ = SETTINGS_CHANGE_LISTENER.set(listener);
 }
 
+/// Validate settings and, when Exclusive-only audio drivers were remapped
+/// (e.g. ASIO → WASAPI Shared on Community), write the healed schema back so
+/// the latent pin does not survive across launches.
+fn persist_sanitized_audio_driver(path: &Path, schema: &mut SettingsSchema) {
+    let before = schema.hardware.audio.driver_type.clone();
+    schema.validate_and_clamp();
+    if schema.hardware.audio.driver_type == before {
+        return;
+    }
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    match serde_json::to_string_pretty(&schema) {
+        Ok(json) => {
+            if let Err(error) = std::fs::write(path, json) {
+                eprintln!("[settings] failed to persist sanitized audio driver: {error}");
+            }
+        }
+        Err(error) => {
+            eprintln!("[settings] failed to serialize sanitized audio driver: {error}");
+        }
+    }
+}
+
 impl SettingsModel {
     pub fn load_or_create(cx: &mut gpui::App) -> gpui::Entity<Self> {
         let path = FutureboardPaths::resolve().settings_file;
         let mut settings = Self::load_from_path(&path);
-        settings.validate_and_clamp();
+        persist_sanitized_audio_driver(&path, &mut settings);
 
         cx.new(|_cx| Self {
             current: settings,
@@ -899,6 +985,25 @@ mod tests {
         schema.appearance.ui_scale = 5.0;
         schema.validate_and_clamp();
         assert_eq!(schema.appearance.ui_scale, 2.5);
+    }
+
+    #[test]
+    fn unavailable_asio_driver_falls_back_to_platform_default() {
+        // Community / unentitled builds must not keep an Exclusive ASIO pin.
+        if DirectAudio::asio_support_enabled() {
+            return;
+        }
+        let mut schema = SettingsSchema::default();
+        schema.hardware.audio.driver_type = "ASIO".to_string();
+        schema.hardware.audio.device_out = "Focusrite USB ASIO".to_string();
+        schema.hardware.audio.device_in = "Focusrite USB ASIO".to_string();
+        schema.validate_and_clamp();
+        assert_eq!(
+            schema.hardware.audio.driver_type,
+            default_audio_driver_type()
+        );
+        assert!(schema.hardware.audio.device_out.is_empty());
+        assert!(schema.hardware.audio.device_in.is_empty());
     }
 
     #[test]

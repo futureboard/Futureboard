@@ -9,7 +9,7 @@ use gpui::{
 };
 
 use crate::assets;
-use crate::components::plugin_format_badge::plugin_format_badge;
+use crate::components::plugin_format_badge::{plugin_format_badge, plugin_format_badge_for};
 use crate::components::plugin_picker::category::normalized_category_label;
 use crate::components::plugin_picker::insert::is_insertable;
 use crate::theme::Colors;
@@ -24,7 +24,7 @@ const COL_FAVORITE: f32 = 18.0;
 const COL_NAME_MIN: f32 = 160.0;
 const COL_VENDOR_MIN: f32 = 100.0;
 const COL_CATEGORY_MIN: f32 = 100.0;
-const COL_FORMAT: f32 = 72.0;
+const COL_FORMAT: f32 = 80.0;
 
 type StringCb = Arc<dyn Fn(&String, &mut Window, &mut App) + 'static>;
 
@@ -65,14 +65,14 @@ fn col_category_cell(label: impl Into<String>) -> Div {
         .child(label.into())
 }
 
-fn col_format_cell(fmt: PluginFormat) -> Div {
+fn col_format_cell(plugin: &RegistryPlugin) -> Div {
     div()
         .w(px(COL_FORMAT))
         .flex_shrink_0()
         .flex()
         .items_center()
         .justify_end()
-        .child(plugin_format_badge(fmt))
+        .child(plugin_format_badge_for(plugin))
 }
 
 /// Column header row — shares the same flex column layout as [`plugin_row`].
@@ -144,7 +144,6 @@ pub fn plugin_row(
     let name = plugin.name.clone();
     let vendor = plugin.vendor.clone();
     let category = normalized_category_label(plugin);
-    let fmt = plugin.format;
     let insertable = is_insertable(plugin);
     let (kind_icon, kind_color) = kind_icon_for(plugin.kind);
     let status = scan_status_label(plugin);
@@ -213,7 +212,7 @@ pub fn plugin_row(
         .child(col_name_cell(name))
         .child(col_vendor_cell(vendor))
         .child(col_category_cell(category))
-        .child(col_format_cell(fmt))
+        .child(col_format_cell(plugin))
         .when_some(status, |el, label| {
             el.child(div().flex_shrink_0().child(status_badge(label, true)))
         })
@@ -235,6 +234,10 @@ fn icon(path: &'static str, size: f32, color: gpui::Rgba) -> impl IntoElement {
 
 pub fn format_badge(fmt: PluginFormat) -> impl IntoElement {
     plugin_format_badge(fmt)
+}
+
+pub fn format_badge_for(plugin: &RegistryPlugin) -> impl IntoElement {
+    plugin_format_badge_for(plugin)
 }
 
 fn status_badge(label: &'static str, tone_warn: bool) -> impl IntoElement {

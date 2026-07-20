@@ -91,6 +91,14 @@ pub fn plugin_filter_sidebar(
         filter_cb.clone(),
         PickerFilter::Format(PluginFormat::Clap),
     ));
+    col = col.child(sidebar_item(
+        "pp-filter-builtin",
+        "Built-in",
+        Some(counts.builtin),
+        active == &PickerFilter::Builtin,
+        filter_cb.clone(),
+        PickerFilter::Builtin,
+    ));
     if au_available {
         col = col.child(sidebar_item(
             "pp-filter-au",

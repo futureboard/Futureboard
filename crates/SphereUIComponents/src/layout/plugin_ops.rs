@@ -12,6 +12,15 @@ use SpherePluginHost::{load_au_cache_state, CatalogLoad};
 
 use super::{PluginCatalogStatus, PluginSearchIndex, StudioLayout};
 
+/// Wall-clock milliseconds since the Unix epoch, used to stamp the built-in
+/// catalog rows so they sort/merge alongside scanned plug-ins.
+fn now_ms_i64() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
 /// Plugin catalog / registry-scan state backing the insert picker — the cached
 /// scan result, whether the preset cache exists on disk, and the catalog load
 /// phase. `StudioLayout` decomposition slice (manual `Default`: status=Loading).
@@ -2175,11 +2184,15 @@ impl StudioLayout {
                 match load {
                     CatalogLoad::Loaded { catalog, sqlite_ms } => {
                         let count = catalog.plugins.len();
-                        let plugins: Vec<SpherePluginHost::RegistryPlugin> = catalog
+                        let scanned: Vec<SpherePluginHost::RegistryPlugin> = catalog
                             .plugins
                             .iter()
                             .map(|e| e.to_registry_plugin())
                             .collect();
+                        // Surface the Futureboard built-in (stock) plug-ins next to
+                        // the scanned VST3/CLAP rows so they appear in the picker and
+                        // the "Built-in" format facet even before any external scan.
+                        let plugins = SpherePluginHost::with_builtins(scanned, now_ms_i64());
                         this.plugin_catalog.available = Some(plugins.clone());
                         this.plugin_search_index =
                             Some(std::sync::Arc::new(PluginSearchIndex::from_plugins(plugins)));
@@ -2196,7 +2209,11 @@ impl StudioLayout {
                         }
                     }
                     CatalogLoad::MissingDatabase { path } => {
-                        this.plugin_catalog.available = Some(Vec::new());
+                        // Built-ins are always available, even with no scan database.
+                        let plugins = SpherePluginHost::with_builtins(Vec::new(), now_ms_i64());
+                        this.plugin_search_index =
+                            Some(std::sync::Arc::new(PluginSearchIndex::from_plugins(plugins.clone())));
+                        this.plugin_catalog.available = Some(plugins);
                         this.plugin_catalog.cache_present = false;
                         this.plugin_catalog.status = PluginCatalogStatus::MissingDatabase;
                         this.update_add_track_instrument_plugins(cx);
@@ -2208,7 +2225,11 @@ impl StudioLayout {
                         }
                     }
                     CatalogLoad::Error { path, message } => {
-                        this.plugin_catalog.available = Some(Vec::new());
+                        // Keep built-ins usable even when the scan cache failed to load.
+                        let plugins = SpherePluginHost::with_builtins(Vec::new(), now_ms_i64());
+                        this.plugin_search_index =
+                            Some(std::sync::Arc::new(PluginSearchIndex::from_plugins(plugins.clone())));
+                        this.plugin_catalog.available = Some(plugins);
                         this.plugin_catalog.cache_present = path.exists();
                         this.plugin_catalog.status =
                             PluginCatalogStatus::Error(message.clone());
@@ -2310,10 +2331,13 @@ impl StudioLayout {
             self.arm_catalog_load(cx);
         }
         eprintln!(
-            "[plugin-picker] opened track={} slot={} kind={:?} format=VST3",
+            "[plugin-picker] opened track={} slot={} kind={:?}",
             track_id, target_slot, desired_kind
         );
-        self.plugin_picker.filters.format = Some(SpherePluginHost::PluginFormat::Vst3);
+        // Do not force a secondary format filter here — sidebar Format / Built-in
+        // facets already gate by format, and a latent VST3-only override would
+        // empty the Built-in / CLAP / AU lists while their counts still look right.
+        self.plugin_picker.filters.format = None;
         if debug {
             let state_label = match &self.plugin_catalog.status {
                 PluginCatalogStatus::Loading => "LoadingCatalog",
@@ -2362,17 +2386,18 @@ impl StudioLayout {
         if plugin_id != STUB_PLUGIN_ID {
             if let Some(plugins) = self.plugin_catalog.available.as_ref() {
                 if let Some(reg) = plugins.iter().find(|p| p.id == plugin_id) {
-                    if reg.format != RegFmt::Vst3 {
-                        eprintln!(
-                            "[PluginAdd] rejected non-VST3 plugin id={} format={:?}",
-                            reg.id, reg.format
-                        );
-                        cx.notify();
-                        return None;
-                    }
+                    // Built-ins use PluginFormat::Unknown + a `builtin:` id; allow
+                    // anything `supports_insert` / validate_insert already accepts
+                    // (VST3, CLAP, built-in) rather than a VST3-only gate.
                     if validate_insert(reg, &self.plugin_picker.insert_target)
                         != crate::components::plugin_picker::InsertValidation::Ok
                     {
+                        eprintln!(
+                            "[PluginAdd] rejected plugin id={} format={:?} builtin={}",
+                            reg.id,
+                            reg.format,
+                            reg.is_builtin()
+                        );
                         cx.notify();
                         return None;
                     }

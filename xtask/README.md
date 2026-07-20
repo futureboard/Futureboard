@@ -47,7 +47,14 @@ out/
 │     ├─ locales/                     # the one CEF subdirectory Chromium requires
 │     ├─ onnxruntime.dll              # staged only if present beside the binary
 │     ├─ Plugins/                     # Built-in Plugin dynamic libraries (with `--plugins`)
-│     │  └─ rodharerist.dll           # each embeds its compiled React UI (no CEF, no PluginUI/)
+│     │  ├─ c1073.dll                  # each is one cdylib — DSP + (optional) embedded React UI
+│     │  ├─ compresser.dll             # (no CEF, no PluginUI/ — CEF is shared at the app root)
+│     │  ├─ echospace.dll
+│     │  ├─ equz8.dll
+│     │  ├─ fa2a.dll
+│     │  ├─ fa76.dll
+│     │  ├─ meowsyn.dll
+│     │  └─ rodharerist.dll
 │     ├─ Resources/
 │     └─ build-info.json
 └─ release/
@@ -106,8 +113,19 @@ Optional flags:
 - `--target <triple>` — cross to another platform folder (default: host triple).
 - `--out <dir>` — root output directory (default: `out`).
 - `--symbols` — also copy the `.pdb` into a separate `symbols/` directory.
-- `--plugins` — build the Built-in Plugin dynamic libraries and stage them into
-  `Plugins/`. Off by default while the plugin cdylibs are being wired up.
+- `--plugin <spec>` — build the Built-in Plugin dynamic libraries and stage them
+  into `Plugins/`. `spec` is one of:
+  - `all` — every built-in crate (`c1073`, `compresser`, `echospace`, `equz8`,
+    `fa2a`, `fa76`, `meowsyn`, `rodharerist`); warns if any expected one is missing.
+  - `none` — build no plugins (the default).
+  - a comma-separated list of crate names, e.g. `rodharerist,equz8`.
+
+  ```powershell
+  cargo xtask package --profile release --edition community --plugin all
+  ```
+
+  `--plugins` (no value) is a legacy alias for `--plugin all`. All eight built-in
+  crates build as `cdylib`s; the loadable-plugin C ABI is still being wired up.
 - `--no-cef` — skip staging the shared CEF runtime even when `build/cef` exists.
 
 ## CEF runtime staging (shared, flat)
@@ -197,7 +215,9 @@ Runtime files are staged explicitly, not by scraping `target/`:
 - **Binary plugins** — Built-in Plugin dynamic libraries are discovered from
   Cargo metadata (workspace members under `crates/BuiltinAudioPlugins/crates`
   that build a `cdylib`/`dylib`), built via the JSON artifact stream, and staged
-  into `Plugins/` when `--plugins` is passed. See `src/plugins.rs`.
+  into `Plugins/` when `--plugins` is passed. The known set is
+  `plugins::BUILTIN_PLUGIN_CRATES`; `missing_builtin_plugins` drives the
+  completeness warning. See `src/plugins.rs`.
 
 ## build-info.json
 

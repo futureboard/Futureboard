@@ -229,13 +229,22 @@ where
     #[cfg(not(target_os = "windows"))]
     let mmcss_set = false;
     // Preallocate before stream start: the callback must never grow this on the
-    // audio thread. Default-sized streams get a conservative upper bound; an
-    // unexpectedly larger callback is silenced below.
+    // audio thread. The requested buffer size is only a *hint* — WASAPI Shared
+    // (and some other cpal backends) round the period up to the device's
+    // shared-mode engine period, so the real callback block is frequently
+    // larger than the `Fixed` size we asked for (e.g. ~480 frames at 48 kHz
+    // even when 256 was requested). Sizing the scratch to exactly the requested
+    // frames made every oversized block trip the silence guard below, so the
+    // stream opened and "ran" but never emitted audio — unlike ASIO, which
+    // hands back precisely the requested buffer. Preallocate a generous upper
+    // bound so realistic shared-mode blocks always fit; the guard below stays
+    // only as a last-resort safety net.
     const DEFAULT_SCRATCH_FRAMES: usize = 8_192;
-    let scratch_frames = match config.buffer_size {
+    let requested_frames = match config.buffer_size {
         BufferSize::Fixed(frames) => frames as usize,
         BufferSize::Default => DEFAULT_SCRATCH_FRAMES,
     };
+    let scratch_frames = requested_frames.max(DEFAULT_SCRATCH_FRAMES);
     let mut local = LocalAudioState::with_monitor_capacity(sr, scratch_frames);
     let mut f32_scratch = vec![0.0f32; scratch_frames.saturating_mul(ch)];
 

@@ -15,6 +15,11 @@ use crate::progress::StemExtractCancelToken;
 pub const UVR_MODEL_RELEASE_BASE: &str =
     "https://github.com/TRvlvr/model_repo/releases/download/all_public_uvr_models";
 
+/// StemSplit Hugging Face repository hosting the single-file HT-Demucs ONNX
+/// export. File names are appended to this `resolve/main` base.
+pub const HTDEMUCS_MODEL_BASE: &str =
+    "https://huggingface.co/StemSplitio/htdemucs-onnx/resolve/main";
+
 /// Progress event while downloading one or more ONNX files for a model.
 #[derive(Clone, Debug)]
 pub struct StemModelDownloadProgress {
@@ -107,8 +112,8 @@ pub fn resolve_installed_model_files(model: StemModel, models_dir: &Path) -> Opt
     )
 }
 
-fn download_url(file_name: &str) -> String {
-    format!("{UVR_MODEL_RELEASE_BASE}/{file_name}")
+fn download_url(base_url: &str, file_name: &str) -> String {
+    format!("{}/{file_name}", base_url.trim_end_matches('/'))
 }
 
 /// Download every ONNX file for `model` into `models_dir`.
@@ -206,7 +211,7 @@ fn download_one_file(
     cancel: &StemExtractCancelToken,
     on_progress: &mut dyn FnMut(StemModelDownloadProgress),
 ) -> Result<(), StemExtractError> {
-    let url = download_url(file_name);
+    let url = download_url(package.base_url, file_name);
     let partial = dest.with_extension("onnx.partial");
     let _ = fs::remove_file(&partial);
 

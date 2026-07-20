@@ -1,7 +1,11 @@
 mod spectral_stub;
 
 #[cfg(feature = "onnx")]
+mod dsp;
+#[cfg(feature = "onnx")]
 mod mdx_params;
+#[cfg(feature = "onnx")]
+mod onnx_htdemucs;
 #[cfg(feature = "onnx")]
 mod onnx_mdx;
 
@@ -15,6 +19,8 @@ use crate::stems::StemKind;
 pub use spectral_stub::SpectralStubBackend;
 
 #[cfg(feature = "onnx")]
+pub use onnx_htdemucs::OnnxHtDemucsBackend;
+#[cfg(feature = "onnx")]
 pub use onnx_mdx::OnnxMdxBackend;
 
 /// Which concrete inference backend will run the job.
@@ -22,6 +28,8 @@ pub use onnx_mdx::OnnxMdxBackend;
 pub enum InferBackendKind {
     /// Real MDX-NET inference via ONNX Runtime (CPU or GPU).
     OnnxMdxNet,
+    /// Real HT-Demucs (single-file, time-domain) inference via ONNX Runtime.
+    OnnxHtDemucs,
     /// Deterministic offline spectral split used when ONNX weights or the
     /// ONNX Runtime are unavailable.
     SpectralStub,
@@ -31,6 +39,7 @@ impl InferBackendKind {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::OnnxMdxNet => "onnx-mdx-net",
+            Self::OnnxHtDemucs => "onnx-htdemucs",
             Self::SpectralStub => "spectral-stub",
         }
     }
@@ -38,7 +47,8 @@ impl InferBackendKind {
     pub fn label(self) -> &'static str {
         match self {
             Self::OnnxMdxNet => "MDX-NET (ONNX Runtime)",
-            Self::SpectralStub => "MDX-NET spectral stub",
+            Self::OnnxHtDemucs => "HT-Demucs (ONNX Runtime)",
+            Self::SpectralStub => "spectral stub",
         }
     }
 }
@@ -87,18 +97,32 @@ pub fn create_mdx_net_backend(
             ensure_ort_dylib_env();
             let models_dir = resolved_models_dir();
             if let Some(files) = crate::download::resolve_installed_model_files(model, &models_dir) {
-                match OnnxMdxBackend::new(model, device, files) {
-                    Ok(backend) => return Ok(Box::new(backend)),
-                    Err(err) => {
-                        log::warn!(
-                            "ONNX MDX-NET backend unavailable for {} ({err}); using spectral stub",
-                            model.label()
-                        );
+                if model == StemModel::HtDemucs {
+                    match OnnxHtDemucsBackend::new(model, device, files) {
+                        Ok(backend) => return Ok(Box::new(backend)),
+                        Err(err) => {
+                            log::warn!(
+                                "ONNX HT-Demucs backend unavailable for {} ({err}); \
+                                 using spectral stub",
+                                model.label()
+                            );
+                        }
+                    }
+                } else {
+                    match OnnxMdxBackend::new(model, device, files) {
+                        Ok(backend) => return Ok(Box::new(backend)),
+                        Err(err) => {
+                            log::warn!(
+                                "ONNX MDX-NET backend unavailable for {} ({err}); \
+                                 using spectral stub",
+                                model.label()
+                            );
+                        }
                     }
                 }
             } else {
                 log::info!(
-                    "MDX-NET weights for {} not installed; using spectral stub",
+                    "Weights for {} not installed; using spectral stub",
                     model.label()
                 );
             }

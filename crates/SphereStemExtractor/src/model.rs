@@ -21,6 +21,9 @@ pub enum StemModel {
     KimVocal,
     /// Kim Instrumental (instrumental + vocals residual).
     KimInst,
+    /// HT-Demucs single-file hybrid transformer (4-stem: drums, bass, other,
+    /// vocals). Time-domain model, distinct from the MDX-NET STFT family.
+    HtDemucs,
 }
 
 impl StemModel {
@@ -33,6 +36,7 @@ impl StemModel {
             Self::MdxNetInstHq => "mdx-net-inst-hq",
             Self::KimVocal => "kim-vocal",
             Self::KimInst => "kim-inst",
+            Self::HtDemucs => "htdemucs",
         }
     }
 
@@ -45,6 +49,7 @@ impl StemModel {
             Self::MdxNetInstHq => "MDX-NET Inst HQ",
             Self::KimVocal => "Kim Vocal 2",
             Self::KimInst => "Kim Instrumental",
+            Self::HtDemucs => "HT-Demucs",
         }
     }
 
@@ -57,6 +62,7 @@ impl StemModel {
             Self::MdxNetInstHq => "2-stem instrumental HQ: instrumental and vocals",
             Self::KimVocal => "2-stem Kim Vocal 2: vocals and instrumental",
             Self::KimInst => "2-stem Kim Instrumental: instrumental and vocals",
+            Self::HtDemucs => "4-stem HT-Demucs: drums, bass, other, vocals",
         }
     }
 
@@ -69,13 +75,14 @@ impl StemModel {
             "mdx-net-inst-hq" | "mdxnet-inst-hq" | "MDX-NET Inst HQ" => Some(Self::MdxNetInstHq),
             "kim-vocal" | "kim-vocal-2" | "Kim Vocal 2" => Some(Self::KimVocal),
             "kim-inst" | "kim-instrumental" | "Kim Instrumental" => Some(Self::KimInst),
+            "htdemucs" | "ht-demucs" | "HT-Demucs" | "demucs" => Some(Self::HtDemucs),
             _ => None,
         }
     }
 
     pub fn default_stems(self) -> &'static [StemKind] {
         match self {
-            Self::MdxNet => &[
+            Self::MdxNet | Self::HtDemucs => &[
                 StemKind::Vocals,
                 StemKind::Drums,
                 StemKind::Bass,
@@ -94,11 +101,16 @@ impl StemModel {
         self.default_stems().contains(&stem)
     }
 
-    /// Downloadable ONNX weight package for this model (UVR public models).
+    /// Downloadable ONNX weight package for this model.
+    ///
+    /// The MDX-NET family is hosted on the public UVR model release; HT-Demucs
+    /// is hosted on the StemSplit Hugging Face repository.
     pub fn package(self) -> StemModelPackage {
+        use crate::download::{HTDEMUCS_MODEL_BASE, UVR_MODEL_RELEASE_BASE};
         match self {
             Self::MdxNet => StemModelPackage {
                 model: self,
+                base_url: UVR_MODEL_RELEASE_BASE,
                 files: &[
                     StemModelFile {
                         file_name: "kuielab_a_vocals.onnx",
@@ -118,6 +130,7 @@ impl StemModel {
             },
             Self::MdxNetKaraoke => StemModelPackage {
                 model: self,
+                base_url: UVR_MODEL_RELEASE_BASE,
                 files: &[StemModelFile {
                     file_name: "UVR_MDXNET_KARA.onnx",
                 }],
@@ -126,6 +139,7 @@ impl StemModel {
             },
             Self::MdxNetMain => StemModelPackage {
                 model: self,
+                base_url: UVR_MODEL_RELEASE_BASE,
                 files: &[StemModelFile {
                     file_name: "UVR_MDXNET_Main.onnx",
                 }],
@@ -134,6 +148,7 @@ impl StemModel {
             },
             Self::MdxNetVocFt => StemModelPackage {
                 model: self,
+                base_url: UVR_MODEL_RELEASE_BASE,
                 files: &[StemModelFile {
                     file_name: "UVR-MDX-NET-Voc_FT.onnx",
                 }],
@@ -142,6 +157,7 @@ impl StemModel {
             },
             Self::MdxNetInstHq => StemModelPackage {
                 model: self,
+                base_url: UVR_MODEL_RELEASE_BASE,
                 files: &[StemModelFile {
                     file_name: "UVR-MDX-NET-Inst_HQ_3.onnx",
                 }],
@@ -150,6 +166,7 @@ impl StemModel {
             },
             Self::KimVocal => StemModelPackage {
                 model: self,
+                base_url: UVR_MODEL_RELEASE_BASE,
                 files: &[StemModelFile {
                     file_name: "Kim_Vocal_2.onnx",
                 }],
@@ -158,11 +175,21 @@ impl StemModel {
             },
             Self::KimInst => StemModelPackage {
                 model: self,
+                base_url: UVR_MODEL_RELEASE_BASE,
                 files: &[StemModelFile {
                     file_name: "Kim_Inst.onnx",
                 }],
                 approx_bytes: 66_800_000,
                 source_label: "Kim Instrumental",
+            },
+            Self::HtDemucs => StemModelPackage {
+                model: self,
+                base_url: HTDEMUCS_MODEL_BASE,
+                files: &[StemModelFile {
+                    file_name: "htdemucs.onnx",
+                }],
+                approx_bytes: 316_000_000,
+                source_label: "StemSplit HT-Demucs (Hugging Face)",
             },
         }
     }
@@ -178,6 +205,8 @@ pub struct StemModelFile {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct StemModelPackage {
     pub model: StemModel,
+    /// Host base URL that each file name is appended to for download.
+    pub base_url: &'static str,
     pub files: &'static [StemModelFile],
     /// Approximate total download size in bytes (UI hint only).
     pub approx_bytes: u64,
@@ -252,6 +281,12 @@ pub const STEM_MODELS: &[StemModelInfo] = &[
         label: "Kim Instrumental",
         description: "2-stem Kim Instrumental: instrumental and vocals",
     },
+    StemModelInfo {
+        model: StemModel::HtDemucs,
+        id: "htdemucs",
+        label: "HT-Demucs",
+        description: "4-stem HT-Demucs: drums, bass, other, vocals",
+    },
 ];
 
 #[cfg(test)]
@@ -266,8 +301,20 @@ mod tests {
         assert!(StemModel::MdxNet.supports_stem(StemKind::Vocals));
         assert!(!StemModel::MdxNet.supports_stem(StemKind::Instrumental));
         assert!(StemModel::MdxNetKaraoke.supports_stem(StemKind::Instrumental));
-        assert_eq!(STEM_MODELS.len(), 7);
+        assert_eq!(STEM_MODELS.len(), 8);
         assert_eq!(StemModel::MdxNet.package().file_count(), 4);
         assert_eq!(StemModel::KimVocal.package().file_count(), 1);
+    }
+
+    #[test]
+    fn htdemucs_is_four_stem_from_hugging_face() {
+        assert_eq!(StemModel::parse("htdemucs"), Some(StemModel::HtDemucs));
+        assert_eq!(StemModel::HtDemucs.as_str(), "htdemucs");
+        assert_eq!(StemModel::HtDemucs.default_stems().len(), 4);
+        assert!(StemModel::HtDemucs.supports_stem(StemKind::Drums));
+        assert!(!StemModel::HtDemucs.supports_stem(StemKind::Instrumental));
+        let package = StemModel::HtDemucs.package();
+        assert_eq!(package.file_count(), 1);
+        assert!(package.base_url.contains("huggingface.co"));
     }
 }

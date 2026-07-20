@@ -7,8 +7,8 @@
 //! audio callback.
 
 pub use sphere_stem_extractor::{
-    InferBackendKind, InferDevice, STEM_MODELS, StemExtractCancelToken, StemExtractError,
-    StemExtractInput, StemExtractOutput, StemExtractParams, StemExtractProgress,
+    HTDEMUCS_MODEL_BASE, InferBackendKind, InferDevice, STEM_MODELS, StemExtractCancelToken,
+    StemExtractError, StemExtractInput, StemExtractOutput, StemExtractParams, StemExtractProgress,
     StemExtractQuality, StemExtractResult, StemExtractStage, StemInferBackend, StemKind, StemModel,
     StemModelDownloadProgress, StemModelFile, StemModelInfo, StemModelPackage, StemSet,
     UVR_MODEL_RELEASE_BASE, create_mdx_net_backend, default_models_dir, download_model,

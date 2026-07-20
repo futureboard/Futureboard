@@ -28,8 +28,8 @@ pub mod stems;
 pub use backend::{InferBackendKind, StemInferBackend, create_mdx_net_backend};
 pub use device::{InferDevice, gpu_available, resolve_device, set_gpu_detected};
 pub use download::{
-    StemModelDownloadProgress, UVR_MODEL_RELEASE_BASE, default_models_dir, download_model,
-    ensure_models_dir, model_installed, resolve_installed_model_files,
+    HTDEMUCS_MODEL_BASE, StemModelDownloadProgress, UVR_MODEL_RELEASE_BASE, default_models_dir,
+    download_model, ensure_models_dir, model_installed, resolve_installed_model_files,
 };
 pub use error::StemExtractError;
 pub use extractor::{StemExtractInput, StemExtractOutput, StemExtractResult, extract_stems};

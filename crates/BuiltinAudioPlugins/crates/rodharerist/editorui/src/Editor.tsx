@@ -1,15 +1,31 @@
-import { StrictMode, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  StrictMode,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { createRoot } from "react-dom/client";
 import {
   categories,
-  cloneParameters,
+  chainOrder,
+  defaultPath,
   models,
+  parametersForPreset,
   presetsData,
+  rackFromPath,
   type CategoryId,
   type Param,
 } from "./data";
 import { Layout } from "./Layout";
-import { postEnabled, postModel, postParam } from "./bridge";
+import {
+  hasNativeBridge,
+  postEnabled,
+  postModel,
+  postParam,
+  postPathOrder,
+} from "./bridge";
 import "./Styles/Editor.css";
 
 type VuState = {
@@ -19,21 +35,108 @@ type VuState = {
   outR: number;
 };
 
+type RigSnapshot = {
+  activeCat: CategoryId;
+  activeModelId: string;
+  stageModels: Record<CategoryId, string>;
+  pathOrder: CategoryId[];
+  bypassed: Partial<Record<CategoryId, boolean>>;
+  parameters: Record<string, Param[]>;
+};
+
 function applyCategoryTheme(cat: CategoryId) {
   const c = categories[cat];
   document.documentElement.style.setProperty("--cat-color", c.color);
   document.documentElement.style.setProperty("--cat-rgb", c.rgb);
 }
 
+function cloneParameters(
+  src: Record<string, Param[]>,
+): Record<string, Param[]> {
+  const out: Record<string, Param[]> = {};
+  for (const [id, params] of Object.entries(src)) {
+    out[id] = params.map((p) => ({ ...p }));
+  }
+  return out;
+}
+
+function defaultStageModels(focus: CategoryId, modelId: string) {
+  const stageModels = {} as Record<CategoryId, string>;
+  for (const cat of chainOrder) {
+    stageModels[cat] = models[cat][0]?.id ?? "";
+  }
+  stageModels[focus] = modelId;
+  return stageModels;
+}
+
+function makeSnapshot(
+  activeCat: CategoryId,
+  activeModelId: string,
+  stageModels: Record<CategoryId, string>,
+  pathOrder: CategoryId[],
+  bypassed: Partial<Record<CategoryId, boolean>>,
+  parameters: Record<string, Param[]>,
+): RigSnapshot {
+  return {
+    activeCat,
+    activeModelId,
+    stageModels: { ...stageModels },
+    pathOrder: [...pathOrder],
+    bypassed: { ...bypassed },
+    parameters: cloneParameters(parameters),
+  };
+}
+
+function applySnapshotToDsp(snap: RigSnapshot) {
+  postPathOrder(snap.pathOrder);
+  for (const cat of chainOrder) {
+    const modelId = snap.stageModels[cat];
+    if (modelId) postModel(categories[cat].node, modelId);
+    postEnabled(categories[cat].node, !snap.bypassed[cat]);
+  }
+  for (const cat of chainOrder) {
+    const modelId = snap.stageModels[cat];
+    for (const param of snap.parameters[modelId] ?? []) {
+      postParam(param.id, param.val);
+    }
+  }
+}
+
+function factorySnapshot(id: string): RigSnapshot | null {
+  const p = presetsData.find((x) => x.id === id);
+  if (!p) return null;
+  const bypassed: Partial<Record<CategoryId, boolean>> = {};
+  for (const cat of p.bypassed ?? []) bypassed[cat] = true;
+  return {
+    activeCat: p.category,
+    activeModelId: p.model,
+    stageModels: defaultStageModels(p.category, p.model),
+    pathOrder: p.path ? [...p.path] : defaultPath(),
+    bypassed,
+    parameters: parametersForPreset(p),
+  };
+}
+
 function RodhareistEditor() {
-  const [currentPresetId, setCurrentPresetId] = useState("06D");
-  const [activeCat, setActiveCat] = useState<CategoryId>("amp");
-  const [activeModelId, setActiveModelId] = useState("mandarin");
+  const initial = presetsData[4]!;
+  const [currentPresetId, setCurrentPresetId] = useState(initial.id);
+  const [activeCat, setActiveCat] = useState<CategoryId>(initial.category);
+  const [activeModelId, setActiveModelId] = useState(initial.model);
+  const [stageModels, setStageModels] = useState<Record<CategoryId, string>>(
+    () => defaultStageModels(initial.category, initial.model),
+  );
+  const [pathOrder, setPathOrder] = useState<CategoryId[]>(() => defaultPath());
   const [bypassed, setBypassed] = useState<Partial<Record<CategoryId, boolean>>>(
     {},
   );
   const [parameters, setParameters] = useState<Record<string, Param[]>>(
-    () => cloneParameters(),
+    () => parametersForPreset(initial),
+  );
+  const [modified, setModified] = useState(false);
+  const [savedRigs, setSavedRigs] = useState<Record<string, RigSnapshot>>({});
+  const [drafts, setDrafts] = useState<Record<string, RigSnapshot>>({});
+  const [dirtyPresetIds, setDirtyPresetIds] = useState<Set<string>>(
+    () => new Set(),
   );
   const [testing, setTesting] = useState(false);
   const [vu, setVu] = useState<VuState>({
@@ -42,6 +145,9 @@ function RodhareistEditor() {
     outL: 0,
     outR: 0,
   });
+  const [showTestDi] = useState(() => !hasNativeBridge());
+
+  const [pendingSwitchId, setPendingSwitchId] = useState<string | null>(null);
 
   const audioRef = useRef<{
     ctx: AudioContext;
@@ -49,6 +155,34 @@ function RodhareistEditor() {
     timer: number | null;
   } | null>(null);
   const levelsRef = useRef({ inLvl: 0, outLvl: 0 });
+
+  // Keep a ref mirror so loadPreset can stash without stale closures.
+  const liveRef = useRef({
+    currentPresetId,
+    activeCat,
+    activeModelId,
+    stageModels,
+    pathOrder,
+    bypassed,
+    parameters,
+    modified,
+    drafts,
+    savedRigs,
+    pendingSwitchId,
+  });
+  liveRef.current = {
+    currentPresetId,
+    activeCat,
+    activeModelId,
+    stageModels,
+    pathOrder,
+    bypassed,
+    parameters,
+    modified,
+    drafts,
+    savedRigs,
+    pendingSwitchId,
+  };
 
   const currentPreset = useMemo(
     () =>
@@ -61,6 +195,19 @@ function RodhareistEditor() {
   useEffect(() => {
     applyCategoryTheme(activeCat);
   }, [activeCat]);
+
+  useEffect(() => {
+    const stages = defaultStageModels(initial.category, initial.model);
+    postPathOrder(defaultPath());
+    for (const cat of chainOrder) {
+      postModel(categories[cat].node, stages[cat]!);
+      postEnabled(categories[cat].node, true);
+      for (const param of parameters[stages[cat]!] ?? []) {
+        postParam(param.id, param.val);
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   useEffect(() => {
     let raf = 0;
@@ -94,78 +241,233 @@ function RodhareistEditor() {
     };
   }, []);
 
-  const selectCategory = useCallback((cat: CategoryId) => {
-    setActiveCat(cat);
-    const first = models[cat]?.[0];
-    if (first) {
-      setActiveModelId(first.id);
-      postModel(categories[cat].node, first.id);
-    }
-  }, []);
-
-  const loadPreset = useCallback((id: string) => {
-    const p = presetsData.find((x) => x.id === id);
-    if (!p) return;
-    setCurrentPresetId(id);
-    setActiveCat(p.category);
-    setActiveModelId(p.model);
-    setParameters((prev) => {
-      const next = { ...prev };
-      const modelParams = next[p.model];
-      if (modelParams && p.values) {
-        next[p.model] = modelParams.map((param) =>
-          p.values[param.id] !== undefined
-            ? { ...param, val: p.values[param.id]! }
-            : param,
-        );
-      }
+  const markDirty = useCallback(() => {
+    setModified(true);
+    setDirtyPresetIds((prev) => {
+      const id = liveRef.current.currentPresetId;
+      if (prev.has(id)) return prev;
+      const next = new Set(prev);
+      next.add(id);
       return next;
     });
   }, []);
 
+  const applyLocalSnapshot = useCallback(
+    (snap: RigSnapshot, presetId: string, isDirty: boolean) => {
+      setCurrentPresetId(presetId);
+      setActiveCat(snap.activeCat);
+      setActiveModelId(snap.activeModelId);
+      setStageModels(snap.stageModels);
+      setPathOrder(snap.pathOrder);
+      setBypassed(snap.bypassed);
+      setParameters(cloneParameters(snap.parameters));
+      setModified(isDirty);
+      applySnapshotToDsp(snap);
+    },
+    [],
+  );
+
+  const commitLoadPreset = useCallback(
+    (id: string, opts?: { discardCurrent?: boolean }) => {
+      const live = liveRef.current;
+      let nextDrafts = live.drafts;
+
+      if (opts?.discardCurrent) {
+        nextDrafts = { ...live.drafts };
+        delete nextDrafts[live.currentPresetId];
+        setDrafts(nextDrafts);
+        setDirtyPresetIds((prev) => {
+          if (!prev.has(live.currentPresetId)) return prev;
+          const next = new Set(prev);
+          next.delete(live.currentPresetId);
+          return next;
+        });
+      }
+
+      const snap =
+        nextDrafts[id] ?? live.savedRigs[id] ?? factorySnapshot(id);
+      if (!snap) return;
+
+      applyLocalSnapshot(snap, id, !!nextDrafts[id]);
+      setPendingSwitchId(null);
+    },
+    [applyLocalSnapshot],
+  );
+
+  const loadPreset = useCallback(
+    (id: string) => {
+      const live = liveRef.current;
+      if (id === live.currentPresetId) return;
+
+      // Leaving a dirty unsaved rig → ask before switching.
+      if (live.modified) {
+        setPendingSwitchId(id);
+        return;
+      }
+
+      commitLoadPreset(id);
+    },
+    [commitLoadPreset],
+  );
+
   const stepPreset = useCallback(
     (dir: number) => {
-      const idx = presetsData.findIndex((p) => p.id === currentPresetId);
-      const next =
-        (idx + dir + presetsData.length) % presetsData.length;
+      const idx = presetsData.findIndex(
+        (p) => p.id === liveRef.current.currentPresetId,
+      );
+      const next = (idx + dir + presetsData.length) % presetsData.length;
       loadPreset(presetsData[next]!.id);
     },
-    [currentPresetId, loadPreset],
+    [loadPreset],
+  );
+
+  const selectCategory = useCallback(
+    (cat: CategoryId) => {
+      setActiveCat(cat);
+      const modelId =
+        liveRef.current.stageModels[cat] || models[cat]?.[0]?.id;
+      if (!modelId) return;
+      setActiveModelId(modelId);
+      postModel(categories[cat].node, modelId);
+    },
+    [],
   );
 
   const selectModel = useCallback(
     (id: string) => {
+      const cat = liveRef.current.activeCat;
       setActiveModelId(id);
-      postModel(categories[activeCat].node, id);
+      setStageModels((prev) => ({ ...prev, [cat]: id }));
+      postModel(categories[cat].node, id);
+      for (const param of liveRef.current.parameters[id] ?? []) {
+        postParam(param.id, param.val);
+      }
+      markDirty();
     },
-    [activeCat],
+    [markDirty],
   );
 
-  const toggleBypass = useCallback(() => {
-    setBypassed((prev) => {
-      const enabled = !prev[activeCat]; // next bypassed state
-      // Bridge sends "enabled" (the inverse of bypassed).
-      postEnabled(categories[activeCat].node, !enabled);
-      return { ...prev, [activeCat]: enabled };
-    });
-  }, [activeCat]);
+  const toggleBypassFor = useCallback(
+    (cat: CategoryId) => {
+      setBypassed((prev) => {
+        const nextBypass = !prev[cat];
+        postEnabled(categories[cat].node, !nextBypass);
+        return { ...prev, [cat]: nextBypass };
+      });
+      markDirty();
+    },
+    [markDirty],
+  );
+
+  const toggleBypass = useCallback(
+    () => toggleBypassFor(liveRef.current.activeCat),
+    [toggleBypassFor],
+  );
+
+  const reorderPath = useCallback(
+    (next: CategoryId[]) => {
+      setPathOrder(next);
+      postPathOrder(next);
+      markDirty();
+      const live = liveRef.current;
+      if (!next.includes(live.activeCat)) {
+        const fallback = next[0] ?? rackFromPath(next)[0];
+        if (fallback) {
+          setActiveCat(fallback);
+          const modelId =
+            live.stageModels[fallback] || models[fallback]?.[0]?.id;
+          if (modelId) {
+            setActiveModelId(modelId);
+            postModel(categories[fallback].node, modelId);
+          }
+        }
+      }
+    },
+    [markDirty],
+  );
 
   const onParamChange = useCallback(
     (id: string, value: number) => {
       postParam(id, value);
+      markDirty();
+      const modelId = liveRef.current.activeModelId;
       setParameters((prev) => {
-        const modelParams = prev[activeModelId];
+        const modelParams = prev[modelId];
         if (!modelParams) return prev;
         return {
           ...prev,
-          [activeModelId]: modelParams.map((p) =>
+          [modelId]: modelParams.map((p) =>
             p.id === id ? { ...p, val: value } : p,
           ),
         };
       });
     },
-    [activeModelId],
+    [markDirty],
   );
+
+  const saveRig = useCallback(() => {
+    const live = liveRef.current;
+    const snap = makeSnapshot(
+      live.activeCat,
+      live.activeModelId,
+      live.stageModels,
+      live.pathOrder,
+      live.bypassed,
+      live.parameters,
+    );
+    setSavedRigs((prev) => ({ ...prev, [live.currentPresetId]: snap }));
+    setDrafts((prev) => {
+      if (!(live.currentPresetId in prev)) return prev;
+      const next = { ...prev };
+      delete next[live.currentPresetId];
+      return next;
+    });
+    setModified(false);
+    setDirtyPresetIds((prev) => {
+      if (!prev.has(live.currentPresetId)) return prev;
+      const next = new Set(prev);
+      next.delete(live.currentPresetId);
+      return next;
+    });
+  }, []);
+
+  const confirmSaveAndSwitch = useCallback(() => {
+    const target = liveRef.current.pendingSwitchId;
+    saveRig();
+    if (target) commitLoadPreset(target);
+  }, [commitLoadPreset, saveRig]);
+
+  const confirmDiscardAndSwitch = useCallback(() => {
+    const target = liveRef.current.pendingSwitchId;
+    if (!target) {
+      setPendingSwitchId(null);
+      return;
+    }
+    commitLoadPreset(target, { discardCurrent: true });
+  }, [commitLoadPreset]);
+
+  const cancelSwitch = useCallback(() => setPendingSwitchId(null), []);
+
+  const revertRig = useCallback(() => {
+    const live = liveRef.current;
+    const snap =
+      live.savedRigs[live.currentPresetId] ??
+      factorySnapshot(live.currentPresetId);
+    if (!snap) return;
+    setDrafts((prev) => {
+      if (!(live.currentPresetId in prev)) return prev;
+      const next = { ...prev };
+      delete next[live.currentPresetId];
+      return next;
+    });
+    setDirtyPresetIds((prev) => {
+      if (!prev.has(live.currentPresetId)) return prev;
+      const next = new Set(prev);
+      next.delete(live.currentPresetId);
+      return next;
+    });
+    applyLocalSnapshot(snap, live.currentPresetId, false);
+  }, [applyLocalSnapshot]);
 
   const toggleTest = useCallback(async () => {
     if (!audioRef.current) {
@@ -225,21 +527,112 @@ function RodhareistEditor() {
     };
   }, []);
 
+  useEffect(() => {
+    const isTypingTarget = (el: EventTarget | null) => {
+      if (!(el instanceof HTMLElement)) return false;
+      const tag = el.tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return true;
+      return el.isContentEditable;
+    };
+
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.defaultPrevented || e.altKey) return;
+      if (isTypingTarget(e.target)) return;
+
+      if (liveRef.current.pendingSwitchId) {
+        if (e.key === "Escape") {
+          e.preventDefault();
+          cancelSwitch();
+        }
+        return;
+      }
+
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s") {
+        e.preventDefault();
+        if (liveRef.current.modified) saveRig();
+        return;
+      }
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "z" && !e.shiftKey) {
+        e.preventDefault();
+        if (liveRef.current.modified) revertRig();
+        return;
+      }
+      if (e.ctrlKey || e.metaKey) return;
+
+      if (e.key === "ArrowLeft") {
+        e.preventDefault();
+        stepPreset(-1);
+        return;
+      }
+      if (e.key === "ArrowRight") {
+        e.preventDefault();
+        stepPreset(1);
+        return;
+      }
+      if (e.key === " " || e.code === "Space") {
+        e.preventDefault();
+        toggleBypass();
+        return;
+      }
+      if (e.key >= "1" && e.key <= "7") {
+        const idx = Number(e.key) - 1;
+        const path = liveRef.current.pathOrder;
+        const cat = path[idx] ?? chainOrder[idx];
+        if (cat) {
+          e.preventDefault();
+          selectCategory(cat);
+        }
+      }
+    };
+
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [
+    cancelSwitch,
+    revertRig,
+    saveRig,
+    selectCategory,
+    stepPreset,
+    toggleBypass,
+  ]);
+
+  const pendingName =
+    presetsData.find((p) => p.id === currentPresetId)?.name ?? "This rig";
+
   return (
     <Layout
       presets={presetsData}
       currentPresetId={currentPresetId}
       presetName={currentPreset.name}
+      modified={modified}
+      dirtyPresetIds={dirtyPresetIds}
       activeCat={activeCat}
       activeModelId={activeModelId}
+      stageModels={stageModels}
+      pathOrder={pathOrder}
       bypassed={bypassed}
       params={params}
       testing={testing}
+      showTestDi={showTestDi}
       vu={vu}
+      discardPrompt={
+        pendingSwitchId
+          ? {
+              presetName: pendingName,
+              onSave: confirmSaveAndSwitch,
+              onDiscard: confirmDiscardAndSwitch,
+              onCancel: cancelSwitch,
+            }
+          : null
+      }
       onStepPreset={stepPreset}
       onLoadPreset={loadPreset}
       onToggleTest={() => void toggleTest()}
+      onSave={saveRig}
+      onRevert={revertRig}
       onSelectCategory={selectCategory}
+      onToggleModule={toggleBypassFor}
+      onReorderPath={reorderPath}
       onSelectModel={selectModel}
       onToggleBypass={toggleBypass}
       onParamChange={onParamChange}

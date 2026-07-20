@@ -60,10 +60,16 @@ impl Amp {
         let g = (gain / 10.0).clamp(0.0, 1.0);
         let sr = self.sample_rate;
 
-        // Voicing constants per amp.
+        // Voicing constants per amp: (pre_scale, stage_drive, mid_hz, treble_hz).
         let (pre_scale, stage_drive, mid_hz, treble_hz) = match model {
             AmpModel::Mandarin => (30.0, 2.2, 620.0, 3_000.0),
             AmpModel::Plexi => (20.0, 1.5, 720.0, 3_400.0),
+            AmpModel::Twin => (8.0, 0.9, 800.0, 4_200.0),
+            AmpModel::TopBoost => (14.0, 1.3, 900.0, 4_800.0),
+            AmpModel::Recto => (42.0, 3.0, 550.0, 2_800.0),
+            AmpModel::Jcm => (26.0, 2.0, 680.0, 3_200.0),
+            AmpModel::Slate => (48.0, 3.4, 500.0, 2_600.0),
+            AmpModel::Bassman => (18.0, 1.4, 480.0, 2_900.0),
         };
         self.pre_gain = 1.0 + g * pre_scale;
         self.stage_drive = stage_drive;

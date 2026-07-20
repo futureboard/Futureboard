@@ -9,7 +9,7 @@
 mod dsp;
 
 pub use dsp::{
-    AmpModel, Dsp, DriveModel, PLUGIN_ID, Params, default_params, descriptor,
+    AmpModel, Dsp, DriveModel, PLUGIN_ID, Params, StageKind, default_params, descriptor,
 };
 
 #[cfg(test)]

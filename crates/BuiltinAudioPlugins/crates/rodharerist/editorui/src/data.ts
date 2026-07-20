@@ -21,11 +21,17 @@ export type Preset = {
   category: CategoryId;
   model: string;
   values: Record<string, number>;
+  /** Stages in the signal path (Helix order). Empty = empty path. */
+  path?: CategoryId[];
+  /** Stages bypassed (off) when loaded. */
+  bypassed?: CategoryId[];
 };
 
 export type Model = {
   id: string;
   name: string;
+  /** Compact label for Path blocks */
+  short: string;
   sub: string;
 };
 
@@ -39,6 +45,22 @@ export type Param = {
 };
 
 export const presetsData: Preset[] = [
+  {
+    id: "00A",
+    name: "Empty",
+    category: "amp",
+    model: "mandarin",
+    values: {},
+    path: [],
+    bypassed: ["dyn", "dist", "amp", "mod", "delay", "verb", "cab"],
+  },
+  {
+    id: "01A",
+    name: "Twin Sparkle",
+    category: "amp",
+    model: "twin",
+    values: { amp_gain: 2.5, amp_bass: 4.5, amp_middle: 5.0, amp_treble: 6.5, amp_presence: 5.5, amp_master: 5.5 },
+  },
   {
     id: "02B",
     name: "Dark & Lush",
@@ -68,6 +90,20 @@ export const presetsData: Preset[] = [
     values: { chorus_mix: 40 },
   },
   {
+    id: "04A",
+    name: "Rats Nest Riff",
+    category: "dist",
+    model: "rat",
+    values: { drive_gain: 8.0, drive_tone: 4.0 },
+  },
+  {
+    id: "05A",
+    name: "Chime Room",
+    category: "amp",
+    model: "topboost",
+    values: { amp_gain: 4.0, amp_middle: 3.5, amp_treble: 7.0, amp_presence: 6.5 },
+  },
+  {
     id: "06D",
     name: "Mandarine Gaze",
     category: "amp",
@@ -82,11 +118,25 @@ export const presetsData: Preset[] = [
     },
   },
   {
+    id: "07A",
+    name: "Modern Crush",
+    category: "amp",
+    model: "recto",
+    values: { amp_gain: 8.5, amp_bass: 6.0, amp_middle: 3.5, amp_treble: 5.5, amp_presence: 6.0, amp_master: 4.5 },
+  },
+  {
     id: "08B",
     name: "Electric Version",
     category: "amp",
     model: "plexi",
     values: { amp_gain: 7.5, amp_bass: 4.0, amp_middle: 6.2 },
+  },
+  {
+    id: "08C",
+    name: "JCM Stack",
+    category: "amp",
+    model: "jcm",
+    values: { amp_gain: 7.0, amp_middle: 6.5, amp_treble: 5.5, amp_presence: 5.5 },
   },
   {
     id: "09A",
@@ -95,6 +145,27 @@ export const presetsData: Preset[] = [
     model: "chorus",
     values: { chorus_mix: 60 },
   },
+  {
+    id: "10A",
+    name: "Slate Solo",
+    category: "amp",
+    model: "slate",
+    values: { amp_gain: 9.0, amp_bass: 5.5, amp_middle: 4.0, amp_treble: 6.0, amp_master: 4.0 },
+  },
+  {
+    id: "11A",
+    name: "Face Melt",
+    category: "dist",
+    model: "fuzz",
+    values: { drive_gain: 9.0, drive_tone: 3.5, drive_level: 5.5 },
+  },
+  {
+    id: "12A",
+    name: "Bassman Room",
+    category: "amp",
+    model: "bassman",
+    values: { amp_gain: 5.0, amp_bass: 7.0, amp_middle: 4.0, amp_treble: 5.0 },
+  },
 ];
 
 export const categories: Record<CategoryId, Category> = {
@@ -102,49 +173,49 @@ export const categories: Record<CategoryId, Category> = {
     name: "Gate",
     short: "Gate",
     color: "var(--c-dyn)",
-    rgb: "99, 102, 241",
+    rgb: "91, 124, 250",
     node: "gate",
   },
   dist: {
     name: "Distortion",
     short: "Dist",
     color: "var(--c-dist)",
-    rgb: "245, 158, 11",
+    rgb: "232, 148, 42",
     node: "drive",
   },
   amp: {
     name: "Amp",
     short: "Amp",
     color: "var(--c-amp)",
-    rgb: "244, 63, 94",
+    rgb: "232, 92, 92",
     node: "amp",
   },
   mod: {
     name: "Modulation",
     short: "Mod",
     color: "var(--c-mod)",
-    rgb: "59, 130, 246",
+    rgb: "61, 184, 232",
     node: "mod",
   },
   delay: {
     name: "Delay",
     short: "Delay",
     color: "var(--c-delay)",
-    rgb: "16, 185, 129",
+    rgb: "61, 214, 140",
     node: "delay",
   },
   verb: {
     name: "Reverb",
     short: "Verb",
     color: "var(--c-verb)",
-    rgb: "139, 92, 246",
+    rgb: "168, 120, 240",
     node: "reverb",
   },
   cab: {
     name: "Cabinet",
     short: "Cab",
     color: "var(--c-cab)",
-    rgb: "236, 72, 153",
+    rgb: "224, 112, 176",
     node: "cab",
   },
 };
@@ -154,6 +225,7 @@ export const models: Record<CategoryId, Model[]> = {
     {
       id: "gate",
       name: "Noise Gate",
+      short: "Gate",
       sub: "Dynamic threshold noise reduction",
     },
   ],
@@ -161,40 +233,106 @@ export const models: Record<CategoryId, Model[]> = {
     {
       id: "screamer",
       name: "Green Screamer",
+      short: "Screamer",
       sub: "Tube drive mid-boost pedal",
     },
     {
       id: "minotaur",
       name: "Minotaur Boost",
+      short: "Minotaur",
       sub: "Buffered analog clean boost",
+    },
+    {
+      id: "rat",
+      name: "Rats Nest",
+      short: "Rat",
+      sub: "Hard-clipping filthy distortion",
+    },
+    {
+      id: "breaker",
+      name: "Breaker Blues",
+      short: "Breaker",
+      sub: "Soft low-gain overdrive",
+    },
+    {
+      id: "fuzz",
+      name: "Face Fuzz",
+      short: "Fuzz",
+      sub: "Gated asymmetric fuzz",
+    },
+    {
+      id: "centurion",
+      name: "Centurion OD",
+      short: "Centurion",
+      sub: "Transparent mid-forward overdrive",
     },
   ],
   amp: [
     {
       id: "mandarin",
       name: "Mandarin 80",
+      short: "Mandarin",
       sub: "1980 vintage British Orange tube head",
     },
     {
       id: "plexi",
       name: "Brit Plexi 100",
+      short: "Plexi",
       sub: "Super Lead 1959 plexiglass Marshall",
+    },
+    {
+      id: "twin",
+      name: "Twin Clean",
+      short: "Twin",
+      sub: "High-headroom American clean combo",
+    },
+    {
+      id: "topboost",
+      name: "Top Boost",
+      short: "TopBoost",
+      sub: "Chiming British class-A combo",
+    },
+    {
+      id: "recto",
+      name: "Recto Modern",
+      short: "Recto",
+      sub: "Tight modern high-gain rectifier",
+    },
+    {
+      id: "jcm",
+      name: "JCM Crunch",
+      short: "JCM",
+      sub: "Classic British stack crunch",
+    },
+    {
+      id: "slate",
+      name: "Lead Slate",
+      short: "Slate",
+      sub: "Hot-rodded saturated lead amp",
+    },
+    {
+      id: "bassman",
+      name: "Bassman",
+      short: "Bassman",
+      sub: "Loose American bass-heavy head",
     },
   ],
   mod: [
     {
       id: "chorus",
       name: "70s Analog Chorus",
+      short: "Chorus",
       sub: "Warm analog modulated chorus",
     },
   ],
   delay: [
-    { id: "tape", name: "Tape Echo", sub: "Warm saturated tape delay" },
+    { id: "tape", name: "Tape Echo", short: "Tape", sub: "Warm saturated tape delay" },
   ],
   verb: [
     {
       id: "plate",
       name: "Studio Plate",
+      short: "Plate",
       sub: "Sustained metallic plate resonance",
     },
   ],
@@ -202,6 +340,7 @@ export const models: Record<CategoryId, Model[]> = {
     {
       id: "vintage_cab",
       name: "1960v Vintage 4x12",
+      short: "4x12",
       sub: "Celestion vintage cabinet sim",
     },
   ],
@@ -254,6 +393,14 @@ export const parameterDefaults: Record<string, Param[]> = {
       unit: "",
     },
     {
+      id: "drive_tone",
+      name: "Tone",
+      min: 0,
+      max: 10,
+      val: 5.0,
+      unit: "",
+    },
+    {
       id: "drive_level",
       name: "Output",
       min: 0,
@@ -261,6 +408,26 @@ export const parameterDefaults: Record<string, Param[]> = {
       val: 7.0,
       unit: "",
     },
+  ],
+  rat: [
+    { id: "drive_gain", name: "Distortion", min: 0, max: 10, val: 7.5, unit: "" },
+    { id: "drive_tone", name: "Filter", min: 0, max: 10, val: 4.5, unit: "" },
+    { id: "drive_level", name: "Volume", min: 0, max: 10, val: 6.0, unit: "" },
+  ],
+  breaker: [
+    { id: "drive_gain", name: "Drive", min: 0, max: 10, val: 4.5, unit: "" },
+    { id: "drive_tone", name: "Tone", min: 0, max: 10, val: 5.5, unit: "" },
+    { id: "drive_level", name: "Level", min: 0, max: 10, val: 6.5, unit: "" },
+  ],
+  fuzz: [
+    { id: "drive_gain", name: "Fuzz", min: 0, max: 10, val: 8.5, unit: "" },
+    { id: "drive_tone", name: "Tone", min: 0, max: 10, val: 3.5, unit: "" },
+    { id: "drive_level", name: "Level", min: 0, max: 10, val: 5.5, unit: "" },
+  ],
+  centurion: [
+    { id: "drive_gain", name: "Gain", min: 0, max: 10, val: 5.0, unit: "" },
+    { id: "drive_tone", name: "Tone", min: 0, max: 10, val: 6.0, unit: "" },
+    { id: "drive_level", name: "Output", min: 0, max: 10, val: 6.5, unit: "" },
   ],
   mandarin: [
     {
@@ -362,6 +529,54 @@ export const parameterDefaults: Record<string, Param[]> = {
       unit: "",
     },
   ],
+  twin: [
+    { id: "amp_gain", name: "Drive", min: 0, max: 10, val: 2.5, unit: "" },
+    { id: "amp_bass", name: "Bass", min: 0, max: 10, val: 4.5, unit: "" },
+    { id: "amp_middle", name: "Mid", min: 0, max: 10, val: 5.0, unit: "" },
+    { id: "amp_treble", name: "Treble", min: 0, max: 10, val: 6.5, unit: "" },
+    { id: "amp_presence", name: "Presence", min: 0, max: 10, val: 5.5, unit: "" },
+    { id: "amp_master", name: "Master", min: 0, max: 10, val: 5.5, unit: "" },
+  ],
+  topboost: [
+    { id: "amp_gain", name: "Drive", min: 0, max: 10, val: 4.0, unit: "" },
+    { id: "amp_bass", name: "Bass", min: 0, max: 10, val: 4.0, unit: "" },
+    { id: "amp_middle", name: "Mid", min: 0, max: 10, val: 3.5, unit: "" },
+    { id: "amp_treble", name: "Treble", min: 0, max: 10, val: 7.0, unit: "" },
+    { id: "amp_presence", name: "Presence", min: 0, max: 10, val: 6.5, unit: "" },
+    { id: "amp_master", name: "Master", min: 0, max: 10, val: 5.0, unit: "" },
+  ],
+  recto: [
+    { id: "amp_gain", name: "Drive", min: 0, max: 10, val: 8.5, unit: "" },
+    { id: "amp_bass", name: "Bass", min: 0, max: 10, val: 6.0, unit: "" },
+    { id: "amp_middle", name: "Mid", min: 0, max: 10, val: 3.5, unit: "" },
+    { id: "amp_treble", name: "Treble", min: 0, max: 10, val: 5.5, unit: "" },
+    { id: "amp_presence", name: "Presence", min: 0, max: 10, val: 6.0, unit: "" },
+    { id: "amp_master", name: "Master", min: 0, max: 10, val: 4.5, unit: "" },
+  ],
+  jcm: [
+    { id: "amp_gain", name: "Pre Gain", min: 0, max: 10, val: 7.0, unit: "" },
+    { id: "amp_bass", name: "Bass", min: 0, max: 10, val: 5.0, unit: "" },
+    { id: "amp_middle", name: "Middle", min: 0, max: 10, val: 6.5, unit: "" },
+    { id: "amp_treble", name: "Treble", min: 0, max: 10, val: 5.5, unit: "" },
+    { id: "amp_presence", name: "Presence", min: 0, max: 10, val: 5.5, unit: "" },
+    { id: "amp_master", name: "Master", min: 0, max: 10, val: 5.0, unit: "" },
+  ],
+  slate: [
+    { id: "amp_gain", name: "Drive", min: 0, max: 10, val: 9.0, unit: "" },
+    { id: "amp_bass", name: "Bass", min: 0, max: 10, val: 5.5, unit: "" },
+    { id: "amp_middle", name: "Mid", min: 0, max: 10, val: 4.0, unit: "" },
+    { id: "amp_treble", name: "Treble", min: 0, max: 10, val: 6.0, unit: "" },
+    { id: "amp_presence", name: "Presence", min: 0, max: 10, val: 6.5, unit: "" },
+    { id: "amp_master", name: "Master", min: 0, max: 10, val: 4.0, unit: "" },
+  ],
+  bassman: [
+    { id: "amp_gain", name: "Drive", min: 0, max: 10, val: 5.0, unit: "" },
+    { id: "amp_bass", name: "Bass", min: 0, max: 10, val: 7.0, unit: "" },
+    { id: "amp_middle", name: "Mid", min: 0, max: 10, val: 4.0, unit: "" },
+    { id: "amp_treble", name: "Treble", min: 0, max: 10, val: 5.0, unit: "" },
+    { id: "amp_presence", name: "Presence", min: 0, max: 10, val: 4.5, unit: "" },
+    { id: "amp_master", name: "Master", min: 0, max: 10, val: 5.0, unit: "" },
+  ],
   chorus: [
     {
       id: "chorus_rate",
@@ -462,6 +677,49 @@ export const chainOrder: CategoryId[] = [
   "cab",
 ];
 
+/** Index used by DSP `path_slot_*` / `StageKind`. */
+export const stageIndex: Record<CategoryId, number> = {
+  dyn: 0,
+  dist: 1,
+  amp: 2,
+  mod: 3,
+  delay: 4,
+  verb: 5,
+  cab: 6,
+};
+
+export const stageByIndex: CategoryId[] = [
+  "dyn",
+  "dist",
+  "amp",
+  "mod",
+  "delay",
+  "verb",
+  "cab",
+];
+
+/** Pack a path into 7 DSP slots (empty = -1). */
+export function pathToSlotValues(path: CategoryId[]): number[] {
+  const slots = Array.from({ length: 7 }, () => -1);
+  path.forEach((cat, i) => {
+    if (i < 7) slots[i] = stageIndex[cat];
+  });
+  return slots;
+}
+
+export function defaultPath(): CategoryId[] {
+  return [...chainOrder];
+}
+
+export function emptyPath(): CategoryId[] {
+  return [];
+}
+
+export function rackFromPath(path: CategoryId[]): CategoryId[] {
+  const inPath = new Set(path);
+  return chainOrder.filter((c) => !inPath.has(c));
+}
+
 export const icons: Record<string, string> = {
   gate: '<rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>',
   drive:
@@ -473,14 +731,17 @@ export const icons: Record<string, string> = {
   cab: '<ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/>',
 };
 
-export const KNOB = {
-  C: 2 * Math.PI * 45,
-  arc: 2 * Math.PI * 45 * 0.75,
-};
-
 export function fmt(val: number, unit: string): string {
   if (unit === "" || unit === "s") return `${val.toFixed(1)}${unit}`;
   return `${Math.round(val)}${unit}`;
+}
+
+/** Canonical default for a parameter within a given model, if defined. */
+export function defaultValueFor(
+  modelId: string,
+  paramId: string,
+): number | undefined {
+  return parameterDefaults[modelId]?.find((p) => p.id === paramId)?.val;
 }
 
 export function cloneParameters(): Record<string, Param[]> {
@@ -489,4 +750,21 @@ export function cloneParameters(): Record<string, Param[]> {
     out[modelId] = params.map((p) => ({ ...p }));
   }
   return out;
+}
+
+/**
+ * Build the complete parameter state for a factory preset. Presets contain
+ * only their intentional overrides, so never layer one over the currently
+ * edited state: that would leak controls from the previously selected preset.
+ */
+export function parametersForPreset(preset: Preset): Record<string, Param[]> {
+  const parameters = cloneParameters();
+  const modelParams = parameters[preset.model];
+  if (!modelParams) return parameters;
+
+  parameters[preset.model] = modelParams.map((param) => {
+    const value = preset.values[param.id];
+    return value === undefined ? param : { ...param, val: value };
+  });
+  return parameters;
 }

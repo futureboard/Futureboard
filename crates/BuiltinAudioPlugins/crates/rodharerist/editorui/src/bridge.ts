@@ -35,6 +35,26 @@ export function postParam(id: string, value: number): void {
   }
 }
 
+/** Publish the full Helix path (7 slots). Missing stages use -1. */
+export function postPathOrder(path: string[]): void {
+  const index: Record<string, number> = {
+    dyn: 0,
+    dist: 1,
+    amp: 2,
+    mod: 3,
+    delay: 4,
+    verb: 5,
+    cab: 6,
+    gate: 0,
+    drive: 1,
+  };
+  for (let i = 0; i < 7; i++) {
+    const cat = path[i];
+    const v = cat !== undefined ? (index[cat] ?? -1) : -1;
+    postParam(`path_slot_${i}`, v);
+  }
+}
+
 /** Forward a per-stage bypass toggle. `stage` is a category node id (`amp`…). */
 export function postEnabled(stage: string, enabled: boolean): void {
   try {

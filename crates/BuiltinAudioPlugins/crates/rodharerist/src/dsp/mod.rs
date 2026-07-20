@@ -41,6 +41,61 @@ use reverb::PlateReverb;
 
 pub const PLUGIN_ID: &str = "futureboard.rodharerist";
 
+/// One slot in the Helix-style signal path. Order is user-editable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum StageKind {
+    Gate = 0,
+    Drive = 1,
+    Amp = 2,
+    Mod = 3,
+    Delay = 4,
+    Reverb = 5,
+    Cab = 6,
+}
+
+impl StageKind {
+    pub const ALL: &'static [Self] = &[
+        Self::Gate,
+        Self::Drive,
+        Self::Amp,
+        Self::Mod,
+        Self::Delay,
+        Self::Reverb,
+        Self::Cab,
+    ];
+
+    pub fn from_index(i: i32) -> Option<Self> {
+        match i {
+            0 => Some(Self::Gate),
+            1 => Some(Self::Drive),
+            2 => Some(Self::Amp),
+            3 => Some(Self::Mod),
+            4 => Some(Self::Delay),
+            5 => Some(Self::Reverb),
+            6 => Some(Self::Cab),
+            _ => None,
+        }
+    }
+
+    pub fn index(self) -> u8 {
+        self as u8
+    }
+
+    /// Default factory path order.
+    pub fn default_path() -> [Option<Self>; 7] {
+        [
+            Some(Self::Gate),
+            Some(Self::Drive),
+            Some(Self::Amp),
+            Some(Self::Mod),
+            Some(Self::Delay),
+            Some(Self::Reverb),
+            Some(Self::Cab),
+        ]
+    }
+}
+
 /// Overdrive/boost voicing, matching the editor's `dist` models.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DriveModel {
@@ -48,16 +103,44 @@ pub enum DriveModel {
     Screamer,
     /// "Minotaur Boost" — cleaner, near-transparent analog boost.
     Minotaur,
+    /// "Rats Nest" — hard-clipping filthy distortion.
+    Rat,
+    /// "Breaker Blues" — soft low-gain overdrive.
+    Breaker,
+    /// "Face Fuzz" — gated asymmetric fuzz.
+    Fuzz,
+    /// "Centurion" — transparent mid-forward OD.
+    Centurion,
 }
 
 impl DriveModel {
-    /// Map the editor model id (`screamer` / `minotaur`).
+    pub const ALL: &'static [Self] = &[
+        Self::Screamer,
+        Self::Minotaur,
+        Self::Rat,
+        Self::Breaker,
+        Self::Fuzz,
+        Self::Centurion,
+    ];
+
+    /// Map the editor model id.
     pub fn from_model_id(id: &str) -> Option<Self> {
         match id {
             "screamer" => Some(Self::Screamer),
             "minotaur" => Some(Self::Minotaur),
+            "rat" => Some(Self::Rat),
+            "breaker" => Some(Self::Breaker),
+            "fuzz" => Some(Self::Fuzz),
+            "centurion" => Some(Self::Centurion),
             _ => None,
         }
+    }
+
+    pub fn from_index(i: u32) -> Self {
+        Self::ALL
+            .get(i as usize)
+            .copied()
+            .unwrap_or(Self::Screamer)
     }
 }
 
@@ -68,15 +151,51 @@ pub enum AmpModel {
     Mandarin,
     /// "Brit Plexi 100" — bright, open plexiglass Super Lead.
     Plexi,
+    /// "Twin Clean" — high-headroom American clean.
+    Twin,
+    /// "Top Boost" — chiming British combo.
+    TopBoost,
+    /// "Recto Modern" — tight high-gain modern.
+    Recto,
+    /// "JCM Crunch" — classic British crunch.
+    Jcm,
+    /// "Lead Slate" — saturated hot-rodded lead.
+    Slate,
+    /// "Bassman" — loose American bass-heavy.
+    Bassman,
 }
 
 impl AmpModel {
+    pub const ALL: &'static [Self] = &[
+        Self::Mandarin,
+        Self::Plexi,
+        Self::Twin,
+        Self::TopBoost,
+        Self::Recto,
+        Self::Jcm,
+        Self::Slate,
+        Self::Bassman,
+    ];
+
     pub fn from_model_id(id: &str) -> Option<Self> {
         match id {
             "mandarin" => Some(Self::Mandarin),
             "plexi" => Some(Self::Plexi),
+            "twin" => Some(Self::Twin),
+            "topboost" => Some(Self::TopBoost),
+            "recto" => Some(Self::Recto),
+            "jcm" => Some(Self::Jcm),
+            "slate" => Some(Self::Slate),
+            "bassman" => Some(Self::Bassman),
             _ => None,
         }
+    }
+
+    pub fn from_index(i: u32) -> Self {
+        Self::ALL
+            .get(i as usize)
+            .copied()
+            .unwrap_or(Self::Mandarin)
     }
 }
 
@@ -97,6 +216,10 @@ pub struct Params {
 
     pub drive_model: DriveModel,
     pub amp_model: AmpModel,
+
+    /// Helix-style ordered path. `None` = empty slot (stage not in path).
+    /// Stages absent from this list are not processed.
+    pub stage_order: [Option<StageKind>; 7],
 
     /// Noise gate threshold (dB, -80..0).
     pub gate_thresh_db: f32,
@@ -146,6 +269,7 @@ pub fn default_params() -> Params {
         cab_on: true,
         drive_model: DriveModel::Screamer,
         amp_model: AmpModel::Mandarin,
+        stage_order: StageKind::default_path(),
         gate_thresh_db: -55.0,
         drive_gain: 6.0,
         drive_tone: 5.5,
@@ -262,6 +386,7 @@ impl Dsp {
             cab_on: params.cab_on,
             drive_model: params.drive_model,
             amp_model: params.amp_model,
+            stage_order: sanitize_stage_order(params.stage_order),
             gate_thresh_db: clamp(params.gate_thresh_db, -80.0, 0.0),
             drive_gain: clamp(params.drive_gain, 0.0, 10.0),
             drive_tone: clamp(params.drive_tone, 0.0, 10.0),
@@ -302,10 +427,15 @@ impl Dsp {
             "delay_on" => p.delay_on = on,
             "reverb_on" => p.reverb_on = on,
             "cab_on" => p.cab_on = on,
-            "drive_model" => {
-                p.drive_model = if on { DriveModel::Minotaur } else { DriveModel::Screamer }
-            }
-            "amp_model" => p.amp_model = if on { AmpModel::Plexi } else { AmpModel::Mandarin },
+            "drive_model" => p.drive_model = DriveModel::from_index(value.round() as u32),
+            "amp_model" => p.amp_model = AmpModel::from_index(value.round() as u32),
+            "path_slot_0" => p.stage_order[0] = StageKind::from_index(value.round() as i32),
+            "path_slot_1" => p.stage_order[1] = StageKind::from_index(value.round() as i32),
+            "path_slot_2" => p.stage_order[2] = StageKind::from_index(value.round() as i32),
+            "path_slot_3" => p.stage_order[3] = StageKind::from_index(value.round() as i32),
+            "path_slot_4" => p.stage_order[4] = StageKind::from_index(value.round() as i32),
+            "path_slot_5" => p.stage_order[5] = StageKind::from_index(value.round() as i32),
+            "path_slot_6" => p.stage_order[6] = StageKind::from_index(value.round() as i32),
             "gate_thresh" => p.gate_thresh_db = value,
             "drive_gain" => p.drive_gain = value,
             "drive_tone" => p.drive_tone = value,
@@ -333,6 +463,36 @@ impl Dsp {
     }
 
     /// Push clamped params into each stage (control-thread only).
+    /// Select a stage model by editor id (`mandarin`, `screamer`, …).
+    /// Control-thread only.
+    pub fn select_model(&mut self, category: &str, model_id: &str) -> bool {
+        let mut p = self.params.clone();
+        match category {
+            "amp" => {
+                let Some(m) = AmpModel::from_model_id(model_id) else {
+                    return false;
+                };
+                p.amp_model = m;
+            }
+            "drive" => {
+                let Some(m) = DriveModel::from_model_id(model_id) else {
+                    return false;
+                };
+                p.drive_model = m;
+            }
+            // Single-algorithm stages: accept their canonical model ids.
+            "gate" if model_id == "gate" => {}
+            "mod" if model_id == "chorus" => {}
+            "delay" if model_id == "tape" => {}
+            "reverb" if model_id == "plate" => {}
+            "cab" if model_id == "vintage_cab" => {}
+            _ => return false,
+        }
+        self.params = p;
+        self.apply_params();
+        true
+    }
+
     fn apply_params(&mut self) {
         let p = &self.params;
         self.gate.set_threshold_db(p.gate_thresh_db);
@@ -351,6 +511,31 @@ impl Dsp {
         self.reverb.configure(p.reverb_decay_s, p.reverb_mix);
         self.cab.configure(p.cab_mic, p.cab_dist);
     }
+
+    /// Replace the Helix path order (control thread).
+    pub fn set_path_order(&mut self, order: [Option<StageKind>; 7]) {
+        self.params.stage_order = sanitize_stage_order(order);
+    }
+}
+
+/// Keep first occurrence of each stage; pack non-empty slots left; clear rest.
+fn sanitize_stage_order(order: [Option<StageKind>; 7]) -> [Option<StageKind>; 7] {
+    let mut out = [None; 7];
+    let mut seen = [false; 7];
+    let mut w = 0usize;
+    for slot in order {
+        let Some(stage) = slot else { continue };
+        let idx = stage.index() as usize;
+        if seen[idx] {
+            continue;
+        }
+        seen[idx] = true;
+        if w < 7 {
+            out[w] = Some(stage);
+            w += 1;
+        }
+    }
+    out
 }
 
 impl StereoEffect for Dsp {
@@ -389,26 +574,32 @@ impl StereoEffect for Dsp {
         self.in_peak = in_level.max(self.in_peak - self.in_peak * 0.0005);
 
         let (mut l, mut r) = (left, right);
-        if self.params.gate_on {
-            (l, r) = self.gate.process(l, r);
-        }
-        if self.params.drive_on {
-            (l, r) = self.drive.process(l, r);
-        }
-        if self.params.amp_on {
-            (l, r) = self.amp.process(l, r);
-        }
-        if self.params.mod_on {
-            (l, r) = self.chorus.process(l, r);
-        }
-        if self.params.delay_on {
-            (l, r) = self.delay.process(l, r);
-        }
-        if self.params.reverb_on {
-            (l, r) = self.reverb.process(l, r);
-        }
-        if self.params.cab_on {
-            (l, r) = self.cab.process(l, r);
+        for slot in self.params.stage_order {
+            let Some(stage) = slot else { continue };
+            match stage {
+                StageKind::Gate if self.params.gate_on => {
+                    (l, r) = self.gate.process(l, r);
+                }
+                StageKind::Drive if self.params.drive_on => {
+                    (l, r) = self.drive.process(l, r);
+                }
+                StageKind::Amp if self.params.amp_on => {
+                    (l, r) = self.amp.process(l, r);
+                }
+                StageKind::Mod if self.params.mod_on => {
+                    (l, r) = self.chorus.process(l, r);
+                }
+                StageKind::Delay if self.params.delay_on => {
+                    (l, r) = self.delay.process(l, r);
+                }
+                StageKind::Reverb if self.params.reverb_on => {
+                    (l, r) = self.reverb.process(l, r);
+                }
+                StageKind::Cab if self.params.cab_on => {
+                    (l, r) = self.cab.process(l, r);
+                }
+                _ => {}
+            }
         }
 
         // Guard against denormals / NaNs escaping into the engine.
@@ -648,6 +839,42 @@ mod tests {
         assert_eq!(dsp.params().amp_model, AmpModel::Plexi);
         assert!(dsp.apply_ui_param("drive_model", 1.0));
         assert_eq!(dsp.params().drive_model, DriveModel::Minotaur);
+        assert!(dsp.select_model("amp", "recto"));
+        assert_eq!(dsp.params().amp_model, AmpModel::Recto);
+        assert!(dsp.select_model("drive", "fuzz"));
+        assert_eq!(dsp.params().drive_model, DriveModel::Fuzz);
+    }
+
+    #[test]
+    fn path_order_reorders_processing_slots() {
+        let mut dsp = Dsp::new(48_000.0);
+        assert!(dsp.apply_ui_param("path_slot_0", 2.0)); // Amp first
+        assert!(dsp.apply_ui_param("path_slot_1", 0.0)); // Gate
+        assert!(dsp.apply_ui_param("path_slot_2", -1.0)); // clear
+        // Remaining slots still have defaults until overwritten — sanitize packs.
+        dsp.set_path_order([
+            Some(StageKind::Amp),
+            Some(StageKind::Cab),
+            None,
+            None,
+            None,
+            None,
+            None,
+        ]);
+        assert_eq!(
+            dsp.params().stage_order,
+            [
+                Some(StageKind::Amp),
+                Some(StageKind::Cab),
+                None,
+                None,
+                None,
+                None,
+                None
+            ]
+        );
+        let (l, r) = dsp.process_stereo(0.2, -0.2);
+        assert!(l.is_finite() && r.is_finite());
     }
 
     #[test]

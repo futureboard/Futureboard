@@ -27,6 +27,9 @@ use ort::value::{Tensor, ValueType};
 use rustfft::num_complex::Complex;
 use rustfft::{Fft, FftPlanner};
 
+use super::dsp::{
+    PlanarStereo, backend_err, deinterleave_stereo, interleave_stereo, resample_planar,
+};
 use super::mdx_params::{MdxParams, params_for_file};
 use super::{InferBackendKind, SeparatedStem, StemInferBackend};
 use crate::device::InferDevice;
@@ -35,12 +38,6 @@ use crate::model::StemModel;
 use crate::params::StemExtractParams;
 use crate::progress::{StemExtractCancelToken, StemExtractProgress, StemExtractStage};
 use crate::stems::StemKind;
-
-type PlanarStereo = [Vec<f32>; 2];
-
-fn backend_err(msg: impl Into<String>) -> StemExtractError {
-    StemExtractError::Backend(msg.into())
-}
 
 /// Execution providers to try, in priority order, for the resolved device.
 fn execution_providers(device: InferDevice) -> Vec<ExecutionProviderDispatch> {
@@ -269,7 +266,7 @@ impl MdxModel {
                 spec[n_fft - k] = spec[k].conj();
             }
             spec[0].im = 0.0;
-            if n_fft % 2 == 0 {
+            if n_fft.is_multiple_of(2) {
                 spec[n_fft / 2].im = 0.0;
             }
 
@@ -519,91 +516,3 @@ fn reflect_pad(signal: &[f32], pad: usize) -> Vec<f32> {
     out
 }
 
-fn deinterleave_stereo(interleaved: &[f32], channels: usize, frames: usize) -> PlanarStereo {
-    let mut left = vec![0.0f32; frames];
-    let mut right = vec![0.0f32; frames];
-    for f in 0..frames {
-        let l = interleaved[f * channels];
-        left[f] = l;
-        right[f] = if channels > 1 {
-            interleaved[f * channels + 1]
-        } else {
-            l
-        };
-    }
-    [left, right]
-}
-
-fn interleave_stereo(planar: &PlanarStereo, channels: usize, frames: usize) -> Vec<f32> {
-    let mut out = vec![0.0f32; frames * channels];
-    for f in 0..frames {
-        let l = planar[0].get(f).copied().unwrap_or(0.0);
-        let r = planar[1].get(f).copied().unwrap_or(0.0);
-        if channels == 1 {
-            out[f] = 0.5 * (l + r);
-        } else {
-            out[f * channels] = l;
-            out[f * channels + 1] = r;
-        }
-    }
-    out
-}
-
-/// Resample a planar-stereo buffer from `from` to `to` Hz with a sinc resampler.
-/// A no-op when the rates already match.
-fn resample_planar(
-    input: &PlanarStereo,
-    from: u32,
-    to: u32,
-) -> Result<PlanarStereo, StemExtractError> {
-    if from == to || input[0].is_empty() {
-        return Ok(input.clone());
-    }
-    use rubato::{
-        Resampler, SincFixedIn, SincInterpolationParameters, SincInterpolationType, WindowFunction,
-    };
-
-    let params = SincInterpolationParameters {
-        sinc_len: 256,
-        f_cutoff: 0.95,
-        oversampling_factor: 256,
-        interpolation: SincInterpolationType::Linear,
-        window: WindowFunction::BlackmanHarris2,
-    };
-    let ratio = to as f64 / from as f64;
-    let chunk = 1024usize;
-    let mut resampler = SincFixedIn::<f32>::new(ratio, 2.0, params, chunk, 2)
-        .map_err(|e| backend_err(format!("resampler init failed: {e}")))?;
-
-    let total = input[0].len();
-    let mut out: PlanarStereo = [Vec::new(), Vec::new()];
-    let mut pos = 0usize;
-    loop {
-        let need = resampler.input_frames_next();
-        if pos + need > total {
-            break;
-        }
-        let frame: Vec<&[f32]> = vec![&input[0][pos..pos + need], &input[1][pos..pos + need]];
-        let processed = resampler
-            .process(&frame, None)
-            .map_err(|e| backend_err(format!("resample failed: {e}")))?;
-        out[0].extend_from_slice(&processed[0]);
-        out[1].extend_from_slice(&processed[1]);
-        pos += need;
-    }
-    if pos < total {
-        let tail: Vec<Vec<f32>> = vec![input[0][pos..].to_vec(), input[1][pos..].to_vec()];
-        let processed = resampler
-            .process_partial(Some(&tail), None)
-            .map_err(|e| backend_err(format!("resample tail failed: {e}")))?;
-        out[0].extend_from_slice(&processed[0]);
-        out[1].extend_from_slice(&processed[1]);
-    }
-
-    // Normalize to the exact expected length so downstream length math is stable.
-    let expected = ((total as f64) * ratio).round() as usize;
-    for ch in out.iter_mut() {
-        ch.resize(expected, 0.0);
-    }
-    Ok(out)
-}

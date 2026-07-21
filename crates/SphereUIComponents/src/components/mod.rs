@@ -6,6 +6,8 @@ pub mod background_tasks;
 mod bottom_panel;
 mod bottom_panel_shell;
 pub mod box_list_view;
+pub mod builtin_plugin_editor;
+pub mod builtin_plugin_editor_window;
 pub mod color_picker;
 pub mod combo_box;
 pub mod command_palette;

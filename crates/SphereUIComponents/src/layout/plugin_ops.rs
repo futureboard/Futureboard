@@ -56,6 +56,15 @@ pub(crate) struct PluginEditorWindows {
         (String, String),
         gpui::WindowHandle<crate::components::plugin_editor_window::PluginEditorWindow>,
     >,
+    /// Open built-in plugin editor windows keyed by `(track_id, insert_id)`.
+    /// These host an embedded React UI in a CEF child window rather than a
+    /// native plug-in view, so they are tracked separately from `open`.
+    pub builtin: std::collections::HashMap<
+        (String, String),
+        gpui::WindowHandle<
+            crate::components::builtin_plugin_editor_window::BuiltinPluginEditorWindow,
+        >,
+    >,
     /// Native main-owned external-bridge editor shells, keyed by
     /// `(track_id, plugin_instance_id)`.
     pub bridge: std::collections::HashMap<(String, String), BridgeEditorSession>,
@@ -1541,6 +1550,35 @@ impl StudioLayout {
             return;
         };
 
+        // Built-ins branch out here, before every VST3 gate below.
+        //
+        // This must stay ahead of the runtime/load-status gating: a built-in has
+        // no VST3 runtime instance, no plugin-host process and no bridge
+        // instance, so `runtime_state` is permanently `NotLoaded` and the gate
+        // would `return` (queueing a pending open that never resolves). Its
+        // editor is an embedded React UI served to CEF over `mikoplugin://` and
+        // depends on none of that machinery.
+        // NB: `is_builtin_ref`, not `is_builtin_id` — an insert slot's
+        // `plugin_id` holds the registry *class id* (`rodharerist`), not the
+        // catalog id (`builtin:rodharerist`).
+        if let Some(id) = plugin_id.as_deref() {
+            if SpherePluginHost::is_builtin_ref(id) {
+                eprintln!(
+                    "[editor-open] builtin route plugin={id} track={track_id} \
+                     slot={insert_index} instance={resolved_plugin_instance_id}"
+                );
+                self.open_builtin_insert_editor(
+                    track_id,
+                    &resolved_plugin_instance_id,
+                    id,
+                    display_name,
+                    window,
+                    cx,
+                );
+                return;
+            }
+        }
+
         eprintln!(
             "[OpenEditor/UI] track_id={track_id} track_index={} track_name={} slot_id={resolved_plugin_instance_id} instance_id={resolved_plugin_instance_id} plugin={display_name}",
             track_index
@@ -1782,6 +1820,8 @@ impl StudioLayout {
             self.plugin_editors.open.remove(&key);
         }
 
+        // NB: built-ins already returned near the top of this function — the
+        // gate below is VST3-only by design.
         let path = plugin_path.filter(|p| !p.trim().is_empty());
         let editable = plugin_format == Some(InsertPluginFormat::Vst3)
             && path.is_some()
@@ -1870,6 +1910,57 @@ impl StudioLayout {
         }
     }
 
+    /// Open the CEF-hosted editor for a built-in plugin insert.
+    ///
+    /// Built-in editors are per-insert like every other editor window, and are
+    /// tracked in the same `plugin_editors.builtin` map so the existing
+    /// focus-if-already-open and close paths apply.
+    fn open_builtin_insert_editor(
+        &mut self,
+        track_id: &str,
+        insert_id: &str,
+        plugin_id: &str,
+        display_name: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let key = (track_id.to_string(), insert_id.to_string());
+
+        // Focus an existing window rather than creating a second browser.
+        if let Some(handle) = self.plugin_editors.builtin.get(&key) {
+            if handle
+                .update(cx, |_, window, _| window.activate_window())
+                .is_ok()
+            {
+                return;
+            }
+            self.plugin_editors.builtin.remove(&key);
+        }
+
+        let editor_id = format!("{track_id}::{insert_id}");
+        let owner_bounds = window.bounds();
+        match crate::components::builtin_plugin_editor_window::open_builtin_editor_window(
+            owner_bounds,
+            editor_id,
+            plugin_id.to_string(),
+            display_name,
+            cx,
+        ) {
+            Ok(handle) => {
+                self.plugin_editors.builtin.insert(key, handle);
+                eprintln!(
+                    "[BuiltinPluginEditor] opened plugin={plugin_id} track={track_id} insert={insert_id}"
+                );
+            }
+            Err(err) => {
+                eprintln!(
+                    "[BuiltinPluginEditor] open FAILED plugin={plugin_id} track={track_id} \
+                     insert={insert_id} err={err}"
+                );
+            }
+        }
+    }
+
     /// Close the editor window for a slot if one is open. Idempotent. Removing
     /// the GPUI window drops the entity, which detaches the native view.
     pub(super) fn close_insert_editor(
@@ -1882,6 +1973,12 @@ impl StudioLayout {
         self.close_bridge_editor(cx, track_id, insert_id);
         // Legacy GPUI-window editor (FUTUREBOARD_PLUGIN_LEGACY_IN_PROCESS only).
         let key = (track_id.to_string(), insert_id.to_string());
+        // Built-in CEF editor. Close is two-phase so CEF releases its native
+        // browser before GPUI destroys the shell/content HWND hierarchy.
+        if let Some(handle) = self.plugin_editors.builtin.remove(&key) {
+            let _ = handle.update(cx, |editor, _window, cx| editor.request_close(cx));
+            eprintln!("[BuiltinPluginEditorClose] plugin={insert_id} close_requested=true");
+        }
         if let Some(handle) = self.plugin_editors.open.remove(&key) {
             let _ = handle.update(cx, |_, window, _| window.remove_window());
             eprintln!("[PluginEditorClose] plugin={insert_id} removed_called=true");

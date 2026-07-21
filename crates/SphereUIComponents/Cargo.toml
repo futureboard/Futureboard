@@ -20,6 +20,14 @@ stem-onnx = ["sphere-audio-processor/stem-onnx"]
 stem-cuda = ["sphere-audio-processor/stem-cuda"]
 stem-directml = ["sphere-audio-processor/stem-directml"]
 stem-coreml = ["sphere-audio-processor/stem-coreml"]
+# CEF-hosted editors for built-in plugins. Requires the CEF SDK in `build/cef`;
+# without this feature the built-in editor route reports "host unavailable"
+# instead of opening a window.
+builtin-plugin-editor = [
+    "dep:sphere-webview",
+    "dep:rodharerist",
+    "dep:builtin-ui-embed",
+]
 
 [dependencies]
 # NOTE: `default-features = false` opts out of gpui's `windows-manifest` feature.
@@ -39,6 +47,11 @@ sphere_directaudioengine.workspace = true
 sphere-audio-processor.workspace = true
 sphere-audio-editor.workspace = true
 sphere-plugin-host.workspace = true
+# Built-in plugin editor hosting (feature `builtin-plugin-editor`).
+# `rodharerist` is needed for its embedded editor asset table.
+sphere-webview = { workspace = true, optional = true, features = ["cef-runtime"] }
+rodharerist = { workspace = true, optional = true }
+builtin-ui-embed = { workspace = true, optional = true }
 # Reusable native graphics/text/window backend (DirectWrite, DWM, GDI paint).
 sphere-graphic-engine.workspace = true
 sphere-midi-service.workspace = true

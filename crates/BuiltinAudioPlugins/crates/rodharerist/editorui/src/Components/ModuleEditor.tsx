@@ -1,3 +1,4 @@
+import { useState } from "react";
 import {
   categories,
   defaultValueFor,
@@ -5,6 +6,7 @@ import {
   type CategoryId,
   type Param,
 } from "../data";
+import type { NamCaptureLoadOptions } from "../bridge";
 import { Knob } from "./Knob";
 
 type ModuleEditorProps = {
@@ -15,6 +17,8 @@ type ModuleEditorProps = {
   onSelectModel: (id: string) => void;
   onToggleBypass: () => void;
   onParamChange: (id: string, value: number) => void;
+  onLoadNamCapture: (json: string, opts: NamCaptureLoadOptions) => void;
+  onBypassCab: () => void;
 };
 
 export function ModuleEditor({
@@ -25,10 +29,31 @@ export function ModuleEditor({
   onSelectModel,
   onToggleBypass,
   onParamChange,
+  onLoadNamCapture,
+  onBypassCab,
 }: ModuleEditorProps) {
   const list = models[activeCat] ?? [];
   const model = list.find((m) => m.id === activeModelId) ?? list[0];
   const cat = categories[activeCat];
+  const isNamCapture = activeCat === "amp" && activeModelId === "nam_capture";
+  const [namStereo, setNamStereo] = useState(true);
+  const [namFullRig, setNamFullRig] = useState(false);
+
+  const handleNamFile = (file: File | undefined) => {
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      const json = reader.result;
+      if (typeof json === "string") {
+        onLoadNamCapture(json, {
+          name: file.name.replace(/\.nam$/i, ""),
+          stereo: namStereo,
+          fullRig: namFullRig,
+        });
+      }
+    };
+    reader.readAsText(file);
+  };
 
   return (
     <section className="editor">
@@ -70,6 +95,40 @@ export function ModuleEditor({
             </button>
           ))}
         </div>
+
+        {isNamCapture && (
+          <div className="nam-capture-controls">
+            <label className="nam-file-btn">
+              Load .nam Capture…
+              <input
+                type="file"
+                accept=".nam"
+                onChange={(e) => handleNamFile(e.target.files?.[0])}
+              />
+            </label>
+            <label className="nam-check">
+              <input
+                type="checkbox"
+                checked={namStereo}
+                onChange={(e) => setNamStereo(e.target.checked)}
+              />
+              Stereo (two independent models)
+            </label>
+            <label className="nam-check">
+              <input
+                type="checkbox"
+                checked={namFullRig}
+                onChange={(e) => setNamFullRig(e.target.checked)}
+              />
+              Full Rig capture (amp + cab + mic)
+            </label>
+            {namFullRig && (
+              <button type="button" className="nam-bypass-cab" onClick={onBypassCab}>
+                Bypass Cab
+              </button>
+            )}
+          </div>
+        )}
 
         <div className="param-bank">
           {params.map((p) => (

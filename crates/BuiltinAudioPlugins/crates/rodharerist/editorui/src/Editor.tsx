@@ -22,9 +22,11 @@ import { Layout } from "./Layout";
 import {
   hasNativeBridge,
   postEnabled,
+  postLoadNamCapture,
   postModel,
   postParam,
   postPathOrder,
+  type NamCaptureLoadOptions,
 } from "./bridge";
 import "./Styles/Editor.css";
 
@@ -364,6 +366,20 @@ function RodhareistEditor() {
     [toggleBypassFor],
   );
 
+  const loadNamCapture = useCallback(
+    (json: string, opts: NamCaptureLoadOptions) => {
+      postLoadNamCapture(json, opts);
+      markDirty();
+    },
+    [markDirty],
+  );
+
+  const bypassCab = useCallback(() => {
+    postEnabled(categories.cab.node, false);
+    setBypassed((prev) => ({ ...prev, cab: true }));
+    markDirty();
+  }, [markDirty]);
+
   const reorderPath = useCallback(
     (next: CategoryId[]) => {
       setPathOrder(next);
@@ -636,6 +652,8 @@ function RodhareistEditor() {
       onSelectModel={selectModel}
       onToggleBypass={toggleBypass}
       onParamChange={onParamChange}
+      onLoadNamCapture={loadNamCapture}
+      onBypassCab={bypassCab}
     />
   );
 }

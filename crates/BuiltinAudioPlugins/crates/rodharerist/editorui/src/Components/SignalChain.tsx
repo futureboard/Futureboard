@@ -1,4 +1,21 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef } from "react";
+import {
+  DndContext,
+  PointerSensor,
+  closestCenter,
+  useDraggable,
+  useDroppable,
+  useSensor,
+  useSensors,
+  type DragEndEvent,
+} from "@dnd-kit/core";
+import {
+  SortableContext,
+  arrayMove,
+  horizontalListSortingStrategy,
+  useSortable,
+} from "@dnd-kit/sortable";
+import { CSS } from "@dnd-kit/utilities";
 import {
   categories,
   icons,
@@ -24,6 +41,8 @@ type SignalChainProps = {
   onToggleModule: (cat: CategoryId) => void;
   onReorderPath: (next: CategoryId[]) => void;
 };
+
+const EMPTY_PATH_DROP_ID = "path-empty";
 
 function modelLabel(cat: CategoryId, modelId: string): string {
   const list = models[cat] ?? [];
@@ -55,6 +74,129 @@ function IoMeter({
   );
 }
 
+function PathModule({
+  cat,
+  selected,
+  isBypassed,
+  label,
+  title,
+  onSelect,
+  onToggle,
+  onRemove,
+}: {
+  cat: CategoryId;
+  selected: boolean;
+  isBypassed: boolean;
+  label: string;
+  title: string;
+  onSelect: () => void;
+  onToggle: () => void;
+  onRemove: () => void;
+}) {
+  const c = categories[cat];
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } =
+    useSortable({ id: cat });
+
+  return (
+    <div className="module-wrap">
+      <div
+        ref={setNodeRef}
+        className={`module${selected ? " selected" : ""}${isBypassed ? " bypassed" : ""}`}
+        style={{
+          ["--mc" as string]: c.color,
+          transform: CSS.Transform.toString(transform),
+          transition,
+          opacity: isDragging ? 0.4 : 1,
+        }}
+        {...attributes}
+        {...listeners}
+        onClick={onSelect}
+        title={title}
+      >
+        <button
+          className="blk-power"
+          title={isBypassed ? "Enable" : "Bypass"}
+          type="button"
+          onClick={(e) => {
+            e.stopPropagation();
+            onToggle();
+          }}
+        />
+        <button
+          className="blk-remove"
+          type="button"
+          title="Remove from path"
+          onClick={(e) => {
+            e.stopPropagation();
+            onRemove();
+          }}
+        >
+          ×
+        </button>
+        <div className="ic">
+          <svg
+            width="22"
+            height="22"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            dangerouslySetInnerHTML={{ __html: icons[c.node] ?? "" }}
+          />
+        </div>
+        <div className="mtext">
+          <span className="mtitle">{c.short}</span>
+          <span className="mmodel">{label}</span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function RackItem({
+  cat,
+  onAdd,
+}: {
+  cat: CategoryId;
+  onAdd: (cat: CategoryId) => void;
+}) {
+  const c = categories[cat];
+  const { attributes, listeners, setNodeRef, transform, isDragging } = useDraggable({
+    id: `rack-${cat}`,
+    data: { fromRack: true, cat },
+  });
+
+  return (
+    <button
+      ref={setNodeRef}
+      type="button"
+      className="rack-item"
+      style={{
+        ["--mc" as string]: c.color,
+        transform: CSS.Translate.toString(transform),
+        opacity: isDragging ? 0.4 : 1,
+      }}
+      {...attributes}
+      {...listeners}
+      onClick={() => onAdd(cat)}
+      title={`Add ${c.name} to path`}
+    >
+      {c.short}
+    </button>
+  );
+}
+
+function EmptyPathDropTarget() {
+  const { setNodeRef, isOver } = useDroppable({ id: EMPTY_PATH_DROP_ID });
+  return (
+    <div ref={setNodeRef} className={`path-empty${isOver ? " drag-over" : ""}`}>
+      Empty path — add blocks from the rack
+    </div>
+  );
+}
+
 export function SignalChain({
   pathOrder,
   activeCat,
@@ -67,9 +209,10 @@ export function SignalChain({
 }: SignalChainProps) {
   const svgRef = useRef<SVGSVGElement>(null);
   const rowRef = useRef<HTMLDivElement>(null);
-  const [dragCat, setDragCat] = useState<CategoryId | null>(null);
-  const [dragFromRack, setDragFromRack] = useState(false);
   const rack = rackFromPath(pathOrder);
+  const sensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 4 } }),
+  );
 
   useEffect(() => {
     const draw = () => {
@@ -117,18 +260,6 @@ export function SignalChain({
     };
   }, [activeCat, bypassed, pathOrder, stageModels]);
 
-  const moveInPath = (cat: CategoryId, dir: -1 | 1) => {
-    const i = pathOrder.indexOf(cat);
-    if (i < 0) return;
-    const j = i + dir;
-    if (j < 0 || j >= pathOrder.length) return;
-    const next = [...pathOrder];
-    const tmp = next[i]!;
-    next[i] = next[j]!;
-    next[j] = tmp;
-    onReorderPath(next);
-  };
-
   const removeFromPath = (cat: CategoryId) => {
     onReorderPath(pathOrder.filter((c) => c !== cat));
   };
@@ -141,18 +272,30 @@ export function SignalChain({
     onReorderPath(next);
   };
 
-  const onDropAt = (index: number) => {
-    if (!dragCat) return;
-    if (dragFromRack) {
-      addToPath(dragCat, index);
-    } else {
-      const without = pathOrder.filter((c) => c !== dragCat);
-      const clamped = Math.max(0, Math.min(index, without.length));
-      without.splice(clamped, 0, dragCat);
-      onReorderPath(without);
+  const handleDragEnd = ({ active, over }: DragEndEvent) => {
+    if (!over) return;
+    const dragData = active.data.current as
+      | { fromRack?: boolean; cat?: CategoryId }
+      | undefined;
+
+    if (dragData?.fromRack) {
+      const cat = dragData.cat as CategoryId;
+      if (over.id === EMPTY_PATH_DROP_ID) {
+        addToPath(cat);
+        return;
+      }
+      const overIndex = pathOrder.indexOf(over.id as CategoryId);
+      addToPath(cat, overIndex >= 0 ? overIndex : undefined);
+      return;
     }
-    setDragCat(null);
-    setDragFromRack(false);
+
+    const activeCatId = active.id as CategoryId;
+    const overCatId = over.id as CategoryId;
+    if (activeCatId === overCatId) return;
+    const oldIndex = pathOrder.indexOf(activeCatId);
+    const newIndex = pathOrder.indexOf(overCatId);
+    if (oldIndex < 0 || newIndex < 0) return;
+    onReorderPath(arrayMove(pathOrder, oldIndex, newIndex));
   };
 
   return (
@@ -160,143 +303,51 @@ export function SignalChain({
       <span className="chain-title">Path</span>
       <span className="chain-hint">Drag to reorder · × remove · rack adds back</span>
       <svg className="chain-svg" ref={svgRef} />
-      <div className="chain-row" ref={rowRef} id="chain-row">
-        <IoMeter title="In" left={vu.inL} right={vu.inR} />
+      <DndContext
+        sensors={sensors}
+        collisionDetection={closestCenter}
+        onDragEnd={handleDragEnd}
+      >
+        <div className="chain-row" ref={rowRef} id="chain-row">
+          <IoMeter title="In" left={vu.inL} right={vu.inR} />
 
-        <div
-          className="drop-zone"
-          onDragOver={(e) => e.preventDefault()}
-          onDrop={() => onDropAt(0)}
-        />
+          {pathOrder.length === 0 && <EmptyPathDropTarget />}
 
-        {pathOrder.length === 0 && (
-          <div className="path-empty">Empty path — add blocks from the rack</div>
-        )}
-
-        {pathOrder.map((cat, index) => {
-          const c = categories[cat];
-          const selected = cat === activeCat;
-          const isBypassed = !!bypassed[cat];
-          const mid = stageModels[cat] ?? models[cat][0]?.id ?? "";
-          const label = modelLabel(cat, mid);
-          return (
-            <div key={cat} className="module-wrap">
-              <div
-                className={`module${selected ? " selected" : ""}${isBypassed ? " bypassed" : ""}`}
-                style={{ ["--mc" as string]: c.color }}
-                draggable
-                onDragStart={() => {
-                  setDragCat(cat);
-                  setDragFromRack(false);
-                }}
-                onDragEnd={() => {
-                  setDragCat(null);
-                  setDragFromRack(false);
-                }}
-                onClick={() => onSelectCategory(cat)}
-                title={`${c.name}: ${models[cat].find((m) => m.id === mid)?.name ?? label}`}
-              >
-                <button
-                  className="blk-power"
-                  title={isBypassed ? "Enable" : "Bypass"}
-                  type="button"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    onToggleModule(cat);
-                  }}
+          <SortableContext items={pathOrder} strategy={horizontalListSortingStrategy}>
+            {pathOrder.map((cat) => {
+              const c = categories[cat];
+              const selected = cat === activeCat;
+              const isBypassed = !!bypassed[cat];
+              const mid = stageModels[cat] ?? models[cat][0]?.id ?? "";
+              const label = modelLabel(cat, mid);
+              return (
+                <PathModule
+                  key={cat}
+                  cat={cat}
+                  selected={selected}
+                  isBypassed={isBypassed}
+                  label={label}
+                  title={`${c.name}: ${models[cat].find((m) => m.id === mid)?.name ?? label}`}
+                  onSelect={() => onSelectCategory(cat)}
+                  onToggle={() => onToggleModule(cat)}
+                  onRemove={() => removeFromPath(cat)}
                 />
-                <button
-                  className="blk-remove"
-                  type="button"
-                  title="Remove from path"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    removeFromPath(cat);
-                  }}
-                >
-                  ×
-                </button>
-                <div className="blk-move">
-                  <button
-                    type="button"
-                    title="Move left"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      moveInPath(cat, -1);
-                    }}
-                  >
-                    ‹
-                  </button>
-                  <button
-                    type="button"
-                    title="Move right"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      moveInPath(cat, 1);
-                    }}
-                  >
-                    ›
-                  </button>
-                </div>
-                <div className="ic">
-                  <svg
-                    width="22"
-                    height="22"
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    strokeWidth="2"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    dangerouslySetInnerHTML={{ __html: icons[c.node] ?? "" }}
-                  />
-                </div>
-                <div className="mtext">
-                  <span className="mtitle">{c.short}</span>
-                  <span className="mmodel">{label}</span>
-                </div>
-              </div>
-              <div
-                className="drop-zone"
-                onDragOver={(e) => e.preventDefault()}
-                onDrop={() => onDropAt(index + 1)}
-              />
-            </div>
-          );
-        })}
+              );
+            })}
+          </SortableContext>
 
-        <IoMeter title="Out" left={vu.outL} right={vu.outR} />
-      </div>
-
-      {rack.length > 0 && (
-        <div className="rack">
-          <span className="rack-label">Rack</span>
-          {rack.map((cat) => {
-            const c = categories[cat];
-            return (
-              <button
-                key={cat}
-                type="button"
-                className="rack-item"
-                style={{ ["--mc" as string]: c.color }}
-                draggable
-                onDragStart={() => {
-                  setDragCat(cat);
-                  setDragFromRack(true);
-                }}
-                onDragEnd={() => {
-                  setDragCat(null);
-                  setDragFromRack(false);
-                }}
-                onClick={() => addToPath(cat)}
-                title={`Add ${c.name} to path`}
-              >
-                {c.short}
-              </button>
-            );
-          })}
+          <IoMeter title="Out" left={vu.outL} right={vu.outR} />
         </div>
-      )}
+
+        {rack.length > 0 && (
+          <div className="rack">
+            <span className="rack-label">Rack</span>
+            {rack.map((cat) => (
+              <RackItem key={cat} cat={cat} onAdd={addToPath} />
+            ))}
+          </div>
+        )}
+      </DndContext>
     </section>
   );
 }

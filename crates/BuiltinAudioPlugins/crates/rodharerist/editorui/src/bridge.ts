@@ -9,10 +9,20 @@
 // In a plain browser (e.g. `bun run dev`) there is no bridge, so every call is a
 // safe no-op — the editor still works for design/preview.
 
+export type NamCaptureLoadOptions = {
+  /** Display name shown in the editor after a successful load. */
+  name: string;
+  /** Build two independent models (true stereo width) vs mirror one to both channels. */
+  stereo: boolean;
+  /** Marks the capture as already modeling amp + cab + mic, for the "Bypass Cab" action. */
+  fullRig: boolean;
+};
+
 type NativeBridge = {
   setParam?: (id: string, value: number) => void;
   setEnabled?: (stage: string, enabled: boolean) => void;
   selectModel?: (category: string, modelId: string) => void;
+  loadNamCapture?: (json: string, opts: NamCaptureLoadOptions) => void;
 };
 
 declare global {
@@ -68,6 +78,19 @@ export function postEnabled(stage: string, enabled: boolean): void {
 export function postModel(category: string, modelId: string): void {
   try {
     bridge()?.selectModel?.(category, modelId);
+  } catch {
+    /* no-op */
+  }
+}
+
+/**
+ * Load a `.nam` capture into the Tone/Amp slot's NAM engine. `json` is the
+ * `.nam` file's raw text content (read client-side via `FileReader`, since
+ * the editor runs sandboxed and has no filesystem path access).
+ */
+export function postLoadNamCapture(json: string, opts: NamCaptureLoadOptions): void {
+  try {
+    bridge()?.loadNamCapture?.(json, opts);
   } catch {
     /* no-op */
   }

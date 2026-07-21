@@ -25,19 +25,24 @@ mod chorus;
 mod delay;
 mod drive;
 mod gate;
+mod handoff;
+mod nam;
 mod reverb;
+mod tone_stage;
 
 use builtin_dsp_core::{
     ParamDescriptor, PluginCategory, PluginDescriptor, StereoEffect, clamp,
 };
 
-use amp::Amp;
 use cab::Cabinet;
 use chorus::Chorus;
 use delay::TapeDelay;
 use drive::Drive;
 use gate::NoiseGate;
+pub use nam::{NamCaptureInfo, NamLoadError};
 use reverb::PlateReverb;
+pub use tone_stage::ToneEngineKind;
+use tone_stage::ToneStage;
 
 pub const PLUGIN_ID: &str = "futureboard.rodharerist";
 
@@ -199,6 +204,45 @@ impl AmpModel {
     }
 }
 
+/// Cabinet voicing, matching the editor's `cab` models.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CabModel {
+    /// "1960v Vintage 4x12" — Celestion vintage cabinet sim.
+    Vintage4x12,
+    /// "American 2x12" — brighter, tighter open-back combo.
+    American2x12,
+    /// "Tweed 1x12" — small, boxy, rolled-off single speaker.
+    Tweed1x12,
+    /// "Modern 4x12" — tight, scooped, extended highs.
+    Modern4x12,
+}
+
+impl CabModel {
+    pub const ALL: &'static [Self] = &[
+        Self::Vintage4x12,
+        Self::American2x12,
+        Self::Tweed1x12,
+        Self::Modern4x12,
+    ];
+
+    pub fn from_model_id(id: &str) -> Option<Self> {
+        match id {
+            "vintage_cab" => Some(Self::Vintage4x12),
+            "american_2x12" => Some(Self::American2x12),
+            "tweed_1x12" => Some(Self::Tweed1x12),
+            "modern_412" => Some(Self::Modern4x12),
+            _ => None,
+        }
+    }
+
+    pub fn from_index(i: u32) -> Self {
+        Self::ALL
+            .get(i as usize)
+            .copied()
+            .unwrap_or(Self::Vintage4x12)
+    }
+}
+
 /// Full parameter set. Knob ranges match `editorui/src/data.ts` one-to-one so the
 /// React UI and the bridge speak the same units.
 #[derive(Debug, Clone)]
@@ -216,6 +260,11 @@ pub struct Params {
 
     pub drive_model: DriveModel,
     pub amp_model: AmpModel,
+    pub cab_model: CabModel,
+
+    /// Which engine the Tone/Amp slot runs: Classic Amp, NAM Capture, or Bypass.
+    /// Mutually exclusive — never more than one processes at a time.
+    pub tone_engine: ToneEngineKind,
 
     /// Helix-style ordered path. `None` = empty slot (stage not in path).
     /// Stages absent from this list are not processed.
@@ -254,6 +303,12 @@ pub struct Params {
     // Cabinet.
     pub cab_mic: f32,  // 0..100 % (mic position / brightness)
     pub cab_dist: f32, // 0..100 % (distance / roll-off)
+
+    // NAM Capture (only active while `tone_engine == ToneEngineKind::NamCapture`).
+    pub nam_input_trim_db: f32,  // -24..24
+    pub nam_output_trim_db: f32, // -24..24
+    pub nam_mix: f32,            // 0..100 % wet
+    pub nam_loudness_norm: bool,
 }
 
 /// Defaults mirror the editor's `parameterDefaults` (Mandarin patch, "06D").
@@ -269,6 +324,8 @@ pub fn default_params() -> Params {
         cab_on: true,
         drive_model: DriveModel::Screamer,
         amp_model: AmpModel::Mandarin,
+        cab_model: CabModel::Vintage4x12,
+        tone_engine: ToneEngineKind::Classic,
         stage_order: StageKind::default_path(),
         gate_thresh_db: -55.0,
         drive_gain: 6.0,
@@ -290,6 +347,10 @@ pub fn default_params() -> Params {
         reverb_mix: 55.0,
         cab_mic: 20.0,
         cab_dist: 40.0,
+        nam_input_trim_db: 0.0,
+        nam_output_trim_db: 0.0,
+        nam_mix: 100.0,
+        nam_loudness_norm: true,
     }
 }
 
@@ -328,13 +389,12 @@ pub fn descriptor() -> PluginDescriptor {
 }
 
 /// The full guitar chain.
-#[derive(Debug, Clone)]
 pub struct Dsp {
     sample_rate: f32,
     params: Params,
     gate: NoiseGate,
     drive: Drive,
-    amp: Amp,
+    amp_stage: ToneStage,
     chorus: Chorus,
     delay: TapeDelay,
     reverb: PlateReverb,
@@ -351,7 +411,7 @@ impl Dsp {
             params: default_params(),
             gate: NoiseGate::new(sr),
             drive: Drive::new(sr),
-            amp: Amp::new(sr),
+            amp_stage: ToneStage::new(sr),
             chorus: Chorus::new(sr),
             delay: TapeDelay::new(sr),
             reverb: PlateReverb::new(sr),
@@ -386,6 +446,8 @@ impl Dsp {
             cab_on: params.cab_on,
             drive_model: params.drive_model,
             amp_model: params.amp_model,
+            cab_model: params.cab_model,
+            tone_engine: params.tone_engine,
             stage_order: sanitize_stage_order(params.stage_order),
             gate_thresh_db: clamp(params.gate_thresh_db, -80.0, 0.0),
             drive_gain: clamp(params.drive_gain, 0.0, 10.0),
@@ -407,6 +469,10 @@ impl Dsp {
             reverb_mix: clamp(params.reverb_mix, 0.0, 100.0),
             cab_mic: clamp(params.cab_mic, 0.0, 100.0),
             cab_dist: clamp(params.cab_dist, 0.0, 100.0),
+            nam_input_trim_db: clamp(params.nam_input_trim_db, -24.0, 24.0),
+            nam_output_trim_db: clamp(params.nam_output_trim_db, -24.0, 24.0),
+            nam_mix: clamp(params.nam_mix, 0.0, 100.0),
+            nam_loudness_norm: params.nam_loudness_norm,
         };
         self.apply_params();
     }
@@ -428,7 +494,12 @@ impl Dsp {
             "reverb_on" => p.reverb_on = on,
             "cab_on" => p.cab_on = on,
             "drive_model" => p.drive_model = DriveModel::from_index(value.round() as u32),
-            "amp_model" => p.amp_model = AmpModel::from_index(value.round() as u32),
+            "amp_model" => {
+                p.amp_model = AmpModel::from_index(value.round() as u32);
+                p.tone_engine = ToneEngineKind::Classic;
+            }
+            "cab_model" => p.cab_model = CabModel::from_index(value.round() as u32),
+            "tone_engine" => p.tone_engine = ToneEngineKind::from_index(value.round() as u32),
             "path_slot_0" => p.stage_order[0] = StageKind::from_index(value.round() as i32),
             "path_slot_1" => p.stage_order[1] = StageKind::from_index(value.round() as i32),
             "path_slot_2" => p.stage_order[2] = StageKind::from_index(value.round() as i32),
@@ -456,6 +527,10 @@ impl Dsp {
             "reverb_mix" => p.reverb_mix = value,
             "cab_mic" => p.cab_mic = value,
             "cab_dist" => p.cab_dist = value,
+            "nam_input_trim" => p.nam_input_trim_db = value,
+            "nam_output_trim" => p.nam_output_trim_db = value,
+            "nam_mix" => p.nam_mix = value,
+            "nam_loudness_norm" => p.nam_loudness_norm = on,
             _ => return false,
         }
         self.set_params(p);
@@ -468,12 +543,17 @@ impl Dsp {
     pub fn select_model(&mut self, category: &str, model_id: &str) -> bool {
         let mut p = self.params.clone();
         match category {
-            "amp" => {
-                let Some(m) = AmpModel::from_model_id(model_id) else {
-                    return false;
-                };
-                p.amp_model = m;
-            }
+            "amp" => match model_id {
+                "bypass" => p.tone_engine = ToneEngineKind::Bypass,
+                "nam_capture" => p.tone_engine = ToneEngineKind::NamCapture,
+                _ => {
+                    let Some(m) = AmpModel::from_model_id(model_id) else {
+                        return false;
+                    };
+                    p.amp_model = m;
+                    p.tone_engine = ToneEngineKind::Classic;
+                }
+            },
             "drive" => {
                 let Some(m) = DriveModel::from_model_id(model_id) else {
                     return false;
@@ -485,7 +565,12 @@ impl Dsp {
             "mod" if model_id == "chorus" => {}
             "delay" if model_id == "tape" => {}
             "reverb" if model_id == "plate" => {}
-            "cab" if model_id == "vintage_cab" => {}
+            "cab" => {
+                let Some(m) = CabModel::from_model_id(model_id) else {
+                    return false;
+                };
+                p.cab_model = m;
+            }
             _ => return false,
         }
         self.params = p;
@@ -497,7 +582,8 @@ impl Dsp {
         let p = &self.params;
         self.gate.set_threshold_db(p.gate_thresh_db);
         self.drive.configure(p.drive_model, p.drive_gain, p.drive_tone, p.drive_level);
-        self.amp.configure(
+        self.amp_stage.set_engine(p.tone_engine);
+        self.amp_stage.configure_classic(
             p.amp_model,
             p.amp_gain,
             p.amp_bass,
@@ -506,15 +592,79 @@ impl Dsp {
             p.amp_presence,
             p.amp_master,
         );
+        self.amp_stage.configure_nam(
+            p.nam_input_trim_db,
+            p.nam_output_trim_db,
+            p.nam_mix,
+            p.nam_loudness_norm,
+        );
         self.chorus.configure(p.chorus_rate, p.chorus_depth, p.chorus_mix);
         self.delay.configure(p.delay_time_ms, p.delay_fb, p.delay_mix);
         self.reverb.configure(p.reverb_decay_s, p.reverb_mix);
-        self.cab.configure(p.cab_mic, p.cab_dist);
+        self.cab.configure(p.cab_model, p.cab_mic, p.cab_dist);
     }
 
     /// Replace the Helix path order (control thread).
     pub fn set_path_order(&mut self, order: [Option<StageKind>; 7]) {
         self.params.stage_order = sanitize_stage_order(order);
+    }
+
+    /// Audio thread: call once per audio block, before the block's per-sample
+    /// [`StereoEffect::process_stereo`] calls. This is the only place a
+    /// pending NAM capture swap (queued by [`Dsp::load_nam_capture_json`] on
+    /// the control thread) is adopted — never mid-block, never per-sample.
+    pub fn begin_block(&mut self) {
+        self.amp_stage.begin_block();
+    }
+
+    /// Control thread: parse and build a `.nam` capture, then queue it for the
+    /// audio thread to adopt at the next [`Dsp::begin_block`]. Rejects a
+    /// sample-rate mismatch (nam-rs does not resample) rather than silently
+    /// mis-running. `stereo` builds two independent models (true stereo
+    /// width); otherwise one model's output is mirrored to both channels.
+    /// `full_rig` marks the capture as already modeling amp + cab + mic, so
+    /// the host/UI can offer an explicit "Bypass Cab" action.
+    pub fn load_nam_capture_json(
+        &mut self,
+        json: &str,
+        name: impl Into<String>,
+        stereo: bool,
+        full_rig: bool,
+    ) -> Result<NamCaptureInfo, NamLoadError> {
+        let prepared = nam::prepare_nam_runtime(
+            json,
+            name.into(),
+            self.sample_rate as f64,
+            stereo,
+            full_rig,
+        )?;
+        let info = prepared.info();
+        // Opportunistic sweep: drop whatever the audio thread has already
+        // retired before handing off the new one.
+        self.amp_stage.poll_nam_garbage();
+        self.amp_stage.submit_nam_runtime(Box::new(prepared));
+        Ok(info)
+    }
+
+    /// Control thread: drop any NAM capture the audio thread has retired.
+    /// Safe to call periodically (e.g. an idle/UI timer/poll) even when
+    /// nothing is pending.
+    pub fn poll_nam_garbage(&mut self) {
+        self.amp_stage.poll_nam_garbage();
+    }
+
+    /// Info about the currently active NAM capture, if the Tone/Amp slot has
+    /// one loaded (regardless of whether `NamCapture` is the active engine).
+    pub fn nam_capture_info(&self) -> Option<NamCaptureInfo> {
+        self.amp_stage.nam_capture_info()
+    }
+
+    /// Latency contributed by the active NAM capture's receptive field, in
+    /// samples (0 if none loaded). A preallocated sample-rate adapter and
+    /// full plugin-latency reporting are follow-up work; this exposes the raw
+    /// number the capture itself already computes.
+    pub fn nam_latency_samples(&self) -> usize {
+        self.amp_stage.nam_latency_samples()
     }
 }
 
@@ -542,7 +692,7 @@ impl StereoEffect for Dsp {
     fn reset(&mut self) {
         self.gate.reset();
         self.drive.reset();
-        self.amp.reset();
+        self.amp_stage.reset();
         self.chorus.reset();
         self.delay.reset();
         self.reverb.reset();
@@ -556,7 +706,7 @@ impl StereoEffect for Dsp {
         self.sample_rate = sr;
         self.gate.set_sample_rate(sr);
         self.drive.set_sample_rate(sr);
-        self.amp.set_sample_rate(sr);
+        self.amp_stage.set_sample_rate(sr);
         self.chorus.set_sample_rate(sr);
         self.delay.set_sample_rate(sr);
         self.reverb.set_sample_rate(sr);
@@ -584,7 +734,7 @@ impl StereoEffect for Dsp {
                     (l, r) = self.drive.process(l, r);
                 }
                 StageKind::Amp if self.params.amp_on => {
-                    (l, r) = self.amp.process(l, r);
+                    (l, r) = self.amp_stage.process(l, r);
                 }
                 StageKind::Mod if self.params.mod_on => {
                     (l, r) = self.chorus.process(l, r);
@@ -765,6 +915,69 @@ pub(crate) fn tube_stage(x: f32, bias: f32, drive: f32) -> f32 {
 mod tests {
     use super::*;
 
+    const TINY_WAVENET_48K: &str = r#"{
+        "version": "0.5.4", "architecture": "WaveNet",
+        "config": { "layers": [{
+            "input_size": 1, "condition_size": 1, "channels": 1, "head_size": 1,
+            "kernel_size": 1, "dilations": [1], "activation": "ReLU",
+            "gated": false, "head_bias": false
+        }], "head": null, "head_scale": 1.0 },
+        "weights": [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0],
+        "sample_rate": 48000.0
+    }"#;
+
+    #[test]
+    fn tone_engine_is_mutually_exclusive_via_select_model_and_ui_param() {
+        let mut dsp = Dsp::new(48_000.0);
+        assert_eq!(dsp.params().tone_engine, ToneEngineKind::Classic);
+
+        assert!(dsp.select_model("amp", "nam_capture"));
+        assert_eq!(dsp.params().tone_engine, ToneEngineKind::NamCapture);
+
+        assert!(dsp.select_model("amp", "bypass"));
+        assert_eq!(dsp.params().tone_engine, ToneEngineKind::Bypass);
+
+        // Picking a classic amp model always snaps the engine back to Classic.
+        assert!(dsp.select_model("amp", "plexi"));
+        assert_eq!(dsp.params().tone_engine, ToneEngineKind::Classic);
+        assert_eq!(dsp.params().amp_model, AmpModel::Plexi);
+
+        assert!(dsp.apply_ui_param("tone_engine", 1.0));
+        assert_eq!(dsp.params().tone_engine, ToneEngineKind::NamCapture);
+    }
+
+    #[test]
+    fn nam_capture_loads_and_swaps_at_block_boundary_not_mid_block() {
+        let mut dsp = Dsp::new(48_000.0);
+        dsp.apply_ui_param("tone_engine", 1.0);
+
+        let info = dsp
+            .load_nam_capture_json(TINY_WAVENET_48K, "Test Capture", false, true)
+            .expect("matching sample rate must load");
+        assert_eq!(info.name, "Test Capture");
+        assert!(info.full_rig);
+        assert!(dsp.nam_capture_info().is_none(), "not adopted before begin_block");
+
+        dsp.begin_block();
+        assert!(dsp.nam_capture_info().is_some(), "adopted at block boundary");
+
+        for _ in 0..256 {
+            let (l, r) = dsp.process_stereo(0.2, -0.2);
+            assert!(l.is_finite() && r.is_finite());
+        }
+
+        dsp.poll_nam_garbage();
+    }
+
+    #[test]
+    fn nam_capture_rejects_sample_rate_mismatch() {
+        let mut dsp = Dsp::new(44_100.0);
+        let err = dsp
+            .load_nam_capture_json(TINY_WAVENET_48K, "Bad Rate", false, false)
+            .expect_err("48kHz capture must be rejected at 44.1kHz engine rate");
+        assert!(matches!(err, NamLoadError::SampleRateMismatch { .. }));
+    }
+
     fn silence_tail_is_finite(dsp: &mut Dsp) {
         for _ in 0..8_000 {
             let (l, r) = dsp.process_stereo(0.0, 0.0);
@@ -843,6 +1056,11 @@ mod tests {
         assert_eq!(dsp.params().amp_model, AmpModel::Recto);
         assert!(dsp.select_model("drive", "fuzz"));
         assert_eq!(dsp.params().drive_model, DriveModel::Fuzz);
+        assert!(dsp.apply_ui_param("cab_model", 1.0));
+        assert_eq!(dsp.params().cab_model, CabModel::American2x12);
+        assert!(dsp.select_model("cab", "modern_412"));
+        assert_eq!(dsp.params().cab_model, CabModel::Modern4x12);
+        assert!(!dsp.select_model("cab", "not_a_cab"));
     }
 
     #[test]

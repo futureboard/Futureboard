@@ -100,6 +100,9 @@ rodharerist = { path = "crates/BuiltinAudioPlugins/crates/rodharerist" }
 
 # MIT/Apache-2.0 DSP libraries used by BuiltinAudioPlugins.
 biquad = "0.6"
+# Pure-Rust, real-time-safe .nam (Neural Amp Modeler) inference — used by
+# rodharerist's NAM Capture tone engine.
+nam-rs = "0.3"
 # `std` required (fundsp no_std path currently misses Vec imports in resample).
 # Keep `files`/`fft` off to avoid pulling Symphonia into stock synth DSP.
 fundsp = { version = "0.23", default-features = false, features = ["std"] }

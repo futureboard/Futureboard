@@ -9,7 +9,8 @@
 mod dsp;
 
 pub use dsp::{
-    AmpModel, Dsp, DriveModel, PLUGIN_ID, Params, StageKind, default_params, descriptor,
+    AmpModel, CabModel, Dsp, DriveModel, NamCaptureInfo, NamLoadError, PLUGIN_ID, Params,
+    StageKind, ToneEngineKind, default_params, descriptor,
 };
 
 #[cfg(test)]

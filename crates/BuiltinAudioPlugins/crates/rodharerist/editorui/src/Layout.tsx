@@ -1,4 +1,5 @@
 import type { CategoryId, Param, Preset } from "./data";
+import type { NamCaptureLoadOptions } from "./bridge";
 import { DiscardDialog } from "./Components/DiscardDialog";
 import { Footer } from "./Components/Footer";
 import { Header } from "./Components/Header";
@@ -45,6 +46,8 @@ export type LayoutProps = {
   onSelectModel: (id: string) => void;
   onToggleBypass: () => void;
   onParamChange: (id: string, value: number) => void;
+  onLoadNamCapture: (json: string, opts: NamCaptureLoadOptions) => void;
+  onBypassCab: () => void;
 };
 
 export function Layout({
@@ -74,6 +77,8 @@ export function Layout({
   onSelectModel,
   onToggleBypass,
   onParamChange,
+  onLoadNamCapture,
+  onBypassCab,
 }: LayoutProps) {
   return (
     <div className="plugin">
@@ -116,6 +121,8 @@ export function Layout({
             onSelectModel={onSelectModel}
             onToggleBypass={onToggleBypass}
             onParamChange={onParamChange}
+            onLoadNamCapture={onLoadNamCapture}
+            onBypassCab={onBypassCab}
           />
         </main>
       </div>

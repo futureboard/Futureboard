@@ -316,6 +316,18 @@ export const models: Record<CategoryId, Model[]> = {
       short: "Bassman",
       sub: "Loose American bass-heavy head",
     },
+    {
+      id: "nam_capture",
+      name: "NAM Capture",
+      short: "NAM",
+      sub: "Neural amp/cab capture (.nam)",
+    },
+    {
+      id: "bypass",
+      name: "Bypass",
+      short: "Bypass",
+      sub: "Pass the Tone/Amp slot through unprocessed",
+    },
   ],
   mod: [
     {
@@ -342,6 +354,24 @@ export const models: Record<CategoryId, Model[]> = {
       name: "1960v Vintage 4x12",
       short: "4x12",
       sub: "Celestion vintage cabinet sim",
+    },
+    {
+      id: "american_2x12",
+      name: "American 2x12",
+      short: "2x12",
+      sub: "Bright, tight open-back combo",
+    },
+    {
+      id: "tweed_1x12",
+      name: "Tweed 1x12",
+      short: "Tweed",
+      sub: "Small, boxy single-speaker combo",
+    },
+    {
+      id: "modern_412",
+      name: "Modern 4x12",
+      short: "Modern",
+      sub: "Tight, scooped, extended highs",
     },
   ],
 };
@@ -577,6 +607,12 @@ export const parameterDefaults: Record<string, Param[]> = {
     { id: "amp_presence", name: "Presence", min: 0, max: 10, val: 4.5, unit: "" },
     { id: "amp_master", name: "Master", min: 0, max: 10, val: 5.0, unit: "" },
   ],
+  nam_capture: [
+    { id: "nam_input_trim", name: "Input Trim", min: -24, max: 24, val: 0, unit: "dB" },
+    { id: "nam_output_trim", name: "Output Trim", min: -24, max: 24, val: 0, unit: "dB" },
+    { id: "nam_mix", name: "Mix", min: 0, max: 100, val: 100, unit: "%" },
+  ],
+  bypass: [],
   chorus: [
     {
       id: "chorus_rate",
@@ -648,22 +684,20 @@ export const parameterDefaults: Record<string, Param[]> = {
     },
   ],
   vintage_cab: [
-    {
-      id: "cab_mic",
-      name: "Mic Pos",
-      min: 0,
-      max: 100,
-      val: 20,
-      unit: "%",
-    },
-    {
-      id: "cab_dist",
-      name: "Distance",
-      min: 0,
-      max: 100,
-      val: 40,
-      unit: "%",
-    },
+    { id: "cab_mic", name: "Mic Pos", min: 0, max: 100, val: 20, unit: "%" },
+    { id: "cab_dist", name: "Distance", min: 0, max: 100, val: 40, unit: "%" },
+  ],
+  american_2x12: [
+    { id: "cab_mic", name: "Mic Pos", min: 0, max: 100, val: 35, unit: "%" },
+    { id: "cab_dist", name: "Distance", min: 0, max: 100, val: 30, unit: "%" },
+  ],
+  tweed_1x12: [
+    { id: "cab_mic", name: "Mic Pos", min: 0, max: 100, val: 15, unit: "%" },
+    { id: "cab_dist", name: "Distance", min: 0, max: 100, val: 55, unit: "%" },
+  ],
+  modern_412: [
+    { id: "cab_mic", name: "Mic Pos", min: 0, max: 100, val: 45, unit: "%" },
+    { id: "cab_dist", name: "Distance", min: 0, max: 100, val: 20, unit: "%" },
   ],
 };
 

@@ -10,10 +10,12 @@
 //! - Phase 3 (hard): `c1073`, `meowsyn`
 
 /// BuildInHelper: embedded UI asset infrastructure shared by every Built-in
-/// Plugin dynamic library. See [`ui`] for the runtime lookup API and
-/// [`ui::generate`] (behind the `ui-generate` feature) for the build-time table
-/// generator. This module is deliberately CEF-free.
-pub mod ui;
+/// Plugin dynamic library.
+///
+/// Re-exported from its own dependency-free crate so plugin `build.rs` files can
+/// depend on the generator without dragging the DSP crates (and their `cdylib`
+/// outputs) into a second build unit — see [`builtin_ui_embed`] for why.
+pub use builtin_ui_embed as ui;
 
 pub use builtin_dsp_core as core;
 

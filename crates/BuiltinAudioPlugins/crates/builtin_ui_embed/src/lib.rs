@@ -1,14 +1,24 @@
 //! BuildInHelper — embedded UI asset infrastructure for Built-in Plugins.
 //!
 //! Each Built-in Plugin dynamic library embeds its compiled React/Vite static UI
-//! (`editorui/dist`) as immutable `&'static [u8]` slices. This module provides the
+//! (`editorui/dist`) as immutable `&'static [u8]` slices. This crate provides the
 //! **runtime** side: a normalized lookup table over those bytes plus the
 //! [`EmbeddedPluginUi`] trait the shared CEF UI host resolves requests through.
 //!
-//! CEF is deliberately **not** referenced here. This module only owns asset data
+//! CEF is deliberately **not** referenced here. This crate only owns asset data
 //! and safe path lookup; request/response handling belongs to `FutureboardNative`
 //! or the shared Built-in Plugin UI host. The generator that produces the static
-//! tables lives in [`crate::ui::generate`] (build-time only).
+//! tables lives in [`generate`] (build-time only, behind the `generate` feature).
+//!
+//! ## Why this is its own crate
+//!
+//! Plugin crates use it from `build.rs`. Cargo compiles build-dependencies as a
+//! separate unit, so every crate reachable from here is built twice. While this
+//! code lived inside `BuiltinAudioPlugins`, that second unit also rebuilt the
+//! eight plugin DSP crates — which are `crate-type = ["rlib", "cdylib"]` and
+//! whose `.dll` outputs carry no metadata hash. Both units then raced to write
+//! the same `target/debug/deps/<name>.dll`, giving intermittent LNK1104 link
+//! failures. This crate is therefore kept dependency-free on purpose.
 //!
 //! ## Guarantees
 //!
@@ -316,7 +326,7 @@ pub fn mime_for_path(path: &str) -> &'static str {
     }
 }
 
-#[cfg(feature = "ui-generate")]
+#[cfg(feature = "generate")]
 pub mod generate;
 
 #[cfg(test)]

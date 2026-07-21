@@ -27,6 +27,7 @@ members = [
     "crates/BuiltinAudioPlugins",
     # Builtin stock DSP cores (engine integration deferred).
     "crates/BuiltinAudioPlugins/crates/builtin_dsp_core",
+    "crates/BuiltinAudioPlugins/crates/builtin_ui_embed",
     "crates/BuiltinAudioPlugins/crates/equz8",
     "crates/BuiltinAudioPlugins/crates/compresser",
     "crates/BuiltinAudioPlugins/crates/fa2a",
@@ -89,6 +90,9 @@ sphere-webview = { path = "crates/SphereWebView", package = "SphereWebView" }
 # BuiltinAudioPlugins stock DSP cores (no DirectAudioEngine wiring yet).
 builtin-audio-plugins = { path = "crates/BuiltinAudioPlugins", package = "BuiltinAudioPlugins" }
 builtin-dsp-core = { path = "crates/BuiltinAudioPlugins/crates/builtin_dsp_core", package = "builtin_dsp_core" }
+# Embedded editor-UI assets + build-time generator. Dependency-free by design;
+# see the crate docs before adding anything to it.
+builtin-ui-embed = { path = "crates/BuiltinAudioPlugins/crates/builtin_ui_embed", package = "builtin_ui_embed" }
 equz8 = { path = "crates/BuiltinAudioPlugins/crates/equz8" }
 compresser = { path = "crates/BuiltinAudioPlugins/crates/compresser" }
 fa2a = { path = "crates/BuiltinAudioPlugins/crates/fa2a" }

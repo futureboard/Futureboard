@@ -1,0 +1,33 @@
+[package]
+name = "builtin_ui_embed"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "BuildInHelper — embedded editor-UI asset table and build-time generator for Futureboard Built-in Plugins"
+
+[lib]
+name = "builtin_ui_embed"
+path = "src/lib.rs"
+
+# NOTE: this crate must stay dependency-free.
+#
+# It is used as a `[build-dependencies]` entry by every Built-in Plugin that
+# ships an editor. Cargo always compiles build-dependencies as a separate unit
+# from normal dependencies, so anything reachable from here gets built twice.
+# When that graph contained the plugin DSP crates (which are `crate-type =
+# ["rlib", "cdylib"]`), both units raced to write the same unhashed
+# `target/debug/deps/<name>.dll`, producing intermittent LNK1104 failures.
+# Keeping this crate free of those dependencies is what prevents that.
+[dependencies]
+
+[features]
+default = []
+# Build-time table generator (`generate`). Enable in `[build-dependencies]`.
+generate = []
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

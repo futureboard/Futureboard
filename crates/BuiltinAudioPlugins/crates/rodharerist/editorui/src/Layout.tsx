@@ -1,11 +1,16 @@
 import type { CategoryId, Param, Preset } from "./data";
 import type { NamCaptureLoadOptions } from "./bridge";
+import type { AbSlot } from "./state/history";
 import { DiscardDialog } from "./Components/DiscardDialog";
 import { Footer } from "./Components/Footer";
 import { Header } from "./Components/Header";
+import { IoStrip } from "./Components/IoStrip";
 import { ModuleEditor } from "./Components/ModuleEditor";
 import { PresetBrowser } from "./Components/PresetBrowser";
 import { SignalChain } from "./Components/SignalChain";
+
+// Supports weights 100-700
+import '@fontsource-variable/ibm-plex-sans/wght.css';
 
 export type DiscardPrompt = {
   presetName: string;
@@ -28,13 +33,18 @@ export type LayoutProps = {
   params: Param[];
   testing: boolean;
   showTestDi: boolean;
-  vu: {
-    inL: number;
-    inR: number;
-    outL: number;
-    outR: number;
-  };
+  inputTrim: number;
+  outputTrim: number;
+  globalBypass: boolean;
+  canUndo: boolean;
+  canRedo: boolean;
+  abSlot: AbSlot;
+  clipboardCat: CategoryId | null;
   discardPrompt: DiscardPrompt | null;
+  onUndo: () => void;
+  onRedo: () => void;
+  onSelectAb: (slot: AbSlot) => void;
+  onCopyAb: () => void;
   onStepPreset: (dir: number) => void;
   onLoadPreset: (id: string) => void;
   onToggleTest: () => void;
@@ -45,7 +55,12 @@ export type LayoutProps = {
   onReorderPath: (next: CategoryId[]) => void;
   onSelectModel: (id: string) => void;
   onToggleBypass: () => void;
+  onToggleGlobalBypass: () => void;
   onParamChange: (id: string, value: number) => void;
+  onGlobalParamChange: (id: string, value: number) => void;
+  onCopySettings: (cat: CategoryId) => void;
+  onPasteSettings: (cat: CategoryId) => void;
+  onResetModule: (cat: CategoryId) => void;
   onLoadNamCapture: (json: string, opts: NamCaptureLoadOptions) => void;
   onBypassCab: () => void;
 };
@@ -64,8 +79,18 @@ export function Layout({
   params,
   testing,
   showTestDi,
-  vu,
+  inputTrim,
+  outputTrim,
+  globalBypass,
+  canUndo,
+  canRedo,
+  abSlot,
+  clipboardCat,
   discardPrompt,
+  onUndo,
+  onRedo,
+  onSelectAb,
+  onCopyAb,
   onStepPreset,
   onLoadPreset,
   onToggleTest,
@@ -76,7 +101,12 @@ export function Layout({
   onReorderPath,
   onSelectModel,
   onToggleBypass,
+  onToggleGlobalBypass,
   onParamChange,
+  onGlobalParamChange,
+  onCopySettings,
+  onPasteSettings,
+  onResetModule,
   onLoadNamCapture,
   onBypassCab,
 }: LayoutProps) {
@@ -88,6 +118,13 @@ export function Layout({
         modified={modified}
         testing={testing}
         showTestDi={showTestDi}
+        canUndo={canUndo}
+        canRedo={canRedo}
+        abSlot={abSlot}
+        onUndo={onUndo}
+        onRedo={onRedo}
+        onSelectAb={onSelectAb}
+        onCopyAb={onCopyAb}
         onStepPreset={onStepPreset}
         onToggleTest={onToggleTest}
         onSave={onSave}
@@ -103,16 +140,32 @@ export function Layout({
         />
 
         <main className="dashboard">
-          <SignalChain
-            pathOrder={pathOrder}
-            activeCat={activeCat}
-            stageModels={stageModels}
-            bypassed={bypassed}
-            vu={vu}
-            onSelectCategory={onSelectCategory}
-            onToggleModule={onToggleModule}
-            onReorderPath={onReorderPath}
-          />
+          {/* Gain staging brackets the chain so input and output levels are
+              always on screen, in the order the signal actually travels. */}
+          <div className="chain-region">
+            <IoStrip side="in" trim={inputTrim} onTrimChange={onGlobalParamChange} />
+            <SignalChain
+              pathOrder={pathOrder}
+              activeCat={activeCat}
+              stageModels={stageModels}
+              bypassed={bypassed}
+              clipboardCat={clipboardCat}
+              onSelectCategory={onSelectCategory}
+              onToggleModule={onToggleModule}
+              onReorderPath={onReorderPath}
+              onCopySettings={onCopySettings}
+              onPasteSettings={onPasteSettings}
+              onResetModule={onResetModule}
+            />
+            <IoStrip
+              side="out"
+              trim={outputTrim}
+              onTrimChange={onGlobalParamChange}
+              globalBypass={globalBypass}
+              onToggleGlobalBypass={onToggleGlobalBypass}
+            />
+          </div>
+
           <ModuleEditor
             activeCat={activeCat}
             activeModelId={activeModelId}
@@ -127,7 +180,7 @@ export function Layout({
         </main>
       </div>
 
-      <Footer />
+      <Footer globalBypass={globalBypass} />
 
       {discardPrompt && (
         <DiscardDialog

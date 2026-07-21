@@ -31,7 +31,8 @@ mod reverb;
 mod tone_stage;
 
 use builtin_dsp_core::{
-    ParamDescriptor, PluginCategory, PluginDescriptor, StereoEffect, clamp,
+    ParamDescriptor, PluginCategory, PluginDescriptor, StereoEffect, clamp, db_to_linear,
+    time_constant,
 };
 
 use cab::Cabinet;
@@ -249,6 +250,13 @@ impl CabModel {
 pub struct Params {
     pub power: bool,
 
+    /// Global input trim applied before the first stage (dB, -24..24). This is
+    /// the level the NAM capture sees, so it changes the model's gain and
+    /// tonal response — it is a first-class control, not a hidden utility.
+    pub input_trim_db: f32,
+    /// Global output trim applied after the last stage (dB, -24..24).
+    pub output_trim_db: f32,
+
     // Per-stage enables (editor "bypass" toggles, inverted).
     pub gate_on: bool,
     pub drive_on: bool,
@@ -315,6 +323,8 @@ pub struct Params {
 pub fn default_params() -> Params {
     Params {
         power: true,
+        input_trim_db: 0.0,
+        output_trim_db: 0.0,
         gate_on: true,
         drive_on: true,
         amp_on: true,
@@ -364,6 +374,8 @@ pub fn descriptor() -> PluginDescriptor {
         version: env!("CARGO_PKG_VERSION"),
         params: &[
             ParamDescriptor { id: "power", name: "Power", default_value: 1.0, min: 0.0, max: 1.0, unit: "bool" },
+            ParamDescriptor { id: "input_trim", name: "Input Trim", default_value: 0.0, min: -24.0, max: 24.0, unit: "dB" },
+            ParamDescriptor { id: "output_trim", name: "Output Trim", default_value: 0.0, min: -24.0, max: 24.0, unit: "dB" },
             ParamDescriptor { id: "gate_thresh", name: "Gate", default_value: -55.0, min: -80.0, max: 0.0, unit: "dB" },
             ParamDescriptor { id: "drive_gain", name: "Drive", default_value: 6.0, min: 0.0, max: 10.0, unit: "" },
             ParamDescriptor { id: "drive_tone", name: "Drive Tone", default_value: 5.5, min: 0.0, max: 10.0, unit: "" },
@@ -399,9 +411,68 @@ pub struct Dsp {
     delay: TapeDelay,
     reverb: PlateReverb,
     cab: Cabinet,
+    /// Linear gains derived from `input_trim_db` / `output_trim_db`, recomputed
+    /// on the control thread so the audio path only multiplies.
+    in_gain: f32,
+    out_gain: f32,
+    meters: Meters,
+}
+
+/// Input/output telemetry for the editor. Written from the audio thread with
+/// plain scalar arithmetic (no allocation, no locking); read opportunistically
+/// by the control thread, which tolerates a torn read of a stale frame.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct MeterFrame {
+    pub in_peak: f32,
+    pub in_rms: f32,
+    pub out_peak: f32,
+    pub out_rms: f32,
+    /// Set when a post-trim input sample reached full scale. Sticky until the
+    /// editor calls [`Dsp::clear_clip`] (click-to-reset).
+    pub in_clip: bool,
+    /// Set when a post-trim output sample reached full scale. Sticky.
+    pub out_clip: bool,
+}
+
+#[derive(Debug, Clone)]
+struct Meters {
     in_peak: f32,
     out_peak: f32,
+    /// Mean-square running averages; `sqrt` is deferred to the reader so the
+    /// audio path stays a multiply-add.
+    in_ms: f32,
+    out_ms: f32,
+    /// One-pole coefficient for a ~300 ms RMS window.
+    rms_coeff: f32,
+    in_clip: bool,
+    out_clip: bool,
 }
+
+impl Meters {
+    fn new(sample_rate: f32) -> Self {
+        Self {
+            in_peak: 0.0,
+            out_peak: 0.0,
+            in_ms: 0.0,
+            out_ms: 0.0,
+            rms_coeff: time_constant(sample_rate, 0.300),
+            in_clip: false,
+            out_clip: false,
+        }
+    }
+
+    fn reset(&mut self) {
+        self.in_peak = 0.0;
+        self.out_peak = 0.0;
+        self.in_ms = 0.0;
+        self.out_ms = 0.0;
+        self.in_clip = false;
+        self.out_clip = false;
+    }
+}
+
+/// Full scale. A sample at or beyond this is reported as a clip.
+const CLIP_THRESHOLD: f32 = 1.0;
 
 impl Dsp {
     pub fn new(sample_rate: f32) -> Self {
@@ -416,8 +487,9 @@ impl Dsp {
             delay: TapeDelay::new(sr),
             reverb: PlateReverb::new(sr),
             cab: Cabinet::new(sr),
-            in_peak: 0.0,
-            out_peak: 0.0,
+            in_gain: 1.0,
+            out_gain: 1.0,
+            meters: Meters::new(sr),
         };
         dsp.apply_params();
         dsp
@@ -430,13 +502,36 @@ impl Dsp {
     /// Latest input/output peak levels (0..1), for editor VU telemetry. Decays
     /// each block; never blocks the audio thread.
     pub fn meter_levels(&self) -> (f32, f32) {
-        (self.in_peak, self.out_peak)
+        (self.meters.in_peak, self.meters.out_peak)
+    }
+
+    /// Full input/output telemetry (peak, RMS and sticky clip flags) for the
+    /// editor's gain-staging display. Both levels are measured **after** the
+    /// corresponding trim, so the numbers match what the chain and the host
+    /// actually see.
+    pub fn meter_frame(&self) -> MeterFrame {
+        MeterFrame {
+            in_peak: self.meters.in_peak,
+            in_rms: self.meters.in_ms.max(0.0).sqrt(),
+            out_peak: self.meters.out_peak,
+            out_rms: self.meters.out_ms.max(0.0).sqrt(),
+            in_clip: self.meters.in_clip,
+            out_clip: self.meters.out_clip,
+        }
+    }
+
+    /// Clear the sticky clip indicators (editor click-to-reset).
+    pub fn clear_clip(&mut self) {
+        self.meters.in_clip = false;
+        self.meters.out_clip = false;
     }
 
     /// Replace the whole parameter set (clamps to legal ranges) and recompute.
     pub fn set_params(&mut self, params: Params) {
         self.params = Params {
             power: params.power,
+            input_trim_db: clamp(params.input_trim_db, -24.0, 24.0),
+            output_trim_db: clamp(params.output_trim_db, -24.0, 24.0),
             gate_on: params.gate_on,
             drive_on: params.drive_on,
             amp_on: params.amp_on,
@@ -486,6 +581,8 @@ impl Dsp {
         let on = value >= 0.5;
         match id {
             "power" => p.power = on,
+            "input_trim" => p.input_trim_db = value,
+            "output_trim" => p.output_trim_db = value,
             "gate_on" => p.gate_on = on,
             "drive_on" => p.drive_on = on,
             "amp_on" => p.amp_on = on,
@@ -580,6 +677,8 @@ impl Dsp {
 
     fn apply_params(&mut self) {
         let p = &self.params;
+        self.in_gain = db_to_linear(p.input_trim_db);
+        self.out_gain = db_to_linear(p.output_trim_db);
         self.gate.set_threshold_db(p.gate_thresh_db);
         self.drive.configure(p.drive_model, p.drive_gain, p.drive_tone, p.drive_level);
         self.amp_stage.set_engine(p.tone_engine);
@@ -697,8 +796,7 @@ impl StereoEffect for Dsp {
         self.delay.reset();
         self.reverb.reset();
         self.cab.reset();
-        self.in_peak = 0.0;
-        self.out_peak = 0.0;
+        self.meters.reset();
     }
 
     fn set_sample_rate(&mut self, sample_rate: f32) {
@@ -711,6 +809,7 @@ impl StereoEffect for Dsp {
         self.delay.set_sample_rate(sr);
         self.reverb.set_sample_rate(sr);
         self.cab.set_sample_rate(sr);
+        self.meters.rms_coeff = time_constant(sr, 0.300);
         self.apply_params();
     }
 
@@ -719,11 +818,19 @@ impl StereoEffect for Dsp {
             return (left, right);
         }
 
-        // Input metering (peak with a gentle per-sample decay).
-        let in_level = left.abs().max(right.abs());
-        self.in_peak = in_level.max(self.in_peak - self.in_peak * 0.0005);
+        // Input trim first: everything downstream — including a NAM capture,
+        // whose gain and voicing depend on the level it is fed — sees the
+        // trimmed signal, so that is also what the input meter must report.
+        let (mut l, mut r) = (left * self.in_gain, right * self.in_gain);
 
-        let (mut l, mut r) = (left, right);
+        let in_level = l.abs().max(r.abs());
+        self.meters.in_peak = in_level.max(self.meters.in_peak - self.meters.in_peak * 0.0005);
+        self.meters.in_ms = in_level * in_level
+            + self.meters.rms_coeff * (self.meters.in_ms - in_level * in_level);
+        if in_level >= CLIP_THRESHOLD {
+            self.meters.in_clip = true;
+        }
+
         for slot in self.params.stage_order {
             let Some(stage) = slot else { continue };
             match stage {
@@ -760,8 +867,16 @@ impl StereoEffect for Dsp {
             r = 0.0;
         }
 
+        l *= self.out_gain;
+        r *= self.out_gain;
+
         let out_level = l.abs().max(r.abs());
-        self.out_peak = out_level.max(self.out_peak - self.out_peak * 0.0005);
+        self.meters.out_peak = out_level.max(self.meters.out_peak - self.meters.out_peak * 0.0005);
+        self.meters.out_ms = out_level * out_level
+            + self.meters.rms_coeff * (self.meters.out_ms - out_level * out_level);
+        if out_level >= CLIP_THRESHOLD {
+            self.meters.out_clip = true;
+        }
         (l, r)
     }
 }
@@ -1039,6 +1154,10 @@ mod tests {
             "reverb_mix",
             "cab_mic",
             "cab_dist",
+            // Global gain staging (editorui/src/globals.ts).
+            "power",
+            "input_trim",
+            "output_trim",
         ] {
             assert!(dsp.apply_ui_param(id, 5.0), "id `{id}` was not routed");
         }
@@ -1120,5 +1239,101 @@ mod tests {
             tail = tail.max(l.abs()).max(r.abs());
         }
         assert!(tail < 0.2, "reverb tail did not decay: {tail}");
+    }
+
+    /// A bare chain (every stage out of the path) must pass a signal through at
+    /// exactly the combined trim gain, so the trims are usable for gain staging
+    /// rather than being an approximate "level" control.
+    fn bare_dsp() -> Dsp {
+        let mut dsp = Dsp::new(48_000.0);
+        let mut p = default_params();
+        p.stage_order = [None; 7];
+        dsp.set_params(p);
+        dsp
+    }
+
+    #[test]
+    fn input_trim_scales_the_signal_entering_the_chain() {
+        let mut dsp = bare_dsp();
+        assert!(dsp.apply_ui_param("input_trim", 6.0));
+        let (l, _) = dsp.process_stereo(0.1, 0.1);
+        // +6 dB ≈ ×1.9953.
+        assert!((l - 0.199_53).abs() < 1.0e-3, "input trim not applied: {l}");
+    }
+
+    #[test]
+    fn output_trim_scales_the_signal_leaving_the_chain() {
+        let mut dsp = bare_dsp();
+        assert!(dsp.apply_ui_param("output_trim", -6.0));
+        let (l, _) = dsp.process_stereo(0.4, 0.4);
+        assert!((l - 0.200_47).abs() < 1.0e-3, "output trim not applied: {l}");
+    }
+
+    #[test]
+    fn trims_are_clamped_to_their_declared_range() {
+        let mut dsp = bare_dsp();
+        dsp.apply_ui_param("input_trim", 999.0);
+        dsp.apply_ui_param("output_trim", -999.0);
+        assert_eq!(dsp.params().input_trim_db, 24.0);
+        assert_eq!(dsp.params().output_trim_db, -24.0);
+    }
+
+    #[test]
+    fn global_bypass_is_a_true_passthrough_ignoring_trims() {
+        let mut dsp = bare_dsp();
+        dsp.apply_ui_param("input_trim", 12.0);
+        dsp.apply_ui_param("power", 0.0);
+        let (l, r) = dsp.process_stereo(0.25, -0.25);
+        assert_eq!((l, r), (0.25, -0.25));
+    }
+
+    #[test]
+    fn input_meter_reports_the_post_trim_level() {
+        let mut dsp = bare_dsp();
+        dsp.apply_ui_param("input_trim", 6.0);
+        for _ in 0..64 {
+            let _ = dsp.process_stereo(0.5, 0.5);
+        }
+        let frame = dsp.meter_frame();
+        assert!(
+            frame.in_peak > 0.9 && frame.in_peak < 1.05,
+            "input meter should track post-trim level, got {}",
+            frame.in_peak
+        );
+    }
+
+    #[test]
+    fn rms_of_a_dc_level_converges_to_that_level() {
+        let mut dsp = bare_dsp();
+        // 300 ms window at 48 kHz — run well past it.
+        for _ in 0..48_000 {
+            let _ = dsp.process_stereo(0.5, 0.5);
+        }
+        let frame = dsp.meter_frame();
+        assert!(
+            (frame.in_rms - 0.5).abs() < 0.01,
+            "input rms should converge to 0.5, got {}",
+            frame.in_rms
+        );
+        assert!(frame.in_rms <= frame.in_peak + 1.0e-4);
+    }
+
+    #[test]
+    fn clip_flags_are_sticky_until_cleared() {
+        let mut dsp = bare_dsp();
+        let _ = dsp.process_stereo(0.2, 0.2);
+        assert!(!dsp.meter_frame().in_clip);
+
+        let _ = dsp.process_stereo(1.5, 1.5);
+        // Still set several quiet samples later.
+        for _ in 0..512 {
+            let _ = dsp.process_stereo(0.01, 0.01);
+        }
+        assert!(dsp.meter_frame().in_clip, "clip flag should latch");
+        assert!(dsp.meter_frame().out_clip);
+
+        dsp.clear_clip();
+        assert!(!dsp.meter_frame().in_clip);
+        assert!(!dsp.meter_frame().out_clip);
     }
 }

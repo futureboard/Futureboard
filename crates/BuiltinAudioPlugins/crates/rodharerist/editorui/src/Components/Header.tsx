@@ -1,4 +1,5 @@
 import logoUrl from "../Assets/logo.svg";
+import type { AbSlot } from "../state/history";
 
 type HeaderProps = {
   presetId: string;
@@ -6,6 +7,13 @@ type HeaderProps = {
   modified: boolean;
   testing: boolean;
   showTestDi: boolean;
+  canUndo: boolean;
+  canRedo: boolean;
+  abSlot: AbSlot;
+  onUndo: () => void;
+  onRedo: () => void;
+  onSelectAb: (slot: AbSlot) => void;
+  onCopyAb: () => void;
   onStepPreset: (dir: number) => void;
   onToggleTest: () => void;
   onSave: () => void;
@@ -18,15 +26,75 @@ export function Header({
   modified,
   testing,
   showTestDi,
+  canUndo,
+  canRedo,
+  abSlot,
+  onUndo,
+  onRedo,
+  onSelectAb,
+  onCopyAb,
   onStepPreset,
   onToggleTest,
   onSave,
   onRevert,
 }: HeaderProps) {
+  const otherSlot: AbSlot = abSlot === "A" ? "B" : "A";
   return (
     <header className="header">
       <div className="brand">
         <img src={logoUrl} alt="Rodhareist" />
+      </div>
+
+      <div className="edit-actions" aria-label="Edit history">
+        <button
+          type="button"
+          className="hdr-btn icon"
+          disabled={!canUndo}
+          onClick={onUndo}
+          title="Undo (Ctrl+Z)"
+          aria-label="Undo"
+        >
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M3 7v6h6" />
+            <path d="M3 13a9 9 0 1 0 3-7.7L3 8" />
+          </svg>
+        </button>
+        <button
+          type="button"
+          className="hdr-btn icon"
+          disabled={!canRedo}
+          onClick={onRedo}
+          title="Redo (Ctrl+Shift+Z)"
+          aria-label="Redo"
+        >
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M21 7v6h-6" />
+            <path d="M21 13a9 9 0 1 1-3-7.7L21 8" />
+          </svg>
+        </button>
+      </div>
+
+      <div className="ab-group" role="group" aria-label="A/B compare">
+        {(["A", "B"] as const).map((slot) => (
+          <button
+            key={slot}
+            type="button"
+            className={`ab-btn${abSlot === slot ? " active" : ""}`}
+            aria-pressed={abSlot === slot}
+            onClick={() => onSelectAb(slot)}
+            title={`Compare slot ${slot} — holds a complete rig state`}
+          >
+            {slot}
+          </button>
+        ))}
+        <button
+          type="button"
+          className="hdr-btn"
+          onClick={onCopyAb}
+          title={`Copy slot ${abSlot} over slot ${otherSlot}`}
+        >
+          {abSlot}→{otherSlot}
+        </button>
       </div>
 
       <div className="preset-nav" aria-label="Rig selector">

@@ -12,6 +12,7 @@ import {
   chainOrder,
   defaultPath,
   models,
+  parameterDefaults,
   parametersForPreset,
   presetsData,
   rackFromPath,
@@ -28,13 +29,41 @@ import {
   postPathOrder,
   type NamCaptureLoadOptions,
 } from "./bridge";
+import { POWER_PARAM_ID } from "./globals";
+import {
+  activeSnapshot,
+  canRedo as historyCanRedo,
+  canUndo as historyCanUndo,
+  commit,
+  copyToOther,
+  createAb,
+  createHistory,
+  redo as historyRedo,
+  reset as historyReset,
+  setActive,
+  undo as historyUndo,
+  type AbSlot,
+  type AbState,
+  type History,
+} from "./state/history";
+import {
+  attachHostTelemetry,
+  pushSimulatedFrame,
+  releasePreview,
+} from "./state/meters";
 import "./Styles/Editor.css";
 
-type VuState = {
-  inL: number;
-  inR: number;
-  outL: number;
-  outR: number;
+/** Global gain-staging state. Mirrors the DSP's global params exactly. */
+type GlobalState = {
+  inputTrim: number;
+  outputTrim: number;
+  globalBypass: boolean;
+};
+
+const DEFAULT_GLOBALS: GlobalState = {
+  inputTrim: 0,
+  outputTrim: 0,
+  globalBypass: false,
 };
 
 type RigSnapshot = {
@@ -44,7 +73,14 @@ type RigSnapshot = {
   pathOrder: CategoryId[];
   bypassed: Partial<Record<CategoryId, boolean>>;
   parameters: Record<string, Param[]>;
+  globals: GlobalState;
 };
+
+/**
+ * Undo coalescing window. A fader drag emits an edit per pointer move; without
+ * this, one gesture would become hundreds of undo steps.
+ */
+const COMMIT_DEBOUNCE_MS = 300;
 
 function applyCategoryTheme(cat: CategoryId) {
   const c = categories[cat];
@@ -78,6 +114,7 @@ function makeSnapshot(
   pathOrder: CategoryId[],
   bypassed: Partial<Record<CategoryId, boolean>>,
   parameters: Record<string, Param[]>,
+  globals: GlobalState,
 ): RigSnapshot {
   return {
     activeCat,
@@ -86,10 +123,24 @@ function makeSnapshot(
     pathOrder: [...pathOrder],
     bypassed: { ...bypassed },
     parameters: cloneParameters(parameters),
+    globals: { ...globals },
   };
 }
 
+/**
+ * Structural comparison used to collapse no-op undo commits. Snapshots are
+ * small (a few dozen numbers) and this runs at most once per debounce window,
+ * so a serialize-and-compare is cheap enough and avoids a hand-written deep
+ * equality that would silently miss a newly added field.
+ */
+function snapshotsEqual(a: RigSnapshot, b: RigSnapshot): boolean {
+  return JSON.stringify(a) === JSON.stringify(b);
+}
+
 function applySnapshotToDsp(snap: RigSnapshot) {
+  postParam("input_trim", snap.globals.inputTrim);
+  postParam("output_trim", snap.globals.outputTrim);
+  postParam(POWER_PARAM_ID, snap.globals.globalBypass ? 0 : 1);
   postPathOrder(snap.pathOrder);
   for (const cat of chainOrder) {
     const modelId = snap.stageModels[cat];
@@ -116,6 +167,7 @@ function factorySnapshot(id: string): RigSnapshot | null {
     pathOrder: p.path ? [...p.path] : defaultPath(),
     bypassed,
     parameters: parametersForPreset(p),
+    globals: { ...DEFAULT_GLOBALS },
   };
 }
 
@@ -134,6 +186,7 @@ function RodhareistEditor() {
   const [parameters, setParameters] = useState<Record<string, Param[]>>(
     () => parametersForPreset(initial),
   );
+  const [globals, setGlobals] = useState<GlobalState>(DEFAULT_GLOBALS);
   const [modified, setModified] = useState(false);
   const [savedRigs, setSavedRigs] = useState<Record<string, RigSnapshot>>({});
   const [drafts, setDrafts] = useState<Record<string, RigSnapshot>>({});
@@ -141,24 +194,47 @@ function RodhareistEditor() {
     () => new Set(),
   );
   const [testing, setTesting] = useState(false);
-  const [vu, setVu] = useState<VuState>({
-    inL: 0,
-    inR: 0,
-    outL: 0,
-    outR: 0,
-  });
   const [showTestDi] = useState(() => !hasNativeBridge());
-
   const [pendingSwitchId, setPendingSwitchId] = useState<string | null>(null);
+
+  /** Per-category settings clipboard (Copy/Paste Settings in the block menu). */
+  const [clipboard, setClipboard] = useState<{
+    cat: CategoryId;
+    modelId: string;
+    params: Param[];
+  } | null>(null);
+
+  const initialSnapshot = useMemo(
+    () =>
+      factorySnapshot(initial.id) ??
+      makeSnapshot(
+        initial.category,
+        initial.model,
+        defaultStageModels(initial.category, initial.model),
+        defaultPath(),
+        {},
+        parametersForPreset(initial),
+        DEFAULT_GLOBALS,
+      ),
+    // `initial` is a module-level constant; this runs once.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [],
+  );
+
+  const [history, setHistory] = useState<History<RigSnapshot>>(() =>
+    createHistory(initialSnapshot),
+  );
+  const [ab, setAb] = useState<AbState<RigSnapshot>>(() =>
+    createAb(initialSnapshot),
+  );
 
   const audioRef = useRef<{
     ctx: AudioContext;
     gain: GainNode;
     timer: number | null;
   } | null>(null);
-  const levelsRef = useRef({ inLvl: 0, outLvl: 0 });
 
-  // Keep a ref mirror so loadPreset can stash without stale closures.
+  // Keep a ref mirror so callbacks can read current state without stale closures.
   const liveRef = useRef({
     currentPresetId,
     activeCat,
@@ -167,10 +243,13 @@ function RodhareistEditor() {
     pathOrder,
     bypassed,
     parameters,
+    globals,
     modified,
     drafts,
     savedRigs,
     pendingSwitchId,
+    history,
+    ab,
   });
   liveRef.current = {
     currentPresetId,
@@ -180,11 +259,28 @@ function RodhareistEditor() {
     pathOrder,
     bypassed,
     parameters,
+    globals,
     modified,
     drafts,
     savedRigs,
     pendingSwitchId,
+    history,
+    ab,
   };
+
+  /** Snapshot of the live editor state. */
+  const currentSnapshot = useCallback((): RigSnapshot => {
+    const l = liveRef.current;
+    return makeSnapshot(
+      l.activeCat,
+      l.activeModelId,
+      l.stageModels,
+      l.pathOrder,
+      l.bypassed,
+      l.parameters,
+      l.globals,
+    );
+  }, []);
 
   const currentPreset = useMemo(
     () =>
@@ -198,8 +294,15 @@ function RodhareistEditor() {
     applyCategoryTheme(activeCat);
   }, [activeCat]);
 
+  // Meter/status telemetry lives outside React: attach the store to the host
+  // once. Meter frames never re-render this component.
+  useEffect(() => attachHostTelemetry(), []);
+
   useEffect(() => {
     const stages = defaultStageModels(initial.category, initial.model);
+    postParam("input_trim", DEFAULT_GLOBALS.inputTrim);
+    postParam("output_trim", DEFAULT_GLOBALS.outputTrim);
+    postParam(POWER_PARAM_ID, 1);
     postPathOrder(defaultPath());
     for (const cat of chainOrder) {
       postModel(categories[cat].node, stages[cat]!);
@@ -211,35 +314,58 @@ function RodhareistEditor() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // -------------------------------------------------------------------------
+  // Undo/redo plumbing
+  // -------------------------------------------------------------------------
+
+  const commitTimerRef = useRef<number | null>(null);
+  /** Set while an undo/redo/preset load is applying, to avoid re-recording it. */
+  const suppressCommitRef = useRef(false);
+
+  /**
+   * Fold the live state into history immediately and return the resulting
+   * history.
+   *
+   * Returns synchronously (rather than only scheduling a `setHistory`) so
+   * callers like undo can act on the result within the same tick. `liveRef` is
+   * updated in step, because it is only refreshed on render.
+   */
+  const flushCommit = useCallback((): History<RigSnapshot> => {
+    if (commitTimerRef.current !== null) {
+      window.clearTimeout(commitTimerRef.current);
+      commitTimerRef.current = null;
+    }
+    const base = liveRef.current.history;
+    if (suppressCommitRef.current) return base;
+    const next = commit(base, currentSnapshot(), snapshotsEqual);
+    if (next !== base) {
+      liveRef.current.history = next;
+      setHistory(next);
+    }
+    return next;
+  }, [currentSnapshot]);
+
+  /**
+   * Record an undo step once the current gesture settles. Called from every
+   * mutating action; consecutive calls within the window collapse into one, so
+   * a fader drag is a single undo step rather than one per pointer move.
+   */
+  const scheduleCommit = useCallback(() => {
+    if (suppressCommitRef.current) return;
+    if (commitTimerRef.current !== null) {
+      window.clearTimeout(commitTimerRef.current);
+    }
+    commitTimerRef.current = window.setTimeout(() => {
+      commitTimerRef.current = null;
+      flushCommit();
+    }, COMMIT_DEBOUNCE_MS);
+  }, [flushCommit]);
+
   useEffect(() => {
-    let raf = 0;
-    let alive = true;
-    const tick = () => {
-      if (!alive) return;
-      raf = window.setTimeout(tick, 30);
-      const lv = levelsRef.current;
-      setVu((prev) => {
-        const inL =
-          lv.inLvl > prev.inL ? lv.inLvl : Math.max(0, prev.inL - 0.015);
-        const inR =
-          lv.inLvl * 0.95 > prev.inR
-            ? lv.inLvl * 0.95
-            : Math.max(0, prev.inR - 0.015);
-        const outL =
-          lv.outLvl > prev.outL ? lv.outLvl : Math.max(0, prev.outL - 0.015);
-        const outR =
-          lv.outLvl * 0.9 > prev.outR
-            ? lv.outLvl * 0.9
-            : Math.max(0, prev.outR - 0.015);
-        lv.inLvl = Math.max(0, lv.inLvl - 0.05);
-        lv.outLvl = Math.max(0, lv.outLvl - 0.055);
-        return { inL, inR, outL, outR };
-      });
-    };
-    tick();
     return () => {
-      alive = false;
-      window.clearTimeout(raf);
+      if (commitTimerRef.current !== null) {
+        window.clearTimeout(commitTimerRef.current);
+      }
     };
   }, []);
 
@@ -252,8 +378,10 @@ function RodhareistEditor() {
       next.add(id);
       return next;
     });
-  }, []);
+    scheduleCommit();
+  }, [scheduleCommit]);
 
+  /** Push a snapshot into the live UI state and the DSP. */
   const applyLocalSnapshot = useCallback(
     (snap: RigSnapshot, presetId: string, isDirty: boolean) => {
       setCurrentPresetId(presetId);
@@ -263,11 +391,80 @@ function RodhareistEditor() {
       setPathOrder(snap.pathOrder);
       setBypassed(snap.bypassed);
       setParameters(cloneParameters(snap.parameters));
+      setGlobals({ ...snap.globals });
       setModified(isDirty);
       applySnapshotToDsp(snap);
     },
     [],
   );
+
+  /**
+   * Restore a snapshot as the result of undo/redo or an A/B switch. Suppresses
+   * commit recording for the duration so the restore is not itself an edit.
+   */
+  const restoreSnapshot = useCallback(
+    (snap: RigSnapshot, isDirty: boolean) => {
+      if (commitTimerRef.current !== null) {
+        window.clearTimeout(commitTimerRef.current);
+        commitTimerRef.current = null;
+      }
+      suppressCommitRef.current = true;
+      applyLocalSnapshot(snap, liveRef.current.currentPresetId, isDirty);
+      // Release after the resulting render has flushed its effects.
+      window.setTimeout(() => {
+        suppressCommitRef.current = false;
+      }, 0);
+    },
+    [applyLocalSnapshot],
+  );
+
+  // Restoring a snapshot is a side effect, so it is performed here rather than
+  // inside a `setState` updater (which React may invoke more than once).
+  const onUndo = useCallback(() => {
+    // Fold any in-flight gesture into history first, so a drag followed by
+    // Ctrl+Z undoes the drag rather than the edit before it.
+    const base = flushCommit();
+    if (!historyCanUndo(base)) return;
+    const next = historyUndo(base);
+    liveRef.current.history = next;
+    setHistory(next);
+    restoreSnapshot(next.present, true);
+  }, [flushCommit, restoreSnapshot]);
+
+  const onRedo = useCallback(() => {
+    const base = liveRef.current.history;
+    if (!historyCanRedo(base)) return;
+    const next = historyRedo(base);
+    liveRef.current.history = next;
+    setHistory(next);
+    restoreSnapshot(next.present, true);
+  }, [restoreSnapshot]);
+
+  // -------------------------------------------------------------------------
+  // A/B compare — compares the complete rig state, not one module
+  // -------------------------------------------------------------------------
+
+  const onSelectAb = useCallback(
+    (slot: AbSlot) => {
+      if (liveRef.current.ab.active === slot) return;
+      flushCommit();
+      const next = setActive(liveRef.current.ab, slot, currentSnapshot());
+      liveRef.current.ab = next;
+      setAb(next);
+      restoreSnapshot(activeSnapshot(next), true);
+    },
+    [currentSnapshot, flushCommit, restoreSnapshot],
+  );
+
+  const onCopyAb = useCallback(() => {
+    const next = copyToOther(liveRef.current.ab, currentSnapshot());
+    liveRef.current.ab = next;
+    setAb(next);
+  }, [currentSnapshot]);
+
+  // -------------------------------------------------------------------------
+  // Preset handling
+  // -------------------------------------------------------------------------
 
   const commitLoadPreset = useCallback(
     (id: string, opts?: { discardCurrent?: boolean }) => {
@@ -290,8 +487,20 @@ function RodhareistEditor() {
         nextDrafts[id] ?? live.savedRigs[id] ?? factorySnapshot(id);
       if (!snap) return;
 
+      // A preset load is a new baseline, not an edit: history and both A/B
+      // slots restart from it.
+      suppressCommitRef.current = true;
       applyLocalSnapshot(snap, id, !!nextDrafts[id]);
+      const freshHistory = historyReset(live.history, snap);
+      const freshAb = createAb(snap);
+      liveRef.current.history = freshHistory;
+      liveRef.current.ab = freshAb;
+      setHistory(freshHistory);
+      setAb(freshAb);
       setPendingSwitchId(null);
+      window.setTimeout(() => {
+        suppressCommitRef.current = false;
+      }, 0);
     },
     [applyLocalSnapshot],
   );
@@ -322,6 +531,10 @@ function RodhareistEditor() {
     },
     [loadPreset],
   );
+
+  // -------------------------------------------------------------------------
+  // Edits
+  // -------------------------------------------------------------------------
 
   const selectCategory = useCallback(
     (cat: CategoryId) => {
@@ -364,6 +577,28 @@ function RodhareistEditor() {
   const toggleBypass = useCallback(
     () => toggleBypassFor(liveRef.current.activeCat),
     [toggleBypassFor],
+  );
+
+  const toggleGlobalBypass = useCallback(() => {
+    setGlobals((prev) => {
+      const next = { ...prev, globalBypass: !prev.globalBypass };
+      postParam(POWER_PARAM_ID, next.globalBypass ? 0 : 1);
+      return next;
+    });
+    markDirty();
+  }, [markDirty]);
+
+  const onGlobalParamChange = useCallback(
+    (id: string, value: number) => {
+      postParam(id, value);
+      setGlobals((prev) => {
+        if (id === "input_trim") return { ...prev, inputTrim: value };
+        if (id === "output_trim") return { ...prev, outputTrim: value };
+        return prev;
+      });
+      markDirty();
+    },
+    [markDirty],
   );
 
   const loadNamCapture = useCallback(
@@ -421,6 +656,64 @@ function RodhareistEditor() {
     [markDirty],
   );
 
+  // -------------------------------------------------------------------------
+  // Block menu actions
+  // -------------------------------------------------------------------------
+
+  const copySettings = useCallback((cat: CategoryId) => {
+    const live = liveRef.current;
+    const modelId = live.stageModels[cat];
+    if (!modelId) return;
+    setClipboard({
+      cat,
+      modelId,
+      params: (live.parameters[modelId] ?? []).map((p) => ({ ...p })),
+    });
+  }, []);
+
+  const pasteSettings = useCallback(
+    (cat: CategoryId) => {
+      const clip = clipboard;
+      // Only paste within the same category: models in different categories
+      // have entirely different parameter sets.
+      if (!clip || clip.cat !== cat) return;
+      const live = liveRef.current;
+
+      setStageModels((prev) => ({ ...prev, [cat]: clip.modelId }));
+      setParameters((prev) => ({
+        ...prev,
+        [clip.modelId]: clip.params.map((p) => ({ ...p })),
+      }));
+      if (live.activeCat === cat) setActiveModelId(clip.modelId);
+
+      postModel(categories[cat].node, clip.modelId);
+      for (const p of clip.params) postParam(p.id, p.val);
+      markDirty();
+    },
+    [clipboard, markDirty],
+  );
+
+  const resetModule = useCallback(
+    (cat: CategoryId) => {
+      const live = liveRef.current;
+      const modelId = live.stageModels[cat];
+      const defaults = modelId ? parameterDefaults[modelId] : undefined;
+      if (!modelId || !defaults) return;
+
+      setParameters((prev) => ({
+        ...prev,
+        [modelId]: defaults.map((p) => ({ ...p })),
+      }));
+      for (const p of defaults) postParam(p.id, p.val);
+      markDirty();
+    },
+    [markDirty],
+  );
+
+  // -------------------------------------------------------------------------
+  // Save / revert
+  // -------------------------------------------------------------------------
+
   const saveRig = useCallback(() => {
     const live = liveRef.current;
     const snap = makeSnapshot(
@@ -430,6 +723,7 @@ function RodhareistEditor() {
       live.pathOrder,
       live.bypassed,
       live.parameters,
+      live.globals,
     );
     setSavedRigs((prev) => ({ ...prev, [live.currentPresetId]: snap }));
     setDrafts((prev) => {
@@ -482,8 +776,19 @@ function RodhareistEditor() {
       next.delete(live.currentPresetId);
       return next;
     });
+    suppressCommitRef.current = true;
     applyLocalSnapshot(snap, live.currentPresetId, false);
+    const freshHistory = historyReset(live.history, snap);
+    liveRef.current.history = freshHistory;
+    setHistory(freshHistory);
+    window.setTimeout(() => {
+      suppressCommitRef.current = false;
+    }, 0);
   }, [applyLocalSnapshot]);
+
+  // -------------------------------------------------------------------------
+  // Browser-only Test DI preview
+  // -------------------------------------------------------------------------
 
   const toggleTest = useCallback(async () => {
     if (!audioRef.current) {
@@ -506,7 +811,10 @@ function RodhareistEditor() {
       audio.timer = null;
     }
 
-    if (!next) return;
+    if (!next) {
+      releasePreview();
+      return;
+    }
 
     audio.timer = window.setInterval(() => {
       if (audio.ctx.state === "suspended") void audio.ctx.resume();
@@ -529,9 +837,38 @@ function RodhareistEditor() {
         osc.start();
         osc.stop(audio.ctx.currentTime + 0.85);
       });
-      levelsRef.current.inLvl = 0.65 + Math.random() * 0.22;
-      levelsRef.current.outLvl = 0.58 + Math.random() * 0.26;
     }, 850);
+  }, [testing]);
+
+  // Preview meter animation. Runs only while the browser Test DI is active and
+  // no native host is supplying real telemetry.
+  useEffect(() => {
+    if (!testing) return;
+    let alive = true;
+    let timer = 0;
+    let level = 0;
+
+    const tick = () => {
+      if (!alive) return;
+      timer = window.setTimeout(tick, 33);
+      level = Math.max(level * 0.94, Math.random() < 0.06 ? 0.55 + Math.random() * 0.3 : 0);
+      const out = level * 0.85;
+      pushSimulatedFrame({
+        inPeak: level,
+        inRms: level * 0.62,
+        outPeak: out,
+        outRms: out * 0.62,
+        inClip: false,
+        outClip: false,
+      });
+    };
+    tick();
+
+    return () => {
+      alive = false;
+      window.clearTimeout(timer);
+      releasePreview();
+    };
   }, [testing]);
 
   useEffect(() => {
@@ -542,6 +879,10 @@ function RodhareistEditor() {
       void audio.ctx.close();
     };
   }, []);
+
+  // -------------------------------------------------------------------------
+  // Shortcuts
+  // -------------------------------------------------------------------------
 
   useEffect(() => {
     const isTypingTarget = (el: EventTarget | null) => {
@@ -568,9 +909,15 @@ function RodhareistEditor() {
         if (liveRef.current.modified) saveRig();
         return;
       }
-      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "z" && !e.shiftKey) {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "z") {
         e.preventDefault();
-        if (liveRef.current.modified) revertRig();
+        if (e.shiftKey) onRedo();
+        else onUndo();
+        return;
+      }
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "y") {
+        e.preventDefault();
+        onRedo();
         return;
       }
       if (e.ctrlKey || e.metaKey) return;
@@ -605,7 +952,8 @@ function RodhareistEditor() {
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [
     cancelSwitch,
-    revertRig,
+    onRedo,
+    onUndo,
     saveRig,
     selectCategory,
     stepPreset,
@@ -630,7 +978,13 @@ function RodhareistEditor() {
       params={params}
       testing={testing}
       showTestDi={showTestDi}
-      vu={vu}
+      inputTrim={globals.inputTrim}
+      outputTrim={globals.outputTrim}
+      globalBypass={globals.globalBypass}
+      canUndo={historyCanUndo(history)}
+      canRedo={historyCanRedo(history)}
+      abSlot={ab.active}
+      clipboardCat={clipboard?.cat ?? null}
       discardPrompt={
         pendingSwitchId
           ? {
@@ -641,6 +995,10 @@ function RodhareistEditor() {
             }
           : null
       }
+      onUndo={onUndo}
+      onRedo={onRedo}
+      onSelectAb={onSelectAb}
+      onCopyAb={onCopyAb}
       onStepPreset={stepPreset}
       onLoadPreset={loadPreset}
       onToggleTest={() => void toggleTest()}
@@ -651,7 +1009,12 @@ function RodhareistEditor() {
       onReorderPath={reorderPath}
       onSelectModel={selectModel}
       onToggleBypass={toggleBypass}
+      onToggleGlobalBypass={toggleGlobalBypass}
       onParamChange={onParamChange}
+      onGlobalParamChange={onGlobalParamChange}
+      onCopySettings={copySettings}
+      onPasteSettings={pasteSettings}
+      onResetModule={resetModule}
       onLoadNamCapture={loadNamCapture}
       onBypassCab={bypassCab}
     />

@@ -18,11 +18,56 @@ export type NamCaptureLoadOptions = {
   fullRig: boolean;
 };
 
+/**
+ * One frame of input/output telemetry, mirroring the Rust `MeterFrame` in
+ * `rodharerist/src/dsp/mod.rs`. Levels are linear 0..1 amplitudes measured
+ * *after* the corresponding trim. Clip flags are sticky until
+ * {@link postClearClip}.
+ */
+export type MeterFrame = {
+  inPeak: number;
+  inRms: number;
+  outPeak: number;
+  outRms: number;
+  inClip: boolean;
+  outClip: boolean;
+};
+
+/**
+ * Host/engine status for the footer. Every field is optional: the editor shows
+ * "—" for anything the host does not report rather than inventing a number.
+ */
+export type HostStatus = {
+  /** Engine sample rate in Hz. */
+  sampleRate?: number;
+  /** Engine block size in samples. */
+  blockSize?: number;
+  /** Total plugin latency in samples (includes any NAM receptive field). */
+  latencySamples?: number;
+  /** Plugin CPU share, 0..1. */
+  cpuLoad?: number;
+  /** True while the engine is reporting DSP overruns. */
+  overload?: boolean;
+  /** Channel count the plugin is instantiated with. */
+  channels?: number;
+};
+
 type NativeBridge = {
   setParam?: (id: string, value: number) => void;
   setEnabled?: (stage: string, enabled: boolean) => void;
   selectModel?: (category: string, modelId: string) => void;
   loadNamCapture?: (json: string, opts: NamCaptureLoadOptions) => void;
+  /** Reset the DSP's sticky clip indicators. */
+  clearClip?: () => void;
+  /**
+   * Register a telemetry sink. The host is expected to call `onMeters` from a
+   * non-realtime timer that samples the DSP's latest frame — never from the
+   * audio callback. Returns an unsubscribe function when supported.
+   */
+  subscribe?: (sink: {
+    onMeters?: (frame: MeterFrame) => void;
+    onStatus?: (status: HostStatus) => void;
+  }) => (() => void) | void;
 };
 
 declare global {
@@ -96,8 +141,40 @@ export function postLoadNamCapture(json: string, opts: NamCaptureLoadOptions): v
   }
 }
 
+/** Reset the DSP's sticky clip indicators (meter click-to-reset). */
+export function postClearClip(): void {
+  try {
+    bridge()?.clearClip?.();
+  } catch {
+    /* no-op */
+  }
+}
+
+/**
+ * Subscribe to host telemetry. Returns an unsubscribe function, which is a
+ * no-op when no host bridge is present — in that case no frames ever arrive and
+ * the editor keeps showing its "no host" state.
+ */
+export function subscribeTelemetry(sink: {
+  onMeters?: (frame: MeterFrame) => void;
+  onStatus?: (status: HostStatus) => void;
+}): () => void {
+  try {
+    const off = bridge()?.subscribe?.(sink);
+    if (typeof off === "function") return off;
+  } catch {
+    /* no-op */
+  }
+  return () => {};
+}
+
 /** Whether a native host bridge is present (useful for conditional UI). */
 export function hasNativeBridge(): boolean {
   const b = bridge();
   return !!(b && (b.setParam || b.setEnabled || b.selectModel));
+}
+
+/** Whether the host can actually deliver meter/status telemetry. */
+export function hasTelemetry(): boolean {
+  return !!bridge()?.subscribe;
 }

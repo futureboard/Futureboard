@@ -7,6 +7,7 @@
 //! points, embedded-UI table) is layered on separately.
 
 mod dsp;
+pub mod ui;
 
 pub use dsp::{
     AmpModel, CabModel, Dsp, DriveModel, NamCaptureInfo, NamLoadError, PLUGIN_ID, Params,

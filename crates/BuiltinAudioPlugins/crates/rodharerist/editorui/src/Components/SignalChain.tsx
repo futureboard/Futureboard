@@ -23,23 +23,21 @@ import {
   rackFromPath,
   type CategoryId,
 } from "../data";
-
-type VuLevels = {
-  inL: number;
-  inR: number;
-  outL: number;
-  outR: number;
-};
+import { BlockMenu, type MenuItem } from "./BlockMenu";
 
 type SignalChainProps = {
   pathOrder: CategoryId[];
   activeCat: CategoryId;
   stageModels: Record<CategoryId, string>;
   bypassed: Partial<Record<CategoryId, boolean>>;
-  vu: VuLevels;
+  /** Category whose settings are on the clipboard, if any. */
+  clipboardCat: CategoryId | null;
   onSelectCategory: (cat: CategoryId) => void;
   onToggleModule: (cat: CategoryId) => void;
   onReorderPath: (next: CategoryId[]) => void;
+  onCopySettings: (cat: CategoryId) => void;
+  onPasteSettings: (cat: CategoryId) => void;
+  onResetModule: (cat: CategoryId) => void;
 };
 
 const EMPTY_PATH_DROP_ID = "path-empty";
@@ -50,48 +48,24 @@ function modelLabel(cat: CategoryId, modelId: string): string {
   return found?.short ?? found?.name ?? "—";
 }
 
-function IoMeter({
-  title,
-  left,
-  right,
-}: {
-  title: string;
-  left: number;
-  right: number;
-}) {
-  return (
-    <div className="io-col">
-      <div className="io-meter" title={title}>
-        <div className="io-bar">
-          <div className="io-fill" style={{ height: `${left * 100}%` }} />
-        </div>
-        <div className="io-bar">
-          <div className="io-fill" style={{ height: `${right * 100}%` }} />
-        </div>
-      </div>
-      <span className="io-cap">{title}</span>
-    </div>
-  );
-}
-
 function PathModule({
   cat,
   selected,
   isBypassed,
   label,
   title,
+  menuItems,
   onSelect,
   onToggle,
-  onRemove,
 }: {
   cat: CategoryId;
   selected: boolean;
   isBypassed: boolean;
   label: string;
   title: string;
+  menuItems: MenuItem[];
   onSelect: () => void;
   onToggle: () => void;
-  onRemove: () => void;
 }) {
   const c = categories[cat];
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } =
@@ -115,24 +89,17 @@ function PathModule({
       >
         <button
           className="blk-power"
-          title={isBypassed ? "Enable" : "Bypass"}
+          title={isBypassed ? "Enable block" : "Bypass block"}
+          aria-label={isBypassed ? `Enable ${c.name}` : `Bypass ${c.name}`}
+          aria-pressed={!isBypassed}
           type="button"
+          onPointerDown={(e) => e.stopPropagation()}
           onClick={(e) => {
             e.stopPropagation();
             onToggle();
           }}
         />
-        <button
-          className="blk-remove"
-          type="button"
-          title="Remove from path"
-          onClick={(e) => {
-            e.stopPropagation();
-            onRemove();
-          }}
-        >
-          ×
-        </button>
+        <BlockMenu label={`${c.name} block options`} items={menuItems} />
         <div className="ic">
           <svg
             width="22"
@@ -150,6 +117,8 @@ function PathModule({
           <span className="mtitle">{c.short}</span>
           <span className="mmodel">{label}</span>
         </div>
+        {/* State is never colour-only: a bypassed block says so in words. */}
+        {isBypassed && <span className="blk-state">BYP</span>}
       </div>
     </div>
   );
@@ -202,10 +171,13 @@ export function SignalChain({
   activeCat,
   stageModels,
   bypassed,
-  vu,
+  clipboardCat,
   onSelectCategory,
   onToggleModule,
   onReorderPath,
+  onCopySettings,
+  onPasteSettings,
+  onResetModule,
 }: SignalChainProps) {
   const svgRef = useRef<SVGSVGElement>(null);
   const rowRef = useRef<HTMLDivElement>(null);
@@ -301,7 +273,9 @@ export function SignalChain({
   return (
     <section className="chain">
       <span className="chain-title">Path</span>
-      <span className="chain-hint">Drag to reorder · × remove · rack adds back</span>
+      <span className="chain-hint">
+        Drag to reorder · ⋮ for block options · rack adds back
+      </span>
       <svg className="chain-svg" ref={svgRef} />
       <DndContext
         sensors={sensors}
@@ -309,8 +283,6 @@ export function SignalChain({
         onDragEnd={handleDragEnd}
       >
         <div className="chain-row" ref={rowRef} id="chain-row">
-          <IoMeter title="In" left={vu.inL} right={vu.inR} />
-
           {pathOrder.length === 0 && <EmptyPathDropTarget />}
 
           <SortableContext items={pathOrder} strategy={horizontalListSortingStrategy}>
@@ -328,15 +300,40 @@ export function SignalChain({
                   isBypassed={isBypassed}
                   label={label}
                   title={`${c.name}: ${models[cat].find((m) => m.id === mid)?.name ?? label}`}
+                  menuItems={[
+                    {
+                      label: isBypassed ? "Enable Block" : "Bypass Block",
+                      onSelect: () => onToggleModule(cat),
+                    },
+                    {
+                      label: "Copy Settings",
+                      onSelect: () => onCopySettings(cat),
+                      separatorBefore: true,
+                    },
+                    {
+                      label: "Paste Settings",
+                      // Settings only transfer between blocks of the same
+                      // category — the models have different parameter sets.
+                      disabled: clipboardCat !== cat,
+                      onSelect: () => onPasteSettings(cat),
+                    },
+                    {
+                      label: "Reset Effect",
+                      onSelect: () => onResetModule(cat),
+                    },
+                    {
+                      label: "Remove from Path",
+                      onSelect: () => removeFromPath(cat),
+                      separatorBefore: true,
+                      destructive: true,
+                    },
+                  ]}
                   onSelect={() => onSelectCategory(cat)}
                   onToggle={() => onToggleModule(cat)}
-                  onRemove={() => removeFromPath(cat)}
                 />
               );
             })}
           </SortableContext>
-
-          <IoMeter title="Out" left={vu.outL} right={vu.outR} />
         </div>
 
         {rack.length > 0 && (

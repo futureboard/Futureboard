@@ -7,6 +7,7 @@ import {
   type Param,
 } from "../data";
 import type { NamCaptureLoadOptions } from "../bridge";
+import { CabinetStage } from "./CabinetStage";
 import { Knob } from "./Knob";
 
 type ModuleEditorProps = {
@@ -36,8 +37,12 @@ export function ModuleEditor({
   const model = list.find((m) => m.id === activeModelId) ?? list[0];
   const cat = categories[activeCat];
   const isNamCapture = activeCat === "amp" && activeModelId === "nam_capture";
+  const isCabinet = activeCat === "cab";
   const [namStereo, setNamStereo] = useState(true);
   const [namFullRig, setNamFullRig] = useState(false);
+
+  const paramValue = (id: string, fallback: number) =>
+    params.find((p) => p.id === id)?.val ?? fallback;
 
   const handleNamFile = (file: File | undefined) => {
     if (!file) return;
@@ -130,21 +135,59 @@ export function ModuleEditor({
           </div>
         )}
 
-        <div className="param-bank">
-          {params.map((p) => (
-            <Knob
-              key={p.id}
-              id={p.id}
-              name={p.name}
-              min={p.min}
-              max={p.max}
-              value={p.val}
-              unit={p.unit}
-              defaultValue={defaultValueFor(activeModelId, p.id)}
-              onChange={onParamChange}
+        {isCabinet ? (
+          // The cabinet module gets a stage view plus a numeric inspector: mic
+          // placement is spatial, so it needs both a direct-manipulation view
+          // and exact values. Both edit the same two DSP parameters.
+          <div className="cab-layout">
+            <CabinetStage
+              modelId={activeModelId}
+              position={paramValue("cab_mic", 20)}
+              distance={paramValue("cab_dist", 40)}
+              bypassed={bypassed}
+              onParamChange={onParamChange}
             />
-          ))}
-        </div>
+            <div className="cab-inspector">
+              <span className="inspector-title">Mic</span>
+              <div className="param-bank column">
+                {params.map((p) => (
+                  <Knob
+                    key={p.id}
+                    id={p.id}
+                    name={p.name}
+                    min={p.min}
+                    max={p.max}
+                    value={p.val}
+                    unit={p.unit}
+                    defaultValue={defaultValueFor(activeModelId, p.id)}
+                    onChange={onParamChange}
+                  />
+                ))}
+              </div>
+              <p className="inspector-note">
+                Position is measured from the speaker centre; distance is shown on a
+                0–30 cm scale. The cabinet is modelled as a whole, so there is no
+                per-speaker or second-mic processing yet.
+              </p>
+            </div>
+          </div>
+        ) : (
+          <div className="param-bank">
+            {params.map((p) => (
+              <Knob
+                key={p.id}
+                id={p.id}
+                name={p.name}
+                min={p.min}
+                max={p.max}
+                value={p.val}
+                unit={p.unit}
+                defaultValue={defaultValueFor(activeModelId, p.id)}
+                onChange={onParamChange}
+              />
+            ))}
+          </div>
+        )}
       </div>
     </section>
   );

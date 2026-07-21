@@ -27,7 +27,6 @@ export function Header({
     <header className="header">
       <div className="brand">
         <img src={logoUrl} alt="Rodhareist" />
-        <span className="tag">Native</span>
       </div>
 
       <div className="preset-nav" aria-label="Rig selector">

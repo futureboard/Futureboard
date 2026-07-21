@@ -35,8 +35,14 @@ use platform::Edition;
     disable_help_subcommand = true
 )]
 struct Cli {
+    /// Explicit subcommand (`package`, `build-all`, `check-all`). Omit this
+    /// to run `package` directly with the flags below, e.g.
+    /// `cargo xtask --package community --plugins all`.
     #[command(subcommand)]
-    command: XtaskCommand,
+    command: Option<XtaskCommand>,
+
+    #[command(flatten)]
+    package: PackageArgs,
 }
 
 #[derive(Subcommand)]
@@ -67,17 +73,14 @@ struct PackageArgs {
     #[arg(long)]
     target: Option<String>,
 
-    /// Which edition to build and stage.
-    #[arg(long, default_value = "community")]
+    /// Which edition to build and stage. `--package` is accepted as an
+    /// alias to match the `cargo build --package` mental model.
+    #[arg(long, alias = "package", default_value = "community")]
     edition: Edition,
 
     /// Root output directory for staged packages.
     #[arg(long, default_value = "out")]
     out: PathBuf,
-
-    /// Also copy debug symbols (`.pdb`) into a `symbols/` directory.
-    #[arg(long)]
-    symbols: bool,
 
     /// Build and stage Built-in Plugin dynamic libraries into `Plugins/`.
     /// Accepts `all`, `none`, or a comma-separated list of plugin crate names
@@ -85,9 +88,13 @@ struct PackageArgs {
     #[arg(long, value_name = "SPEC")]
     plugin: Option<String>,
 
-    /// Legacy alias for `--plugin all`.
+    /// Same as `--plugin`. Bare `--plugins` (no value) means `all`.
+    #[arg(long, value_name = "SPEC", num_args = 0..=1, default_missing_value = "all")]
+    plugins: Option<String>,
+
+    /// Also copy debug symbols (`.pdb`) into a `symbols/` directory.
     #[arg(long)]
-    plugins: bool,
+    symbols: bool,
 
     /// Skip staging the shared CEF runtime even when `build/cef` is present.
     #[arg(long)]
@@ -97,9 +104,14 @@ struct PackageArgs {
 fn main() -> ExitCode {
     let cli = Cli::parse();
     match cli.command {
-        XtaskCommand::Package(args) => run_package(args),
-        XtaskCommand::BuildAll { args } => run_aliases(&["build-ce", "build-exclusive-win"], &args),
-        XtaskCommand::CheckAll { args } => run_aliases(&["check-ce", "check-exclusive-win"], &args),
+        Some(XtaskCommand::Package(args)) => run_package(args),
+        Some(XtaskCommand::BuildAll { args }) => {
+            run_aliases(&["build-ce", "build-exclusive-win"], &args)
+        }
+        Some(XtaskCommand::CheckAll { args }) => {
+            run_aliases(&["check-ce", "check-exclusive-win"], &args)
+        }
+        None => run_package(cli.package),
     }
 }
 
@@ -110,7 +122,10 @@ fn run_package(args: PackageArgs) -> ExitCode {
         edition: args.edition,
         out_root: args.out,
         symbols: args.symbols,
-        plugins: package::PluginSelection::parse(args.plugin.as_deref(), args.plugins),
+        plugins: package::PluginSelection::parse(
+            args.plugin.as_deref().or(args.plugins.as_deref()),
+            false,
+        ),
         stage_cef: !args.no_cef,
     };
     match package::run(&options) {

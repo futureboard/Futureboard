@@ -63,8 +63,8 @@ pub use preset::{
     read_preset_file, register_plugin, validate_plugin_for_registration, write_preset,
 };
 pub use builtin::{
-    builtin_catalog, builtin_editor_url, builtin_id, is_builtin_id, with_builtins,
-    BUILTIN_ID_PREFIX,
+    builtin_catalog, builtin_editor_url, builtin_id, is_builtin_id, is_builtin_ref,
+    resolve_builtin_stem, with_builtins, BUILTIN_ID_PREFIX,
 };
 pub use instance_manager::{InsertSlot, InstanceId, InstanceManager, PluginInstance};
 pub use registry::{

@@ -64,6 +64,35 @@ pub fn builtin_stem(id: &str) -> Option<&str> {
     id.strip_prefix(BUILTIN_ID_PREFIX)
 }
 
+/// Resolve either identifier form a built-in travels under to its catalog stem.
+///
+/// A built-in is referred to by two different strings depending on where you
+/// are:
+///
+/// * `builtin:rodharerist` — the [`RegistryPlugin::id`], used by the plugin
+///   picker and catalog;
+/// * `rodharerist` — the [`RegistryPlugin::class_id`], which is what an insert
+///   slot stores in its `plugin_id` field (`apply_picked_insert` prefers
+///   `class_id` over `id`, because for VST3 that is the controller class).
+///
+/// Anything reached from an insert slot therefore cannot use
+/// [`is_builtin_id`] alone. Matching is validated against [`CATALOG`] rather
+/// than by shape, so an external plug-in whose class id merely lacks a prefix
+/// is never mistaken for a built-in.
+pub fn resolve_builtin_stem(id: &str) -> Option<&'static str> {
+    let candidate = builtin_stem(id).unwrap_or(id);
+    CATALOG
+        .iter()
+        .find(|entry| entry.stem == candidate)
+        .map(|entry| entry.stem)
+}
+
+/// Whether `id` denotes a built-in in **either** identifier form. Use this, not
+/// [`is_builtin_id`], for anything sourced from an insert slot.
+pub fn is_builtin_ref(id: &str) -> bool {
+    resolve_builtin_stem(id).is_some()
+}
+
 /// The `mikoplugin://<stem>/index.html` editor URL for a built-in id, or `None`
 /// when the id is not a built-in or that built-in ships no editor.
 pub fn builtin_editor_url(id: &str) -> Option<String> {

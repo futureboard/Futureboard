@@ -82,6 +82,18 @@ pub fn setup(cx: &mut App) {
     assets::register_fonts(cx);
     boot::log("fonts registered");
 
+    // Prewarm CEF on the GPUI UI thread, but outside this active App update.
+    // CEF may synchronously dispatch Win32 messages while initializing; running
+    // it as foreground work prevents those messages from re-entering a borrowed
+    // AppCell. A failure stays non-fatal and is surfaced by the editor window.
+    cx.spawn(async move |_cx| {
+        match sphere_ui_components::components::builtin_plugin_editor::init_at_boot() {
+            Ok(()) => boot::log("builtin plugin editor host (CEF) initialized"),
+            Err(err) => boot::log(&format!("builtin plugin editor host unavailable: {err}")),
+        }
+    })
+    .detach();
+
     // Apply the saved renderer preference now (before any window) so the GPU
     // renderer can be warmed during the loading screen rather than stalling the
     // first studio frame.

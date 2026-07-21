@@ -12,6 +12,28 @@ use sphere_ui_components::boot;
 use sphere_ui_components::embedded_assets::EmbeddedAssets;
 
 fn main() {
+    // ── Phase -1 — CEF process dispatch ───────────────────────────────────────
+    // CEF re-launches THIS executable for its own helper processes (renderer,
+    // GPU, utility). Those launches must be detected and serviced before any
+    // other initialization: a helper process must not create a window, open the
+    // audio device, touch settings, or run the elevation check. `execute_process`
+    // returns >= 0 only in a helper, and in that case the only correct action is
+    // to exit with the code it hands back.
+    //
+    // The app passed here declares the `mikoplugin://` scheme. CEF requires that
+    // declaration in *every* process, so the same app type is used again when
+    // the browser-side runtime initializes.
+    #[cfg(feature = "builtin-plugin-editor")]
+    {
+        use sphere_webview::runtime::ProcessDispatch;
+        let mut scheme_app = sphere_webview::scheme::plugin_scheme_app();
+        if let ProcessDispatch::SubprocessExit(code) =
+            sphere_webview::runtime::execute_subprocess(Some(&mut scheme_app))
+        {
+            std::process::exit(code);
+        }
+    }
+
     // Privilege safety — must run before audio, plugins, settings, or project I/O.
     // Community and Exclusive Edition both block elevated launches. Developer
     // builds may opt in with `--features allow_elevated_for_testing`.

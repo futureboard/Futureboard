@@ -167,6 +167,9 @@ pub use installer::install_cef;
 #[cfg(feature = "cef-runtime")]
 pub mod runtime;
 
+#[cfg(feature = "cef-runtime")]
+pub mod scheme;
+
 #[cfg(test)]
 mod tests {
     use super::*;

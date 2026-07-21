@@ -16,8 +16,27 @@ pub enum ProcessDispatch {
     SubprocessExit(i32),
 }
 
+/// Bind the CEF API version for this process.
+///
+/// cef-rs stamps a version into every wrapper object it creates. Until this has
+/// run that version is `-1`, and the first C→C++ call aborts the process with
+/// `CefApp_0_CToCpp called with invalid version -1`. It therefore has to happen
+/// before **any** CEF object exists — including the [`cef::App`] that
+/// [`execute_subprocess`] and [`CefRuntime::initialize`] are handed, which is
+/// constructed by the caller long before either runs.
+///
+/// Idempotent and safe to call from anywhere; every entry point in this crate
+/// calls it first so a caller cannot get the ordering wrong.
+pub fn ensure_api_version() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let _ = cef::api_hash(cef::sys::CEF_API_VERSION_LAST, 0);
+    });
+}
+
 /// Dispatch CEF subprocess command lines before starting the native UI.
 pub fn execute_subprocess(application: Option<&mut cef::App>) -> ProcessDispatch {
+    ensure_api_version();
     let args = cef::args::Args::new();
     let exit_code =
         cef::execute_process(Some(args.as_main_args()), application, std::ptr::null_mut());
@@ -123,7 +142,7 @@ impl CefRuntime {
         #[cfg(target_os = "macos")]
         let library = load_macos_framework()?;
 
-        let _ = cef::api_hash(cef::sys::CEF_API_VERSION_LAST, 0);
+        ensure_api_version();
         let args = cef::args::Args::new();
         let settings = cef::Settings {
             no_sandbox: 1,
@@ -192,6 +211,34 @@ impl CefRuntime {
         Ok(WebView {
             browser,
             owner_thread: self.owner_thread,
+            _runtime: PhantomData,
+            _not_send: PhantomData,
+        })
+    }
+
+    /// Create a web view whose lifetime is not tied to this borrow.
+    ///
+    /// [`Self::create_webview`] returns a `WebView<'runtime>`, which cannot be
+    /// stored in the same struct as the runtime it borrows. A host that owns
+    /// both (one CEF runtime plus a map of open editor views) needs this.
+    ///
+    /// # Safety
+    ///
+    /// The returned view must be dropped, or [`WebView::close`]d, **before**
+    /// the [`CefRuntime`] it came from. Storing both in one struct satisfies
+    /// this by declaring the view field before the runtime field, since Rust
+    /// drops fields in declaration order.
+    pub unsafe fn create_webview_detached(
+        &self,
+        parent: NativeParent,
+        config: WebViewConfig,
+    ) -> Result<WebView<'static>, CefRuntimeError> {
+        let view = self.create_webview(parent, config)?;
+        // Only the PhantomData borrow marker changes; the browser handle and
+        // its thread affinity are carried over unchanged.
+        Ok(WebView {
+            browser: view.browser,
+            owner_thread: view.owner_thread,
             _runtime: PhantomData,
             _not_send: PhantomData,
         })

@@ -7,6 +7,7 @@ name = "BuiltinAudioPlugins"
 version = "0.1.0"
 dependencies = [
  "builtin_dsp_core",
+ "builtin_ui_embed",
  "c1073",
  "compresser",
  "echospace",
@@ -14,7 +15,6 @@ dependencies = [
  "fa2a",
  "fa76",
  "meowsyn",
- "tempfile",
 ]
 
 [[package]]
@@ -1098,6 +1098,13 @@ name = "builtin_dsp_core"
 version = "0.1.0"
 dependencies = [
  "biquad",
+]
+
+[[package]]
+name = "builtin_ui_embed"
+version = "0.1.0"
+dependencies = [
+ "tempfile",
 ]
 
 [[package]]
@@ -2906,6 +2913,7 @@ version = "2026.7.2"
 dependencies = [
  "SphereDiscordRPC",
  "SpherePlatform",
+ "SphereWebView",
  "base64",
  "cpal",
  "ed25519-dalek",
@@ -6657,6 +6665,7 @@ version = "0.1.0"
 dependencies = [
  "biquad",
  "builtin_dsp_core",
+ "builtin_ui_embed",
  "nam-rs",
 ]
 
@@ -7444,7 +7453,9 @@ version = "0.1.0"
 dependencies = [
  "SphereMidiService",
  "SphereSoundfontPlayer",
+ "SphereWebView",
  "base64",
+ "builtin_ui_embed",
  "crc32fast",
  "dirs 5.0.1",
  "gpui",
@@ -7452,6 +7463,7 @@ dependencies = [
  "pollster 0.4.0",
  "raw-window-handle",
  "rfd",
+ "rodharerist",
  "serde",
  "serde_json",
  "sphere-audio-editor",

@@ -2679,8 +2679,9 @@ impl StudioLayout {
                     display_name,
                 );
             });
+            let is_builtin = SpherePluginHost::builtin_audio_bridge_supported(&bridge_class_id);
             let bridge_enabled = super::plugin_bridge_runtime::bridge_enabled()
-                && plugin_format == InsertPluginFormat::Vst3;
+                && (plugin_format == InsertPluginFormat::Vst3 || is_builtin);
             if bridge_enabled {
                 use crate::components::timeline::timeline_state::{
                     PluginRuntimeBackend, PluginRuntimeState,
@@ -2736,11 +2737,20 @@ impl StudioLayout {
                         let mut bridge_sink = None;
                         match runtime.lock() {
                             Ok(mut runtime) => {
-                                if let Err(error) = runtime.send_load_plugin(
-                                    descriptor,
-                                    sample_rate,
-                                    max_block_size,
-                                ) {
+                                let load_result = if is_builtin {
+                                    runtime.send_load_builtin_plugin(
+                                        descriptor,
+                                        sample_rate,
+                                        max_block_size,
+                                    )
+                                } else {
+                                    runtime.send_load_plugin(
+                                        descriptor,
+                                        sample_rate,
+                                        max_block_size,
+                                    )
+                                };
+                                if let Err(error) = load_result {
                                     eprintln!("[plugin-runtime] external bridge LoadPlugin failed: {error}");
                                     let _ = self.timeline.update(cx, |timeline, _cx| {
                                         timeline.state.set_insert_runtime(
@@ -3288,6 +3298,39 @@ impl StudioLayout {
         slots
     }
 
+    /// All inserts whose audio is rendered through the shared-memory bridge,
+    /// including Futureboard built-ins that have no module path.
+    fn bridge_audio_insert_slots(&self, cx: &App) -> Vec<(String, String)> {
+        let mut slots = self.bridge_vst3_insert_slots(cx);
+        if !super::plugin_bridge_runtime::bridge_enabled() {
+            return slots;
+        }
+        let state = &self.timeline.read(cx).state;
+        slots.extend(state.tracks.iter().flat_map(|track| {
+            track
+                .inserts
+                .iter()
+                .filter(|slot| {
+                    slot.plugin_id
+                        .as_deref()
+                        .is_some_and(SpherePluginHost::builtin_audio_bridge_supported)
+                })
+                .map(|slot| (track.id.clone(), slot.id.clone()))
+        }));
+        slots.extend(state.master.inserts.iter().filter_map(|slot| {
+            slot.plugin_id
+                .as_deref()
+                .filter(|id| SpherePluginHost::builtin_audio_bridge_supported(id))
+                .map(|_| {
+                    (
+                        crate::components::timeline::timeline_state::MASTER_TRACK_ID.to_string(),
+                        slot.id.clone(),
+                    )
+                })
+        }));
+        slots
+    }
+
     /// Pull current VST3 states from the plugin host into the timeline slots
     /// (`InsertSlotState::vst3_state`) so the next project snapshot persists
     /// them. Bounded request/response — call on save, not per frame. Slots the
@@ -3341,7 +3384,7 @@ impl StudioLayout {
         cx: &mut Context<Self>,
         reason: &'static str,
     ) -> bool {
-        let slots = self.bridge_vst3_insert_slots(cx);
+        let slots = self.bridge_audio_insert_slots(cx);
         if slots.is_empty() {
             return false;
         }
@@ -3560,24 +3603,31 @@ impl StudioLayout {
         let Some(slot) = slot else {
             return false;
         };
-        if slot.plugin_format != Some(InsertPluginFormat::Vst3) {
+        let class_id = slot.plugin_id.clone().unwrap_or_default();
+        let is_builtin = SpherePluginHost::builtin_audio_bridge_supported(&class_id);
+        if slot.plugin_format != Some(InsertPluginFormat::Vst3) && !is_builtin {
             return false;
         }
-        let Some(path) = slot.plugin_path.as_ref() else {
-            return false;
-        };
-        let path_string = path.to_string_lossy().into_owned();
-        let class_id = slot.plugin_id.clone().unwrap_or_default();
+        let path = slot.plugin_path.as_ref();
+        let path_string = path
+            .map(|path| path.to_string_lossy().into_owned())
+            .unwrap_or_default();
         let display_name = slot.display_name.clone();
 
         eprintln!(
             "[PluginRestore] project insert found track={track_id} slot={slot_id} plugin={display_name}"
         );
         eprintln!("[PluginRestore] creating runtime instance...");
-        eprintln!("[PluginRestore] resolved path={path_string}");
+        if is_builtin {
+            eprintln!("[PluginRestore] resolved built-in={class_id}");
+        } else {
+            eprintln!("[PluginRestore] resolved path={path_string}");
+        }
 
-        if !path.exists() {
-            let reason = format!("Plugin file not found: {}", path.display());
+        if !is_builtin && path.is_none_or(|path| !path.exists()) {
+            let reason = path
+                .map(|path| format!("Plugin file not found: {}", path.display()))
+                .unwrap_or_else(|| "Plugin file not found".to_string());
             eprintln!("[PluginRestore] failed reason={reason}");
             let _ = self.timeline.update(cx, |timeline, _cx| {
                 timeline.state.set_insert_runtime(
@@ -3601,7 +3651,7 @@ impl StudioLayout {
         let descriptor = super::plugin_bridge_runtime::BridgePluginDescriptor {
             track_id: track_id.to_string(),
             insert_id: slot_id.to_string(),
-            plugin_path: path_string,
+            plugin_path: path_string.clone(),
             class_id: class_id.clone(),
             display_name: display_name.clone(),
         };
@@ -3641,9 +3691,16 @@ impl StudioLayout {
                 });
                 let bridge_sink = match runtime.lock() {
                     Ok(mut runtime) => {
-                        if let Err(error) =
+                        let load_result = if is_builtin {
+                            runtime.send_load_builtin_plugin(
+                                descriptor,
+                                sample_rate,
+                                max_block_size,
+                            )
+                        } else {
                             runtime.send_load_plugin(descriptor, sample_rate, max_block_size)
-                        {
+                        };
+                        if let Err(error) = load_result {
                             eprintln!("[PluginRestore] failed reason={error}");
                             let _ = self.timeline.update(cx, |timeline, _cx| {
                                 timeline.state.set_insert_runtime(
@@ -3657,17 +3714,17 @@ impl StudioLayout {
                             return false;
                         }
                         eprintln!(
-                            "[PluginRestore] runtime instance created instance_id={slot_id} path={}",
-                            path.display()
+                            "[PluginRestore] runtime instance created instance_id={slot_id} source={}",
+                            if is_builtin { class_id.as_str() } else { path_string.as_str() }
                         );
-                        // Restore the persisted plugin state. Commands are
-                        // processed in order on the host, so this applies
-                        // after the LoadPlugin above completes.
-                        if let Some(state) = slot.vst3_state.as_ref() {
-                            if let Err(error) = runtime.send_plugin_state(slot_id, state) {
-                                eprintln!(
+                        // Restore opaque VST3 state only for external modules.
+                        if !is_builtin {
+                            if let Some(state) = slot.vst3_state.as_ref() {
+                                if let Err(error) = runtime.send_plugin_state(slot_id, state) {
+                                    eprintln!(
                                     "[PluginRestore] SetPluginState send failed instance={slot_id}: {error}"
                                 );
+                                }
                             }
                         }
                         runtime.audio_sink_for(slot_id)
@@ -3714,7 +3771,7 @@ impl StudioLayout {
         if !super::plugin_bridge_runtime::bridge_enabled() {
             return;
         }
-        let slots = self.bridge_vst3_insert_slots(cx);
+        let slots = self.bridge_audio_insert_slots(cx);
         if let Some(engine) = self.audio_bridge.engine.as_ref() {
             for (_, insert_id) in &slots {
                 let _ = engine.set_plugin_bridge_sink(insert_id.clone(), None);
@@ -3739,7 +3796,7 @@ impl StudioLayout {
             return;
         }
 
-        let inserts = self.bridge_vst3_insert_slots(cx);
+        let inserts = self.bridge_audio_insert_slots(cx);
         let wanted: std::collections::HashSet<String> =
             inserts.iter().map(|(_, slot_id)| slot_id.clone()).collect();
         if let Some(runtime) = self.plugin_editors.bridge_runtime.as_ref() {
@@ -3770,7 +3827,7 @@ impl StudioLayout {
             return;
         }
 
-        let inserts = self.bridge_vst3_insert_slots(cx);
+        let inserts = self.bridge_audio_insert_slots(cx);
 
         let wanted: std::collections::HashSet<String> =
             inserts.iter().map(|(_, slot_id)| slot_id.clone()).collect();

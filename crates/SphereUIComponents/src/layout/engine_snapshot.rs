@@ -289,20 +289,27 @@ fn build_engine_inserts_for(
                 if plugin_id == STUB_PLUGIN_ID {
                     return None;
                 }
-                if slot.plugin_format != Some(InsertPluginFormat::Vst3) {
+                let is_builtin = SpherePluginHost::builtin_audio_bridge_supported(plugin_id);
+                if slot.plugin_format != Some(InsertPluginFormat::Vst3) && !is_builtin {
                     return None;
                 }
-                let path = slot
-                    .plugin_path
-                    .as_ref()
-                    .map(|p| p.to_string_lossy().into_owned())
-                    .filter(|p| !p.trim().is_empty())?;
+                let path = if is_builtin {
+                    String::new()
+                } else {
+                    slot.plugin_path
+                        .as_ref()
+                        .map(|p| p.to_string_lossy().into_owned())
+                        .filter(|p| !p.trim().is_empty())?
+                };
 
                 let role = bridge_insert_role(track_type, slot_index);
 
                 let mut params: std::collections::HashMap<String, serde_json::Value> =
                     std::collections::HashMap::new();
-                params.insert("format".to_string(), serde_json::json!("VST3"));
+                params.insert(
+                    "format".to_string(),
+                    serde_json::json!(if is_builtin { "BuiltIn" } else { "VST3" }),
+                );
                 params.insert("modulePath".to_string(), serde_json::json!(path));
                 params.insert("path".to_string(), serde_json::json!(path));
                 params.insert("classId".to_string(), serde_json::json!(plugin_id));

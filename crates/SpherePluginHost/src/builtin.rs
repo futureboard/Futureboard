@@ -141,6 +141,13 @@ pub fn is_builtin_ref(id: &str) -> bool {
     resolve_builtin_stem(id).is_some()
 }
 
+/// Whether this built-in currently has an out-of-process audio DSP runtime.
+/// Keep this narrower than the catalog: unsupported built-ins must retain their
+/// existing path instead of being routed to a host that cannot instantiate them.
+pub fn builtin_audio_bridge_supported(id: &str) -> bool {
+    resolve_builtin_stem(id) == Some("rodharerist")
+}
+
 /// The `mikoplugin://<stem>/index.html` editor URL for a built-in id, or `None`
 /// when the id is not a built-in or that built-in ships no editor.
 pub fn builtin_editor_url(id: &str) -> Option<String> {
@@ -237,6 +244,14 @@ mod tests {
     fn stem_round_trips() {
         assert_eq!(builtin_stem(&builtin_id("meowsyn")), Some("meowsyn"));
         assert!(builtin_stem("clap:foo").is_none());
+    }
+
+    #[test]
+    fn only_rodhareist_is_audio_bridge_supported() {
+        assert!(builtin_audio_bridge_supported("rodharerist"));
+        assert!(builtin_audio_bridge_supported("builtin:rodharerist"));
+        assert!(!builtin_audio_bridge_supported("equz8"));
+        assert!(!builtin_audio_bridge_supported("vst3:whatever"));
     }
 
     #[test]

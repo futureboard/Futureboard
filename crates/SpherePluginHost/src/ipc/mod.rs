@@ -25,7 +25,7 @@ use serde::{Deserialize, Serialize};
 /// [`HostEvent`]. The client sends it in [`HostCommand::Hello`] and the host
 /// echoes its own in [`HostEvent::Ready`]; a mismatch should be surfaced, not
 /// silently tolerated.
-pub const PROTOCOL_VERSION: u32 = 3;
+pub const PROTOCOL_VERSION: u32 = 4;
 
 /// Commands sent **client → host** (written to the host's stdin).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -50,6 +50,15 @@ pub enum HostCommand {
         plugin_instance_id: String,
         plugin_path: String,
         class_id: String,
+        sample_rate: u32,
+        max_block_size: u32,
+    },
+    /// Create a Futureboard built-in DSP instance in the host process. Built-ins
+    /// use the same per-instance shared-memory audio exchange as VST3 plugins,
+    /// but do not have a module path or native editor lifecycle.
+    LoadBuiltinPlugin {
+        plugin_instance_id: String,
+        plugin_id: String,
         sample_rate: u32,
         max_block_size: u32,
     },
@@ -436,6 +445,23 @@ mod tests {
     }
 
     #[test]
+    fn builtin_load_round_trips_through_frame() {
+        let cmd = HostCommand::LoadBuiltinPlugin {
+            plugin_instance_id: "track1:insert3".into(),
+            plugin_id: "rodharerist".into(),
+            sample_rate: 48_000,
+            max_block_size: 256,
+        };
+        let mut buf = Vec::new();
+        write_frame(&mut buf, &cmd).unwrap();
+        let mut reader = Cursor::new(buf);
+        assert_eq!(
+            read_frame::<HostCommand, _>(&mut reader).unwrap(),
+            Some(cmd)
+        );
+    }
+
+    #[test]
     fn event_round_trips_and_skips_blank_lines() {
         let ev = HostEvent::EditorAttached {
             plugin_instance_id: "track1:insert2".into(),
@@ -491,6 +517,6 @@ mod tests {
             pid: 42,
         })
         .unwrap();
-        assert_eq!(json, r#"{"event":"Ready","protocol_version":3,"pid":42}"#);
+        assert_eq!(json, r#"{"event":"Ready","protocol_version":4,"pid":42}"#);
     }
 }

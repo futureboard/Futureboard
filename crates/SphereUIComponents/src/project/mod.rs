@@ -715,12 +715,14 @@ fn project_insert_to_timeline(pi: &ProjectInsert) -> InsertSlotState {
                 PluginFormat::Lv2 => InsertPluginFormat::Lv2,
                 PluginFormat::Unknown => InsertPluginFormat::Unknown,
             };
+            let is_builtin = SpherePluginHost::builtin_audio_bridge_supported(&plugin.plugin_uid);
             let bridge = SpherePluginHost::plugin_host_client::plugin_host_bridge_enabled()
-                && plugin_format == InsertPluginFormat::Vst3;
-            let path_missing = plugin
-                .plugin_path
-                .as_ref()
-                .is_none_or(|path| !path.exists());
+                && (plugin_format == InsertPluginFormat::Vst3 || is_builtin);
+            let path_missing = !is_builtin
+                && plugin
+                    .plugin_path
+                    .as_ref()
+                    .is_none_or(|path| !path.exists());
             let (load_status, runtime_state, runtime_backend) = if path_missing {
                 (
                     InsertLoadStatus::Missing("Plugin file not found".to_string()),

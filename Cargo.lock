@@ -7409,6 +7409,7 @@ name = "sphere-plugin-host"
 version = "0.1.0"
 dependencies = [
  "base64",
+ "builtin_dsp_core",
  "cc",
  "cpal",
  "crossbeam-channel",
@@ -7418,6 +7419,7 @@ dependencies = [
  "napi-build",
  "napi-derive",
  "parking_lot",
+ "rodharerist",
  "rusqlite",
  "serde",
  "serde_json",

@@ -531,6 +531,21 @@ impl PluginHostClient {
         })
     }
 
+    pub fn load_builtin_plugin(
+        &mut self,
+        plugin_instance_id: impl Into<String>,
+        plugin_id: impl Into<String>,
+        sample_rate: u32,
+        max_block_size: u32,
+    ) -> Result<(), PluginHostClientError> {
+        self.send(&HostCommand::LoadBuiltinPlugin {
+            plugin_instance_id: plugin_instance_id.into(),
+            plugin_id: plugin_id.into(),
+            sample_rate,
+            max_block_size,
+        })
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn open_editor(
         &mut self,

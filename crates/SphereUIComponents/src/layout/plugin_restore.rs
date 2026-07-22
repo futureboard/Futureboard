@@ -280,7 +280,11 @@ impl StudioLayout {
             return PluginRestoreWaitOutcome::Failed;
         };
 
-        if !slot.plugin_path.as_ref().is_some_and(|p| p.exists()) {
+        let is_builtin = slot
+            .plugin_id
+            .as_deref()
+            .is_some_and(SpherePluginHost::builtin_audio_bridge_supported);
+        if !is_builtin && !slot.plugin_path.as_ref().is_some_and(|p| p.exists()) {
             let reason = slot
                 .plugin_path
                 .as_ref()

@@ -19,12 +19,14 @@
 
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
+use std::cell::UnsafeCell;
 use std::collections::HashMap;
 use std::io::{self, BufReader};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use builtin_dsp_core::StereoEffect;
 use SpherePluginHost::audio_bridge::{
     bridge_kick_event_name, BridgeKickEvent, SharedAudioRegion, AUDIO_BUF_LEN, MAX_BLOCK_FRAMES,
     MAX_CHANNELS,
@@ -233,6 +235,54 @@ struct LoadedPlugin {
 
 type LoadedRegistry = HashMap<String, LoadedPlugin>;
 
+/// A built-in processor is created on the IPC thread and then owned exclusively
+/// by the audio producer thread. The map only publishes/removes `Arc` handles;
+/// no other thread accesses the DSP inside the cell.
+struct BuiltinHostProcessor {
+    dsp: UnsafeCell<rodharerist::Dsp>,
+}
+
+// SAFETY: `process_block` is called only by the single audio producer thread.
+// IPC/UI threads only clone or remove the surrounding Arc map entry.
+unsafe impl Send for BuiltinHostProcessor {}
+unsafe impl Sync for BuiltinHostProcessor {}
+
+impl BuiltinHostProcessor {
+    fn rodhareist(sample_rate: u32) -> Self {
+        Self {
+            dsp: UnsafeCell::new(rodharerist::Dsp::new(sample_rate.max(1) as f32)),
+        }
+    }
+
+    fn process_block(&self, in_l: &[f32], in_r: &[f32], interleaved: &mut [f32], frames: usize) {
+        // SAFETY: the dedicated producer thread is the sole DSP accessor.
+        let dsp = unsafe { &mut *self.dsp.get() };
+        for i in 0..frames {
+            let (l, r) = dsp.process_stereo(in_l[i], in_r[i]);
+            interleaved[i * 2] = l;
+            interleaved[i * 2 + 1] = r;
+        }
+    }
+}
+
+type SharedBuiltinProcessors = Arc<Mutex<Arc<HashMap<String, Arc<BuiltinHostProcessor>>>>>;
+
+#[cfg(test)]
+mod builtin_processor_tests {
+    use super::*;
+
+    #[test]
+    fn rodhareist_processes_daw_input_to_stereo_output() {
+        let processor = BuiltinHostProcessor::rodhareist(48_000);
+        let in_l = [0.2f32; 32];
+        let in_r = [-0.1f32; 32];
+        let mut output = [0.0f32; 64];
+        processor.process_block(&in_l, &in_r, &mut output, 32);
+        assert!(output.iter().all(|sample| sample.is_finite()));
+        assert!(output.iter().any(|sample| sample.abs() > 1.0e-6));
+    }
+}
+
 #[derive(Debug)]
 #[allow(dead_code)]
 struct PendingEditorPrepare {
@@ -362,6 +412,7 @@ fn shutdown_host(
 fn service_audio_bridge(
     region: &SharedAudioRegion,
     dsp: &BridgeAudioShared,
+    builtin: Option<&BuiltinHostProcessor>,
     plugin_instance_id: &str,
 ) {
     let bridge = region.bridge();
@@ -381,7 +432,9 @@ fn service_audio_bridge(
     // broadcast to every loaded plugin.
     let mut midi_count = 0u32;
     while let Some(ev) = bridge.midi.try_pop() {
-        dsp.apply_shared_midi(plugin_instance_id, ev);
+        if builtin.is_none() {
+            dsp.apply_shared_midi(plugin_instance_id, ev);
+        }
         midi_count += 1;
     }
     // stderr is a pipe to the parent process — writing it from the producer
@@ -396,7 +449,9 @@ fn service_audio_bridge(
     // process() below). Per-instance ring, like MIDI — never broadcast.
     let mut param_count = 0u32;
     while let Some(ev) = bridge.params.try_pop() {
-        dsp.apply_shared_param(plugin_instance_id, ev.param_id, ev.value);
+        if builtin.is_none() {
+            dsp.apply_shared_param(plugin_instance_id, ev.param_id, ev.value);
+        }
         param_count += 1;
     }
     if param_count > 0 && debug_enabled() {
@@ -412,36 +467,51 @@ fn service_audio_bridge(
             .audio_in
             .read_deinterleaved(&mut in_l[..frames], &mut in_r[..frames], frames);
     }
-    let output_channels = dsp
-        .main_audio_output_channel_count_for_instance(plugin_instance_id)
-        .unwrap_or_else(|| bridge.plugin_output_channels())
-        .max(1)
-        .min(MAX_CHANNELS as u32) as usize;
+    let output_channels = builtin.map_or_else(
+        || {
+            dsp.main_audio_output_channel_count_for_instance(plugin_instance_id)
+                .unwrap_or_else(|| bridge.plugin_output_channels())
+                .max(1)
+                .min(MAX_CHANNELS as u32) as usize
+        },
+        |_| 2,
+    );
     bridge.set_plugin_output_channels(output_channels as u32);
     let mut interleaved = [0.0f32; AUDIO_BUF_LEN];
     let len = (frames * output_channels).min(AUDIO_BUF_LEN);
-    // Real transport ProcessContext published by the engine for this block.
-    let bt = bridge.load_transport();
-    let transport = DirectAudio::RuntimeTransportContext {
-        tempo_bpm: bt.tempo_bpm,
-        time_sig_num: bt.time_sig_num,
-        time_sig_den: bt.time_sig_den,
-        project_time_samples: bt.project_time_samples,
-        ppq_position: bt.ppq_position,
-        bar_position_ppq: bt.bar_position_ppq,
-        playing: bt.playing,
-        recording: bt.recording,
+    let produced_channels = if let Some(builtin) = builtin {
+        builtin.process_block(
+            &in_l[..frames],
+            &in_r[..frames],
+            &mut interleaved[..len],
+            frames,
+        );
+        2
+    } else {
+        // Real transport ProcessContext published by the engine for this block.
+        let bt = bridge.load_transport();
+        let transport = DirectAudio::RuntimeTransportContext {
+            tempo_bpm: bt.tempo_bpm,
+            time_sig_num: bt.time_sig_num,
+            time_sig_den: bt.time_sig_den,
+            project_time_samples: bt.project_time_samples,
+            ppq_position: bt.ppq_position,
+            bar_position_ppq: bt.bar_position_ppq,
+            playing: bt.playing,
+            recording: bt.recording,
+        };
+        dsp.render_single_voice_interleaved(
+            plugin_instance_id,
+            frames,
+            &in_l[..frames],
+            &in_r[..frames],
+            &mut interleaved[..len],
+            output_channels,
+            transport,
+        )
+        .max(1)
+        .min(output_channels)
     };
-    let produced_channels = dsp.render_single_voice_interleaved(
-        plugin_instance_id,
-        frames,
-        &in_l[..frames],
-        &in_r[..frames],
-        &mut interleaved[..len],
-        output_channels,
-        transport,
-    );
-    let produced_channels = produced_channels.max(1).min(output_channels);
     let mut peak_l = 0.0f32;
     let mut peak_r = 0.0f32;
     for i in 0..frames {
@@ -455,7 +525,8 @@ fn service_audio_bridge(
         peak_l = peak_l.max(l.abs());
         peak_r = peak_r.max(r.abs());
     }
-    let dsp_ready = dsp.dsp_ready() && (dsp.has_loaded_instances() || dsp.continuous_mode());
+    let dsp_ready = builtin.is_some()
+        || (dsp.dsp_ready() && (dsp.has_loaded_instances() || dsp.continuous_mode()));
     // SAFETY: the host owns `audio_out` for this block — the engine waits on
     // `done_seq` (published below) before reading it.
     unsafe {
@@ -471,7 +542,12 @@ fn service_audio_bridge(
         .fetch_add(1, Ordering::Relaxed)
         .is_multiple_of(64)
     {
-        if let Some(latency) = dsp.voice_latency_samples(plugin_instance_id) {
+        let latency = if builtin.is_some() {
+            Some(0)
+        } else {
+            dsp.voice_latency_samples(plugin_instance_id)
+        };
+        if let Some(latency) = latency {
             bridge
                 .latency_samples
                 .store(latency as u32, Ordering::Relaxed);
@@ -561,6 +637,7 @@ fn boost_audio_producer_thread() {}
 /// back to the legacy 250 µs sleep poll.
 fn run_audio_producer(
     regions: SharedAudioRegions,
+    builtins: SharedBuiltinProcessors,
     dsp: Arc<BridgeAudioShared>,
     shutdown: Arc<AtomicBool>,
     kick: Option<BridgeKickEvent>,
@@ -574,8 +651,17 @@ fn run_audio_producer(
             .lock()
             .map(|map| Arc::clone(&map))
             .unwrap_or_default();
+        let builtin_snapshot = builtins
+            .lock()
+            .map(|map| Arc::clone(&map))
+            .unwrap_or_default();
         for (instance_id, region) in snapshot.iter() {
-            service_audio_bridge(region.as_ref(), &dsp, instance_id);
+            service_audio_bridge(
+                region.as_ref(),
+                &dsp,
+                builtin_snapshot.get(instance_id).map(Arc::as_ref),
+                instance_id,
+            );
         }
         // Acknowledge the latest voice-snapshot publish now that any snapshot
         // borrowed for this block has been dropped (lets unload hand the final
@@ -642,8 +728,11 @@ fn run_ipc_loop(mut out: io::Stdout, shutdown: Arc<AtomicBool>) {
     // with the dedicated audio producer thread. The `Arc` keeps the view mapped
     // for the host's lifetime.
     let region_slots: SharedAudioRegions = Arc::new(Mutex::new(Arc::new(HashMap::new())));
+    let builtin_processors: SharedBuiltinProcessors =
+        Arc::new(Mutex::new(Arc::new(HashMap::new())));
     {
         let slots = region_slots.clone();
+        let builtins = builtin_processors.clone();
         let dsp = preview.lock().bridge_shared();
         let shutdown = shutdown.clone();
         // Producer wake event, shared with the engine-side sink. Keyed by the
@@ -667,7 +756,7 @@ fn run_ipc_loop(mut out: io::Stdout, shutdown: Arc<AtomicBool>) {
         });
         std::thread::Builder::new()
             .name("plugin-host-audio".into())
-            .spawn(move || run_audio_producer(slots, dsp, shutdown, kick))
+            .spawn(move || run_audio_producer(slots, builtins, dsp, shutdown, kick))
             .expect("spawn plugin-host audio producer");
     }
 
@@ -753,6 +842,7 @@ fn run_ipc_loop(mut out: io::Stdout, shutdown: Arc<AtomicBool>) {
                             &preview,
                             &mut preview_output_started,
                             &region_slots,
+                            &builtin_processors,
                             &mut out,
                         )
                     });
@@ -1108,6 +1198,7 @@ fn dispatch(
     preview: &SharedPluginHostPreview,
     preview_output_started: &mut bool,
     region_slots: &SharedAudioRegions,
+    builtin_processors: &SharedBuiltinProcessors,
     out: &mut io::Stdout,
 ) {
     match cmd {
@@ -1241,6 +1332,68 @@ fn dispatch(
                 max_block_size,
                 pending_plugin_loads,
                 load_result_tx,
+            );
+        }
+        HostCommand::LoadBuiltinPlugin {
+            plugin_instance_id,
+            plugin_id,
+            sample_rate,
+            max_block_size,
+        } => {
+            let Some(stem) = SpherePluginHost::resolve_builtin_stem(&plugin_id) else {
+                let _ = ipc::write_frame(
+                    out,
+                    &HostEvent::PluginLoadFailed {
+                        plugin_instance_id,
+                        error: format!("unknown built-in plugin: {plugin_id}"),
+                    },
+                );
+                return;
+            };
+            if stem != "rodharerist" {
+                let _ = ipc::write_frame(
+                    out,
+                    &HostEvent::PluginLoadFailed {
+                        plugin_instance_id,
+                        error: format!("built-in DSP is not host-enabled yet: {stem}"),
+                    },
+                );
+                return;
+            }
+            if loaded.contains_key(&plugin_instance_id) {
+                let _ = ipc::write_frame(
+                    out,
+                    &HostEvent::PluginAlreadyLoaded {
+                        plugin_instance_id,
+                        name: "Rodhareist".to_string(),
+                    },
+                );
+                return;
+            }
+            let processor = Arc::new(BuiltinHostProcessor::rodhareist(sample_rate));
+            if let Ok(mut processors) = builtin_processors.lock() {
+                Arc::make_mut(&mut processors).insert(plugin_instance_id.clone(), processor);
+            }
+            loaded.insert(
+                plugin_instance_id.clone(),
+                LoadedPlugin {
+                    plugin_path: String::new(),
+                    class_id: stem.to_string(),
+                    name: "Rodhareist".to_string(),
+                    sample_rate,
+                    max_block_size,
+                    processing_ready: true,
+                },
+            );
+            eprintln!(
+                "[plugin-host-builtin] loaded instance={plugin_instance_id} plugin={stem} sr={sample_rate} block={max_block_size}"
+            );
+            let _ = ipc::write_frame(
+                out,
+                &HostEvent::PluginLoaded {
+                    plugin_instance_id,
+                    name: "Rodhareist".to_string(),
+                },
             );
         }
         HostCommand::OpenEditorWithParentHwnd {
@@ -1458,6 +1611,9 @@ fn dispatch(
             registry.remove(&plugin_instance_id);
             preview.lock().unload_instance(&plugin_instance_id);
             loaded.remove(&plugin_instance_id);
+            if let Ok(mut processors) = builtin_processors.lock() {
+                Arc::make_mut(&mut processors).remove(&plugin_instance_id);
+            }
             if let Ok(mut slots) = region_slots.lock() {
                 Arc::make_mut(&mut slots).remove(&plugin_instance_id);
             }

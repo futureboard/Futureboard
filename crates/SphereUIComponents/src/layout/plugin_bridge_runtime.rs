@@ -268,6 +268,43 @@ impl PluginBridgeRuntime {
         }
     }
 
+    pub fn send_load_builtin_plugin(
+        &mut self,
+        descriptor: BridgePluginDescriptor,
+        sample_rate: u32,
+        max_block_size: u32,
+    ) -> Result<(), PluginHostClientError> {
+        let _ = self.configure_audio_bridge(sample_rate, max_block_size);
+        if self.loaded.contains_key(&descriptor.insert_id) {
+            eprintln!(
+                "[plugin-bridge] LoadBuiltinPlugin skipped instance={} reason=already_loaded",
+                descriptor.insert_id
+            );
+            return Ok(());
+        }
+        let instance = descriptor.insert_id.clone();
+        eprintln!(
+            "[plugin-bridge] sending LoadBuiltinPlugin instance={} plugin={}",
+            instance, descriptor.class_id
+        );
+        self.establish_shared_audio_for_instance(&instance, sample_rate, max_block_size);
+        self.client.load_builtin_plugin(
+            instance.clone(),
+            descriptor.class_id.clone(),
+            sample_rate,
+            max_block_size,
+        )?;
+        self.loaded.insert(
+            instance,
+            BridgeLoadedPlugin {
+                descriptor,
+                host_pid: self.host_pid,
+                confirmed: false,
+            },
+        );
+        Ok(())
+    }
+
     pub fn send_load_plugin(
         &mut self,
         descriptor: BridgePluginDescriptor,

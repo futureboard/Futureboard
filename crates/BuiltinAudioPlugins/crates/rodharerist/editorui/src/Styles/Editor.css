@@ -501,7 +501,7 @@ body {
   border: 1px solid var(--stroke-2);
   border-radius: var(--radius);
   display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px;
-  overflow: hidden;
+  overflow: visible;
   flex-shrink: 0;
   transition: border-color 0.12s var(--ease), background 0.12s var(--ease);
 }

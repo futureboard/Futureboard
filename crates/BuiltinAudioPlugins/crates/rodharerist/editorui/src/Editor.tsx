@@ -1060,6 +1060,10 @@ function BoundEditor() {
 }
 
 function AppRoot() {
+  if (import.meta.env.DEV) {
+    return <RodhareistEditor />;
+  }
+
   return (
     <HashRouter>
       <BoundInstanceProvider>

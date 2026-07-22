@@ -34,11 +34,7 @@ pub(super) fn deinterleave_stereo(
 
 /// Re-interleave a planar-stereo buffer to `channels`, folding to mono when
 /// `channels == 1`, clamped to `frames`.
-pub(super) fn interleave_stereo(
-    planar: &PlanarStereo,
-    channels: usize,
-    frames: usize,
-) -> Vec<f32> {
+pub(super) fn interleave_stereo(planar: &PlanarStereo, channels: usize, frames: usize) -> Vec<f32> {
     let mut out = vec![0.0f32; frames * channels];
     for f in 0..frames {
         let l = planar[0].get(f).copied().unwrap_or(0.0);

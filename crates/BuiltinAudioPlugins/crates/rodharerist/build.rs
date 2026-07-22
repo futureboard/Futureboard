@@ -9,9 +9,8 @@
 use std::path::PathBuf;
 
 fn main() {
-    let out_dir = PathBuf::from(
-        std::env::var("OUT_DIR").expect("OUT_DIR is always set for build scripts"),
-    );
+    let out_dir =
+        PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR is always set for build scripts"));
     let dist = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("editorui/dist");
 
     let options = builtin_ui_embed::generate::GenerateOptions::from_out_dir(dist, out_dir);
@@ -19,7 +18,10 @@ fn main() {
         // Success is the normal case — stay quiet rather than emitting a
         // `cargo:warning` on every build.
         Ok(report) if report.dist_present => {
-            println!("cargo:rustc-env=RODHAREIST_UI_ASSET_COUNT={}", report.asset_count);
+            println!(
+                "cargo:rustc-env=RODHAREIST_UI_ASSET_COUNT={}",
+                report.asset_count
+            );
         }
         Ok(_) => {
             // Not fatal — the DSP core is independently useful and tested.

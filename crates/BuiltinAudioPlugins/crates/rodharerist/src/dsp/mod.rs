@@ -143,10 +143,7 @@ impl DriveModel {
     }
 
     pub fn from_index(i: u32) -> Self {
-        Self::ALL
-            .get(i as usize)
-            .copied()
-            .unwrap_or(Self::Screamer)
+        Self::ALL.get(i as usize).copied().unwrap_or(Self::Screamer)
     }
 }
 
@@ -198,10 +195,7 @@ impl AmpModel {
     }
 
     pub fn from_index(i: u32) -> Self {
-        Self::ALL
-            .get(i as usize)
-            .copied()
-            .unwrap_or(Self::Mandarin)
+        Self::ALL.get(i as usize).copied().unwrap_or(Self::Mandarin)
     }
 }
 
@@ -379,29 +373,190 @@ pub fn descriptor() -> PluginDescriptor {
         category: PluginCategory::Effect,
         version: env!("CARGO_PKG_VERSION"),
         params: &[
-            ParamDescriptor { id: "power", name: "Power", default_value: 1.0, min: 0.0, max: 1.0, unit: "bool" },
-            ParamDescriptor { id: "input_trim", name: "Input Trim", default_value: 0.0, min: -24.0, max: 24.0, unit: "dB" },
-            ParamDescriptor { id: "output_trim", name: "Output Trim", default_value: 0.0, min: -24.0, max: 24.0, unit: "dB" },
-            ParamDescriptor { id: "gate_thresh", name: "Gate", default_value: -55.0, min: -80.0, max: 0.0, unit: "dB" },
-            ParamDescriptor { id: "drive_gain", name: "Drive", default_value: 6.0, min: 0.0, max: 10.0, unit: "" },
-            ParamDescriptor { id: "drive_tone", name: "Drive Tone", default_value: 5.5, min: 0.0, max: 10.0, unit: "" },
-            ParamDescriptor { id: "drive_level", name: "Drive Level", default_value: 6.5, min: 0.0, max: 10.0, unit: "" },
-            ParamDescriptor { id: "amp_gain", name: "Amp Drive", default_value: 6.0, min: 0.0, max: 10.0, unit: "" },
-            ParamDescriptor { id: "amp_bass", name: "Bass", default_value: 5.1, min: 0.0, max: 10.0, unit: "" },
-            ParamDescriptor { id: "amp_middle", name: "Middle", default_value: 4.8, min: 0.0, max: 10.0, unit: "" },
-            ParamDescriptor { id: "amp_treble", name: "Treble", default_value: 4.8, min: 0.0, max: 10.0, unit: "" },
-            ParamDescriptor { id: "amp_presence", name: "Presence", default_value: 5.0, min: 0.0, max: 10.0, unit: "" },
-            ParamDescriptor { id: "amp_master", name: "Master", default_value: 3.5, min: 0.0, max: 10.0, unit: "" },
-            ParamDescriptor { id: "chorus_rate", name: "Chorus Rate", default_value: 4.0, min: 0.0, max: 10.0, unit: "" },
-            ParamDescriptor { id: "chorus_depth", name: "Chorus Depth", default_value: 5.5, min: 0.0, max: 10.0, unit: "" },
-            ParamDescriptor { id: "chorus_mix", name: "Chorus Mix", default_value: 40.0, min: 0.0, max: 100.0, unit: "%" },
-            ParamDescriptor { id: "delay_time", name: "Delay Time", default_value: 420.0, min: 40.0, max: 1200.0, unit: "ms" },
-            ParamDescriptor { id: "delay_fb", name: "Delay FB", default_value: 35.0, min: 0.0, max: 100.0, unit: "%" },
-            ParamDescriptor { id: "delay_mix", name: "Delay Mix", default_value: 30.0, min: 0.0, max: 100.0, unit: "%" },
-            ParamDescriptor { id: "reverb_decay", name: "Reverb Decay", default_value: 8.5, min: 0.5, max: 15.0, unit: "s" },
-            ParamDescriptor { id: "reverb_mix", name: "Reverb Mix", default_value: 55.0, min: 0.0, max: 100.0, unit: "%" },
-            ParamDescriptor { id: "cab_mic", name: "Cab Mic", default_value: 20.0, min: 0.0, max: 100.0, unit: "%" },
-            ParamDescriptor { id: "cab_dist", name: "Cab Distance", default_value: 40.0, min: 0.0, max: 100.0, unit: "%" },
+            ParamDescriptor {
+                id: "power",
+                name: "Power",
+                default_value: 1.0,
+                min: 0.0,
+                max: 1.0,
+                unit: "bool",
+            },
+            ParamDescriptor {
+                id: "input_trim",
+                name: "Input Trim",
+                default_value: 0.0,
+                min: -24.0,
+                max: 24.0,
+                unit: "dB",
+            },
+            ParamDescriptor {
+                id: "output_trim",
+                name: "Output Trim",
+                default_value: 0.0,
+                min: -24.0,
+                max: 24.0,
+                unit: "dB",
+            },
+            ParamDescriptor {
+                id: "gate_thresh",
+                name: "Gate",
+                default_value: -55.0,
+                min: -80.0,
+                max: 0.0,
+                unit: "dB",
+            },
+            ParamDescriptor {
+                id: "drive_gain",
+                name: "Drive",
+                default_value: 6.0,
+                min: 0.0,
+                max: 10.0,
+                unit: "",
+            },
+            ParamDescriptor {
+                id: "drive_tone",
+                name: "Drive Tone",
+                default_value: 5.5,
+                min: 0.0,
+                max: 10.0,
+                unit: "",
+            },
+            ParamDescriptor {
+                id: "drive_level",
+                name: "Drive Level",
+                default_value: 6.5,
+                min: 0.0,
+                max: 10.0,
+                unit: "",
+            },
+            ParamDescriptor {
+                id: "amp_gain",
+                name: "Amp Drive",
+                default_value: 6.0,
+                min: 0.0,
+                max: 10.0,
+                unit: "",
+            },
+            ParamDescriptor {
+                id: "amp_bass",
+                name: "Bass",
+                default_value: 5.1,
+                min: 0.0,
+                max: 10.0,
+                unit: "",
+            },
+            ParamDescriptor {
+                id: "amp_middle",
+                name: "Middle",
+                default_value: 4.8,
+                min: 0.0,
+                max: 10.0,
+                unit: "",
+            },
+            ParamDescriptor {
+                id: "amp_treble",
+                name: "Treble",
+                default_value: 4.8,
+                min: 0.0,
+                max: 10.0,
+                unit: "",
+            },
+            ParamDescriptor {
+                id: "amp_presence",
+                name: "Presence",
+                default_value: 5.0,
+                min: 0.0,
+                max: 10.0,
+                unit: "",
+            },
+            ParamDescriptor {
+                id: "amp_master",
+                name: "Master",
+                default_value: 3.5,
+                min: 0.0,
+                max: 10.0,
+                unit: "",
+            },
+            ParamDescriptor {
+                id: "chorus_rate",
+                name: "Chorus Rate",
+                default_value: 4.0,
+                min: 0.0,
+                max: 10.0,
+                unit: "",
+            },
+            ParamDescriptor {
+                id: "chorus_depth",
+                name: "Chorus Depth",
+                default_value: 5.5,
+                min: 0.0,
+                max: 10.0,
+                unit: "",
+            },
+            ParamDescriptor {
+                id: "chorus_mix",
+                name: "Chorus Mix",
+                default_value: 40.0,
+                min: 0.0,
+                max: 100.0,
+                unit: "%",
+            },
+            ParamDescriptor {
+                id: "delay_time",
+                name: "Delay Time",
+                default_value: 420.0,
+                min: 40.0,
+                max: 1200.0,
+                unit: "ms",
+            },
+            ParamDescriptor {
+                id: "delay_fb",
+                name: "Delay FB",
+                default_value: 35.0,
+                min: 0.0,
+                max: 100.0,
+                unit: "%",
+            },
+            ParamDescriptor {
+                id: "delay_mix",
+                name: "Delay Mix",
+                default_value: 30.0,
+                min: 0.0,
+                max: 100.0,
+                unit: "%",
+            },
+            ParamDescriptor {
+                id: "reverb_decay",
+                name: "Reverb Decay",
+                default_value: 8.5,
+                min: 0.5,
+                max: 15.0,
+                unit: "s",
+            },
+            ParamDescriptor {
+                id: "reverb_mix",
+                name: "Reverb Mix",
+                default_value: 55.0,
+                min: 0.0,
+                max: 100.0,
+                unit: "%",
+            },
+            ParamDescriptor {
+                id: "cab_mic",
+                name: "Cab Mic",
+                default_value: 20.0,
+                min: 0.0,
+                max: 100.0,
+                unit: "%",
+            },
+            ParamDescriptor {
+                id: "cab_dist",
+                name: "Cab Distance",
+                default_value: 40.0,
+                min: 0.0,
+                max: 100.0,
+                unit: "%",
+            },
         ],
     }
 }
@@ -686,7 +841,8 @@ impl Dsp {
         self.in_gain = db_to_linear(p.input_trim_db);
         self.out_gain = db_to_linear(p.output_trim_db);
         self.gate.set_threshold_db(p.gate_thresh_db);
-        self.drive.configure(p.drive_model, p.drive_gain, p.drive_tone, p.drive_level);
+        self.drive
+            .configure(p.drive_model, p.drive_gain, p.drive_tone, p.drive_level);
         self.amp_stage.set_engine(p.tone_engine);
         self.amp_stage.configure_classic(
             p.amp_model,
@@ -703,8 +859,10 @@ impl Dsp {
             p.nam_mix,
             p.nam_loudness_norm,
         );
-        self.chorus.configure(p.chorus_rate, p.chorus_depth, p.chorus_mix);
-        self.delay.configure(p.delay_time_ms, p.delay_fb, p.delay_mix);
+        self.chorus
+            .configure(p.chorus_rate, p.chorus_depth, p.chorus_mix);
+        self.delay
+            .configure(p.delay_time_ms, p.delay_fb, p.delay_mix);
         self.reverb.configure(p.reverb_decay_s, p.reverb_mix);
         self.cab.configure(p.cab_model, p.cab_mic, p.cab_dist);
     }
@@ -736,13 +894,8 @@ impl Dsp {
         stereo: bool,
         full_rig: bool,
     ) -> Result<NamCaptureInfo, NamLoadError> {
-        let prepared = nam::prepare_nam_runtime(
-            json,
-            name.into(),
-            self.sample_rate as f64,
-            stereo,
-            full_rig,
-        )?;
+        let prepared =
+            nam::prepare_nam_runtime(json, name.into(), self.sample_rate as f64, stereo, full_rig)?;
         let info = prepared.info();
         // Opportunistic sweep: drop whatever the audio thread has already
         // retired before handing off the new one.
@@ -831,8 +984,8 @@ impl StereoEffect for Dsp {
 
         let in_level = l.abs().max(r.abs());
         self.meters.in_peak = in_level.max(self.meters.in_peak - self.meters.in_peak * 0.0005);
-        self.meters.in_ms = in_level * in_level
-            + self.meters.rms_coeff * (self.meters.in_ms - in_level * in_level);
+        self.meters.in_ms =
+            in_level * in_level + self.meters.rms_coeff * (self.meters.in_ms - in_level * in_level);
         if in_level >= CLIP_THRESHOLD {
             self.meters.in_clip = true;
         }
@@ -904,7 +1057,10 @@ pub(crate) struct StereoBiquad {
 
 impl StereoBiquad {
     pub(crate) fn none() -> Self {
-        Self { left: None, right: None }
+        Self {
+            left: None,
+            right: None,
+        }
     }
 
     /// Install (or clear) the filter for both channels. `DirectForm1` is `Copy`,
@@ -1077,10 +1233,16 @@ mod tests {
             .expect("matching sample rate must load");
         assert_eq!(info.name, "Test Capture");
         assert!(info.full_rig);
-        assert!(dsp.nam_capture_info().is_none(), "not adopted before begin_block");
+        assert!(
+            dsp.nam_capture_info().is_none(),
+            "not adopted before begin_block"
+        );
 
         dsp.begin_block();
-        assert!(dsp.nam_capture_info().is_some(), "adopted at block boundary");
+        assert!(
+            dsp.nam_capture_info().is_some(),
+            "adopted at block boundary"
+        );
 
         for _ in 0..256 {
             let (l, r) = dsp.process_stereo(0.2, -0.2);
@@ -1272,7 +1434,10 @@ mod tests {
         let mut dsp = bare_dsp();
         assert!(dsp.apply_ui_param("output_trim", -6.0));
         let (l, _) = dsp.process_stereo(0.4, 0.4);
-        assert!((l - 0.200_47).abs() < 1.0e-3, "output trim not applied: {l}");
+        assert!(
+            (l - 0.200_47).abs() < 1.0e-3,
+            "output trim not applied: {l}"
+        );
     }
 
     #[test]

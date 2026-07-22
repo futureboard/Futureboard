@@ -75,7 +75,11 @@ pub fn has_editor_ui(crate_dir: &Path) -> bool {
 /// Whether a built site is present (`editorui/dist/index.html`) — the precondition
 /// for embedding. Missing dist before the UI build is a normal, recoverable state.
 pub fn editor_ui_built(crate_dir: &Path) -> bool {
-    crate_dir.join("editorui").join("dist").join("index.html").is_file()
+    crate_dir
+        .join("editorui")
+        .join("dist")
+        .join("index.html")
+        .is_file()
 }
 
 /// Classify a Cargo artifact: returns `(name, path)` when it is a plugin dynamic
@@ -152,7 +156,9 @@ pub fn build_plugins(
         }
     }
 
-    let status = child.wait().context("failed to wait on cargo plugin build")?;
+    let status = child
+        .wait()
+        .context("failed to wait on cargo plugin build")?;
     if !status.success() {
         bail!("cargo plugin build failed with {status}");
     }
@@ -178,7 +184,12 @@ pub fn stage_plugins(
             .library
             .file_name()
             .and_then(|n| n.to_str())
-            .with_context(|| format!("plugin library has no file name: {}", plugin.library.display()))?;
+            .with_context(|| {
+                format!(
+                    "plugin library has no file name: {}",
+                    plugin.library.display()
+                )
+            })?;
         let actual_ext = plugin
             .library
             .extension()
@@ -263,9 +274,12 @@ mod tests {
         let all = expected_builtin_plugin_files(triple);
         assert!(missing_builtin_plugins(&all, triple).is_empty());
         // Drop one → it is reported missing.
-        let mut partial = all.clone();
+        let mut partial = all;
         partial.retain(|name| name != "meowsyn.dll");
-        assert_eq!(missing_builtin_plugins(&partial, triple), vec!["meowsyn.dll".to_string()]);
+        assert_eq!(
+            missing_builtin_plugins(&partial, triple),
+            vec!["meowsyn.dll".to_string()]
+        );
     }
 
     #[test]

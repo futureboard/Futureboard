@@ -191,9 +191,7 @@ pub unsafe extern "C" fn sphere_stretch_process_stereo(
 // call it from a realtime audio callback.
 // ============================================================================
 
-use crate::analysis::{
-    AnalysisOptions, InstrumentCategory, KeyMode, PitchClass, analyze_mono,
-};
+use crate::analysis::{AnalysisOptions, InstrumentCategory, KeyMode, PitchClass, analyze_mono};
 
 /// Plain-old-data analysis result for the C ABI.
 ///

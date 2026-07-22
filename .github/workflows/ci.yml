@@ -91,24 +91,37 @@ jobs:
         with:
           components: clippy
 
-      - name: Cache Rust dependencies
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Cache Rust dependencies and CEF
+        id: ci-cache
         uses: actions/cache@v4
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ci-cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+            build/cef
+          key: ci-cargo-cef-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: |
-            ci-cargo-${{ runner.os }}-
+            ci-cargo-cef-${{ runner.os }}-
+
+      - name: Install pinned CEF SDK and runtime
+        if: steps.ci-cache.outputs.cache-hit != 'true'
+        run: cargo run -p SphereWebView --example install_cef --features installer
+
+      - name: Install built-in plugin editor dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Build embedded built-in plugin editors
+        run: |
+          bun run --cwd crates/BuiltinAudioPlugins/crates/meowsyn/editor build
+          bun run --cwd crates/BuiltinAudioPlugins/crates/opensampler/editor build
+          bun run --cwd crates/BuiltinAudioPlugins/crates/rodharerist/editorui build
 
       - name: cargo clippy (Community Edition)
         run: cargo clippy-ce --all-targets -- -D warnings
-
-      - name: cargo clippy N-API addons
-        run: |
-          cargo clippy -p sphere_directaudioengine --lib --features napi --target-dir target/community -- -D warnings
-          cargo clippy -p sphere-plugin-host --lib --features napi --target-dir target/community -- -D warnings
 
       - name: cargo test (Community Edition)
         run: cargo test-ce

@@ -21,8 +21,8 @@ use std::time::{Duration, Instant};
 use gpui::prelude::FluentBuilder;
 use gpui::{
     div, px, size, App, AppContext, Bounds, Context, InteractiveElement, IntoElement, MouseButton,
-    ParentElement, Pixels, Point, Render, Styled, Window, WindowBackgroundAppearance,
-    WindowBounds, WindowHandle, WindowKind,
+    ParentElement, Pixels, Point, Render, Styled, Window, WindowBackgroundAppearance, WindowBounds,
+    WindowHandle, WindowKind,
 };
 
 use crate::components::builtin_plugin_editor::{
@@ -108,7 +108,9 @@ fn decode_state_bytes(bytes: Option<&[u8]>) -> serde_json::Value {
             serde_json::json!({})
         }
         Err(error) => {
-            eprintln!("[plugin-bridge] persisted state is not valid UTF-8, using defaults: {error}");
+            eprintln!(
+                "[plugin-bridge] persisted state is not valid UTF-8, using defaults: {error}"
+            );
             serde_json::json!({})
         }
     }
@@ -328,7 +330,10 @@ impl BuiltinPluginEditorWindow {
             .active_instance
             .as_ref()
             .is_some_and(|active| instances.iter().any(|i| &i.instance_key == active));
-        let removed_active = self.active_instance.clone().filter(|_| !active_still_present);
+        let removed_active = self
+            .active_instance
+            .clone()
+            .filter(|_| !active_still_present);
         self.instances = instances;
 
         if !active_still_present {
@@ -1070,7 +1075,7 @@ mod tests {
         // testing (GPUI `Context<Self>` cannot be constructed standalone in a
         // unit test); this test only pins down the pure membership check the
         // real method relies on so a future refactor can't silently drop it.
-        let instances = vec![descriptor(a.clone())];
+        let instances = [descriptor(a.clone())];
         assert!(instances.iter().any(|i| i.instance_key == a));
         assert!(!instances.iter().any(|i| i.instance_key == b));
     }
@@ -1128,19 +1133,24 @@ mod tests {
     #[test]
     fn decode_state_bytes_falls_back_to_empty_object_on_corrupt_bytes() {
         assert_eq!(decode_state_bytes(Some(b"not json")), serde_json::json!({}));
-        assert_eq!(decode_state_bytes(Some(&[0xff, 0xfe])), serde_json::json!({}));
+        assert_eq!(
+            decode_state_bytes(Some(&[0xff, 0xfe])),
+            serde_json::json!({})
+        );
     }
 
     #[test]
     fn inbound_bridge_ready_parses_by_tag() {
-        let raw = br#"{"type":"futureboard.bridgeReady","pluginId":"rodharerist","bridgeVersion":1}"#;
+        let raw =
+            br#"{"type":"futureboard.bridgeReady","pluginId":"rodharerist","bridgeVersion":1}"#;
         let msg: InboundMsg = serde_json::from_slice(raw).unwrap();
         assert!(matches!(msg, InboundMsg::BridgeReady { .. }));
     }
 
     #[test]
     fn inbound_request_select_instance_parses_by_tag() {
-        let raw = br#"{"type":"futureboard.requestSelectInstance","instanceId":"track-3::insert-9"}"#;
+        let raw =
+            br#"{"type":"futureboard.requestSelectInstance","instanceId":"track-3::insert-9"}"#;
         let msg: InboundMsg = serde_json::from_slice(raw).unwrap();
         match msg {
             InboundMsg::RequestSelectInstance { instance_id } => {

@@ -119,9 +119,8 @@ impl Classifier for HeuristicClassifier {
             + f.percussiveness * 0.5;
 
         // Keys/piano: broad harmonic range, moderate attack, tonal.
-        scores[4].1 = mid_band(f.centroid_hz, 1200.0, 1800.0)
-            + (1.0 - f.flatness)
-            + f.percussiveness * 0.6;
+        scores[4].1 =
+            mid_band(f.centroid_hz, 1200.0, 1800.0) + (1.0 - f.flatness) + f.percussiveness * 0.6;
 
         // Strings: sustained (low percussiveness), tonal, mid-high centroid.
         scores[5].1 = mid_band(f.centroid_hz, 1800.0, 1800.0)

@@ -93,7 +93,10 @@ fn check_plugin_naming(staging_dir: &Path, triple: &str) -> Result<()> {
         if !path.is_file() {
             continue;
         }
-        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or_default();
+        let ext = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or_default();
         if ext != expected {
             bail!(
                 "plugin `{}` has extension `.{ext}` but target {triple} requires `.{expected}`",
@@ -110,7 +113,10 @@ fn check_cef_layout(staging_dir: &Path, triple: &str) -> Result<()> {
     for required in required_runtime_files(triple) {
         let path = staging_dir.join(&required);
         if !path.is_file() {
-            bail!("required CEF runtime file missing beside binary: {}", path.display());
+            bail!(
+                "required CEF runtime file missing beside binary: {}",
+                path.display()
+            );
         }
     }
     let locales = staging_dir.join(LOCALES_DIR);
@@ -119,7 +125,10 @@ fn check_cef_layout(staging_dir: &Path, triple: &str) -> Result<()> {
             .map(|mut entries| entries.next().is_some())
             .unwrap_or(false);
     if !populated {
-        bail!("required CEF `locales/` directory missing or empty: {}", locales.display());
+        bail!(
+            "required CEF `locales/` directory missing or empty: {}",
+            locales.display()
+        );
     }
     Ok(())
 }
@@ -143,7 +152,10 @@ fn check_required_dirs(staging_dir: &Path) -> Result<()> {
     for dir in [PLUGINS_DIR, RESOURCES_DIR] {
         let path = staging_dir.join(dir);
         if !path.is_dir() {
-            bail!("required directory missing from package: {}", path.display());
+            bail!(
+                "required directory missing from package: {}",
+                path.display()
+            );
         }
     }
     Ok(())
@@ -296,7 +308,14 @@ mod tests {
     fn valid_package_passes() {
         let temp = tempfile::tempdir().unwrap();
         valid_package(temp.path());
-        validate_staging(&inputs(temp.path(), "FutureboardNative.exe", &[], false, false)).unwrap();
+        validate_staging(&inputs(
+            temp.path(),
+            "FutureboardNative.exe",
+            &[],
+            false,
+            false,
+        ))
+        .unwrap();
     }
 
     #[test]
@@ -309,8 +328,14 @@ mod tests {
             "FutureboardPluginHostX64.exe".to_string(),
             "FutureboardPluginScanner.exe".to_string(),
         ];
-        validate_staging(&inputs(temp.path(), "FutureboardNative.exe", &sidecars, false, false))
-            .unwrap();
+        validate_staging(&inputs(
+            temp.path(),
+            "FutureboardNative.exe",
+            &sidecars,
+            false,
+            false,
+        ))
+        .unwrap();
     }
 
     #[test]
@@ -323,8 +348,14 @@ mod tests {
             "FutureboardPluginScanner.exe".to_string(),
         ];
         assert!(
-            validate_staging(&inputs(temp.path(), "FutureboardNative.exe", &sidecars, false, false))
-                .is_err()
+            validate_staging(&inputs(
+                temp.path(),
+                "FutureboardNative.exe",
+                &sidecars,
+                false,
+                false
+            ))
+            .is_err()
         );
     }
 
@@ -334,8 +365,14 @@ mod tests {
         valid_package(temp.path());
         fs::write(temp.path().join("FutureboardNative.exe"), b"").unwrap();
         assert!(
-            validate_staging(&inputs(temp.path(), "FutureboardNative.exe", &[], false, false))
-                .is_err()
+            validate_staging(&inputs(
+                temp.path(),
+                "FutureboardNative.exe",
+                &[],
+                false,
+                false
+            ))
+            .is_err()
         );
     }
 
@@ -345,8 +382,14 @@ mod tests {
         valid_package(temp.path());
         fs::remove_dir_all(temp.path().join(PLUGINS_DIR)).unwrap();
         assert!(
-            validate_staging(&inputs(temp.path(), "FutureboardNative.exe", &[], false, false))
-                .is_err()
+            validate_staging(&inputs(
+                temp.path(),
+                "FutureboardNative.exe",
+                &[],
+                false,
+                false
+            ))
+            .is_err()
         );
     }
 
@@ -356,8 +399,14 @@ mod tests {
         valid_package(temp.path());
         fs::write(temp.path().join(BUILD_INFO_FILE), "not json {").unwrap();
         assert!(
-            validate_staging(&inputs(temp.path(), "FutureboardNative.exe", &[], false, false))
-                .is_err()
+            validate_staging(&inputs(
+                temp.path(),
+                "FutureboardNative.exe",
+                &[],
+                false,
+                false
+            ))
+            .is_err()
         );
     }
 
@@ -367,8 +416,14 @@ mod tests {
         valid_package(temp.path());
         fs::write(temp.path().join("libjunk.rlib"), b"junk").unwrap();
         assert!(
-            validate_staging(&inputs(temp.path(), "FutureboardNative.exe", &[], false, false))
-                .is_err()
+            validate_staging(&inputs(
+                temp.path(),
+                "FutureboardNative.exe",
+                &[],
+                false,
+                false
+            ))
+            .is_err()
         );
     }
 
@@ -379,10 +434,23 @@ mod tests {
         let sym = temp.path().join(staging::SYMBOLS_DIR);
         fs::create_dir_all(&sym).unwrap();
         fs::write(sym.join("FutureboardNative.pdb"), b"pdb").unwrap();
-        validate_staging(&inputs(temp.path(), "FutureboardNative.exe", &[], true, false)).unwrap();
+        validate_staging(&inputs(
+            temp.path(),
+            "FutureboardNative.exe",
+            &[],
+            true,
+            false,
+        ))
+        .unwrap();
         assert!(
-            validate_staging(&inputs(temp.path(), "FutureboardNative.exe", &[], false, false))
-                .is_err()
+            validate_staging(&inputs(
+                temp.path(),
+                "FutureboardNative.exe",
+                &[],
+                false,
+                false
+            ))
+            .is_err()
         );
     }
 
@@ -393,8 +461,14 @@ mod tests {
         fs::create_dir_all(temp.path().join("CEF")).unwrap();
         fs::write(temp.path().join("CEF/libcef.dll"), b"x").unwrap();
         assert!(
-            validate_staging(&inputs(temp.path(), "FutureboardNative.exe", &[], false, false))
-                .is_err()
+            validate_staging(&inputs(
+                temp.path(),
+                "FutureboardNative.exe",
+                &[],
+                false,
+                false
+            ))
+            .is_err()
         );
     }
 
@@ -404,8 +478,14 @@ mod tests {
         valid_package(temp.path());
         fs::create_dir_all(temp.path().join("PluginUI")).unwrap();
         assert!(
-            validate_staging(&inputs(temp.path(), "FutureboardNative.exe", &[], false, false))
-                .is_err()
+            validate_staging(&inputs(
+                temp.path(),
+                "FutureboardNative.exe",
+                &[],
+                false,
+                false
+            ))
+            .is_err()
         );
     }
 
@@ -415,12 +495,25 @@ mod tests {
         valid_package(temp.path());
         add_cef(temp.path());
         // Flat, complete CEF beside the binary passes.
-        validate_staging(&inputs(temp.path(), "FutureboardNative.exe", &[], false, true)).unwrap();
+        validate_staging(&inputs(
+            temp.path(),
+            "FutureboardNative.exe",
+            &[],
+            false,
+            true,
+        ))
+        .unwrap();
         // Missing a required CEF file fails when CEF is expected.
         fs::remove_file(temp.path().join("icudtl.dat")).unwrap();
         assert!(
-            validate_staging(&inputs(temp.path(), "FutureboardNative.exe", &[], false, true))
-                .is_err()
+            validate_staging(&inputs(
+                temp.path(),
+                "FutureboardNative.exe",
+                &[],
+                false,
+                true
+            ))
+            .is_err()
         );
     }
 
@@ -429,10 +522,20 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         valid_package(temp.path());
         // A `.so` under Plugins/ is wrong for a Windows target.
-        fs::write(temp.path().join(PLUGINS_DIR).join("librodharerist.so"), b"x").unwrap();
+        fs::write(
+            temp.path().join(PLUGINS_DIR).join("librodharerist.so"),
+            b"x",
+        )
+        .unwrap();
         assert!(
-            validate_staging(&inputs(temp.path(), "FutureboardNative.exe", &[], false, false))
-                .is_err()
+            validate_staging(&inputs(
+                temp.path(),
+                "FutureboardNative.exe",
+                &[],
+                false,
+                false
+            ))
+            .is_err()
         );
     }
 
@@ -441,6 +544,13 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         valid_package(temp.path());
         fs::write(temp.path().join(PLUGINS_DIR).join("rodharerist.dll"), b"MZ").unwrap();
-        validate_staging(&inputs(temp.path(), "FutureboardNative.exe", &[], false, false)).unwrap();
+        validate_staging(&inputs(
+            temp.path(),
+            "FutureboardNative.exe",
+            &[],
+            false,
+            false,
+        ))
+        .unwrap();
     }
 }

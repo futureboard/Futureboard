@@ -69,7 +69,13 @@ impl TapeDelay {
         self.feedback = (fb / 100.0).clamp(0.0, 0.95);
         self.mix = (mix / 100.0).clamp(0.0, 1.0);
         // Warm tape tone in the feedback loop.
-        self.tone.set(make_eq_biquad("lowpass", 4_000.0, 0.0, 0.707, self.sample_rate));
+        self.tone.set(make_eq_biquad(
+            "lowpass",
+            4_000.0,
+            0.0,
+            0.707,
+            self.sample_rate,
+        ));
     }
 
     #[inline]

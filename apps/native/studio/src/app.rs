@@ -113,11 +113,11 @@ pub fn setup(cx: &mut App) {
         // Reading the GPU list first: enumerate adapters and record availability
         // so stem extraction can auto-select GPU (DirectML on Windows).
         if let Some(splash) = splash.as_ref() {
-            let _ = cx.update(|app| splash.set_status(app, "Reading GPU list…"));
+            cx.update(|app| splash.set_status(app, "Reading GPU list…"));
         }
         let gpu_summary = cx.update(|_app| sphere_ui_components::startup::probe_gpus().summary);
         if let Some(splash) = splash.as_ref() {
-            let _ = cx.update(|app| splash.set_status(app, gpu_summary.clone()));
+            cx.update(|app| splash.set_status(app, gpu_summary.clone()));
         }
 
         let plan = run_lightweight_boot(cx).await;
@@ -133,7 +133,7 @@ pub fn setup(cx: &mut App) {
                 StartupRoute::Welcome => "Opening Welcome…",
                 _ => "Opening Studio…",
             };
-            let _ = cx.update(|app| splash.set_status(app, opening));
+            cx.update(|app| splash.set_status(app, opening));
         }
         match plan.route {
             StartupRoute::Welcome => {

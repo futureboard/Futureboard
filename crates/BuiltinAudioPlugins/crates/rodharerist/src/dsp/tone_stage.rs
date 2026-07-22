@@ -4,9 +4,9 @@
 //! classic amp implementation (they're two independent processors this stage
 //! merely dispatches between).
 
+use super::AmpModel;
 use super::amp::Amp;
 use super::nam::{NamCapture, NamCaptureInfo, PreparedNamRuntime};
-use super::AmpModel;
 
 /// Which engine the Tone/Amp slot currently runs. Mutually exclusive.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -81,11 +81,19 @@ impl ToneStage {
         presence: f32,
         master: f32,
     ) {
-        self.classic.configure(model, gain, bass, middle, treble, presence, master);
+        self.classic
+            .configure(model, gain, bass, middle, treble, presence, master);
     }
 
-    pub(super) fn configure_nam(&mut self, input_trim_db: f32, output_trim_db: f32, mix_pct: f32, loudness_norm_on: bool) {
-        self.nam.configure(input_trim_db, output_trim_db, mix_pct, loudness_norm_on);
+    pub(super) fn configure_nam(
+        &mut self,
+        input_trim_db: f32,
+        output_trim_db: f32,
+        mix_pct: f32,
+        loudness_norm_on: bool,
+    ) {
+        self.nam
+            .configure(input_trim_db, output_trim_db, mix_pct, loudness_norm_on);
     }
 
     /// Control thread: submit a freshly-built capture for the audio thread to

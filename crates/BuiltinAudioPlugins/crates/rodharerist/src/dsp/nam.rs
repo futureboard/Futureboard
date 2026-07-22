@@ -14,8 +14,8 @@
 use builtin_dsp_core::make_eq_biquad;
 use nam_rs::{Model, NamModel};
 
-use super::handoff::HandoffCell;
 use super::StereoBiquad;
+use super::handoff::HandoffCell;
 
 /// Target integrated loudness (LUFS) captures are normalized to when loudness
 /// normalization is enabled, matching the reference NAM plugin's convention.
@@ -224,8 +224,13 @@ impl NamCapture {
     }
 
     fn recompute_sample_rate_derived(&mut self) {
-        self.dc_hpf
-            .set(make_eq_biquad("highpass", 20.0, 0.0, 0.707, self.sample_rate));
+        self.dc_hpf.set(make_eq_biquad(
+            "highpass",
+            20.0,
+            0.0,
+            0.707,
+            self.sample_rate,
+        ));
         let fade_len = (self.sample_rate * (SWAP_FADE_MS / 1_000.0)).max(1.0);
         self.fade_step = 1.0 / fade_len;
     }
@@ -241,7 +246,13 @@ impl NamCapture {
     }
 
     /// Live knob update (control thread only): trims in dB, mix in 0..100 %.
-    pub(super) fn configure(&mut self, input_trim_db: f32, output_trim_db: f32, mix_pct: f32, loudness_norm_on: bool) {
+    pub(super) fn configure(
+        &mut self,
+        input_trim_db: f32,
+        output_trim_db: f32,
+        mix_pct: f32,
+        loudness_norm_on: bool,
+    ) {
         self.input_trim = db_to_linear(input_trim_db);
         self.output_trim = db_to_linear(output_trim_db);
         self.mix = (mix_pct / 100.0).clamp(0.0, 1.0);
@@ -274,7 +285,10 @@ impl NamCapture {
     /// Latency contributed by the active capture's receptive field, in
     /// samples (0 if none loaded or an LSTM capture, which has no warmup).
     pub(super) fn latency_samples(&self) -> usize {
-        self.active.as_ref().map(|rt| rt.receptive_field).unwrap_or(0)
+        self.active
+            .as_ref()
+            .map(|rt| rt.receptive_field)
+            .unwrap_or(0)
     }
 
     /// Audio thread: adopt a pending runtime and retire a finished fade.
@@ -399,14 +413,16 @@ mod tests {
         let mut cap = NamCapture::new(48_000.0);
         cap.configure(0.0, 0.0, 100.0, false);
 
-        let first = prepare_nam_runtime(TINY_WAVENET_48K, "a".into(), 48_000.0, false, false).unwrap();
+        let first =
+            prepare_nam_runtime(TINY_WAVENET_48K, "a".into(), 48_000.0, false, false).unwrap();
         cap.submit(Box::new(first));
         cap.begin_block();
         for _ in 0..8 {
             cap.process(0.2, 0.2);
         }
 
-        let second = prepare_nam_runtime(TINY_WAVENET_48K, "b".into(), 48_000.0, false, false).unwrap();
+        let second =
+            prepare_nam_runtime(TINY_WAVENET_48K, "b".into(), 48_000.0, false, false).unwrap();
         cap.submit(Box::new(second));
         cap.begin_block(); // adopts `second`, starts fading `first` out
         assert!(cap.fading_out.is_some());

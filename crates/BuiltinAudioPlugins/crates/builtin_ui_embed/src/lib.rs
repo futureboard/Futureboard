@@ -129,7 +129,10 @@ impl EmbeddedUiAssetTable {
             Ok(index) => Some(&self.assets[index]),
             // The table may not be sorted if hand-authored; fall back to a linear
             // scan so a mis-ordered slice degrades to correct-but-slower, not wrong.
-            Err(_) => self.assets.iter().find(|asset| asset.path == normalized_path),
+            Err(_) => self
+                .assets
+                .iter()
+                .find(|asset| asset.path == normalized_path),
         }
     }
 }
@@ -222,9 +225,7 @@ pub struct PluginRequest {
 pub fn parse_plugin_url(url: &str) -> Option<PluginRequest> {
     let prefix = format!("{PLUGIN_URL_SCHEME}://");
     // Case-insensitive scheme match without allocating the whole lowercased URL.
-    let rest = if url.len() >= prefix.len()
-        && url[..prefix.len()].eq_ignore_ascii_case(&prefix)
-    {
+    let rest = if url.len() >= prefix.len() && url[..prefix.len()].eq_ignore_ascii_case(&prefix) {
         &url[prefix.len()..]
     } else {
         return None;
@@ -404,10 +405,7 @@ mod tests {
             Some("/assets/index-A91kLm.css")
         );
         // Invalid escape is preserved rather than panicking.
-        assert_eq!(
-            normalize_request_path("/a%zz").as_deref(),
-            Some("/a%zz")
-        );
+        assert_eq!(normalize_request_path("/a%zz").as_deref(), Some("/a%zz"));
     }
 
     #[test]
@@ -462,7 +460,10 @@ mod tests {
         assert_eq!(mime_for_extension("JS"), "text/javascript; charset=utf-8");
         assert_eq!(mime_for_extension("mjs"), "text/javascript; charset=utf-8");
         assert_eq!(mime_for_extension("css"), "text/css; charset=utf-8");
-        assert_eq!(mime_for_extension("json"), "application/json; charset=utf-8");
+        assert_eq!(
+            mime_for_extension("json"),
+            "application/json; charset=utf-8"
+        );
         assert_eq!(mime_for_extension("svg"), "image/svg+xml");
         assert_eq!(mime_for_extension("png"), "image/png");
         assert_eq!(mime_for_extension("jpg"), "image/jpeg");
@@ -479,7 +480,10 @@ mod tests {
     #[test]
     fn unknown_mime_falls_back_to_octet_stream() {
         assert_eq!(mime_for_extension("xyz"), "application/octet-stream");
-        assert_eq!(mime_for_path("/assets/data.bin"), "application/octet-stream");
+        assert_eq!(
+            mime_for_path("/assets/data.bin"),
+            "application/octet-stream"
+        );
         assert_eq!(mime_for_path("/no-extension"), "application/octet-stream");
     }
 
@@ -492,11 +496,16 @@ mod tests {
         // Bare host maps to index.html.
         let root = parse_plugin_url("mikoplugin://rodharerist").unwrap();
         assert_eq!(root.path, "/index.html");
-        assert_eq!(parse_plugin_url("mikoplugin://rodharerist/").unwrap().path, "/index.html");
+        assert_eq!(
+            parse_plugin_url("mikoplugin://rodharerist/").unwrap().path,
+            "/index.html"
+        );
 
         // Scheme is case-insensitive; query strings are stripped.
         assert_eq!(
-            parse_plugin_url("MikoPlugin://rodharerist/index.html?v=1").unwrap().path,
+            parse_plugin_url("MikoPlugin://rodharerist/index.html?v=1")
+                .unwrap()
+                .path,
             "/index.html"
         );
     }

@@ -39,10 +39,7 @@ impl OnnxClassifier {
         let model = tract_onnx::onnx()
             .model_for_path(path.as_ref())
             .map_err(|e| AnalysisError::ModelLoad(e.to_string()))?
-            .with_input_fact(
-                0,
-                f32::fact([1, FEATURE_VECTOR_LEN]).into(),
-            )
+            .with_input_fact(0, f32::fact([1, FEATURE_VECTOR_LEN]).into())
             .map_err(|e| AnalysisError::ModelLoad(e.to_string()))?
             .into_optimized()
             .map_err(|e| AnalysisError::ModelLoad(e.to_string()))?

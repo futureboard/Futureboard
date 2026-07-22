@@ -30,10 +30,10 @@ use cef::rc::Rc as _;
 // blocks, so every one of these traits has to be nameable here.
 use cef::wrapper::stream_resource_handler::StreamResourceHandler;
 use cef::{
-    wrap_app, wrap_resource_handler, wrap_scheme_handler_factory, App, CefString, CefStringUtf16,
-    ImplApp, ImplPostData, ImplPostDataElement, ImplRequest, ImplResourceHandler, ImplResponse,
-    ImplSchemeHandlerFactory, ImplSchemeRegistrar, ResourceHandler, SchemeHandlerFactory,
-    SchemeOptions, WrapApp, WrapResourceHandler, WrapSchemeHandlerFactory,
+    App, CefString, CefStringUtf16, ImplApp, ImplPostData, ImplPostDataElement, ImplRequest,
+    ImplResourceHandler, ImplResponse, ImplSchemeHandlerFactory, ImplSchemeRegistrar,
+    ResourceHandler, SchemeHandlerFactory, SchemeOptions, WrapApp, WrapResourceHandler,
+    WrapSchemeHandlerFactory, wrap_app, wrap_resource_handler, wrap_scheme_handler_factory,
 };
 
 /// Scheme built-in plugin editors are served under. Must match
@@ -221,7 +221,7 @@ wrap_app! {
                 | SchemeOptions::FETCH_ENABLED.get_raw();
             let registered = registrar.add_custom_scheme(
                 Some(&CefString::from(PLUGIN_SCHEME)),
-                options,
+                options as _,
             );
             eprintln!(
                 "[plugin-scheme] event=OnRegisterCustomSchemes scheme={PLUGIN_SCHEME} options={options} registered={} pid={} thread={:?}",

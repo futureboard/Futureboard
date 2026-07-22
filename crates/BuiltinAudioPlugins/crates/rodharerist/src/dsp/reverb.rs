@@ -137,9 +137,18 @@ impl PlateReverb {
         let s = |len: usize| ((len as f32 * scale) as usize).max(1);
 
         self.combs_l = COMB_TUNINGS.iter().map(|&t| Comb::new(s(t))).collect();
-        self.combs_r = COMB_TUNINGS.iter().map(|&t| Comb::new(s(t + STEREO_SPREAD))).collect();
-        self.allpass_l = ALLPASS_TUNINGS.iter().map(|&t| Allpass::new(s(t))).collect();
-        self.allpass_r = ALLPASS_TUNINGS.iter().map(|&t| Allpass::new(s(t + STEREO_SPREAD))).collect();
+        self.combs_r = COMB_TUNINGS
+            .iter()
+            .map(|&t| Comb::new(s(t + STEREO_SPREAD)))
+            .collect();
+        self.allpass_l = ALLPASS_TUNINGS
+            .iter()
+            .map(|&t| Allpass::new(s(t)))
+            .collect();
+        self.allpass_r = ALLPASS_TUNINGS
+            .iter()
+            .map(|&t| Allpass::new(s(t + STEREO_SPREAD)))
+            .collect();
     }
 
     /// `decay_s` 0.5..15, `mix` 0..100 %.

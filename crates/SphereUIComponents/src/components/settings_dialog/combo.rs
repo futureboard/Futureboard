@@ -127,10 +127,9 @@ pub(crate) fn hardware_combo_overlay(
         }
         HardwareCombo::OutputDevice => {
             let selected = schema.hardware.audio.device_out.clone();
-            let is_asio = sanitized_backend_label(
-                &schema.hardware.audio.driver_type,
-                available_backends,
-            ) == "ASIO";
+            let is_asio =
+                sanitized_backend_label(&schema.hardware.audio.driver_type, available_backends)
+                    == "ASIO";
             let up = on_update.clone();
             combo_box_string_menu(
                 "settings-audio-output-menu",

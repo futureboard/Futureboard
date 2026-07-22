@@ -7,6 +7,6 @@ HERE="$(cd "$(dirname "$(readlink -f "${0}")")" && pwd)"
 
 # Prefer any libraries bundled next to the binary over system ones, without
 # clobbering a caller's existing LD_LIBRARY_PATH.
-export LD_LIBRARY_PATH="${HERE}/usr/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+export LD_LIBRARY_PATH="${HERE}/usr/bin:${HERE}/usr/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
 
 exec "${HERE}/usr/bin/FutureboardNative" "$@"

@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result, anyhow, bail};
 use cargo_metadata::MetadataCommand;
 
 use crate::cargo_build::{self, APP_PACKAGE};
@@ -46,11 +46,7 @@ impl PluginSelection {
                 }
             };
         }
-        if plugins_flag {
-            Self::All
-        } else {
-            Self::None
-        }
+        if plugins_flag { Self::All } else { Self::None }
     }
 
     fn is_enabled(&self) -> bool {
@@ -76,8 +72,7 @@ pub struct PackageOptions {
 /// Run the full package pipeline and return the published directory.
 pub fn run(options: &PackageOptions) -> Result<PathBuf> {
     // 1. Build and discover the real executable paths (app + runtime sidecars).
-    let build =
-        cargo_build::build(&options.profile, options.target.as_deref(), options.edition)?;
+    let build = cargo_build::build(&options.profile, options.target.as_deref(), options.edition)?;
     let executable = &build.app_executable;
     eprintln!("[xtask] built executable: {}", executable.display());
 
@@ -90,7 +85,12 @@ pub fn run(options: &PackageOptions) -> Result<PathBuf> {
     let platform = platform_folder(&target_triple);
 
     // 2. Prepare staging (clean any stale directory first).
-    let plan = StagingPlan::new(&options.out_root, &options.profile, options.edition, &platform);
+    let plan = StagingPlan::new(
+        &options.out_root,
+        &options.profile,
+        options.edition,
+        &platform,
+    );
     plan.prepare()?;
 
     // 3. Copy required runtime files into staging — the app binary, the sidecar
@@ -114,8 +114,8 @@ pub fn run(options: &PackageOptions) -> Result<PathBuf> {
     staging::create_layout_dirs(&plan.staging_dir)?;
 
     // 4a. Stage the shared CEF runtime flat beside the binary (never a CEF/
-    //     subdir). Skipped (with a warning) when the workspace has no prepared
-    //     distribution, so a developer build without CEF installed still packages.
+    //     subdir). A normal package is not publishable without it; developers
+    //     who intentionally need a CEF-free tree must opt out with --no-cef.
     let mut cef_staged = false;
     if options.stage_cef {
         match cef::locate_cef_dist(&workspace_root(), &target_triple) {
@@ -129,9 +129,10 @@ pub fn run(options: &PackageOptions) -> Result<PathBuf> {
                 );
                 cef_staged = true;
             }
-            None => eprintln!(
-                "[xtask] no CEF distribution at build/cef — skipping CEF staging \
-                 (run SphereWebView's install_cef to populate it)"
+            None => bail!(
+                "CEF distribution not found at build/cef; run \
+                 `cargo run -p SphereWebView --example install_cef --features installer`, \
+                 or pass --no-cef for an intentional CEF-free developer package"
             ),
         }
     }
@@ -159,15 +160,16 @@ pub fn run(options: &PackageOptions) -> Result<PathBuf> {
             }
         };
 
-        // Report UI embedding state per plugin: a plugin with an `editorui/` whose
-        // `dist/index.html` is missing will embed an empty table (see Part 2/3).
+        // An editor-bearing plugin is not release-ready when its static bundle
+        // is absent: compiling it would silently embed an empty asset table.
         for plugin in &selected {
-            if plugins::has_editor_ui(&plugin.crate_dir) && !plugins::editor_ui_built(&plugin.crate_dir)
+            if plugins::has_editor_ui(&plugin.crate_dir)
+                && !plugins::editor_ui_built(&plugin.crate_dir)
             {
-                eprintln!(
-                    "[xtask] plugin `{}` has editorui/ but no built dist/index.html — \
-                     its embedded UI table will be empty (run its editorui build first)",
-                    plugin.name
+                bail!(
+                    "plugin `{}` has editorui/ but no built dist/index.html; \
+                     run its editorui build before packaging",
+                    plugin.name,
                 );
             }
         }
@@ -190,9 +192,9 @@ pub fn run(options: &PackageOptions) -> Result<PathBuf> {
         if options.plugins == PluginSelection::All {
             let missing = plugins::missing_builtin_plugins(&staged, &target_triple);
             if !missing.is_empty() {
-                eprintln!(
-                    "[xtask] warning: expected built-in plugin(s) not staged: {}",
-                    missing.join(", ")
+                bail!(
+                    "expected built-in plugin(s) were not staged: {}",
+                    missing.join(", "),
                 );
             }
         }
@@ -271,7 +273,10 @@ fn plugin_packages() -> Result<Vec<DiscoveredPlugin>> {
     let mut packages = Vec::new();
     for package in &metadata.packages {
         let manifest = package.manifest_path.as_std_path();
-        let in_plugin_dir = manifest.to_string_lossy().replace('\\', "/").contains(marker);
+        let in_plugin_dir = manifest
+            .to_string_lossy()
+            .replace('\\', "/")
+            .contains(marker);
         let produces_dylib = package.targets.iter().any(|target| {
             target
                 .kind
@@ -310,12 +315,11 @@ fn package_version() -> Result<String> {
 
 /// The host target triple, parsed from `rustc -vV`'s `host:` line.
 fn host_target() -> Result<String> {
-    let output = std::process::Command::new(
-        std::env::var("RUSTC").unwrap_or_else(|_| "rustc".to_string()),
-    )
-    .arg("-vV")
-    .output()
-    .context("failed to run rustc -vV")?;
+    let output =
+        std::process::Command::new(std::env::var("RUSTC").unwrap_or_else(|_| "rustc".to_string()))
+            .arg("-vV")
+            .output()
+            .context("failed to run rustc -vV")?;
     let text = String::from_utf8(output.stdout).context("rustc -vV output was not UTF-8")?;
     text.lines()
         .find_map(|line| line.strip_prefix("host: "))
@@ -332,7 +336,11 @@ fn smoke_check(exe: &Path) {
     match Command::new(exe).arg("--version").output() {
         Ok(output) if output.status.success() => {
             let text = String::from_utf8_lossy(&output.stdout);
-            eprintln!("[xtask] smoke check `{} --version`: {}", exe.display(), text.trim());
+            eprintln!(
+                "[xtask] smoke check `{} --version`: {}",
+                exe.display(),
+                text.trim()
+            );
         }
         Ok(_) => eprintln!(
             "[xtask] smoke check skipped: `{} --version` returned non-zero (no --version handler)",
@@ -352,11 +360,26 @@ mod tests {
 
     #[test]
     fn plugin_selection_all_and_none() {
-        assert_eq!(PluginSelection::parse(Some("all"), false), PluginSelection::All);
-        assert_eq!(PluginSelection::parse(Some("ALL"), false), PluginSelection::All);
-        assert_eq!(PluginSelection::parse(Some("*"), false), PluginSelection::All);
-        assert_eq!(PluginSelection::parse(Some("none"), false), PluginSelection::None);
-        assert_eq!(PluginSelection::parse(Some(""), true), PluginSelection::None);
+        assert_eq!(
+            PluginSelection::parse(Some("all"), false),
+            PluginSelection::All
+        );
+        assert_eq!(
+            PluginSelection::parse(Some("ALL"), false),
+            PluginSelection::All
+        );
+        assert_eq!(
+            PluginSelection::parse(Some("*"), false),
+            PluginSelection::All
+        );
+        assert_eq!(
+            PluginSelection::parse(Some("none"), false),
+            PluginSelection::None
+        );
+        assert_eq!(
+            PluginSelection::parse(Some(""), true),
+            PluginSelection::None
+        );
     }
 
     #[test]
@@ -376,6 +399,9 @@ mod tests {
         assert_eq!(PluginSelection::parse(None, true), PluginSelection::All);
         assert_eq!(PluginSelection::parse(None, false), PluginSelection::None);
         // Explicit --plugin wins over the legacy bool.
-        assert_eq!(PluginSelection::parse(Some("none"), true), PluginSelection::None);
+        assert_eq!(
+            PluginSelection::parse(Some("none"), true),
+            PluginSelection::None
+        );
     }
 }

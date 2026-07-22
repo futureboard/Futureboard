@@ -30,7 +30,7 @@ const WINDOWS_11_MIN_BUILD: u32 = 22_000;
 #[cfg(target_os = "windows")]
 fn windows_control_icon_font() -> &'static str {
     static FONT: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
-    *FONT.get_or_init(|| windows_control_icon_font_for_build(windows_build_number()))
+    FONT.get_or_init(|| windows_control_icon_font_for_build(windows_build_number()))
 }
 
 #[cfg(target_os = "windows")]

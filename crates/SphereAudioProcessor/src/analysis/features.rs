@@ -134,7 +134,11 @@ pub fn extract(samples: &[f32], sample_rate: f32) -> Option<SpectralFeatures> {
     }
     let arith = total / avg.len() as f32;
     let geo = (log_sum / count).exp();
-    let flatness = if arith > f32::EPSILON { (geo / arith).clamp(0.0, 1.0) } else { 0.0 };
+    let flatness = if arith > f32::EPSILON {
+        (geo / arith).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
 
     // Zero-crossing rate over the time-domain signal.
     let mut crossings = 0.0_f32;

@@ -88,16 +88,34 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Cache Rust dependencies
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Cache Rust dependencies and CEF
+        id: build-cache
         uses: actions/cache@v4
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+            build/cef
+          key: desktop-cargo-cef-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: |
-            cargo-${{ runner.os }}-
+            desktop-cargo-cef-${{ runner.os }}-
+
+      - name: Install pinned CEF SDK and runtime
+        if: steps.build-cache.outputs.cache-hit != 'true'
+        run: cargo run -p SphereWebView --example install_cef --features installer
+
+      - name: Install built-in plugin editor dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Build embedded built-in plugin editors
+        run: |
+          bun run --cwd crates/BuiltinAudioPlugins/crates/meowsyn/editor build
+          bun run --cwd crates/BuiltinAudioPlugins/crates/opensampler/editor build
+          bun run --cwd crates/BuiltinAudioPlugins/crates/rodharerist/editorui build
 
       - name: Verify shared app assets
         shell: bash
@@ -113,13 +131,23 @@ jobs:
           done
           echo "Shared app assets OK"
 
-      - name: Build workspace (Community Edition, release)
-        run: cargo build-ce --release
+      - name: Package native runtime with xtask
+        run: cargo run -p xtask -- package --profile release --edition community --plugin all
+
+      - name: Resolve xtask package directory
+        shell: bash
+        run: |
+          set -euo pipefail
+          package_dir="$(find out/release/community -mindepth 1 -maxdepth 1 -type d -print -quit)"
+          test -n "$package_dir" || { echo "xtask package directory not found"; exit 1; }
+          test -f "$package_dir/build-info.json" || { echo "missing $package_dir/build-info.json"; exit 1; }
+          echo "FUTUREBOARD_PACKAGE_DIR=$package_dir" >> "$GITHUB_ENV"
+          echo "xtask package: $package_dir"
 
       - name: Bundle native app (macOS)
         if: matrix.os == 'macos-latest'
         run: |
-          bash packaging/native/bundle-macos.sh
+          bash packaging/native/bundle-macos.sh "$FUTUREBOARD_PACKAGE_DIR" packaging/native/out
           bash packaging/native/bundle-macos-dmg.sh "packaging/native/out/Futureboard Studio.app" packaging/native/out "${{ needs.version.outputs.app-version }}"
 
       - name: Install Inno Setup
@@ -129,62 +157,31 @@ jobs:
       - name: Build Windows installer
         if: matrix.os == 'windows-latest'
         shell: pwsh
-        run: ./packaging/windows/build-installer.ps1 -AppVersion "${{ needs.version.outputs.app-version }}"
+        run: ./packaging/windows/build-installer.ps1 -AppVersion "${{ needs.version.outputs.app-version }}" -SourceDir $env:FUTUREBOARD_PACKAGE_DIR
 
       # Bare `version.json` version (no nightly suffix here — this workflow
       # only runs on tagged releases), matching the AUR PKGBUILD's `pkgver`
       # so its hardcoded AppImage filename resolves against this release.
       - name: Build AppImage (Linux)
         if: matrix.os == 'ubuntu-24.04'
-        run: bash packaging/linux/bundle-appimage.sh
+        run: bash packaging/linux/bundle-appimage.sh "$FUTUREBOARD_PACKAGE_DIR" "$PWD/target/appimage" "${{ needs.version.outputs.app-version }}"
 
-      # Every workspace member's binaries/libraries land directly in
-      # `target/community/release/` (dependency artifacts stay under `deps/`),
-      # so a per-OS filter here is enough to grab "all" of them without needing
-      # to enumerate crate/bin names as they're added or removed:
-      #   win:   *.exe + *.dll
-      #   linux: extension-less executables + *.so
-      #   mac:   extension-less executables + *.dylib
-      - name: Stage release binaries
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p dist-native
-          case "${{ matrix.platform }}" in
-            win)
-              cp target/community/release/*.exe dist-native/
-              cp target/community/release/*.dll dist-native/
-              ;;
-            linux)
-              find target/community/release -maxdepth 1 -type f -perm -111 ! -name "*.*" -exec cp {} dist-native/ \;
-              cp target/community/release/*.so dist-native/
-              ;;
-            mac)
-              find target/community/release -maxdepth 1 -type f -perm -111 ! -name "*.*" -exec cp {} dist-native/ \;
-              cp target/community/release/*.dylib dist-native/
-              ;;
-          esac
-          # The workspace task runner is a dev tool, not a runtime binary.
-          rm -f dist-native/xtask dist-native/xtask.exe
-          echo "Staged native binaries:"
-          ls -la dist-native/
-
-      - name: Compress release binaries
+      - name: Archive xtask runtime package
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p dist-native-archives
           if [[ "${{ matrix.platform }}" == "win" ]]; then
-            pwsh -NoProfile -Command "Compress-Archive -Path 'dist-native/*' -DestinationPath 'dist-native-archives/${{ matrix.native-artifact-name }}-binaries.zip' -Force"
+            pwsh -NoProfile -Command 'Compress-Archive -Path (Join-Path $env:FUTUREBOARD_PACKAGE_DIR "*") -DestinationPath "dist-native-archives/${{ matrix.native-artifact-name }}-runtime.zip" -Force'
           else
-            tar -czf "dist-native-archives/${{ matrix.native-artifact-name }}-binaries.tar.gz" -C dist-native .
+            tar -czf "dist-native-archives/${{ matrix.native-artifact-name }}-runtime.tar.gz" -C "$FUTUREBOARD_PACKAGE_DIR" .
           fi
           ls -lh dist-native-archives/
 
-      - name: Upload native binaries artifact
+      - name: Upload native runtime artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.native-artifact-name }}-binaries
+          name: ${{ matrix.native-artifact-name }}-runtime
           path: dist-native-archives/*
           if-no-files-found: error
           retention-days: 7

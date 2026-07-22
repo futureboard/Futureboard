@@ -19,9 +19,7 @@ pub mod onnx;
 pub use bpm::TempoEstimate;
 pub use error::AnalysisError;
 pub use features::{FEATURE_VECTOR_LEN, SpectralFeatures};
-pub use instrument::{
-    Classifier, HeuristicClassifier, InstrumentCategory, InstrumentEstimate,
-};
+pub use instrument::{Classifier, HeuristicClassifier, InstrumentCategory, InstrumentEstimate};
 pub use key::{KeyEstimate, KeyMode, PitchClass};
 
 #[cfg(feature = "onnx")]

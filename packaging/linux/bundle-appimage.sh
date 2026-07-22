@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Bundle the Community Edition FutureboardNative into a portable Linux AppImage.
 #
-# Usage: bundle-appimage.sh [BIN] [OUT_DIR] [APP_VERSION]
-#   BIN         Path to the built native binary.
-#               Default: target/community/release/FutureboardNative
+# Usage: bundle-appimage.sh [PACKAGE_DIR] [OUT_DIR] [APP_VERSION]
+#   PACKAGE_DIR Complete runtime tree produced by `xtask package`.
+#               Default: out/release/community/linux-x64
 #   OUT_DIR     Directory the finished .AppImage is written to.
 #               Default: target/appimage
 #   APP_VERSION Version string embedded in the AppImage filename.
@@ -12,9 +12,10 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 
-BIN="${1:-$ROOT/target/community/release/FutureboardNative}"
+PACKAGE_DIR="${1:-$ROOT/out/release/community/linux-x64}"
 OUT_DIR="${2:-$ROOT/target/appimage}"
 APP_VERSION="${3:-}"
+BIN="$PACKAGE_DIR/FutureboardNative"
 
 if [[ -z "$APP_VERSION" ]]; then
   # Avoid a hard `node` dependency for a one-line JSON read.
@@ -35,7 +36,12 @@ ICON_SRC="$ROOT/packages/shared/app/icons/app.png"
 APPDIR="$OUT_DIR/AppDir"
 
 if [[ ! -f "$BIN" ]]; then
-  echo "error: native binary not found: $BIN (run: cargo build-ce --release)" >&2
+  echo "error: xtask runtime package not found: $BIN" >&2
+  echo "run: cargo xtask package --profile release --edition community --plugin all" >&2
+  exit 1
+fi
+if [[ ! -f "$PACKAGE_DIR/build-info.json" ]]; then
+  echo "error: missing xtask package metadata: $PACKAGE_DIR/build-info.json" >&2
   exit 1
 fi
 for f in "$DESKTOP_SRC" "$APPRUN_SRC" "$MIME_SRC" "$ICON_SRC"; do
@@ -50,29 +56,14 @@ mkdir -p \
   "$APPDIR/usr/share/icons/hicolor/512x512/apps" \
   "$APPDIR/usr/share/mime/packages"
 
-install -m755 "$BIN" "$APPDIR/usr/bin/FutureboardNative"
-
-# Include every workspace runtime binary produced next to BIN so helper
-# processes keep working from the AppImage without a separate download.
-# `xtask` is the workspace task runner, not a runtime binary.
-BIN_DIR="$(cd "$(dirname "$BIN")" && pwd)"
-while IFS= read -r helper; do
-  helper_name="$(basename "$helper")"
-  if [[ "$helper_name" == "$(basename "$BIN")" ]]; then
-    continue
-  fi
-  install -m755 "$helper" "$APPDIR/usr/bin/$helper_name"
-done < <(
-  find "$BIN_DIR" -maxdepth 1 -type f -perm -111 \
-    ! -name "*.*" ! -name "xtask" \
-    -print
-)
-
-# Bundle workspace shared libraries next to the app and expose them through
-# AppRun's LD_LIBRARY_PATH.
-find "$BIN_DIR" -maxdepth 1 -type f -name "*.so" -print0 | while IFS= read -r -d '' lib; do
-  install -m755 "$lib" "$APPDIR/usr/lib/$(basename "$lib")"
-done
+# Preserve the validated xtask layout as one unit. CEF resources/locales,
+# helper processes, built-in plugins, runtime libraries and build-info.json
+# must remain beside the main executable exactly as xtask staged them.
+cp -a "$PACKAGE_DIR/." "$APPDIR/usr/bin/"
+chmod +x \
+  "$APPDIR/usr/bin/FutureboardNative" \
+  "$APPDIR/usr/bin/FutureboardPluginHostX64" \
+  "$APPDIR/usr/bin/FutureboardPluginScanner"
 
 install -m755 "$APPRUN_SRC" "$APPDIR/AppRun"
 

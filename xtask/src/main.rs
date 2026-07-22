@@ -96,7 +96,7 @@ struct PackageArgs {
     #[arg(long)]
     symbols: bool,
 
-    /// Skip staging the shared CEF runtime even when `build/cef` is present.
+    /// Intentionally package without the shared CEF runtime.
     #[arg(long)]
     no_cef: bool,
 }

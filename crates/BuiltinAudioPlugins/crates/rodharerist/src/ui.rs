@@ -82,14 +82,22 @@ mod tests {
         assert!(index.mime_type.starts_with("text/html"));
 
         // Root and bare-slash requests must reach the SPA shell.
-        assert_eq!(RodhareistUi::resolve_ui_asset("/").map(|a| a.path), Some("/index.html"));
-        assert_eq!(RodhareistUi::resolve_ui_asset("").map(|a| a.path), Some("/index.html"));
+        assert_eq!(
+            RodhareistUi::resolve_ui_asset("/").map(|a| a.path),
+            Some("/index.html")
+        );
+        assert_eq!(
+            RodhareistUi::resolve_ui_asset("").map(|a| a.path),
+            Some("/index.html")
+        );
 
         // The generator's sort order is what makes the binary search valid.
         let table = RodhareistUi::table();
         for asset in EMBEDDED_UI_ASSETS {
             assert_eq!(
-                table.get(asset.path).map(|found: &EmbeddedUiAsset| found.path),
+                table
+                    .get(asset.path)
+                    .map(|found: &EmbeddedUiAsset| found.path),
                 Some(asset.path),
                 "asset {} is not retrievable — table is not sorted by path",
                 asset.path

@@ -1,17 +1,18 @@
 #!/usr/bin/env bash
-# Bundle the Community Edition FutureboardNative into a macOS .app using shared app assets.
+# Bundle the xtask-staged Community Edition runtime into a macOS .app.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 
-BIN="${1:-$ROOT/target/community/release/FutureboardNative}"
+PACKAGE_DIR="${1:-}"
 OUT="${2:-$ROOT/packaging/native/out}"
+
+if [[ -z "$PACKAGE_DIR" ]]; then
+  PACKAGE_DIR="$(find "$ROOT/out/release/community" -mindepth 1 -maxdepth 1 -type d -name 'macos-*' -print -quit 2>/dev/null || true)"
+fi
 
 APP_NAME="Futureboard Studio"
 APP_DIR="$OUT/$APP_NAME.app"
-
-SRC_DIR="$(cd "$(dirname "$BIN")" && pwd)"
-MAIN_BIN_NAME="$(basename "$BIN")"
 
 # IMPORTANT:
 # This must match CFBundleExecutable in Info.plist.
@@ -27,8 +28,14 @@ MACOS="$CONTENTS/MacOS"
 RESOURCES="$CONTENTS/Resources"
 FRAMEWORKS="$CONTENTS/Frameworks"
 
-if [[ ! -f "$BIN" ]]; then
-  echo "error: native binary not found: $BIN (run: cargo build-ce --release)" >&2
+if [[ -z "$PACKAGE_DIR" || ! -f "$PACKAGE_DIR/FutureboardNative" ]]; then
+  echo "error: xtask macOS runtime package not found: ${PACKAGE_DIR:-<none>}" >&2
+  echo "run: cargo xtask package --profile release --edition community --plugin all" >&2
+  exit 1
+fi
+
+if [[ ! -f "$PACKAGE_DIR/build-info.json" ]]; then
+  echo "error: missing xtask package metadata: $PACKAGE_DIR/build-info.json" >&2
   exit 1
 fi
 
@@ -43,36 +50,12 @@ mkdir -p "$MACOS" "$RESOURCES" "$FRAMEWORKS"
 # Existing Info.plist
 cp "$PLIST_SRC" "$CONTENTS/Info.plist"
 
-# Main executable
-cp "$BIN" "$MACOS/$APP_EXECUTABLE_NAME"
+# Preserve the complete validated xtask runtime layout beside the executable.
+# This includes helper processes, CEF files/locales, built-in plugins, runtime
+# libraries and build-info.json.
+cp -a "$PACKAGE_DIR/." "$MACOS/"
 chmod +x "$MACOS/$APP_EXECUTABLE_NAME"
-
-# Other Mach-O helper binaries in the build output root.
-# macOS binaries often have no extension, so copy executable files.
-while IFS= read -r helper; do
-  helper_name="$(basename "$helper")"
-
-  if [[ "$helper_name" == "$MAIN_BIN_NAME" ]]; then
-    continue
-  fi
-
-  # Skip obvious non-runtime build files and the workspace task runner.
-  case "$helper_name" in
-    xtask|*.dylib|*.a|*.rlib|*.dSYM|*.rmeta|*.o|*.d)
-      continue
-      ;;
-  esac
-
-  cp "$helper" "$MACOS/$helper_name"
-  chmod +x "$MACOS/$helper_name"
-done < <(
-  find "$SRC_DIR" -maxdepth 1 -type f -perm -111 -print
-)
-
-# Dynamic libraries
-find "$SRC_DIR" -maxdepth 1 -type f -name "*.dylib" -print0 | while IFS= read -r -d '' dylib; do
-  cp "$dylib" "$FRAMEWORKS/"
-done
+chmod +x "$MACOS/FutureboardPluginHostX64" "$MACOS/FutureboardPluginScanner"
 
 # Icon
 if [[ -f "$ICON_SRC" ]]; then

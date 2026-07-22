@@ -71,7 +71,8 @@ impl BuildInfo {
 
     /// Pretty-printed JSON, newline-terminated for clean diffs.
     pub fn to_json(&self) -> Result<String> {
-        let mut json = serde_json::to_string_pretty(self).context("failed to serialize build-info")?;
+        let mut json =
+            serde_json::to_string_pretty(self).context("failed to serialize build-info")?;
         json.push('\n');
         Ok(json)
     }
@@ -79,7 +80,10 @@ impl BuildInfo {
 
 /// `git rev-parse HEAD`, or `None` when git/metadata is unavailable.
 fn git_commit() -> Option<String> {
-    let output = Command::new("git").args(["rev-parse", "HEAD"]).output().ok()?;
+    let output = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .ok()?;
     if !output.status.success() {
         return None;
     }

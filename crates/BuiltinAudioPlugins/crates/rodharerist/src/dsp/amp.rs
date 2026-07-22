@@ -81,10 +81,14 @@ impl Amp {
         let treble_db = (treble - 5.0) / 5.0 * 12.0;
         let presence_db = (presence - 5.0) / 5.0 * 8.0;
 
-        self.bass.set(make_eq_biquad("lowshelf", 110.0, bass_db, 0.707, sr));
-        self.mid.set(make_eq_biquad("bell", mid_hz, mid_db, 0.8, sr));
-        self.treble.set(make_eq_biquad("highshelf", treble_hz, treble_db, 0.707, sr));
-        self.presence.set(make_eq_biquad("highshelf", 5_200.0, presence_db, 0.707, sr));
+        self.bass
+            .set(make_eq_biquad("lowshelf", 110.0, bass_db, 0.707, sr));
+        self.mid
+            .set(make_eq_biquad("bell", mid_hz, mid_db, 0.8, sr));
+        self.treble
+            .set(make_eq_biquad("highshelf", treble_hz, treble_db, 0.707, sr));
+        self.presence
+            .set(make_eq_biquad("highshelf", 5_200.0, presence_db, 0.707, sr));
     }
 
     #[inline]

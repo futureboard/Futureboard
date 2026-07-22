@@ -20,7 +20,12 @@ const HOP: usize = 512;
 
 /// Estimate tempo of a mono buffer. Returns `None` for signals too short to
 /// hold a meaningful onset envelope.
-pub fn estimate_bpm(samples: &[f32], sample_rate: f32, min_bpm: f32, max_bpm: f32) -> Option<TempoEstimate> {
+pub fn estimate_bpm(
+    samples: &[f32],
+    sample_rate: f32,
+    min_bpm: f32,
+    max_bpm: f32,
+) -> Option<TempoEstimate> {
     if sample_rate <= 0.0 || !sample_rate.is_finite() {
         return None;
     }
@@ -98,8 +103,16 @@ pub fn estimate_bpm(samples: &[f32], sample_rate: f32, min_bpm: f32, max_bpm: f3
 }
 
 fn sanitize_range(min_bpm: f32, max_bpm: f32) -> (f32, f32) {
-    let mut lo = if min_bpm.is_finite() && min_bpm > 0.0 { min_bpm } else { 60.0 };
-    let mut hi = if max_bpm.is_finite() && max_bpm > lo { max_bpm } else { 200.0 };
+    let mut lo = if min_bpm.is_finite() && min_bpm > 0.0 {
+        min_bpm
+    } else {
+        60.0
+    };
+    let mut hi = if max_bpm.is_finite() && max_bpm > lo {
+        max_bpm
+    } else {
+        200.0
+    };
     lo = lo.clamp(20.0, 400.0);
     hi = hi.clamp(lo + 1.0, 400.0);
     (lo, hi)

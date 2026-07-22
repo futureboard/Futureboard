@@ -2330,7 +2330,9 @@ impl StudioLayout {
         // refreshes their sidebars, it never tears the shared window down.
         for (plugin_id, handle) in self.plugin_editors.builtin.drain() {
             let _ = handle.update(cx, |editor, _window, cx| editor.request_close(cx));
-            eprintln!("[BuiltinPluginEditorClose] plugin={plugin_id} close_requested=true shutdown=true");
+            eprintln!(
+                "[BuiltinPluginEditorClose] plugin={plugin_id} close_requested=true shutdown=true"
+            );
         }
         SpherePluginHost::native_editor::detach_all_embedded_editors();
     }

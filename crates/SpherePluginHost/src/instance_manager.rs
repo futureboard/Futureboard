@@ -25,7 +25,10 @@ pub struct InsertSlot {
 
 impl InsertSlot {
     pub fn new(track_id: u64, insert_index: u32) -> Self {
-        Self { track_id, insert_index }
+        Self {
+            track_id,
+            insert_index,
+        }
     }
 }
 
@@ -62,7 +65,11 @@ impl InstanceManager {
     /// Create an instance of `plugin_id` at `slot`, returning its id. If the slot
     /// was already occupied, the previous instance is removed first (one instance
     /// per slot). The new instance does **not** auto-bind the editor.
-    pub fn create_instance(&mut self, plugin_id: impl Into<String>, slot: InsertSlot) -> InstanceId {
+    pub fn create_instance(
+        &mut self,
+        plugin_id: impl Into<String>,
+        slot: InsertSlot,
+    ) -> InstanceId {
         if let Some(existing) = self.by_slot.get(&slot).copied() {
             self.remove_instance(existing);
         }
@@ -89,7 +96,8 @@ impl InstanceManager {
         if self.editor_binding.get(&removed.plugin_id) == Some(&id) {
             match self.instances_of(&removed.plugin_id).first() {
                 Some(next) => {
-                    self.editor_binding.insert(removed.plugin_id.clone(), next.id);
+                    self.editor_binding
+                        .insert(removed.plugin_id.clone(), next.id);
                 }
                 None => {
                     self.editor_binding.remove(&removed.plugin_id);
@@ -104,7 +112,9 @@ impl InstanceManager {
     }
 
     pub fn instance_at(&self, slot: InsertSlot) -> Option<&PluginInstance> {
-        self.by_slot.get(&slot).and_then(|id| self.instances.get(id))
+        self.by_slot
+            .get(&slot)
+            .and_then(|id| self.instances.get(id))
     }
 
     /// All instances of a plug-in type, ordered by id (creation order).

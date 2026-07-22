@@ -116,7 +116,8 @@ Optional flags:
 - `--plugin <spec>` — build the Built-in Plugin dynamic libraries and stage them
   into `Plugins/`. `spec` is one of:
   - `all` — every built-in crate (`c1073`, `compresser`, `echospace`, `equz8`,
-    `fa2a`, `fa76`, `meowsyn`, `rodharerist`); warns if any expected one is missing.
+    `fa2a`, `fa76`, `meowsyn`, `rodharerist`); fails if any expected library is
+    missing from the staged package.
   - `none` — build no plugins (the default).
   - a comma-separated list of crate names, e.g. `rodharerist,equz8`.
 
@@ -126,7 +127,8 @@ Optional flags:
 
   `--plugins` (no value) is a legacy alias for `--plugin all`. All eight built-in
   crates build as `cdylib`s; the loadable-plugin C ABI is still being wired up.
-- `--no-cef` — skip staging the shared CEF runtime even when `build/cef` exists.
+- `--no-cef` — intentionally create a developer package without the shared CEF
+  runtime. Normal packages fail when `build/cef` is unavailable.
 
 ## CEF runtime staging (shared, flat)
 
@@ -139,9 +141,10 @@ runtime) into the application root:
 - `build/cef/Resources/*` (paks, `icudtl.dat`) → app root
 - `build/cef/Resources/locales/*` → `locales/`
 
-`src/cef.rs` verifies the flat layout is complete before publishing. If `build/cef`
-is absent, CEF staging is skipped with a warning so a developer build without CEF
-installed still packages.
+`src/cef.rs` verifies the flat layout is complete before publishing. If
+`build/cef` is absent, packaging fails rather than publishing a runtime whose
+built-in plugin editors cannot open. Use `--no-cef` only for an intentional
+CEF-free developer package.
 
 ## Built-in Plugin embedded UI (BuildInHelper)
 
@@ -176,8 +179,9 @@ To wire a plugin's editor UI (e.g. `rodharerist`):
 
 The editor UI is built into a single self-contained `dist/index.html` (Vite +
 `vite-plugin-singlefile` inlines all JS/CSS/assets), so a plugin embeds just one
-asset. Build it first (`bun install && bun run build` in `editorui/`); a missing
-`dist/` produces an empty table so the crate still compiles.
+asset. Build it first (`bun install && bun run build` in `editorui/`). The Rust
+crate can still compile with an empty table, but `xtask package --plugin ...`
+rejects that incomplete release package.
 
 At runtime the shared CEF host loads the editor via the `mikoplugin://` custom
 scheme — `mikoplugin://<plugin>/index.html` — and resolves it through the loaded
@@ -216,8 +220,8 @@ Runtime files are staged explicitly, not by scraping `target/`:
   Cargo metadata (workspace members under `crates/BuiltinAudioPlugins/crates`
   that build a `cdylib`/`dylib`), built via the JSON artifact stream, and staged
   into `Plugins/` when `--plugins` is passed. The known set is
-  `plugins::BUILTIN_PLUGIN_CRATES`; `missing_builtin_plugins` drives the
-  completeness warning. See `src/plugins.rs`.
+  `plugins::BUILTIN_PLUGIN_CRATES`; `missing_builtin_plugins` enforces package
+  completeness. See `src/plugins.rs`.
 
 ## build-info.json
 

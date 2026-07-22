@@ -67,8 +67,8 @@ fn download_onnxruntime() {
     let cuda = std::env::var_os("CARGO_FEATURE_STEM_CUDA").is_some();
     let directml = std::env::var_os("CARGO_FEATURE_STEM_DIRECTML").is_some();
 
-    let version =
-        std::env::var("FUTUREBOARD_ORT_VERSION").unwrap_or_else(|_| ORT_DEFAULT_VERSION.to_string());
+    let version = std::env::var("FUTUREBOARD_ORT_VERSION")
+        .unwrap_or_else(|_| ORT_DEFAULT_VERSION.to_string());
 
     // Where the binary ends up: OUT_DIR is target/<profile>/build/<pkg>/out.
     let out_dir = PathBuf::from(std::env::var_os("OUT_DIR").expect("OUT_DIR is set by Cargo"));
@@ -120,8 +120,9 @@ fn download_onnxruntime() {
     assets.push(format!("onnxruntime-{platform}-{version}.{ext}"));
 
     for asset in &assets {
-        let url =
-            format!("https://github.com/microsoft/onnxruntime/releases/download/v{version}/{asset}");
+        let url = format!(
+            "https://github.com/microsoft/onnxruntime/releases/download/v{version}/{asset}"
+        );
         println!("cargo:warning=Downloading ONNX Runtime {version} ({asset})...");
         let bytes = match http_get(&url) {
             Ok(bytes) => bytes,

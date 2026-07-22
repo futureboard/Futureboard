@@ -96,7 +96,8 @@ pub fn create_mdx_net_backend(
         } else {
             ensure_ort_dylib_env();
             let models_dir = resolved_models_dir();
-            if let Some(files) = crate::download::resolve_installed_model_files(model, &models_dir) {
+            if let Some(files) = crate::download::resolve_installed_model_files(model, &models_dir)
+            {
                 if model == StemModel::HtDemucs {
                     match OnnxHtDemucsBackend::new(model, device, files) {
                         Ok(backend) => return Ok(Box::new(backend)),

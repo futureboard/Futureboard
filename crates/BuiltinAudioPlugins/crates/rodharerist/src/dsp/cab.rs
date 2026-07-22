@@ -55,16 +55,20 @@ impl Cabinet {
         };
 
         // Fixed low-cut and cabinet body resonance.
-        self.hpf.set(make_eq_biquad("highpass", hpf_hz, 0.0, 0.707, sr));
-        self.body.set(make_eq_biquad("bell", body_hz, body_db, 0.9, sr));
+        self.hpf
+            .set(make_eq_biquad("highpass", hpf_hz, 0.0, 0.707, sr));
+        self.body
+            .set(make_eq_biquad("bell", body_hz, body_db, 0.9, sr));
 
         // Presence peak: emphasised on-axis, tamed off-axis.
         let presence_db = presence_base_db + m * 4.0 - d * 1.5;
-        self.presence.set(make_eq_biquad("bell", presence_hz, presence_db, 1.1, sr));
+        self.presence
+            .set(make_eq_biquad("bell", presence_hz, presence_db, 1.1, sr));
 
         // Speaker roll-off: each cabinet falls off past its own knee.
         let cutoff = (base_cutoff + m * 2_500.0 - d * 1_200.0).clamp(2_000.0, sr * 0.45);
-        self.lpf.set(make_eq_biquad("lowpass", cutoff, 0.0, 0.707, sr));
+        self.lpf
+            .set(make_eq_biquad("lowpass", cutoff, 0.0, 0.707, sr));
 
         self.level = 1.0 - d * 0.2;
     }

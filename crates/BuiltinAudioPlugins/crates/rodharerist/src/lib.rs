@@ -11,7 +11,7 @@ mod state;
 pub mod ui;
 
 pub use dsp::{
-    AmpModel, CabModel, Dsp, DriveModel, NamCaptureInfo, NamLoadError, PLUGIN_ID, Params,
+    AmpModel, CabModel, DriveModel, Dsp, NamCaptureInfo, NamLoadError, PLUGIN_ID, Params,
     StageKind, ToneEngineKind, default_params, descriptor,
 };
 pub use state::{RodhareistState, SCHEMA_VERSION};

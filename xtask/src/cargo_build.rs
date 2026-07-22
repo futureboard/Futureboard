@@ -155,7 +155,11 @@ fn merged_features(edition: Edition) -> String {
 fn wanted_executable(artifact: &Artifact) -> Option<(String, PathBuf)> {
     let name = artifact.target.name.as_str();
     let is_wanted = (name == APP_BINARY || SIDECAR_BINARIES.contains(&name))
-        && artifact.target.kind.iter().any(|kind| kind.as_str() == "bin");
+        && artifact
+            .target
+            .kind
+            .iter()
+            .any(|kind| kind.as_str() == "bin");
     if !is_wanted {
         return None;
     }

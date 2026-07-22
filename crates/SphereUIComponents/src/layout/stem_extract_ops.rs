@@ -107,9 +107,8 @@ impl StudioLayout {
                 .position(|track| track.id == request.source_track_id)
                 .unwrap_or(timeline.state.tracks.len().saturating_sub(1));
 
-            let mut insert_at = source_index + 1;
             let mut created_ids = Vec::new();
-            for stem in &request.stems {
+            for (insert_at, stem) in (source_index + 1..).zip(request.stems.iter()) {
                 let path_string = stem.path.to_string_lossy().into_owned();
                 let track_name = stem.kind.label().to_string();
                 let track_id = timeline.state.create_track(CreateTrackOptions {
@@ -124,7 +123,6 @@ impl StudioLayout {
                     input_monitor: InputMonitorMode::Off,
                 });
                 let _ = timeline.state.reorder_track(&track_id, insert_at);
-                insert_at += 1;
 
                 let clip_name = format!(
                     "{}_{}",

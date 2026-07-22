@@ -95,10 +95,9 @@ impl OnnxHtDemucsBackend {
         device: InferDevice,
         files: Vec<PathBuf>,
     ) -> Result<Self, StemExtractError> {
-        let file = files
-            .into_iter()
-            .next()
-            .ok_or_else(|| backend_err(format!("no installed ONNX weights for {}", model.label())))?;
+        let file = files.into_iter().next().ok_or_else(|| {
+            backend_err(format!("no installed ONNX weights for {}", model.label()))
+        })?;
         Ok(Self {
             model,
             device,
@@ -185,8 +184,9 @@ impl StemInferBackend for OnnxHtDemucsBackend {
         let n_chunks = total.div_ceil(stride).max(1);
 
         // Per-source planar-stereo accumulators plus a shared window weight.
-        let mut acc: Vec<PlanarStereo> =
-            (0..SOURCES.len()).map(|_| [vec![0.0f32; total], vec![0.0f32; total]]).collect();
+        let mut acc: Vec<PlanarStereo> = (0..SOURCES.len())
+            .map(|_| [vec![0.0f32; total], vec![0.0f32; total]])
+            .collect();
         let mut weight = vec![0.0f32; total];
 
         for chunk_index in 0..n_chunks {

@@ -53,55 +53,77 @@ impl Drive {
                 self.pre_gain = 1.0 + g * 24.0;
                 self.out_gain = 0.25 + lvl * 1.1;
                 self.mix = 1.0;
-                self.input_hpf.set(make_eq_biquad("highpass", 220.0, 0.0, 0.7, sr));
-                self.mid_boost.set(make_eq_biquad("bell", 720.0, 6.0, 0.7, sr));
+                self.input_hpf
+                    .set(make_eq_biquad("highpass", 220.0, 0.0, 0.7, sr));
+                self.mid_boost
+                    .set(make_eq_biquad("bell", 720.0, 6.0, 0.7, sr));
                 let cutoff = 2_000.0 + t * 4_000.0;
-                self.tone_lpf.set(make_eq_biquad("lowpass", cutoff, 0.0, 0.707, sr));
+                self.tone_lpf
+                    .set(make_eq_biquad("lowpass", cutoff, 0.0, 0.707, sr));
             }
             DriveModel::Minotaur => {
                 self.pre_gain = 1.0 + g * 8.0;
                 self.out_gain = 0.4 + lvl * 1.3;
                 self.mix = 0.85;
-                self.input_hpf.set(make_eq_biquad("highpass", 35.0, 0.0, 0.7, sr));
+                self.input_hpf
+                    .set(make_eq_biquad("highpass", 35.0, 0.0, 0.7, sr));
                 self.mid_boost.set(None);
                 let cutoff = (4_000.0 + t * 8_000.0).min(sr * 0.45);
-                self.tone_lpf.set(make_eq_biquad("lowpass", cutoff, 0.0, 0.707, sr));
+                self.tone_lpf
+                    .set(make_eq_biquad("lowpass", cutoff, 0.0, 0.707, sr));
             }
             DriveModel::Rat => {
                 self.pre_gain = 1.0 + g * 36.0;
                 self.out_gain = 0.18 + lvl * 0.95;
                 self.mix = 1.0;
-                self.input_hpf.set(make_eq_biquad("highpass", 120.0, 0.0, 0.7, sr));
-                self.mid_boost.set(make_eq_biquad("bell", 1_100.0, 3.0, 0.9, sr));
+                self.input_hpf
+                    .set(make_eq_biquad("highpass", 120.0, 0.0, 0.7, sr));
+                self.mid_boost
+                    .set(make_eq_biquad("bell", 1_100.0, 3.0, 0.9, sr));
                 let cutoff = 1_200.0 + t * 5_500.0;
-                self.tone_lpf.set(make_eq_biquad("lowpass", cutoff, 0.0, 0.707, sr));
+                self.tone_lpf
+                    .set(make_eq_biquad("lowpass", cutoff, 0.0, 0.707, sr));
             }
             DriveModel::Breaker => {
                 self.pre_gain = 1.0 + g * 12.0;
                 self.out_gain = 0.35 + lvl * 1.15;
                 self.mix = 0.92;
-                self.input_hpf.set(make_eq_biquad("highpass", 80.0, 0.0, 0.7, sr));
-                self.mid_boost.set(make_eq_biquad("bell", 650.0, 2.5, 0.8, sr));
+                self.input_hpf
+                    .set(make_eq_biquad("highpass", 80.0, 0.0, 0.7, sr));
+                self.mid_boost
+                    .set(make_eq_biquad("bell", 650.0, 2.5, 0.8, sr));
                 let cutoff = 2_500.0 + t * 6_000.0;
-                self.tone_lpf.set(make_eq_biquad("lowpass", cutoff, 0.0, 0.707, sr));
+                self.tone_lpf
+                    .set(make_eq_biquad("lowpass", cutoff, 0.0, 0.707, sr));
             }
             DriveModel::Fuzz => {
                 self.pre_gain = 1.0 + g * 48.0;
                 self.out_gain = 0.15 + lvl * 0.85;
                 self.mix = 1.0;
-                self.input_hpf.set(make_eq_biquad("highpass", 60.0, 0.0, 0.7, sr));
-                self.mid_boost.set(make_eq_biquad("bell", 400.0, 4.0, 0.6, sr));
+                self.input_hpf
+                    .set(make_eq_biquad("highpass", 60.0, 0.0, 0.7, sr));
+                self.mid_boost
+                    .set(make_eq_biquad("bell", 400.0, 4.0, 0.6, sr));
                 let cutoff = 900.0 + t * 3_500.0;
-                self.tone_lpf.set(make_eq_biquad("lowpass", cutoff, 0.0, 0.707, sr));
+                self.tone_lpf
+                    .set(make_eq_biquad("lowpass", cutoff, 0.0, 0.707, sr));
             }
             DriveModel::Centurion => {
                 self.pre_gain = 1.0 + g * 14.0;
                 self.out_gain = 0.32 + lvl * 1.2;
                 self.mix = 0.88;
-                self.input_hpf.set(make_eq_biquad("highpass", 90.0, 0.0, 0.7, sr));
-                self.mid_boost.set(make_eq_biquad("bell", 780.0, 4.5, 0.75, sr));
+                self.input_hpf
+                    .set(make_eq_biquad("highpass", 90.0, 0.0, 0.7, sr));
+                self.mid_boost
+                    .set(make_eq_biquad("bell", 780.0, 4.5, 0.75, sr));
                 let cutoff = 3_000.0 + t * 7_000.0;
-                self.tone_lpf.set(make_eq_biquad("lowpass", cutoff.min(sr * 0.45), 0.0, 0.707, sr));
+                self.tone_lpf.set(make_eq_biquad(
+                    "lowpass",
+                    cutoff.min(sr * 0.45),
+                    0.0,
+                    0.707,
+                    sr,
+                ));
             }
         }
     }

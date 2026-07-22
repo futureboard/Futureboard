@@ -12,8 +12,8 @@
 //! This module is pure data + string mapping — no DSP crate dependency, so the
 //! host crate stays lean.
 
-use crate::registry::{PluginFormat, PluginKind, PluginStatus, RegistryPlugin};
 use crate::plugin_db::PluginScanStatus;
+use crate::registry::{PluginFormat, PluginKind, PluginStatus, RegistryPlugin};
 
 /// Id prefix that marks a registry row as a Futureboard built-in.
 pub const BUILTIN_ID_PREFIX: &str = "builtin:";
@@ -37,14 +37,62 @@ struct BuiltinEntry {
 /// The curated built-in catalog. Mirrors the workspace members under
 /// `crates/BuiltinAudioPlugins/crates`.
 const CATALOG: &[BuiltinEntry] = &[
-    BuiltinEntry { stem: "rodharerist", name: "Rodhareist", category: "Multi-FX", kind: PluginKind::Effect, has_editor: true },
-    BuiltinEntry { stem: "equz8", name: "EQ-Z8", category: "EQ", kind: PluginKind::Effect, has_editor: false },
-    BuiltinEntry { stem: "compresser", name: "Compresser", category: "Dynamics", kind: PluginKind::Effect, has_editor: false },
-    BuiltinEntry { stem: "fa2a", name: "FA-2A", category: "Dynamics", kind: PluginKind::Effect, has_editor: false },
-    BuiltinEntry { stem: "echospace", name: "EchoSpace", category: "Delay", kind: PluginKind::Effect, has_editor: false },
-    BuiltinEntry { stem: "fa76", name: "FA-76", category: "Dynamics", kind: PluginKind::Effect, has_editor: false },
-    BuiltinEntry { stem: "c1073", name: "C1073", category: "EQ", kind: PluginKind::Effect, has_editor: false },
-    BuiltinEntry { stem: "meowsyn", name: "MeowSyn", category: "Instrument", kind: PluginKind::Instrument, has_editor: false },
+    BuiltinEntry {
+        stem: "rodharerist",
+        name: "Rodhareist",
+        category: "Multi-FX",
+        kind: PluginKind::Effect,
+        has_editor: true,
+    },
+    BuiltinEntry {
+        stem: "equz8",
+        name: "EQ-Z8",
+        category: "EQ",
+        kind: PluginKind::Effect,
+        has_editor: false,
+    },
+    BuiltinEntry {
+        stem: "compresser",
+        name: "Compresser",
+        category: "Dynamics",
+        kind: PluginKind::Effect,
+        has_editor: false,
+    },
+    BuiltinEntry {
+        stem: "fa2a",
+        name: "FA-2A",
+        category: "Dynamics",
+        kind: PluginKind::Effect,
+        has_editor: false,
+    },
+    BuiltinEntry {
+        stem: "echospace",
+        name: "EchoSpace",
+        category: "Delay",
+        kind: PluginKind::Effect,
+        has_editor: false,
+    },
+    BuiltinEntry {
+        stem: "fa76",
+        name: "FA-76",
+        category: "Dynamics",
+        kind: PluginKind::Effect,
+        has_editor: false,
+    },
+    BuiltinEntry {
+        stem: "c1073",
+        name: "C1073",
+        category: "EQ",
+        kind: PluginKind::Effect,
+        has_editor: false,
+    },
+    BuiltinEntry {
+        stem: "meowsyn",
+        name: "MeowSyn",
+        category: "Instrument",
+        kind: PluginKind::Instrument,
+        has_editor: false,
+    },
 ];
 
 const VENDOR: &str = "Futureboard";
@@ -167,7 +215,11 @@ mod tests {
     fn builtins_are_insertable() {
         for plugin in builtin_catalog(0) {
             assert!(plugin.is_builtin());
-            assert!(plugin.supports_insert(), "{} should be insertable", plugin.name);
+            assert!(
+                plugin.supports_insert(),
+                "{} should be insertable",
+                plugin.name
+            );
         }
     }
 

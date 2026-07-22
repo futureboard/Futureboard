@@ -164,8 +164,7 @@ fn collect(root: &Path, dir: &Path, out: &mut Vec<Entry>) -> io::Result<()> {
         let rel_path = to_forward_slashes(relative);
         // Normalize into a URL key (leading slash, no traversal). `dist` output is
         // always well-formed, so normalization should not reject anything.
-        let url_path = normalize_request_path(&rel_path)
-            .unwrap_or_else(|| format!("/{rel_path}"));
+        let url_path = normalize_request_path(&rel_path).unwrap_or_else(|| format!("/{rel_path}"));
         let bytes = fs::read(&path)?;
         out.push(Entry {
             url_path,
@@ -278,7 +277,10 @@ mod tests {
         assert_eq!(report.asset_count, 0);
 
         let generated = fs::read_to_string(out.join("embedded_ui_assets.rs")).unwrap();
-        assert!(generated.contains("EMBEDDED_UI_ASSETS: &[::builtin_ui_embed::EmbeddedUiAsset] = &[\n];"));
+        assert!(
+            generated
+                .contains("EMBEDDED_UI_ASSETS: &[::builtin_ui_embed::EmbeddedUiAsset] = &[\n];")
+        );
     }
 
     #[test]

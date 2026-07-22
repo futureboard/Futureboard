@@ -45,7 +45,12 @@ pub struct StagingPlan {
 ///   development layout).
 /// * any other profile → `out/<profile>/<edition>/<platform>` (so `release`
 ///   yields `out/release/community/windows-x64`).
-pub fn final_output_dir(out_root: &Path, profile: &str, edition: Edition, platform: &str) -> PathBuf {
+pub fn final_output_dir(
+    out_root: &Path,
+    profile: &str,
+    edition: Edition,
+    platform: &str,
+) -> PathBuf {
     if profile == "dev" {
         out_root.join("dev").join(platform)
     } else {
@@ -73,11 +78,17 @@ impl StagingPlan {
     pub fn prepare(&self) -> Result<()> {
         if self.staging_dir.exists() {
             fs::remove_dir_all(&self.staging_dir).with_context(|| {
-                format!("failed to clean stale staging dir {}", self.staging_dir.display())
+                format!(
+                    "failed to clean stale staging dir {}",
+                    self.staging_dir.display()
+                )
             })?;
         }
         fs::create_dir_all(&self.staging_dir).with_context(|| {
-            format!("failed to create staging dir {}", self.staging_dir.display())
+            format!(
+                "failed to create staging dir {}",
+                self.staging_dir.display()
+            )
         })?;
         Ok(())
     }

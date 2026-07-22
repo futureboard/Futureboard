@@ -56,11 +56,13 @@ pub(crate) struct PluginEditorWindows {
         (String, String),
         gpui::WindowHandle<crate::components::plugin_editor_window::PluginEditorWindow>,
     >,
-    /// Open built-in plugin editor windows keyed by `(track_id, insert_id)`.
-    /// These host an embedded React UI in a CEF child window rather than a
-    /// native plug-in view, so they are tracked separately from `open`.
+    /// Open built-in plugin editor windows keyed by `plugin_id` — one shared
+    /// CEF browser per built-in plugin type, not one per insert. Many
+    /// track/insert DSP instances of the same `plugin_id` bind to the same
+    /// window; the window's own sidebar tracks which one is active. See
+    /// `open_builtin_insert_editor`.
     pub builtin: std::collections::HashMap<
-        (String, String),
+        String,
         gpui::WindowHandle<
             crate::components::builtin_plugin_editor_window::BuiltinPluginEditorWindow,
         >,
@@ -1910,11 +1912,57 @@ impl StudioLayout {
         }
     }
 
+    /// Build the sidebar's instance list for `plugin_id`: every insert slot
+    /// across every track whose `plugin_id` matches, in track order. Cheap
+    /// enough (project-sized, not audio-rate) to rebuild wholesale on every
+    /// open/lifecycle event rather than diff in place.
+    fn collect_builtin_instances(
+        &self,
+        plugin_id: &str,
+        cx: &Context<Self>,
+    ) -> Vec<crate::components::builtin_plugin_editor_window::PluginInstanceDescriptor> {
+        use crate::components::builtin_plugin_editor_window::{
+            PluginInstanceDescriptor, PluginInstanceKey,
+        };
+
+        let state = &self.timeline.read(cx).state;
+        let mut instances = Vec::new();
+        for track in &state.tracks {
+            for slot in &track.inserts {
+                let Some(slot_plugin_id) = slot.plugin_id.as_deref() else {
+                    continue;
+                };
+                if slot_plugin_id != plugin_id {
+                    continue;
+                }
+                instances.push(PluginInstanceDescriptor {
+                    instance_key: PluginInstanceKey {
+                        track_id: track.id.clone(),
+                        insert_id: slot.id.clone(),
+                    },
+                    plugin_id: plugin_id.to_string(),
+                    track_name: track.name.clone(),
+                    insert_name: slot.display_name.clone(),
+                    bypassed: slot.bypassed,
+                    enabled: slot.enabled,
+                    // Whatever's persisted for this insert (see the doc
+                    // comment on `InsertSlotState::vst3_state` — reused
+                    // generically, not VST3-only). `None` for a fresh insert
+                    // that was never saved; the editor host falls back to
+                    // DSP defaults in that case.
+                    state_bytes: slot.vst3_state.clone(),
+                });
+            }
+        }
+        instances
+    }
+
     /// Open the CEF-hosted editor for a built-in plugin insert.
     ///
-    /// Built-in editors are per-insert like every other editor window, and are
-    /// tracked in the same `plugin_editors.builtin` map so the existing
-    /// focus-if-already-open and close paths apply.
+    /// Built-in editors are shared per `plugin_id`: one native window and one
+    /// CEF browser serve every track/insert using that plugin. Opening a
+    /// second insert of the same plugin_id focuses the existing window and
+    /// switches its sidebar selection — it never creates a second browser.
     fn open_builtin_insert_editor(
         &mut self,
         track_id: &str,
@@ -1924,32 +1972,46 @@ impl StudioLayout {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let key = (track_id.to_string(), insert_id.to_string());
+        use crate::components::builtin_plugin_editor_window::PluginInstanceKey;
 
-        // Focus an existing window rather than creating a second browser.
-        if let Some(handle) = self.plugin_editors.builtin.get(&key) {
-            if handle
-                .update(cx, |_, window, _| window.activate_window())
-                .is_ok()
-            {
+        let target = PluginInstanceKey {
+            track_id: track_id.to_string(),
+            insert_id: insert_id.to_string(),
+        };
+        let instances = self.collect_builtin_instances(plugin_id, cx);
+
+        // Focus the existing shared window and rebind it to this instance,
+        // rather than creating a second browser for the same plugin_id.
+        if let Some(handle) = self.plugin_editors.builtin.get(plugin_id) {
+            let result = handle.update(cx, |editor, window, cx| {
+                editor.set_instances(instances.clone(), cx);
+                editor.select_instance(target.clone(), cx);
+                window.activate_window();
+            });
+            if result.is_ok() {
+                eprintln!(
+                    "[BuiltinPluginEditor] focused shared plugin={plugin_id} track={track_id} insert={insert_id}"
+                );
                 return;
             }
-            self.plugin_editors.builtin.remove(&key);
+            self.plugin_editors.builtin.remove(plugin_id);
         }
 
-        let editor_id = format!("{track_id}::{insert_id}");
         let owner_bounds = window.bounds();
         match crate::components::builtin_plugin_editor_window::open_builtin_editor_window(
             owner_bounds,
-            editor_id,
             plugin_id.to_string(),
             display_name,
+            instances,
+            Some(target),
             cx,
         ) {
             Ok(handle) => {
-                self.plugin_editors.builtin.insert(key, handle);
+                self.plugin_editors
+                    .builtin
+                    .insert(plugin_id.to_string(), handle);
                 eprintln!(
-                    "[BuiltinPluginEditor] opened plugin={plugin_id} track={track_id} insert={insert_id}"
+                    "[BuiltinPluginEditor] opened shared plugin={plugin_id} track={track_id} insert={insert_id}"
                 );
             }
             Err(err) => {
@@ -1957,6 +2019,25 @@ impl StudioLayout {
                     "[BuiltinPluginEditor] open FAILED plugin={plugin_id} track={track_id} \
                      insert={insert_id} err={err}"
                 );
+            }
+        }
+    }
+
+    /// Refresh every open shared built-in editor's sidebar from current
+    /// project state. Call after any insert/track add/remove/rename/reorder
+    /// (spec: sidebar must reflect the live project, not a stale snapshot
+    /// taken at open time). Cheap no-op when no built-in editor is open.
+    pub(super) fn refresh_builtin_editor_sidebars(&mut self, cx: &mut Context<Self>) {
+        if self.plugin_editors.builtin.is_empty() {
+            return;
+        }
+        let plugin_ids: Vec<String> = self.plugin_editors.builtin.keys().cloned().collect();
+        for plugin_id in plugin_ids {
+            let instances = self.collect_builtin_instances(&plugin_id, cx);
+            if let Some(handle) = self.plugin_editors.builtin.get(&plugin_id) {
+                let _ = handle.update(cx, |editor, _window, cx| {
+                    editor.set_instances(instances, cx);
+                });
             }
         }
     }
@@ -1973,12 +2054,12 @@ impl StudioLayout {
         self.close_bridge_editor(cx, track_id, insert_id);
         // Legacy GPUI-window editor (FUTUREBOARD_PLUGIN_LEGACY_IN_PROCESS only).
         let key = (track_id.to_string(), insert_id.to_string());
-        // Built-in CEF editor. Close is two-phase so CEF releases its native
-        // browser before GPUI destroys the shell/content HWND hierarchy.
-        if let Some(handle) = self.plugin_editors.builtin.remove(&key) {
-            let _ = handle.update(cx, |editor, _window, cx| editor.request_close(cx));
-            eprintln!("[BuiltinPluginEditorClose] plugin={insert_id} close_requested=true");
-        }
+        // Built-in CEF editor: this instance is gone (unloaded/replaced), but
+        // the shared browser other instances of the same plugin_id use must
+        // not be torn down. Refresh every open shared editor's sidebar so it
+        // drops the now-gone instance (and reselects/clears active selection
+        // if it was the one showing) instead of destroying the window.
+        self.refresh_builtin_editor_sidebars(cx);
         if let Some(handle) = self.plugin_editors.open.remove(&key) {
             let _ = handle.update(cx, |_, window, _| window.remove_window());
             eprintln!("[PluginEditorClose] plugin={insert_id} removed_called=true");
@@ -2203,6 +2284,10 @@ impl StudioLayout {
     /// being destroyed (Part 11). Cheap: only inspects state when an editor is
     /// open, and only closes when its backing slot is genuinely gone.
     pub(super) fn reconcile_open_plugin_editors(&mut self, cx: &mut Context<Self>) {
+        // Shared built-in editors: same backstop, but they track membership
+        // (not existence) — a deleted track/insert must drop out of the
+        // sidebar even if nothing ever called `close_insert_editor` for it.
+        self.refresh_builtin_editor_sidebars(cx);
         if self.plugin_editors.open.is_empty() && self.plugin_editors.bridge.is_empty() {
             return;
         }
@@ -2239,6 +2324,13 @@ impl StudioLayout {
             .collect();
         for (track_id, insert_id) in keys {
             self.close_insert_editor(&track_id, &insert_id, cx);
+        }
+        // Shared built-in editors are keyed by plugin_id, not (track, insert),
+        // so they need their own close pass — `close_insert_editor` only
+        // refreshes their sidebars, it never tears the shared window down.
+        for (plugin_id, handle) in self.plugin_editors.builtin.drain() {
+            let _ = handle.update(cx, |editor, _window, cx| editor.request_close(cx));
+            eprintln!("[BuiltinPluginEditorClose] plugin={plugin_id} close_requested=true shutdown=true");
         }
         SpherePluginHost::native_editor::detach_all_embedded_editors();
     }

@@ -7,12 +7,14 @@
 //! points, embedded-UI table) is layered on separately.
 
 mod dsp;
+mod state;
 pub mod ui;
 
 pub use dsp::{
     AmpModel, CabModel, Dsp, DriveModel, NamCaptureInfo, NamLoadError, PLUGIN_ID, Params,
     StageKind, ToneEngineKind, default_params, descriptor,
 };
+pub use state::{RodhareistState, SCHEMA_VERSION};
 
 #[cfg(test)]
 mod tests {

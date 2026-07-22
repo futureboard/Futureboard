@@ -1920,4 +1920,64 @@ mod vsti_substrip_persistence_tests {
             "substrip insert plugin state bytes restored"
         );
     }
+
+    /// A built-in plugin (no VST3 runtime, `InsertPluginFormat::Unknown`)
+    /// persists its DSP state through the same `vst3_state` byte channel as
+    /// any other insert — the field is opaque-bytes-keyed-by-plugin_id, not
+    /// format-gated (see `InsertSlotState::vst3_state`'s doc comment). This
+    /// is what `collect_builtin_instances` (`plugin_ops.rs`) reads back to
+    /// populate a shared editor's `selectInstance.state`.
+    #[test]
+    fn builtin_plugin_state_bytes_roundtrip_through_save_and_load() {
+        let mut state = TimelineState::default();
+        let track_id = state.create_track(CreateTrackOptions {
+            track_type: TrackType::Audio,
+            name: "Guitar".into(),
+            color: crate::color::auto_color_for_index(0),
+            volume: 0.8,
+            pan: 0.0,
+            armed: false,
+            input_monitor: InputMonitorMode::Off,
+        });
+        let slot = state.ensure_insert_slot_at(&track_id, 0).expect("slot");
+        state.set_insert_plugin(
+            &track_id,
+            &slot,
+            "rodharerist".to_string(),
+            None,
+            InsertPluginFormat::Unknown,
+            None,
+            "Rodhareist".to_string(),
+        );
+        let json_state = br#"{"schema_version":1,"params":{"amp_gain":7.5}}"#.to_vec();
+        {
+            let slots = state.insert_slots_mut(&track_id).expect("slots");
+            let fx = slots.iter_mut().find(|s| s.id == slot).expect("fx slot");
+            fx.vst3_state = Some(std::sync::Arc::new(json_state.clone()));
+        }
+
+        let project = FutureboardProject::from(&state);
+        let bytes = encode_project(&project);
+        let decoded = decode_project(&bytes).expect("decode");
+
+        let mut restored = TimelineState::default();
+        apply_to_timeline(&decoded, &mut restored);
+
+        let track = restored
+            .tracks
+            .iter()
+            .find(|t| t.id == track_id)
+            .expect("track restored");
+        let fx = track
+            .inserts
+            .iter()
+            .find(|s| s.id == slot)
+            .expect("builtin insert restored");
+        assert_eq!(fx.plugin_id.as_deref(), Some("rodharerist"));
+        assert_eq!(
+            fx.vst3_state.as_ref().map(|s| s.as_ref().clone()),
+            Some(json_state),
+            "built-in plugin's JSON state bytes must survive save/load"
+        );
+    }
 }

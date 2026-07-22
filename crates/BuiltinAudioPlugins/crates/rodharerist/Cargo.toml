@@ -17,6 +17,8 @@ biquad.workspace = true
 builtin-dsp-core.workspace = true
 builtin-ui-embed.workspace = true
 nam-rs.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 
 [build-dependencies]
 # Build-time only: turns `editorui/dist` into the embedded asset table.

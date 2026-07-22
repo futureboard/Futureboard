@@ -48,7 +48,7 @@ use tone_stage::ToneStage;
 pub const PLUGIN_ID: &str = "futureboard.rodharerist";
 
 /// One slot in the Helix-style signal path. Order is user-editable.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[repr(u8)]
 pub enum StageKind {
     Gate = 0,
@@ -103,7 +103,7 @@ impl StageKind {
 }
 
 /// Overdrive/boost voicing, matching the editor's `dist` models.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum DriveModel {
     /// "Green Screamer" — mid-boosted tube-screamer style overdrive.
     Screamer,
@@ -151,7 +151,7 @@ impl DriveModel {
 }
 
 /// Amplifier voicing, matching the editor's `amp` models.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum AmpModel {
     /// "Mandarin 80" — warm, mid-forward British tube head.
     Mandarin,
@@ -206,7 +206,7 @@ impl AmpModel {
 }
 
 /// Cabinet voicing, matching the editor's `cab` models.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum CabModel {
     /// "1960v Vintage 4x12" — Celestion vintage cabinet sim.
     Vintage4x12,
@@ -246,7 +246,13 @@ impl CabModel {
 
 /// Full parameter set. Knob ranges match `editorui/src/data.ts` one-to-one so the
 /// React UI and the bridge speak the same units.
-#[derive(Debug, Clone)]
+///
+/// This is the per-insert DSP state: the shared built-in editor's
+/// `SelectInstanceMsg.state` (see `builtin_plugin_editor_window.rs`) is a
+/// serialized [`Params`] wrapped in [`RodhareistState`], not a separately
+/// invented schema — there is no reason for the wire format to diverge from
+/// what the DSP actually holds.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Params {
     pub power: bool,
 

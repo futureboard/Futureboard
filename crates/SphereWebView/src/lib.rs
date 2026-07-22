@@ -165,6 +165,9 @@ mod installer;
 pub use installer::install_cef;
 
 #[cfg(feature = "cef-runtime")]
+pub mod client;
+
+#[cfg(feature = "cef-runtime")]
 pub mod runtime;
 
 #[cfg(feature = "cef-runtime")]

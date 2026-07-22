@@ -52,6 +52,11 @@ import {
   releasePreview,
 } from "./state/meters";
 import "./Styles/Editor.css";
+import { HashRouter, Routes, Route } from "react-router-dom";
+import {
+  BoundInstanceProvider,
+  useBoundInstance,
+} from "./state/boundInstance";
 
 /** Global gain-staging state. Mirrors the DSP's global params exactly. */
 type GlobalState = {
@@ -171,7 +176,7 @@ function factorySnapshot(id: string): RigSnapshot | null {
   };
 }
 
-function RodhareistEditor() {
+export function RodhareistEditor() {
   const initial = presetsData[4]!;
   const [currentPresetId, setCurrentPresetId] = useState(initial.id);
   const [activeCat, setActiveCat] = useState<CategoryId>(initial.category);
@@ -1021,11 +1026,57 @@ function RodhareistEditor() {
   );
 }
 
+/** Empty state: no compatible instance is currently bound (route `/`, or a
+ * removed active instance with nothing left to fall back to). Never leaves
+ * a destroyed insert's controls on screen. */
+function NoInstanceSelected() {
+  return (
+    <div className="flex h-screen w-screen items-center justify-center bg-neutral-950 text-sm text-neutral-400">
+      No Rodhareist instances are available in this project.
+    </div>
+  );
+}
+
+/**
+ * Mounts the real editor only once a native-approved instance is bound, and
+ * remounts it (via `key`) on every instance switch.
+ *
+ * This stands in for the spec's "centralized bound-instance store with
+ * atomic replacement" until Phase 5 gives instances real, persisted DSP
+ * state: with nothing to preserve across a switch yet, a full remount gives
+ * the same guarantees that section actually cares about — no stale timers
+ * (`commitTimerRef`), no mixed state from two instances, no leaked
+ * optimistic edits — for free, via each hook's own unmount cleanup. Once
+ * Phase 5 lands, the natural next step is to replace this remount with a
+ * store that carries the previous instance's confirmed state out and the
+ * next instance's snapshot in, instead of discarding and starting fresh.
+ */
+function BoundEditor() {
+  const { instanceId, connectionStatus } = useBoundInstance();
+  if (connectionStatus !== "active" || !instanceId) {
+    return <NoInstanceSelected />;
+  }
+  return <RodhareistEditor key={instanceId} />;
+}
+
+function AppRoot() {
+  return (
+    <HashRouter>
+      <BoundInstanceProvider>
+        <Routes>
+          <Route path="/" element={<NoInstanceSelected />} />
+          <Route path="/instance/:instanceId" element={<BoundEditor />} />
+        </Routes>
+      </BoundInstanceProvider>
+    </HashRouter>
+  );
+}
+
 const rootEl = document.getElementById("root");
 if (rootEl) {
   createRoot(rootEl).render(
     <StrictMode>
-      <RodhareistEditor />
+      <AppRoot />
     </StrictMode>,
   );
 }

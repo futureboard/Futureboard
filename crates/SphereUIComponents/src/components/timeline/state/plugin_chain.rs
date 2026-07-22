@@ -284,11 +284,19 @@ pub struct InsertSlotState {
     pub multiout_collapsed: bool,
     /// When true, open the plugin editor once runtime reaches Active/Loaded.
     pub pending_open_editor: bool,
-    /// Packed VST3 state (`Vst3PluginState::to_packed_bytes`) for project
-    /// persistence. Loaded from the project file on open (then pushed to the
-    /// plugin host after `LoadPlugin`), refreshed from the host on save.
-    /// `Arc` because plugin states can be megabytes and slots are cloned
-    /// freely. `None` = no captured state (fresh insert / stateless plugin).
+    /// Opaque per-plugin state bytes for project persistence. Despite the
+    /// name, this is not VST3-specific: `timeline_insert_to_project` /
+    /// `project_insert_to_timeline` round-trip it for *any* `plugin_id`,
+    /// keying only on presence, not format. Built-in plugins (e.g.
+    /// rodharerist) use it too — their bytes are a UTF-8 JSON
+    /// `RodhareistState` blob (see that crate's `state` module), not a VST3
+    /// packed state; this field carries whichever byte format the plugin_id
+    /// in question actually produces. For VST3 specifically: packed via
+    /// `Vst3PluginState::to_packed_bytes`, loaded from the project file on
+    /// open (then pushed to the plugin host after `LoadPlugin`), refreshed
+    /// from the host on save. `Arc` because plugin states can be megabytes
+    /// and slots are cloned freely. `None` = no captured state (fresh insert
+    /// / stateless plugin).
     pub vst3_state: Option<std::sync::Arc<Vec<u8>>>,
 }
 

@@ -186,10 +186,15 @@ impl CefRuntime {
 
     /// Create a real native CEF child window. No render handler, shared texture,
     /// or off-screen rendering path is used.
+    ///
+    /// `client` should normally be `Some` — see [`crate::client`]. `None` is
+    /// still accepted (e.g. a test double) but gives the browser zero
+    /// navigation policy and no crash signal.
     pub fn create_webview<'runtime>(
         &'runtime self,
         parent: NativeParent,
         config: WebViewConfig,
+        client: Option<&mut cef::Client>,
     ) -> Result<WebView<'runtime>, CefRuntimeError> {
         self.ensure_thread()?;
         if config.url.trim().is_empty() {
@@ -200,7 +205,7 @@ impl CefRuntime {
         debug_assert_eq!(window_info.windowless_rendering_enabled, 0);
         let browser = cef::browser_host_create_browser_sync(
             Some(&window_info),
-            None,
+            client,
             Some(&cef::CefString::from(config.url.as_str())),
             Some(&cef::BrowserSettings::default()),
             None,
@@ -232,8 +237,9 @@ impl CefRuntime {
         &self,
         parent: NativeParent,
         config: WebViewConfig,
+        client: Option<&mut cef::Client>,
     ) -> Result<WebView<'static>, CefRuntimeError> {
-        let view = self.create_webview(parent, config)?;
+        let view = self.create_webview(parent, config, client)?;
         // Only the PhantomData borrow marker changes; the browser handle and
         // its thread affinity are carried over unchanged.
         Ok(WebView {
@@ -288,6 +294,20 @@ impl WebView<'_> {
             .main_frame()
             .ok_or(CefRuntimeError::MissingMainFrame)?;
         frame.load_url(Some(&cef::CefString::from(url)));
+        Ok(())
+    }
+
+    /// Run `code` in the document's main frame. Fire-and-forget — CEF gives no
+    /// synchronous return value for this call. Used to push bridge protocol
+    /// messages (`futureboard.selectInstance`, ...) into the already-loaded
+    /// React app without navigating or reloading the page.
+    pub fn execute_javascript(&self, code: &str) -> Result<(), CefRuntimeError> {
+        self.ensure_thread()?;
+        let frame = self
+            .browser
+            .main_frame()
+            .ok_or(CefRuntimeError::MissingMainFrame)?;
+        frame.execute_java_script(Some(&cef::CefString::from(code)), None, 0);
         Ok(())
     }
 

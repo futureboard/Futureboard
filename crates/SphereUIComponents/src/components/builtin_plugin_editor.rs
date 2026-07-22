@@ -93,6 +93,14 @@ pub enum ViewEvent {
     Opened,
     OpenFailed(String),
     Closed,
+    /// The renderer process for this browser terminated (crash, OOM-kill,
+    /// `chrome://kill` in dev). The browser object and native DSP state on
+    /// the Rust side are untouched — only the page's JS state is gone, so
+    /// the window stays open and the browser reloads its own URL; once
+    /// `bridgeReady` arrives again the current selection is re-sent (see
+    /// `BuiltinPluginEditorWindow::push_selected_instance`, gated on
+    /// `browser_ready`).
+    RendererCrashed,
 }
 
 #[cfg(not(feature = "builtin-plugin-editor"))]
@@ -130,24 +138,34 @@ mod imp {
     pub fn is_view_open(_view_id: ViewId) -> bool {
         false
     }
+
+    pub fn take_inbound(_origin: &str) -> Vec<Vec<u8>> {
+        Vec::new()
+    }
+
+    pub fn send_to_view(_view_id: ViewId, _code: &str) {}
+
+    pub fn reload_view(_view_id: ViewId) {}
 }
 
 #[cfg(feature = "builtin-plugin-editor")]
 mod imp {
     use std::cell::{Cell, RefCell};
     use std::collections::HashMap;
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex, OnceLock};
 
     use sphere_webview::runtime::{
         CefRuntime, CefRuntimeConfig, NativeParent, WebView, WebViewConfig, WindowBounds,
     };
-    use sphere_webview::scheme::{register_plugin_scheme_factory, SchemeAsset};
+    use sphere_webview::client::{plugin_browser_client, CrashFlag};
+    use sphere_webview::scheme::{register_plugin_scheme_factory, BridgeSink, SchemeAsset};
 
     use super::{origin_for_plugin_id, HostAvailability, ViewEvent, ViewId, ViewRect};
 
     struct HostedView {
         _editor_id: String,
         view: WebView<'static>,
+        crash_flag: CrashFlag,
     }
 
     struct ClosingView {
@@ -241,6 +259,76 @@ mod imp {
         }
     }
 
+    /// React->native bridge inbound queue, keyed by scheme origin (the same
+    /// stem `resolve_asset` matches on, e.g. `"rodharerist"`). Filled from
+    /// CEF's IO thread (`bridge_sink`, below) — process-wide `Mutex`, not a
+    /// UI-thread `thread_local!` like `HOST`/`COMMANDS`, since the scheme
+    /// factory callback does not run on the UI thread. Drained by
+    /// `take_inbound`, called from the GPUI pump tick (non-realtime).
+    static INBOUND: OnceLock<Mutex<HashMap<String, Vec<Vec<u8>>>>> = OnceLock::new();
+
+    fn inbound_map() -> &'static Mutex<HashMap<String, Vec<Vec<u8>>>> {
+        INBOUND.get_or_init(|| Mutex::new(HashMap::new()))
+    }
+
+    fn bridge_sink() -> BridgeSink {
+        Arc::new(|origin: &str, body: Vec<u8>| {
+            if let Ok(mut map) = inbound_map().lock() {
+                map.entry(origin.to_string()).or_default().push(body);
+            }
+        })
+    }
+
+    /// Drain every bridge message POSTed by `origin`'s page since the last
+    /// call. Never blocks on CEF — just takes whatever `bridge_sink` queued.
+    pub fn take_inbound(origin: &str) -> Vec<Vec<u8>> {
+        inbound_map()
+            .lock()
+            .ok()
+            .and_then(|mut map| map.remove(origin))
+            .unwrap_or_default()
+    }
+
+    /// Run `code` in `view_id`'s document. No-op (not an error) if the view
+    /// isn't open yet or already closed — callers already gate on
+    /// `is_view_open`/`ViewEvent::Opened` where it matters.
+    pub fn send_to_view(view_id: ViewId, code: &str) {
+        HOST.with(|cell| {
+            if let Ok(slot) = cell.try_borrow() {
+                if let Some(host) = slot.as_ref() {
+                    if let Some(hosted) = host.views.get(&view_id) {
+                        if let Err(error) = hosted.view.execute_javascript(code) {
+                            eprintln!(
+                                "[plugin-bridge] execute_javascript failed view_id={view_id:?} err={error}"
+                            );
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+    /// Reload `view_id`'s document. Used by the bridge-ready watchdog to
+    /// recover a page whose load silently died (e.g. Chromium's network
+    /// service crashed mid-transfer, which it auto-restarts for *future*
+    /// requests but does not retry the one already in flight, so a page can
+    /// finish HTTP-200 headers and still never actually paint).
+    pub fn reload_view(view_id: ViewId) {
+        HOST.with(|cell| {
+            if let Ok(slot) = cell.try_borrow() {
+                if let Some(host) = slot.as_ref() {
+                    if let Some(hosted) = host.views.get(&view_id) {
+                        if let Err(error) = hosted.view.reload() {
+                            eprintln!(
+                                "[plugin-bridge] reload failed view_id={view_id:?} err={error}"
+                            );
+                        }
+                    }
+                }
+            }
+        });
+    }
+
     pub fn availability(plugin_id: &str) -> HostAvailability {
         let Some(origin) = origin_for_plugin_id(plugin_id) else {
             return HostAvailability::NoEditorForPlugin(plugin_id.to_string());
@@ -264,6 +352,7 @@ mod imp {
         let mut app = sphere_webview::scheme::plugin_scheme_app();
         let config = CefRuntimeConfig {
             cache_path: cef_cache_dir(),
+            remote_debugging_port: debug_port(),
             ..Default::default()
         };
         let runtime = CefRuntime::initialize(config, Some(&mut app))
@@ -272,7 +361,7 @@ mod imp {
         // The factory can only be installed once initialize has succeeded.
         let resolver: sphere_webview::scheme::SchemeResolver =
             Arc::new(|origin: &str, path: &str| resolve_asset(origin, path));
-        register_plugin_scheme_factory(resolver)
+        register_plugin_scheme_factory(resolver, Some(bridge_sink()))
             .map_err(|e| HostAvailability::RuntimeFailed(e.to_string()))?;
 
         *slot = Some(Host {
@@ -454,6 +543,7 @@ mod imp {
                         completed.push((view_id, ViewEvent::Opened));
                     } else {
                         let rect = pending.bounds.unwrap_or(open.rect);
+                        let (mut client, crash_flag) = plugin_browser_client();
                         let result = WindowBounds::new(rect.x, rect.y, rect.width, rect.height)
                             .map_err(|error| error.to_string())
                             .and_then(|bounds| {
@@ -467,6 +557,7 @@ mod imp {
                                     host.runtime.create_webview_detached(
                                         parent,
                                         WebViewConfig::new(url, bounds),
+                                        Some(&mut client),
                                     )
                                 }
                                 .map_err(|error| error.to_string())
@@ -478,6 +569,7 @@ mod imp {
                                     HostedView {
                                         _editor_id: open.editor_id,
                                         view,
+                                        crash_flag,
                                     },
                                 );
                                 opened_now = true;
@@ -504,6 +596,21 @@ mod imp {
             }
 
             let _ = host.runtime.do_message_loop_work();
+
+            // Renderer crash detection (`client::CrashFlag`, set from
+            // `on_render_process_terminated`). The browser object and native
+            // DSP state survive a renderer crash — only the page's JS state
+            // is gone — so this reloads the same URL rather than tearing the
+            // window down; `ViewEvent::RendererCrashed` lets the GPUI window
+            // reset `browser_ready` so it re-sends the current selection once
+            // the fresh page announces `bridgeReady` again.
+            for (view_id, hosted) in &host.views {
+                if hosted.crash_flag.take() {
+                    eprintln!("[plugin-scheme] reloading crashed renderer view_id={view_id:?}");
+                    let _ = hosted.view.reload();
+                    completed.push((*view_id, ViewEvent::RendererCrashed));
+                }
+            }
 
             // `close_browser(true)` is asynchronous. Keep both the WebView and
             // the GPUI-owned parent shell alive until CEF's native child HWND is
@@ -580,11 +687,19 @@ mod imp {
             .map(std::path::PathBuf::from)
             .map(|home| home.join(".cache"))
     }
+
+    /// Opens Chromium's remote-debugging endpoint (`http://127.0.0.1:<port>`)
+    /// so a real browser's devtools can inspect the editor's console/network
+    /// when `FUTUREBOARD_PLUGIN_VIEW_DEBUG=1` — otherwise off, since it is a
+    /// local unauthenticated debug surface.
+    fn debug_port() -> Option<u16> {
+        std::env::var_os("FUTUREBOARD_PLUGIN_VIEW_DEBUG").map(|_| 9222)
+    }
 }
 
 pub use imp::{
-    availability, close_view, init_at_boot, is_view_open, open_view, pump, set_view_bounds,
-    take_view_events,
+    availability, close_view, init_at_boot, is_view_open, open_view, pump, reload_view,
+    send_to_view, set_view_bounds, take_inbound, take_view_events,
 };
 
 #[cfg(test)]

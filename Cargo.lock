@@ -6667,6 +6667,8 @@ dependencies = [
  "builtin_dsp_core",
  "builtin_ui_embed",
  "nam-rs",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

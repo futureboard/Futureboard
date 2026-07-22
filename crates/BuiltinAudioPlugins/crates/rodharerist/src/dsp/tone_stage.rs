@@ -9,7 +9,7 @@ use super::nam::{NamCapture, NamCaptureInfo, PreparedNamRuntime};
 use super::AmpModel;
 
 /// Which engine the Tone/Amp slot currently runs. Mutually exclusive.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ToneEngineKind {
     /// The modeled tube-stage + passive tonestack ([`Amp`]).
     Classic,

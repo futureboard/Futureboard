@@ -154,18 +154,23 @@ mod imp {
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex, OnceLock};
 
+    use sphere_webview::client::{plugin_browser_client, BrowserLifecycle};
+    use sphere_webview::runtime::cef::rc::Rc as _;
     use sphere_webview::runtime::{
         CefRuntime, CefRuntimeConfig, NativeParent, WebView, WebViewConfig, WindowBounds,
     };
-    use sphere_webview::client::{plugin_browser_client, CrashFlag};
     use sphere_webview::scheme::{register_plugin_scheme_factory, BridgeSink, SchemeAsset};
 
     use super::{origin_for_plugin_id, HostAvailability, ViewEvent, ViewId, ViewRect};
 
     struct HostedView {
         _editor_id: String,
+        // Drop the browser before the explicitly retained client.
         view: WebView<'static>,
-        crash_flag: CrashFlag,
+        _client: sphere_webview::runtime::cef::Client,
+        lifecycle: BrowserLifecycle,
+        opened_at: std::time::Instant,
+        stability_reported: bool,
     }
 
     struct ClosingView {
@@ -521,6 +526,7 @@ mod imp {
             for (view_id, pending) in commands {
                 if pending.close {
                     if let Some(hosted) = host.views.remove(&view_id) {
+                        let browser_id = hosted.view.browser_identifier();
                         let _ = hosted.view.close(true);
                         host.closing_views.insert(
                             view_id,
@@ -528,6 +534,10 @@ mod imp {
                                 hosted,
                                 pump_ticks: 0,
                             },
+                        );
+                        eprintln!(
+                            "[cef-registry] event=close_requested view_id={view_id:?} browser_id={browser_id} editor_count={} removal_deferred_until=OnBeforeClose",
+                            host.views.len() + host.closing_views.len()
                         );
                     } else if !host.closing_views.contains_key(&view_id) {
                         // A close that canceled an unprocessed open has no native
@@ -543,11 +553,13 @@ mod imp {
                         completed.push((view_id, ViewEvent::Opened));
                     } else {
                         let rect = pending.bounds.unwrap_or(open.rect);
-                        let (mut client, crash_flag) = plugin_browser_client();
+                        let url = diagnostic_control_url().unwrap_or_else(|| {
+                            format!("mikoplugin://{}/index.html", open.origin)
+                        });
+                        let (mut client, lifecycle) = plugin_browser_client(&url);
                         let result = WindowBounds::new(rect.x, rect.y, rect.width, rect.height)
                             .map_err(|error| error.to_string())
                             .and_then(|bounds| {
-                                let url = format!("mikoplugin://{}/index.html", open.origin);
                                 // SAFETY: the returned view is stored in
                                 // `host.views`, declared before `host.runtime`,
                                 // and therefore released first.
@@ -562,18 +574,42 @@ mod imp {
                                 }
                                 .map_err(|error| error.to_string())
                             });
+                        eprintln!(
+                            "[cef-ref] object_type=cef_client_t event=after_CreateBrowserSync has_one_ref={} has_at_least_one_ref={} thread={:?}",
+                            client.has_one_ref(),
+                            client.has_at_least_one_ref(),
+                            std::thread::current().id()
+                        );
                         match result {
-                            Ok(view) => {
+                            Ok(view) if lifecycle.after_created() => {
+                                let browser_id = view.browser_identifier();
                                 host.views.insert(
                                     view_id,
                                     HostedView {
                                         _editor_id: open.editor_id,
                                         view,
-                                        crash_flag,
+                                        _client: client,
+                                        lifecycle,
+                                        opened_at: std::time::Instant::now(),
+                                        stability_reported: false,
                                     },
+                                );
+                                eprintln!(
+                                    "[cef-registry] event=insert source=OnAfterCreated view_id={view_id:?} browser_id={browser_id} editor_count={}",
+                                    host.views.len() + host.closing_views.len()
                                 );
                                 opened_now = true;
                                 completed.push((view_id, ViewEvent::Opened));
+                            }
+                            Ok(view) => {
+                                let browser_id = view.browser_identifier();
+                                let _ = view.close(true);
+                                completed.push((
+                                    view_id,
+                                    ViewEvent::OpenFailed(format!(
+                                        "CreateBrowserSync returned browser {browser_id} before OnAfterCreated"
+                                    )),
+                                ));
                             }
                             Err(error) => {
                                 completed.push((view_id, ViewEvent::OpenFailed(error)));
@@ -597,18 +633,30 @@ mod imp {
 
             let _ = host.runtime.do_message_loop_work();
 
-            // Renderer crash detection (`client::CrashFlag`, set from
+            // Renderer crash detection (`BrowserLifecycle`, set from
             // `on_render_process_terminated`). The browser object and native
             // DSP state survive a renderer crash — only the page's JS state
             // is gone — so this reloads the same URL rather than tearing the
             // window down; `ViewEvent::RendererCrashed` lets the GPUI window
             // reset `browser_ready` so it re-sends the current selection once
             // the fresh page announces `bridgeReady` again.
-            for (view_id, hosted) in &host.views {
-                if hosted.crash_flag.take() {
+            let editor_count = host.views.len() + host.closing_views.len();
+            for (view_id, hosted) in &mut host.views {
+                if hosted.lifecycle.take_renderer_terminated() {
                     eprintln!("[plugin-scheme] reloading crashed renderer view_id={view_id:?}");
                     let _ = hosted.view.reload();
                     completed.push((*view_id, ViewEvent::RendererCrashed));
+                }
+                if !hosted.stability_reported
+                    && hosted.opened_at.elapsed() >= std::time::Duration::from_secs(60)
+                {
+                    hosted.stability_reported = true;
+                    eprintln!(
+                        "[cef-stability] browser_id={} view_id={view_id:?} elapsed_seconds=60 javascript_executed={} renderer_alive=true editor_count={}",
+                        hosted.view.browser_identifier(),
+                        hosted.lifecycle.javascript_executed(),
+                        editor_count
+                    );
                 }
             }
 
@@ -620,14 +668,23 @@ mod imp {
             let mut closed = Vec::new();
             for (view_id, closing) in &mut host.closing_views {
                 closing.pump_ticks = closing.pump_ticks.saturating_add(1);
-                if !webview_window_alive(&closing.hosted.view)
-                    || closing.pump_ticks >= MAX_CLOSE_PUMP_TICKS
-                {
-                    closed.push(*view_id);
+                if closing.hosted.lifecycle.before_close() {
+                    closed.push((*view_id, "OnBeforeClose"));
+                } else if closing.pump_ticks >= MAX_CLOSE_PUMP_TICKS {
+                    closed.push((*view_id, "timeout"));
                 }
             }
-            for view_id in closed {
+            for (view_id, reason) in closed {
+                let browser_id = host
+                    .closing_views
+                    .get(&view_id)
+                    .map(|closing| closing.hosted.view.browser_identifier())
+                    .unwrap_or(-1);
                 host.closing_views.remove(&view_id);
+                eprintln!(
+                    "[cef-registry] event=remove source={reason} view_id={view_id:?} browser_id={browser_id} editor_count={}",
+                    host.views.len() + host.closing_views.len()
+                );
                 completed.push((view_id, ViewEvent::Closed));
             }
         });
@@ -640,22 +697,6 @@ mod imp {
                 }
             });
         }
-    }
-
-    #[cfg(target_os = "windows")]
-    fn webview_window_alive(view: &WebView<'_>) -> bool {
-        use windows::Win32::Foundation::HWND;
-        use windows::Win32::UI::WindowsAndMessaging::IsWindow;
-
-        let Ok(handle) = view.native_window_handle() else {
-            return false;
-        };
-        unsafe { IsWindow(Some(HWND(handle.0.cast()))).as_bool() }
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    fn webview_window_alive(_view: &WebView<'_>) -> bool {
-        false
     }
 
     /// On Windows `cef_window_handle_t` is cef-dll-sys's own `HWND` newtype,
@@ -686,6 +727,14 @@ mod imp {
         std::env::var_os("HOME")
             .map(std::path::PathBuf::from)
             .map(|home| home.join(".cache"))
+    }
+
+    /// Optional normal-page control. The exact URL is also whitelisted by the
+    /// diagnostic client; absent this variable the plugin custom scheme is used.
+    fn diagnostic_control_url() -> Option<String> {
+        std::env::var("FUTUREBOARD_CEF_CONTROL_URL")
+            .ok()
+            .filter(|url| !url.trim().is_empty())
     }
 
     /// Opens Chromium's remote-debugging endpoint (`http://127.0.0.1:<port>`)

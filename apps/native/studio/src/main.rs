@@ -12,6 +12,9 @@ use sphere_ui_components::boot;
 use sphere_ui_components::embedded_assets::EmbeddedAssets;
 
 fn main() {
+    #[cfg(feature = "builtin-plugin-editor")]
+    sphere_webview::runtime::log_process_entry();
+
     // ── Phase -1 — CEF process dispatch ───────────────────────────────────────
     // CEF re-launches THIS executable for its own helper processes (renderer,
     // GPU, utility). Those launches must be detected and serviced before any
@@ -30,6 +33,11 @@ fn main() {
         if let ProcessDispatch::SubprocessExit(code) =
             sphere_webview::runtime::execute_subprocess(Some(&mut scheme_app))
         {
+            eprintln!(
+                "[cef-process] subprocess_exit pid={} code={} before_futureboard_startup=true",
+                std::process::id(),
+                code
+            );
             std::process::exit(code);
         }
     }

@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use std::thread::{self, ThreadId};
 
+use cef::rc::Rc as _;
 use cef::{ImplBrowser, ImplBrowserHost, ImplFrame};
 use thiserror::Error;
 
@@ -30,8 +31,41 @@ pub enum ProcessDispatch {
 pub fn ensure_api_version() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
-        let _ = cef::api_hash(cef::sys::CEF_API_VERSION_LAST, 0);
+        let hash = cef::api_hash(cef::sys::CEF_API_VERSION_LAST, 0);
+        eprintln!(
+            "[cef-process] api_version={} api_version_last={} api_hash_available={}",
+            cef::api_version(),
+            cef::sys::CEF_API_VERSION_LAST,
+            !hash.is_null()
+        );
     });
+}
+
+/// Log process identity before any Futureboard subsystem is initialized.
+///
+/// CEF appends `--type` and, for the Network Service, `--utility-sub-type` to
+/// the same executable. Keeping this at the first statement of `main` makes it
+/// unambiguous whether a helper escaped into normal application startup.
+pub fn log_process_entry() {
+    let args: Vec<String> = std::env::args_os()
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect();
+    let process_type = command_line_switch(&args, "--type").unwrap_or("<browser>");
+    let utility_sub_type = command_line_switch(&args, "--utility-sub-type").unwrap_or("<none>");
+    eprintln!(
+        "[cef-process] entry pid={} command_line={args:?} type={process_type:?} utility_sub_type={utility_sub_type:?}",
+        std::process::id()
+    );
+}
+
+fn command_line_switch<'a>(args: &'a [String], name: &str) -> Option<&'a str> {
+    args.iter().enumerate().find_map(|(index, arg)| {
+        arg.strip_prefix(&format!("{name}=")).or_else(|| {
+            (arg == name)
+                .then(|| args.get(index + 1).map(String::as_str))
+                .flatten()
+        })
+    })
 }
 
 /// Dispatch CEF subprocess command lines before starting the native UI.
@@ -40,6 +74,12 @@ pub fn execute_subprocess(application: Option<&mut cef::App>) -> ProcessDispatch
     let args = cef::args::Args::new();
     let exit_code =
         cef::execute_process(Some(args.as_main_args()), application, std::ptr::null_mut());
+    eprintln!(
+        "[cef-process] cef_execute_process_return={} pid={} thread={:?}",
+        exit_code,
+        std::process::id(),
+        std::thread::current().id()
+    );
     if exit_code < 0 {
         ProcessDispatch::BrowserProcess
     } else {
@@ -53,7 +93,6 @@ pub fn execute_subprocess(application: Option<&mut cef::App>) -> ProcessDispatch
 pub struct CefRuntimeConfig {
     pub cache_path: Option<PathBuf>,
     pub root_cache_path: Option<PathBuf>,
-    pub browser_subprocess_path: Option<PathBuf>,
     pub locale: Option<String>,
     pub user_agent: Option<String>,
     pub remote_debugging_port: Option<u16>,
@@ -152,7 +191,10 @@ impl CefRuntime {
             windowless_rendering_enabled: 0,
             cache_path: cef_path(config.cache_path.as_ref()),
             root_cache_path: cef_path(config.root_cache_path.as_ref()),
-            browser_subprocess_path: cef_path(config.browser_subprocess_path.as_ref()),
+            // Intentionally empty during CEF integration diagnosis: every CEF
+            // helper re-enters this executable and is dispatched at the first
+            // statement of `main`.
+            browser_subprocess_path: cef::CefString::default(),
             locale: cef_string(config.locale.as_deref()),
             user_agent: cef_string(config.user_agent.as_deref()),
             remote_debugging_port: config.remote_debugging_port.unwrap_or(0) as i32,
@@ -203,6 +245,13 @@ impl CefRuntime {
         let window_info =
             cef::WindowInfo::default().set_as_child(parent.as_raw(), &config.bounds.as_cef_rect());
         debug_assert_eq!(window_info.windowless_rendering_enabled, 0);
+        eprintln!(
+            "[cef-lifecycle] event=CreateBrowserSync begin url={:?} parent={:?} bounds={:?} thread={:?}",
+            config.url,
+            parent.as_raw(),
+            config.bounds,
+            std::thread::current().id()
+        );
         let browser = cef::browser_host_create_browser_sync(
             Some(&window_info),
             client,
@@ -210,8 +259,21 @@ impl CefRuntime {
             Some(&cef::BrowserSettings::default()),
             None,
             None,
-        )
-        .ok_or(CefRuntimeError::CreateBrowserFailed)?;
+        );
+        let Some(browser) = browser else {
+            eprintln!(
+                "[cef-lifecycle] event=CreateBrowserSync result=false url={:?} thread={:?}",
+                config.url,
+                std::thread::current().id()
+            );
+            return Err(CefRuntimeError::CreateBrowserFailed);
+        };
+        eprintln!(
+            "[cef-lifecycle] event=CreateBrowserSync result=true browser_id={} url={:?} thread={:?}",
+            browser.identifier(),
+            config.url,
+            std::thread::current().id()
+        );
 
         Ok(WebView {
             browser,
@@ -243,7 +305,7 @@ impl CefRuntime {
         // Only the PhantomData borrow marker changes; the browser handle and
         // its thread affinity are carried over unchanged.
         Ok(WebView {
-            browser: view.browser,
+            browser: view.browser.clone(),
             owner_thread: view.owner_thread,
             _runtime: PhantomData,
             _not_send: PhantomData,
@@ -283,7 +345,23 @@ pub struct WebView<'runtime> {
     _not_send: PhantomData<Rc<()>>,
 }
 
+impl Drop for WebView<'_> {
+    fn drop(&mut self) {
+        eprintln!(
+            "[cef-ref] object_type=cef_browser_t browser_id={} event=webview_release has_one_ref={} has_at_least_one_ref={} thread={:?}",
+            self.browser.identifier(),
+            self.browser.has_one_ref(),
+            self.browser.has_at_least_one_ref(),
+            std::thread::current().id()
+        );
+    }
+}
+
 impl WebView<'_> {
+    pub fn browser_identifier(&self) -> i32 {
+        self.browser.identifier()
+    }
+
     pub fn load_url(&self, url: &str) -> Result<(), CefRuntimeError> {
         self.ensure_thread()?;
         if url.trim().is_empty() {
@@ -396,7 +474,7 @@ fn platform_set_bounds(
     handle: cef::sys::cef_window_handle_t,
     bounds: WindowBounds,
 ) -> Result<(), CefRuntimeError> {
-    use windows_sys::Win32::UI::WindowsAndMessaging::{SWP_NOACTIVATE, SWP_NOZORDER, SetWindowPos};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{SetWindowPos, SWP_NOACTIVATE, SWP_NOZORDER};
     let ok = unsafe {
         SetWindowPos(
             handle.0.cast(),

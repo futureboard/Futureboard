@@ -131,12 +131,32 @@ pub fn validate_cef_path(
         Path::new("archive.json"),
         Path::new("CMakeLists.txt"),
         Path::new("include/cef_app.h"),
+        Path::new("include/cef_version.h"),
         Path::new(target.runtime_library()),
     ] {
         let candidate = path.join(relative);
         if !candidate.is_file() {
             return Err(CefDistributionError::MissingFile(candidate));
         }
+    }
+
+    let version_header = path.join("include/cef_version.h");
+    let version_contents = std::fs::read_to_string(&version_header)?;
+    let expected_version = format!("#define CEF_VERSION \"{CEF_VERSION}+");
+    if !version_contents.contains(&expected_version) {
+        return Err(CefDistributionError::VersionMismatch {
+            path: version_header,
+            expected: CEF_VERSION,
+        });
+    }
+
+    let archive_path = path.join("archive.json");
+    let archive_contents = std::fs::read_to_string(&archive_path)?;
+    if !archive_contents.contains(&format!("cef_binary_{CEF_VERSION}+")) {
+        return Err(CefDistributionError::VersionMismatch {
+            path: archive_path,
+            expected: CEF_VERSION,
+        });
     }
     Ok(())
 }
@@ -147,6 +167,11 @@ pub enum CefDistributionError {
     UnsupportedTarget(String),
     #[error("CEF distribution is missing required file: {0}")]
     MissingFile(PathBuf),
+    #[error("CEF distribution at {path} does not match pinned version {expected}")]
+    VersionMismatch {
+        path: PathBuf,
+        expected: &'static str,
+    },
     #[error("CEF destination already exists: {0}")]
     DestinationExists(PathBuf),
     #[error("CEF install I/O failed: {0}")]

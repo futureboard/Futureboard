@@ -1,62 +1,304 @@
-//! Browser-process CEF client for plugin editor browsers: navigation lockdown
-//! plus a renderer-crash signal.
+//! Browser-process CEF client for plugin editor browsers.
 //!
-//! `runtime::create_webview*` previously passed `None` for the client
-//! parameter to `browser_host_create_browser_sync`, meaning the browser had
-//! **zero** navigation policy (any in-page link, `window.open`, or redirect
-//! would have gone through) and no way to observe a renderer crash at all.
-//! This supplies both via one `RequestHandler`.
+//! The client locks navigation to the editor's initial origin, records the full
+//! browser/load lifecycle, and exposes thread-safe state to the native host so
+//! registry insertion/removal can follow `OnAfterCreated`/`OnBeforeClose`.
 
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 use cef::rc::Rc as _;
 use cef::{
-    Browser, CefString, CefStringUtf16, Client, Frame, ImplClient, ImplRequest,
-    ImplRequestHandler, Request, RequestHandler, TerminationStatus, WrapClient,
-    WrapRequestHandler, wrap_client, wrap_request_handler,
+    wrap_client, wrap_display_handler, wrap_life_span_handler, wrap_load_handler,
+    wrap_request_handler, Browser, CefString, CefStringUtf16, Client, DisplayHandler, Errorcode,
+    Frame, ImplBrowser, ImplClient, ImplDisplayHandler, ImplFrame, ImplLifeSpanHandler,
+    ImplLoadHandler, ImplRequest, ImplRequestHandler, LifeSpanHandler, LoadHandler, LogSeverity,
+    Request, RequestHandler, TerminationStatus, TransitionType, WrapClient, WrapDisplayHandler,
+    WrapLifeSpanHandler, WrapLoadHandler, WrapRequestHandler,
 };
 
-use crate::scheme::PLUGIN_SCHEME;
+use crate::scheme::{cef_diagnostics_enabled, PLUGIN_SCHEME};
 
-/// Set from CEF's `on_render_process_terminated` (browser-process thread,
-/// not necessarily the UI thread); polled from the GPUI pump tick. A plain
-/// atomic is enough for one crash-happened bit — no lock, no queue.
+const JAVASCRIPT_PROBE: &str =
+    "console.log('[cef-diagnostic] javascript-executed url=' + location.href);";
+
+static NEXT_CLIENT_OBJECT_ID: AtomicU64 = AtomicU64::new(1);
+
 #[derive(Clone)]
-pub struct CrashFlag(Arc<AtomicBool>);
+struct ObjectLifetime {
+    _inner: Arc<ObjectLifetimeInner>,
+}
 
-impl CrashFlag {
-    pub fn new() -> Self {
-        Self(Arc::new(AtomicBool::new(false)))
-    }
+struct ObjectLifetimeInner {
+    object_type: &'static str,
+    object_id: u64,
+}
 
-    /// Read-and-clear. `true` means the renderer for this browser terminated
-    /// (crash, OOM-kill, `chrome://kill` in dev) since the last check.
-    pub fn take(&self) -> bool {
-        self.0.swap(false, Ordering::AcqRel)
-    }
-
-    fn mark(&self) {
-        self.0.store(true, Ordering::Release);
+impl ObjectLifetime {
+    fn new(object_type: &'static str) -> Self {
+        let object_id = NEXT_CLIENT_OBJECT_ID.fetch_add(1, Ordering::Relaxed);
+        if cef_diagnostics_enabled() {
+            eprintln!(
+                "[cef-ref] object_type={object_type} object_id={object_id} event=created thread={:?}",
+                std::thread::current().id()
+            );
+        }
+        Self {
+            _inner: Arc::new(ObjectLifetimeInner {
+                object_type,
+                object_id,
+            }),
+        }
     }
 }
 
-impl Default for CrashFlag {
-    fn default() -> Self {
-        Self::new()
+impl Drop for ObjectLifetimeInner {
+    fn drop(&mut self) {
+        if cef_diagnostics_enabled() {
+            eprintln!(
+                "[cef-ref] object_type={} object_id={} event=final_destruction thread={:?}",
+                self.object_type,
+                self.object_id,
+                std::thread::current().id()
+            );
+        }
+    }
+}
+
+#[derive(Default)]
+struct BrowserLifecycleInner {
+    after_created: AtomicBool,
+    before_close: AtomicBool,
+    renderer_terminated: AtomicBool,
+    javascript_executed: AtomicBool,
+    browser_id: AtomicI32,
+}
+
+/// CEF lifecycle state shared by callbacks and the native editor registry.
+#[derive(Clone, Default)]
+pub struct BrowserLifecycle(Arc<BrowserLifecycleInner>);
+
+impl BrowserLifecycle {
+    pub fn after_created(&self) -> bool {
+        self.0.after_created.load(Ordering::Acquire)
+    }
+
+    pub fn before_close(&self) -> bool {
+        self.0.before_close.load(Ordering::Acquire)
+    }
+
+    pub fn browser_id(&self) -> Option<i32> {
+        let id = self.0.browser_id.load(Ordering::Acquire);
+        (id > 0).then_some(id)
+    }
+
+    pub fn javascript_executed(&self) -> bool {
+        self.0.javascript_executed.load(Ordering::Acquire)
+    }
+
+    /// Read-and-clear the renderer termination signal.
+    pub fn take_renderer_terminated(&self) -> bool {
+        self.0.renderer_terminated.swap(false, Ordering::AcqRel)
+    }
+
+    fn mark_after_created(&self, browser_id: i32) {
+        self.0.browser_id.store(browser_id, Ordering::Release);
+        self.0.after_created.store(true, Ordering::Release);
+    }
+
+    fn mark_before_close(&self) {
+        self.0.before_close.store(true, Ordering::Release);
+    }
+
+    fn mark_renderer_terminated(&self) {
+        self.0.renderer_terminated.store(true, Ordering::Release);
+    }
+
+    fn mark_javascript_executed(&self) {
+        self.0.javascript_executed.store(true, Ordering::Release);
+    }
+}
+
+fn browser_id(browser: Option<&mut Browser>) -> i32 {
+    browser.map(|browser| browser.identifier()).unwrap_or(-1)
+}
+
+fn frame_url(frame: Option<&mut Frame>) -> String {
+    frame
+        .map(|frame| CefStringUtf16::from(&frame.url()).to_string())
+        .unwrap_or_else(|| "<no-frame>".to_string())
+}
+
+fn cef_string(value: Option<&CefString>) -> String {
+    value
+        .map(ToString::to_string)
+        .unwrap_or_else(|| "<none>".to_string())
+}
+
+wrap_life_span_handler! {
+    pub struct PluginLifeSpanHandler {
+        lifecycle: BrowserLifecycle,
+        _lifetime: ObjectLifetime,
+    }
+
+    impl LifeSpanHandler {
+        fn on_after_created(&self, browser: Option<&mut Browser>) {
+            let id = browser_id(browser);
+            self.lifecycle.mark_after_created(id);
+            eprintln!(
+                "[cef-lifecycle] event=OnAfterCreated browser_id={id} thread={:?}",
+                std::thread::current().id()
+            );
+        }
+
+        fn do_close(&self, browser: Option<&mut Browser>) -> ::std::os::raw::c_int {
+            let id = browser_id(browser);
+            eprintln!(
+                "[cef-lifecycle] event=DoClose browser_id={id} return=false thread={:?}",
+                std::thread::current().id()
+            );
+            0
+        }
+
+        fn on_before_close(&self, browser: Option<&mut Browser>) {
+            let id = browser_id(browser);
+            self.lifecycle.mark_before_close();
+            eprintln!(
+                "[cef-lifecycle] event=OnBeforeClose browser_id={id} thread={:?}",
+                std::thread::current().id()
+            );
+        }
+    }
+}
+
+wrap_load_handler! {
+    pub struct PluginLoadHandler {
+        lifecycle: BrowserLifecycle,
+        _lifetime: ObjectLifetime,
+    }
+
+    impl LoadHandler {
+        fn on_loading_state_change(
+            &self,
+            browser: Option<&mut Browser>,
+            is_loading: ::std::os::raw::c_int,
+            can_go_back: ::std::os::raw::c_int,
+            can_go_forward: ::std::os::raw::c_int,
+        ) {
+            let id = browser_id(browser);
+            eprintln!(
+                "[cef-lifecycle] event=OnLoadingStateChange browser_id={id} is_loading={} can_go_back={} can_go_forward={} thread={:?}",
+                is_loading != 0,
+                can_go_back != 0,
+                can_go_forward != 0,
+                std::thread::current().id()
+            );
+        }
+
+        fn on_load_start(
+            &self,
+            browser: Option<&mut Browser>,
+            frame: Option<&mut Frame>,
+            transition_type: TransitionType,
+        ) {
+            let id = browser_id(browser);
+            let url = frame_url(frame);
+            eprintln!(
+                "[cef-lifecycle] event=OnLoadStart browser_id={id} url={url:?} transition={transition_type:?} thread={:?}",
+                std::thread::current().id()
+            );
+        }
+
+        fn on_load_end(
+            &self,
+            browser: Option<&mut Browser>,
+            frame: Option<&mut Frame>,
+            http_status_code: ::std::os::raw::c_int,
+        ) {
+            let id = browser_id(browser);
+            let Some(frame) = frame else {
+                eprintln!(
+                    "[cef-lifecycle] event=OnLoadEnd browser_id={id} status={http_status_code} url=\"<no-frame>\" thread={:?}",
+                    std::thread::current().id()
+                );
+                return;
+            };
+            let url = CefStringUtf16::from(&frame.url()).to_string();
+            let is_main = frame.is_main() != 0;
+            eprintln!(
+                "[cef-lifecycle] event=OnLoadEnd browser_id={id} status={http_status_code} is_main={is_main} url={url:?} thread={:?}",
+                std::thread::current().id()
+            );
+            if is_main {
+                frame.execute_java_script(
+                    Some(&CefString::from(JAVASCRIPT_PROBE)),
+                    Some(&CefString::from("futureboard-cef-diagnostic")),
+                    1,
+                );
+            }
+        }
+
+        fn on_load_error(
+            &self,
+            browser: Option<&mut Browser>,
+            frame: Option<&mut Frame>,
+            error_code: Errorcode,
+            error_text: Option<&CefString>,
+            failed_url: Option<&CefString>,
+        ) {
+            let id = browser_id(browser);
+            let frame_url = frame_url(frame);
+            let error_text = cef_string(error_text);
+            let failed_url = cef_string(failed_url);
+            eprintln!(
+                "[cef-lifecycle] event=OnLoadError browser_id={id} code={error_code:?} error={error_text:?} failed_url={failed_url:?} frame_url={frame_url:?} thread={:?}",
+                std::thread::current().id()
+            );
+        }
+    }
+}
+
+wrap_display_handler! {
+    pub struct PluginDisplayHandler {
+        lifecycle: BrowserLifecycle,
+        _lifetime: ObjectLifetime,
+    }
+
+    impl DisplayHandler {
+        fn on_console_message(
+            &self,
+            browser: Option<&mut Browser>,
+            level: LogSeverity,
+            message: Option<&CefString>,
+            source: Option<&CefString>,
+            line: ::std::os::raw::c_int,
+        ) -> ::std::os::raw::c_int {
+            let id = browser_id(browser);
+            let message = cef_string(message);
+            let source = cef_string(source);
+            if message.contains("[cef-diagnostic] javascript-executed") {
+                self.lifecycle.mark_javascript_executed();
+            }
+            if cef_diagnostics_enabled() || message.contains("[cef-diagnostic]") {
+                eprintln!(
+                    "[cef-console] browser_id={id} level={level:?} source={source:?} line={line} message={message:?} thread={:?}",
+                    std::thread::current().id()
+                );
+            }
+            0
+        }
     }
 }
 
 wrap_request_handler! {
     pub struct PluginRequestHandler {
-        crash_flag: CrashFlag,
+        lifecycle: BrowserLifecycle,
+        allowed_origin: String,
+        control_url: Option<String>,
+        _lifetime: ObjectLifetime,
     }
 
     impl RequestHandler {
-        // Only the plugin's own custom-scheme origin may ever load in this
-        // browser. Blocks external navigation, `file://`, and any other
-        // scheme a compromised or buggy page might try to reach — the editor
-        // has no legitimate reason to navigate anywhere else, ever.
         fn on_before_browse(
             &self,
             _browser: Option<&mut Browser>,
@@ -67,55 +309,122 @@ wrap_request_handler! {
         ) -> ::std::os::raw::c_int {
             let Some(request) = request else { return 0 };
             let url = CefStringUtf16::from(&request.url()).to_string();
-            if is_allowed_navigation(&url) {
-                0 // allow
+            if is_allowed_navigation(&url, &self.allowed_origin, self.control_url.as_deref()) {
+                0
             } else {
-                eprintln!("[plugin-scheme] blocked navigation outside plugin origin url={url}");
-                1 // cancel
+                eprintln!("[cef-lifecycle] event=NavigationBlocked url={url:?}");
+                1
             }
         }
 
         fn on_render_process_terminated(
             &self,
-            _browser: Option<&mut Browser>,
+            browser: Option<&mut Browser>,
             status: TerminationStatus,
-            _error_code: ::std::os::raw::c_int,
-            _error_string: Option<&CefString>,
+            error_code: ::std::os::raw::c_int,
+            error_string: Option<&CefString>,
         ) {
-            eprintln!("[plugin-scheme] renderer process terminated status={status:?}");
-            self.crash_flag.mark();
+            let id = browser_id(browser);
+            let error_string = cef_string(error_string);
+            eprintln!(
+                "[cef-lifecycle] event=OnRenderProcessTerminated browser_id={id} status={status:?} error_code={error_code} error={error_string:?} thread={:?}",
+                std::thread::current().id()
+            );
+            self.lifecycle.mark_renderer_terminated();
         }
     }
 }
 
-/// Same-origin navigations only (the editor's own `mikoplugin://` document),
-/// plus the harmless `about:blank` CEF uses internally before a scheme
-/// navigation resolves.
-fn is_allowed_navigation(url: &str) -> bool {
+fn plugin_origin(url: &str) -> Option<String> {
     let prefix = format!("{PLUGIN_SCHEME}://");
-    url.eq_ignore_ascii_case("about:blank") || url.to_ascii_lowercase().starts_with(&prefix)
+    if !url.to_ascii_lowercase().starts_with(&prefix) {
+        return None;
+    }
+    let rest = &url[prefix.len()..];
+    let host_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let host = &rest[..host_end];
+    (!host.is_empty()).then(|| format!("{PLUGIN_SCHEME}://{}", host.to_ascii_lowercase()))
+}
+
+fn is_allowed_navigation(url: &str, allowed_origin: &str, control_url: Option<&str>) -> bool {
+    if url.eq_ignore_ascii_case("about:blank") {
+        return true;
+    }
+    if control_url.is_some_and(|control| url == control) {
+        return true;
+    }
+    let lower = url.to_ascii_lowercase();
+    lower == allowed_origin || lower.starts_with(&format!("{allowed_origin}/"))
 }
 
 wrap_client! {
     pub struct PluginBrowserClient {
         request_handler: RequestHandler,
+        life_span_handler: LifeSpanHandler,
+        load_handler: LoadHandler,
+        display_handler: DisplayHandler,
+        _lifetime: ObjectLifetime,
     }
 
     impl Client {
         fn request_handler(&self) -> Option<RequestHandler> {
             Some(self.request_handler.clone())
         }
+
+        fn life_span_handler(&self) -> Option<LifeSpanHandler> {
+            Some(self.life_span_handler.clone())
+        }
+
+        fn load_handler(&self) -> Option<LoadHandler> {
+            Some(self.load_handler.clone())
+        }
+
+        fn display_handler(&self) -> Option<DisplayHandler> {
+            Some(self.display_handler.clone())
+        }
     }
 }
 
-/// Build the client for one plugin editor browser and the crash flag its
-/// owner should poll. Every browser gets its own — `on_before_browse`/
-/// `on_render_process_terminated` fire per-browser, so there is no reason to
-/// share one `Client` (and thus one `CrashFlag`) across unrelated windows.
-pub fn plugin_browser_client() -> (Client, CrashFlag) {
-    let crash_flag = CrashFlag::new();
-    let handler = PluginRequestHandler::new(crash_flag.clone());
-    (PluginBrowserClient::new(handler), crash_flag)
+/// Build one explicitly retained client and its observable lifecycle state.
+pub fn plugin_browser_client(initial_url: &str) -> (Client, BrowserLifecycle) {
+    let lifecycle = BrowserLifecycle::default();
+    let control_url = (!initial_url
+        .to_ascii_lowercase()
+        .starts_with(&format!("{PLUGIN_SCHEME}://")))
+    .then(|| initial_url.to_string());
+    let allowed_origin = plugin_origin(initial_url).unwrap_or_default();
+
+    let request_handler = PluginRequestHandler::new(
+        lifecycle.clone(),
+        allowed_origin,
+        control_url,
+        ObjectLifetime::new("cef_resource_request_handler_t"),
+    );
+    let life_span_handler = PluginLifeSpanHandler::new(
+        lifecycle.clone(),
+        ObjectLifetime::new("cef_life_span_handler_t"),
+    );
+    let load_handler =
+        PluginLoadHandler::new(lifecycle.clone(), ObjectLifetime::new("cef_load_handler_t"));
+    let display_handler = PluginDisplayHandler::new(
+        lifecycle.clone(),
+        ObjectLifetime::new("cef_display_handler_t"),
+    );
+    let client = PluginBrowserClient::new(
+        request_handler,
+        life_span_handler,
+        load_handler,
+        display_handler,
+        ObjectLifetime::new("cef_client_t"),
+    );
+    if cef_diagnostics_enabled() {
+        eprintln!(
+            "[cef-ref] object_type=cef_client_t event=return_to_host has_one_ref={} thread={:?}",
+            client.has_one_ref(),
+            std::thread::current().id()
+        );
+    }
+    (client, lifecycle)
 }
 
 #[cfg(test)]
@@ -123,10 +432,35 @@ mod tests {
     use super::*;
 
     #[test]
-    fn allows_only_the_plugin_scheme_and_about_blank() {
-        assert!(is_allowed_navigation("mikoplugin://rodharerist/index.html"));
-        assert!(is_allowed_navigation("MIKOPLUGIN://rodharerist/"));
-        assert!(is_allowed_navigation("about:blank"));
+    fn allows_only_the_expected_plugin_origin_and_about_blank() {
+        let origin = "mikoplugin://rodharerist";
+        assert!(is_allowed_navigation(
+            "mikoplugin://rodharerist/index.html",
+            origin,
+            None
+        ));
+        assert!(is_allowed_navigation(
+            "MIKOPLUGIN://RODHARERIST/assets/app.js",
+            origin,
+            None
+        ));
+        assert!(is_allowed_navigation("about:blank", origin, None));
+        assert!(!is_allowed_navigation(
+            "mikoplugin://another/index.html",
+            origin,
+            None
+        ));
+    }
+
+    #[test]
+    fn allows_only_the_exact_control_url() {
+        let control = "data:text/html,<p>control</p>";
+        assert!(is_allowed_navigation(control, "", Some(control)));
+        assert!(!is_allowed_navigation(
+            "https://example.com",
+            "",
+            Some(control)
+        ));
     }
 
     #[test]
@@ -139,16 +473,23 @@ mod tests {
             "chrome://settings",
             "",
         ] {
-            assert!(!is_allowed_navigation(url), "should block {url}");
+            assert!(!is_allowed_navigation(
+                url,
+                "mikoplugin://rodharerist",
+                None
+            ));
         }
     }
 
     #[test]
-    fn crash_flag_reads_and_clears() {
-        let flag = CrashFlag::new();
-        assert!(!flag.take());
-        flag.mark();
-        assert!(flag.take());
-        assert!(!flag.take());
+    fn lifecycle_signals_read_and_clear() {
+        let lifecycle = BrowserLifecycle::default();
+        assert!(!lifecycle.after_created());
+        lifecycle.mark_after_created(7);
+        assert!(lifecycle.after_created());
+        assert_eq!(lifecycle.browser_id(), Some(7));
+        lifecycle.mark_renderer_terminated();
+        assert!(lifecycle.take_renderer_terminated());
+        assert!(!lifecycle.take_renderer_terminated());
     }
 }

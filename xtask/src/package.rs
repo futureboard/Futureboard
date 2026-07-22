@@ -118,7 +118,7 @@ pub fn run(options: &PackageOptions) -> Result<PathBuf> {
     //     distribution, so a developer build without CEF installed still packages.
     let mut cef_staged = false;
     if options.stage_cef {
-        match cef::locate_cef_dist(&workspace_root()) {
+        match cef::locate_cef_dist(&workspace_root(), &target_triple) {
             Some(dist) => {
                 let report = cef::stage_cef(&plan.staging_dir, &dist, &target_triple)
                     .context("failed to stage the CEF runtime")?;

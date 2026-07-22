@@ -22,17 +22,18 @@
 //! thread. The resolver is therefore `Send + Sync` and must not block: it is
 //! only ever expected to index a static table.
 
-use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 use cef::rc::Rc as _;
 // The `wrap_*!` macros expand to `impl Impl<T> for` / `impl Wrap<T> for`
 // blocks, so every one of these traits has to be nameable here.
+use cef::wrapper::stream_resource_handler::StreamResourceHandler;
 use cef::{
-    App, CefString, CefStringUtf16, ImplApp, ImplPostData, ImplPostDataElement, ImplRequest,
-    ImplResourceHandler, ImplResponse, ImplSchemeHandlerFactory, ImplSchemeRegistrar,
-    ResourceHandler, SchemeHandlerFactory, SchemeOptions, WrapApp, WrapResourceHandler,
-    WrapSchemeHandlerFactory, wrap_app, wrap_resource_handler, wrap_scheme_handler_factory,
+    wrap_app, wrap_resource_handler, wrap_scheme_handler_factory, App, CefString, CefStringUtf16,
+    ImplApp, ImplPostData, ImplPostDataElement, ImplRequest, ImplResourceHandler, ImplResponse,
+    ImplSchemeHandlerFactory, ImplSchemeRegistrar, ResourceHandler, SchemeHandlerFactory,
+    SchemeOptions, WrapApp, WrapResourceHandler, WrapSchemeHandlerFactory,
 };
 
 /// Scheme built-in plugin editors are served under. Must match
@@ -50,6 +51,128 @@ const BRIDGE_ACK: SchemeAsset = SchemeAsset {
     bytes: b"{\"ok\":true}",
     mime_type: "application/json; charset=utf-8",
 };
+
+/// Under 100 bytes and self-verifying: the console message proves JavaScript ran.
+const MINIMAL_TEST_DOCUMENT: SchemeAsset = SchemeAsset {
+    bytes: b"<!doctype html><script>console.log('minimal-js-ok')</script><p>minimal</p>",
+    mime_type: "text/html",
+};
+
+static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
+static NEXT_OBJECT_ID: AtomicU64 = AtomicU64::new(1);
+
+#[derive(Clone)]
+struct ObjectLifetime {
+    _inner: Arc<ObjectLifetimeInner>,
+}
+
+struct ObjectLifetimeInner {
+    object_type: &'static str,
+    object_id: u64,
+}
+
+impl ObjectLifetime {
+    fn new(object_type: &'static str, object_id: u64) -> Self {
+        if cef_diagnostics_enabled() {
+            eprintln!(
+                "[cef-ref] object_type={object_type} object_id={object_id} event=created thread={:?}",
+                std::thread::current().id()
+            );
+        }
+        Self {
+            _inner: Arc::new(ObjectLifetimeInner {
+                object_type,
+                object_id,
+            }),
+        }
+    }
+}
+
+impl Drop for ObjectLifetimeInner {
+    fn drop(&mut self) {
+        if cef_diagnostics_enabled() {
+            eprintln!(
+                "[cef-ref] object_type={} object_id={} event=final_destruction thread={:?}",
+                self.object_type,
+                self.object_id,
+                std::thread::current().id()
+            );
+        }
+    }
+}
+
+pub(crate) fn cef_diagnostics_enabled() -> bool {
+    cfg!(debug_assertions) || std::env::var_os("FUTUREBOARD_PLUGIN_VIEW_DEBUG").is_some()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ResourceHandlerMode {
+    BuiltIn,
+    Custom,
+}
+
+fn resource_handler_mode() -> ResourceHandlerMode {
+    match std::env::var("FUTUREBOARD_CEF_RESOURCE_HANDLER") {
+        Ok(value) if value.eq_ignore_ascii_case("builtin") => ResourceHandlerMode::BuiltIn,
+        _ => ResourceHandlerMode::Custom,
+    }
+}
+
+fn diagnostic_document(path: &str, resolved: Option<SchemeAsset>) -> Option<SchemeAsset> {
+    if path != "/index.html" {
+        return resolved;
+    }
+    match std::env::var("FUTUREBOARD_CEF_TEST_DOCUMENT") {
+        Ok(value) if value.eq_ignore_ascii_case("minimal") => Some(MINIMAL_TEST_DOCUMENT),
+        // `large` deliberately means the current embedded single-file document.
+        _ => resolved,
+    }
+}
+
+fn make_resource_handler(asset: Option<SchemeAsset>, request_id: u64) -> ResourceHandler {
+    let mode = resource_handler_mode();
+    if let (ResourceHandlerMode::BuiltIn, Some(asset)) = (mode, asset) {
+        // CefStreamReader::CreateForData does not own the source pointer. SchemeAsset
+        // bytes are static and therefore remain alive beyond the stream handler.
+        let stream =
+            cef::stream_reader_create_for_data(asset.bytes.as_ptr().cast_mut(), asset.bytes.len());
+        if let Some(stream) = stream {
+            let (mime, _) = split_mime(asset.mime_type);
+            eprintln!(
+                "[cef-resource] request_id={request_id} handler=builtin length={} mime={mime:?} bytes_lifetime=static",
+                asset.bytes.len()
+            );
+            let handler = StreamResourceHandler::new_with_stream(mime.to_string(), stream);
+            if cef_diagnostics_enabled() {
+                eprintln!(
+                    "[cef-ref] object_type=cef_resource_handler_t object_id={request_id} implementation=builtin event=return_to_cef has_one_ref={}",
+                    handler.has_one_ref()
+                );
+            }
+            return handler;
+        }
+        eprintln!(
+            "[cef-resource] request_id={request_id} handler=builtin stream_create=false fallback=custom"
+        );
+    }
+
+    eprintln!(
+        "[cef-resource] request_id={request_id} handler=custom length={} bytes_lifetime=static",
+        asset.map(|asset| asset.bytes.len()).unwrap_or(0)
+    );
+    let handler = PluginAssetHandler::new(
+        asset,
+        ReadState::new(request_id),
+        ObjectLifetime::new("cef_resource_handler_t", request_id),
+    );
+    if cef_diagnostics_enabled() {
+        eprintln!(
+            "[cef-ref] object_type=cef_resource_handler_t object_id={request_id} implementation=custom event=return_to_cef has_one_ref={}",
+            handler.has_one_ref()
+        );
+    }
+    handler
+}
 
 /// One resolved asset. Bytes are `'static` because they live in a loaded
 /// library's read-only data segment — nothing is copied to serve a request.
@@ -75,7 +198,9 @@ pub type BridgeSink = Arc<dyn Fn(&str, Vec<u8>) + Send + Sync>;
 // Declares the plugin scheme in every CEF process. (`wrap_app!` matches on
 // `$vis:vis struct`, so the description cannot be a doc comment here.)
 wrap_app! {
-    pub struct PluginSchemeApp;
+    pub struct PluginSchemeApp {
+        _lifetime: ObjectLifetime,
+    }
 
     impl App {
         fn on_register_custom_schemes(&self, registrar: Option<&mut cef::SchemeRegistrar>) {
@@ -94,7 +219,16 @@ wrap_app! {
                 | SchemeOptions::SECURE.get_raw()
                 | SchemeOptions::CORS_ENABLED.get_raw()
                 | SchemeOptions::FETCH_ENABLED.get_raw();
-            registrar.add_custom_scheme(Some(&CefString::from(PLUGIN_SCHEME)), options);
+            let registered = registrar.add_custom_scheme(
+                Some(&CefString::from(PLUGIN_SCHEME)),
+                options,
+            );
+            eprintln!(
+                "[plugin-scheme] event=OnRegisterCustomSchemes scheme={PLUGIN_SCHEME} options={options} registered={} pid={} thread={:?}",
+                registered != 0,
+                std::process::id(),
+                std::thread::current().id()
+            );
         }
     }
 }
@@ -104,6 +238,7 @@ wrap_scheme_handler_factory! {
     pub struct PluginSchemeFactory {
         resolver: SchemeResolver,
         bridge: Option<BridgeSink>,
+        _lifetime: ObjectLifetime,
     }
 
     impl SchemeHandlerFactory {
@@ -120,6 +255,8 @@ wrap_scheme_handler_factory! {
             let url = CefStringUtf16::from(&request.url()).to_string();
             let (plugin, path) = split_plugin_url(&url)?;
 
+            let request_id = NEXT_REQUEST_ID.fetch_add(1, Ordering::Relaxed);
+
             if path == BRIDGE_PATH {
                 let method = CefStringUtf16::from(&request.method()).to_string();
                 if method.eq_ignore_ascii_case("POST") {
@@ -134,22 +271,22 @@ wrap_scheme_handler_factory! {
                         sink(&plugin, body);
                     }
                 }
-                return Some(PluginAssetHandler::new(
-                    Some(BRIDGE_ACK),
-                    AtomicUsize::new(0).into(),
-                ));
+                return Some(make_resource_handler(Some(BRIDGE_ACK), request_id));
             }
 
             // A miss still gets a handler, so the renderer sees a clean 404
             // instead of a failed-to-load network error.
-            let asset = (self.resolver)(&plugin, &path);
-            if std::env::var_os("FUTUREBOARD_PLUGIN_VIEW_DEBUG").is_some() {
+            let asset = diagnostic_document(&path, (self.resolver)(&plugin, &path));
+            if cef_diagnostics_enabled() {
                 eprintln!(
-                    "[plugin-scheme] request url={url} plugin={plugin} path={path} resolved={}",
-                    asset.is_some()
+                    "[plugin-scheme] request_id={request_id} url={url} plugin={plugin} path={path} resolved={} handler={:?} test_document={} length={}",
+                    asset.is_some(),
+                    resource_handler_mode(),
+                    std::env::var("FUTUREBOARD_CEF_TEST_DOCUMENT").unwrap_or_else(|_| "current".to_string()),
+                    asset.map(|asset| asset.bytes.len()).unwrap_or(0)
                 );
             }
-            Some(PluginAssetHandler::new(asset, AtomicUsize::new(0).into()))
+            Some(make_resource_handler(asset, request_id))
         }
     }
 }
@@ -184,11 +321,146 @@ fn read_post_data(request: &mut cef::Request) -> Vec<u8> {
     out
 }
 
-// Serves one in-memory asset. No I/O, no allocation of the payload.
+#[derive(Clone)]
+struct ReadState {
+    request_id: u64,
+    offset: Arc<Mutex<usize>>,
+}
+
+impl ReadState {
+    fn new(request_id: u64) -> Self {
+        Self {
+            request_id,
+            offset: Arc::new(Mutex::new(0)),
+        }
+    }
+
+    #[allow(clippy::not_unsafe_ptr_arg_deref)]
+    fn read_sync(
+        &self,
+        method: &'static str,
+        asset: Option<SchemeAsset>,
+        data_out: *mut u8,
+        bytes_to_read: ::std::os::raw::c_int,
+        bytes_read: Option<&mut ::std::os::raw::c_int>,
+    ) -> ::std::os::raw::c_int {
+        let total = asset.map(|asset| asset.bytes.len()).unwrap_or(0);
+        let mut offset = match self.offset.lock() {
+            Ok(offset) => offset,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let before = *offset;
+        let Some(bytes_read) = bytes_read else {
+            self.log_read(method, before, total, bytes_to_read, 0, None, 0, before);
+            return 0;
+        };
+        *bytes_read = 0;
+
+        let Some(asset) = asset else {
+            self.log_read(method, before, total, bytes_to_read, 0, Some(0), 0, before);
+            return 0;
+        };
+        if data_out.is_null() || bytes_to_read <= 0 {
+            self.log_read(method, before, total, bytes_to_read, 0, Some(0), 0, before);
+            return 0;
+        }
+
+        let remaining = asset.bytes.len().saturating_sub(before);
+        if remaining == 0 {
+            // Synchronous EOF: false and exactly zero bytes. No callback is used.
+            self.log_read(method, before, total, bytes_to_read, 0, Some(0), 0, before);
+            return 0;
+        }
+
+        let copied = remaining.min(bytes_to_read as usize);
+        // SAFETY: CEF supplies `data_out` with capacity `bytes_to_read`; copied
+        // is bounded by that value and by the remaining static asset bytes.
+        unsafe {
+            std::ptr::copy_nonoverlapping(asset.bytes[before..].as_ptr(), data_out, copied);
+        }
+        *offset = before + copied;
+        *bytes_read = copied as ::std::os::raw::c_int;
+        self.log_read(
+            method,
+            before,
+            total,
+            bytes_to_read,
+            copied,
+            Some(*bytes_read),
+            1,
+            *offset,
+        );
+        1
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn log_read(
+        &self,
+        method: &str,
+        before: usize,
+        total: usize,
+        bytes_to_read: i32,
+        copied: usize,
+        bytes_read: Option<i32>,
+        return_value: i32,
+        after: usize,
+    ) {
+        if cef_diagnostics_enabled() {
+            eprintln!(
+                "[cef-resource] method={method} handler_id={} request_id={} offset_before={before} total_length={total} bytes_to_read={bytes_to_read} bytes_copied={copied} bytes_read_returned={bytes_read:?} return_value={return_value} offset_after={after} callback_invoked=false thread={:?}",
+                self.request_id,
+                self.request_id,
+                std::thread::current().id()
+            );
+        }
+    }
+
+    fn skip_sync(
+        &self,
+        asset: Option<SchemeAsset>,
+        bytes_to_skip: i64,
+        bytes_skipped: Option<&mut i64>,
+    ) -> ::std::os::raw::c_int {
+        let mut offset = match self.offset.lock() {
+            Ok(offset) => offset,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let before = *offset;
+        let Some(bytes_skipped) = bytes_skipped else {
+            return 0;
+        };
+        *bytes_skipped = 0;
+        let Some(asset) = asset else { return 0 };
+        if bytes_to_skip < 0 {
+            return 0;
+        }
+        let skipped = asset
+            .bytes
+            .len()
+            .saturating_sub(before)
+            .min(bytes_to_skip as usize);
+        *offset = before + skipped;
+        *bytes_skipped = skipped as i64;
+        if cef_diagnostics_enabled() {
+            eprintln!(
+                "[cef-resource] method=Skip handler_id={} request_id={} offset_before={before} total_length={} bytes_to_skip={bytes_to_skip} bytes_skipped={skipped} return_value=1 offset_after={} callback_invoked=false thread={:?}",
+                self.request_id,
+                self.request_id,
+                asset.bytes.len(),
+                *offset,
+                std::thread::current().id()
+            );
+        }
+        1
+    }
+}
+
+// Serves one in-memory asset. Payload and cursor ownership are per request.
 wrap_resource_handler! {
     pub struct PluginAssetHandler {
         asset: Option<SchemeAsset>,
-        cursor: Arc<AtomicUsize>,
+        state: ReadState,
+        _lifetime: ObjectLifetime,
     }
 
     impl ResourceHandler {
@@ -198,8 +470,6 @@ wrap_resource_handler! {
             handle_request: Option<&mut ::std::os::raw::c_int>,
             _callback: Option<&mut cef::Callback>,
         ) -> ::std::os::raw::c_int {
-            // The bytes are already in memory: complete synchronously rather
-            // than making CEF wait on a callback.
             if let Some(handle_request) = handle_request {
                 *handle_request = 1;
             }
@@ -215,43 +485,31 @@ wrap_resource_handler! {
             let Some(response) = response else { return };
             match self.asset {
                 Some(asset) => {
-                    // `mime_type` is `"text/html; charset=utf-8"`; CEF's mime
-                    // field wants the bare type, with charset set separately
-                    // so the renderer builds the right `Content-Type` header
-                    // instead of embedding the charset in the type token.
                     let (mime, charset) = split_mime(asset.mime_type);
-                    let status_text = CefString::from("OK");
-                    let mime_string = CefString::from(mime);
                     response.set_status(200);
-                    response.set_status_text(Some(&status_text));
-                    response.set_mime_type(Some(&mime_string));
+                    response.set_status_text(Some(&CefString::from("OK")));
+                    response.set_mime_type(Some(&CefString::from(mime)));
                     if let Some(charset) = charset {
                         response.set_charset(Some(&CefString::from(charset)));
                     }
-                    // Belt-and-suspenders: some CEF network-service code paths
-                    // read the actual `Content-Type` header rather than the
-                    // response object's mime/charset fields when building the
-                    // document's resource response, so set both.
                     response.set_header_by_name(
                         Some(&CefString::from("Content-Type")),
                         Some(&CefString::from(asset.mime_type)),
                         1,
                     );
-                    // Embedded assets are immutable for the life of the
-                    // process, so let the renderer cache them freely.
                     response.set_header_by_name(
                         Some(&CefString::from("Cache-Control")),
-                        Some(&CefString::from("public, max-age=31536000, immutable")),
+                        Some(&CefString::from("no-store")),
                         1,
                     );
                     if let Some(length) = response_length {
                         *length = asset.bytes.len() as i64;
                     }
-                    if std::env::var_os("FUTUREBOARD_PLUGIN_VIEW_DEBUG").is_some() {
+                    if cef_diagnostics_enabled() {
                         let readback = CefStringUtf16::from(&response.mime_type()).to_string();
                         eprintln!(
-                            "[plugin-scheme] status=200 status_text=OK mime_set={mime} \
-                             mime_readback={readback} length={} ",
+                            "[plugin-scheme] request_id={} status=200 mime_set={mime} mime_readback={readback} length={} bytes_lifetime=static",
+                            self.state.request_id,
                             asset.bytes.len()
                         );
                     }
@@ -263,17 +521,25 @@ wrap_resource_handler! {
                     if let Some(length) = response_length {
                         *length = 0;
                     }
-                    if std::env::var_os("FUTUREBOARD_PLUGIN_VIEW_DEBUG").is_some() {
-                        eprintln!("[plugin-scheme] status=404 (no asset resolved)");
+                    if cef_diagnostics_enabled() {
+                        eprintln!(
+                            "[plugin-scheme] request_id={} status=404 length=0",
+                            self.state.request_id
+                        );
                     }
                 }
             }
         }
 
-        // `ImplResourceHandler::read` is a safe trait method taking a raw
-        // pointer — the signature is fixed by cef-rs and cannot be marked
-        // `unsafe`. CEF guarantees `data_out` points to at least
-        // `bytes_to_read` writable bytes; both are validated below before use.
+        fn skip(
+            &self,
+            bytes_to_skip: i64,
+            bytes_skipped: Option<&mut i64>,
+            _callback: Option<&mut cef::ResourceSkipCallback>,
+        ) -> ::std::os::raw::c_int {
+            self.state.skip_sync(self.asset, bytes_to_skip, bytes_skipped)
+        }
+
         #[allow(clippy::not_unsafe_ptr_arg_deref)]
         fn read(
             &self,
@@ -282,35 +548,25 @@ wrap_resource_handler! {
             bytes_read: Option<&mut ::std::os::raw::c_int>,
             _callback: Option<&mut cef::ResourceReadCallback>,
         ) -> ::std::os::raw::c_int {
-            let Some(bytes_read) = bytes_read else { return 0 };
-            *bytes_read = 0;
+            self.state
+                .read_sync("Read", self.asset, data_out, bytes_to_read, bytes_read)
+        }
 
-            let Some(asset) = self.asset else { return 0 };
-            if data_out.is_null() || bytes_to_read <= 0 {
-                return 0;
-            }
-
-            let offset = self.cursor.load(Ordering::Relaxed);
-            let remaining = asset.bytes.len().saturating_sub(offset);
-            if remaining == 0 {
-                // Returning 0 with *bytes_read == 0 signals end of stream.
-                return 0;
-            }
-
-            let count = remaining.min(bytes_to_read as usize);
-            // SAFETY: `data_out` is a CEF-owned buffer of at least
-            // `bytes_to_read` bytes; `count <= bytes_to_read` and the source
-            // range is inside the static asset.
-            unsafe {
-                std::ptr::copy_nonoverlapping(
-                    asset.bytes[offset..].as_ptr(),
-                    data_out,
-                    count,
-                );
-            }
-            self.cursor.store(offset + count, Ordering::Relaxed);
-            *bytes_read = count as ::std::os::raw::c_int;
-            1
+        #[allow(clippy::not_unsafe_ptr_arg_deref)]
+        fn read_response(
+            &self,
+            data_out: *mut u8,
+            bytes_to_read: ::std::os::raw::c_int,
+            bytes_read: Option<&mut ::std::os::raw::c_int>,
+            _callback: Option<&mut cef::Callback>,
+        ) -> ::std::os::raw::c_int {
+            self.state.read_sync(
+                "ReadResponse",
+                self.asset,
+                data_out,
+                bytes_to_read,
+                bytes_read,
+            )
         }
     }
 }
@@ -323,10 +579,7 @@ wrap_resource_handler! {
 fn split_mime(mime_type: &str) -> (&str, Option<&str>) {
     match mime_type.split_once(';') {
         Some((mime, rest)) => {
-            let charset = rest
-                .trim()
-                .strip_prefix("charset=")
-                .map(str::trim);
+            let charset = rest.trim().strip_prefix("charset=").map(str::trim);
             (mime.trim(), charset)
         }
         None => (mime_type.trim(), None),
@@ -386,7 +639,15 @@ pub fn plugin_scheme_app() -> App {
     // Without this the process aborts on the first C→C++ call with
     // `CefApp_0_CToCpp called with invalid version -1`.
     crate::runtime::ensure_api_version();
-    PluginSchemeApp::new()
+    let object_id = NEXT_OBJECT_ID.fetch_add(1, Ordering::Relaxed);
+    let app = PluginSchemeApp::new(ObjectLifetime::new("cef_app_t", object_id));
+    if cef_diagnostics_enabled() {
+        eprintln!(
+            "[cef-ref] object_type=cef_app_t object_id={object_id} event=return_to_caller has_one_ref={}",
+            app.has_one_ref()
+        );
+    }
+    app
 }
 
 /// Install the handler that serves plugin assets. Call once, after
@@ -399,12 +660,30 @@ pub fn register_plugin_scheme_factory(
     resolver: SchemeResolver,
     bridge: Option<BridgeSink>,
 ) -> Result<(), SchemeError> {
-    let mut factory = PluginSchemeFactory::new(resolver, bridge);
+    let object_id = NEXT_OBJECT_ID.fetch_add(1, Ordering::Relaxed);
+    let mut factory = PluginSchemeFactory::new(
+        resolver,
+        bridge,
+        ObjectLifetime::new("cef_scheme_handler_factory_t", object_id),
+    );
+    if cef_diagnostics_enabled() {
+        eprintln!(
+            "[cef-ref] object_type=cef_scheme_handler_factory_t object_id={object_id} event=before_register has_one_ref={}",
+            factory.has_one_ref()
+        );
+    }
     let ok = cef::register_scheme_handler_factory(
         Some(&CefString::from(PLUGIN_SCHEME)),
         None,
         Some(&mut factory),
     );
+    if cef_diagnostics_enabled() {
+        eprintln!(
+            "[cef-ref] object_type=cef_scheme_handler_factory_t object_id={object_id} event=after_register accepted={} has_one_ref={}",
+            ok != 0,
+            factory.has_one_ref()
+        );
+    }
     if ok == 0 {
         return Err(SchemeError::RegisterFactoryFailed);
     }
@@ -420,6 +699,64 @@ pub enum SchemeError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn minimal_test_document_stays_below_one_hundred_bytes() {
+        assert!(MINIMAL_TEST_DOCUMENT.bytes.len() < 100);
+        assert_eq!(MINIMAL_TEST_DOCUMENT.mime_type, "text/html");
+    }
+
+    #[test]
+    fn custom_reader_obeys_chunk_and_eof_contract() {
+        let asset = SchemeAsset {
+            bytes: b"abcdef",
+            mime_type: "text/plain",
+        };
+        let state = ReadState::new(41);
+        let mut first = [0u8; 4];
+        let mut read = -1;
+        assert_eq!(
+            state.read_sync("test", Some(asset), first.as_mut_ptr(), 4, Some(&mut read)),
+            1
+        );
+        assert_eq!(read, 4);
+        assert_eq!(&first, b"abcd");
+
+        let mut second = [0u8; 4];
+        assert_eq!(
+            state.read_sync("test", Some(asset), second.as_mut_ptr(), 4, Some(&mut read)),
+            1
+        );
+        assert_eq!(read, 2);
+        assert_eq!(&second[..2], b"ef");
+
+        assert_eq!(
+            state.read_sync("test", Some(asset), second.as_mut_ptr(), 4, Some(&mut read)),
+            0
+        );
+        assert_eq!(read, 0);
+    }
+
+    #[test]
+    fn each_custom_reader_has_independent_state() {
+        let asset = SchemeAsset {
+            bytes: b"abcd",
+            mime_type: "text/plain",
+        };
+        let first = ReadState::new(1);
+        let second = ReadState::new(2);
+        let mut out = [0u8; 2];
+        let mut read = 0;
+        assert_eq!(
+            first.read_sync("test", Some(asset), out.as_mut_ptr(), 2, Some(&mut read)),
+            1
+        );
+        assert_eq!(
+            second.read_sync("test", Some(asset), out.as_mut_ptr(), 2, Some(&mut read)),
+            1
+        );
+        assert_eq!(&out, b"ab");
+    }
 
     #[test]
     fn splits_mime_and_charset() {

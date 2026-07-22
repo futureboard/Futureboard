@@ -294,6 +294,12 @@ pub struct BuiltinPluginEditorWindow {
     /// message: `0` means the window never re-rendered while waiting (a
     /// scheduling problem), non-zero means the bounds were never usable.
     attach_attempts: u32,
+    /// Scale factor `last_rect` was measured at, so a view-space point can be
+    /// tested against the browser rect without re-reading the window.
+    last_scale: f32,
+    /// Whether the pointer is currently outside the browser rect. Keeps the
+    /// leave notification edge-triggered rather than sent on every move.
+    pointer_left: bool,
 }
 
 impl BuiltinPluginEditorWindow {
@@ -338,6 +344,8 @@ impl BuiltinPluginEditorWindow {
             surface: OffscreenSurface::default(),
             focus: cx.focus_handle(),
             attach_attempts: 0,
+            last_scale: 1.0,
+            pointer_left: true,
         }
     }
 
@@ -764,6 +772,7 @@ impl BuiltinPluginEditorWindow {
             Ok(()) => {
                 self.status = Status::Attaching;
                 self.last_rect = Some(rect);
+                self.last_scale = scale;
                 cx.notify();
             }
             Err(err) => {
@@ -799,6 +808,7 @@ impl BuiltinPluginEditorWindow {
             window.scale_factor(),
         );
         self.last_rect = Some(rect);
+        self.last_scale = window.scale_factor();
     }
 
     /// Begin an asynchronous close. The shell remains alive until the CEF pump
@@ -1037,12 +1047,34 @@ impl BuiltinPluginEditorWindow {
 
     fn forward_mouse_move(&mut self, event: &MouseMoveEvent) {
         let (x, y) = self.to_view_point(event.position);
+        // A move whose position is outside the browser rect is still forwarded
+        // (a drag must keep tracking), but it is flagged as a leave so the page
+        // can drop hover state instead of holding the last hovered control lit
+        // forever. `mouse_leave` stays sticky until the pointer comes back.
+        let inside = self.view_contains(x, y);
+        if !inside && self.pointer_left {
+            return;
+        }
+        self.pointer_left = !inside;
         self.send_input(EditorInput::MouseMove {
             x,
             y,
             modifiers: self.surface.modifiers(event.modifiers),
-            leaving: false,
+            leaving: !inside,
         });
+    }
+
+    /// Whether a view-space point is inside the browser rect. Uses the logical
+    /// size derived from the rect last handed to the host, so it can never
+    /// disagree with what CEF was told to lay out.
+    fn view_contains(&self, x: i32, y: i32) -> bool {
+        let Some(rect) = self.last_rect else {
+            return false;
+        };
+        let scale = self.last_scale.max(f32::EPSILON);
+        let width = (rect.width as f32 / scale).round() as i32;
+        let height = (rect.height as f32 / scale).round() as i32;
+        (0..width).contains(&x) && (0..height).contains(&y)
     }
 
     fn on_surface_mouse_down(
@@ -1328,6 +1360,28 @@ mod tests {
         let rect = content_rect(bounds(1000.0, 700.0), 1.0, SIDEBAR_W);
         assert_eq!(rect.x, SIDEBAR_W as i32);
         assert_eq!(rect.width, 1000 - SIDEBAR_W as i32);
+    }
+
+    /// The browser is told to lay out in logical pixels, so a window-space
+    /// pointer position becomes a view-space one by subtracting the chrome this
+    /// window reserves — the same offsets `content_rect` reserves. Verified
+    /// end-to-end by `examples/osr_editor_probe`, which reports the coordinate
+    /// the page actually received (a click sent at 400,300 arrives at 400,300).
+    #[test]
+    fn view_space_points_subtract_the_reserved_chrome() {
+        let to_view = |x: f32, y: f32, sidebar: f32| {
+            ((x - sidebar).round() as i32, (y - HEADER_H).round() as i32)
+        };
+        assert_eq!(to_view(SIDEBAR_W, HEADER_H, SIDEBAR_W), (0, 0));
+        assert_eq!(
+            to_view(SIDEBAR_W + 400.0, HEADER_H + 300.0, SIDEBAR_W),
+            (400, 300)
+        );
+        // Collapsed sidebar reserves nothing on the left.
+        assert_eq!(to_view(400.0, HEADER_H + 300.0, 0.0), (400, 300));
+        // A position over the chrome maps outside the view, which is what the
+        // page should see — not a clamp onto its edge.
+        assert!(to_view(0.0, 0.0, SIDEBAR_W).0 < 0);
     }
 
     #[test]

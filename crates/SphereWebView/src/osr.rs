@@ -286,6 +286,18 @@ wrap_render_handler! {
         ) -> ::std::os::raw::c_int {
             let Some(screen_info) = screen_info else { return 0 };
             let (width, height) = self.surface.view_size();
+            {
+                use std::sync::atomic::{AtomicBool, Ordering};
+                static LOGGED: AtomicBool = AtomicBool::new(false);
+                if !LOGGED.swap(true, Ordering::Relaxed) {
+                    eprintln!(
+                        "[cef-osr] GetScreenInfo called: reporting scale={} view={}x{}",
+                        self.surface.scale_factor(),
+                        width,
+                        height
+                    );
+                }
+            }
             screen_info.device_scale_factor = self.surface.scale_factor();
             screen_info.depth = 32;
             screen_info.depth_per_component = 8;

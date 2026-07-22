@@ -19,6 +19,9 @@
 //! `FUTUREBOARD_PLUGIN_VIEW_DEBUG=1` turns on page console forwarding, which is
 //! how a JavaScript error inside the editor becomes visible.
 
+#[cfg(feature = "builtin-plugin-editor")]
+use sphere_ui_components::components::builtin_plugin_editor as host;
+
 fn main() {
     #[cfg(not(feature = "builtin-plugin-editor"))]
     {
@@ -31,7 +34,6 @@ fn main() {
 
 #[cfg(feature = "builtin-plugin-editor")]
 fn run() {
-    use sphere_ui_components::components::builtin_plugin_editor as host;
     use sphere_webview::runtime::ProcessDispatch;
 
     sphere_webview::runtime::log_process_entry();
@@ -68,6 +70,8 @@ fn run() {
     let mut inbound = 0;
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
     let mut last_generation = 0;
+    let mut input_stage = InputStage::WaitingForBridge;
+    let mut seen = InputSeen::default();
 
     while std::time::Instant::now() < deadline {
         host::pump();
@@ -89,23 +93,245 @@ fn run() {
 
         for raw in host::take_inbound(origin) {
             inbound += 1;
-            println!(
-                "[probe] inbound #{inbound}: {}",
-                String::from_utf8_lossy(&raw)
-            );
+            let body = String::from_utf8_lossy(&raw).into_owned();
+            println!("[probe] inbound #{inbound}: {body}");
+            if body.contains("futureboard.bridgeReady")
+                && input_stage == InputStage::WaitingForBridge
+            {
+                input_stage = InputStage::InstallListeners;
+            }
+            seen.record(&body);
         }
+
+        input_stage = drive_input(view_id, input_stage);
     }
 
     println!("[probe] SUMMARY frames_painted={frames} bridge_messages={inbound}");
     println!(
-        "[probe] verdict paint={} bridge={}",
-        if frames > 0 { "OK" } else { "NONE" },
-        if inbound > 0 { "OK" } else { "NONE" }
+        "[probe] verdict paint={} bridge={} mouse_move={} mouse_click={} wheel={} key={}",
+        verdict(frames > 0),
+        verdict(inbound > 0),
+        verdict(seen.mouse_move),
+        verdict(seen.mouse_click),
+        verdict(seen.wheel),
+        verdict(seen.key),
     );
+    if let Some(position) = seen.click_position {
+        println!(
+            "[probe] click landed at page coordinates {position:?} (sent {:?})",
+            (CLICK_X, CLICK_Y)
+        );
+    }
 
     host::close_view(view_id);
     for _ in 0..60 {
         host::pump();
         std::thread::sleep(std::time::Duration::from_millis(16));
+    }
+}
+
+/// Where the synthetic click is aimed, in the page's own coordinate space.
+/// Any point inside the view works — the page reports back what it received,
+/// which is what makes the coordinate mapping checkable rather than assumed.
+#[cfg(feature = "builtin-plugin-editor")]
+const CLICK_X: i32 = 400;
+#[cfg(feature = "builtin-plugin-editor")]
+const CLICK_Y: i32 = 300;
+
+#[cfg(feature = "builtin-plugin-editor")]
+fn verdict(ok: bool) -> &'static str {
+    if ok {
+        "OK"
+    } else {
+        "NONE"
+    }
+}
+
+/// Which input events the page told us it actually received.
+#[cfg(feature = "builtin-plugin-editor")]
+#[derive(Default)]
+struct InputSeen {
+    mouse_move: bool,
+    mouse_click: bool,
+    wheel: bool,
+    key: bool,
+    click_position: Option<(i64, i64)>,
+}
+
+#[cfg(feature = "builtin-plugin-editor")]
+impl InputSeen {
+    fn record(&mut self, body: &str) {
+        if body.contains("\"probe.mousemove\"") {
+            self.mouse_move = true;
+        }
+        if body.contains("\"probe.wheel\"") {
+            self.wheel = true;
+        }
+        if body.contains("\"probe.keydown\"") {
+            self.key = true;
+        }
+        if body.contains("\"probe.mousedown\"") {
+            self.mouse_click = true;
+            self.click_position = parse_position(body);
+        }
+    }
+}
+
+/// Pull `"x":<int>,"y":<int>` out of the probe listener's JSON without pulling
+/// in a parser — the payload shape is fixed by `LISTENER_SCRIPT` below.
+#[cfg(feature = "builtin-plugin-editor")]
+fn parse_position(body: &str) -> Option<(i64, i64)> {
+    let field = |name: &str| -> Option<i64> {
+        let start = body.find(&format!("\"{name}\":"))? + name.len() + 3;
+        let rest = &body[start..];
+        let end = rest.find([',', '}'])?;
+        rest[..end].trim().parse().ok()
+    };
+    Some((field("x")?, field("y")?))
+}
+
+/// Installed in the page once it is up: every input event the page receives is
+/// reported straight back through the same bridge endpoint the editor uses.
+#[cfg(feature = "builtin-plugin-editor")]
+const LISTENER_SCRIPT: &str = r#"
+(function () {
+  const post = (body) => fetch("__bridge", { method: "POST", body: JSON.stringify(body) });
+  addEventListener("mousemove", (e) => post({ type: "probe.mousemove", x: e.clientX, y: e.clientY }), { once: true });
+  addEventListener("mousedown", (e) => post({ type: "probe.mousedown", x: e.clientX, y: e.clientY, button: e.button }), { once: true });
+  addEventListener("wheel", (e) => post({ type: "probe.wheel", dy: e.deltaY }), { once: true });
+  addEventListener("keydown", (e) => post({ type: "probe.keydown", key: e.key }), { once: true });
+  post({
+    type: "probe.metrics",
+    dpr: devicePixelRatio,
+    innerWidth: innerWidth,
+    innerHeight: innerHeight,
+    visualScale: visualViewport ? visualViewport.scale : null,
+  });
+  console.log("[cef-diagnostic] probe listeners installed");
+})();
+"#;
+
+/// Input replay runs one step per pump tick so CEF can deliver each event (and
+/// the page's `fetch` back to native can complete) before the next is sent.
+#[cfg(feature = "builtin-plugin-editor")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InputStage {
+    WaitingForBridge,
+    InstallListeners,
+    /// Pump ticks to wait after installing listeners before replaying input.
+    Settle(u8),
+    Move,
+    Press,
+    Release,
+    Wheel,
+    KeyDown,
+    KeyChar,
+    KeyUp,
+    Done,
+}
+
+#[cfg(feature = "builtin-plugin-editor")]
+fn drive_input(view_id: host::ViewId, stage: InputStage) -> InputStage {
+    use host::{EditorInput, EditorKey, EditorKeyKind, EditorModifiers, EditorMouseButton};
+
+    let held = EditorModifiers {
+        left_button: true,
+        ..Default::default()
+    };
+    let none = EditorModifiers::default();
+
+    match stage {
+        InputStage::WaitingForBridge | InputStage::Done => return stage,
+        InputStage::InstallListeners => {
+            host::send_to_view(view_id, LISTENER_SCRIPT);
+            // `execute_javascript` is asynchronous; an event sent on the very
+            // next tick can beat the listeners into the document and be missed.
+            return InputStage::Settle(6);
+        }
+        InputStage::Settle(remaining) => {
+            return if remaining == 0 {
+                InputStage::Move
+            } else {
+                InputStage::Settle(remaining - 1)
+            };
+        }
+        InputStage::Move => host::send_view_input(
+            view_id,
+            EditorInput::MouseMove {
+                x: CLICK_X,
+                y: CLICK_Y,
+                modifiers: none,
+                leaving: false,
+            },
+        ),
+        InputStage::Press => host::send_view_input(
+            view_id,
+            EditorInput::MouseButton {
+                x: CLICK_X,
+                y: CLICK_Y,
+                button: EditorMouseButton::Left,
+                pressed: true,
+                click_count: 1,
+                modifiers: held,
+            },
+        ),
+        InputStage::Release => host::send_view_input(
+            view_id,
+            EditorInput::MouseButton {
+                x: CLICK_X,
+                y: CLICK_Y,
+                button: EditorMouseButton::Left,
+                pressed: false,
+                click_count: 1,
+                modifiers: none,
+            },
+        ),
+        InputStage::Wheel => host::send_view_input(
+            view_id,
+            EditorInput::MouseWheel {
+                x: CLICK_X,
+                y: CLICK_Y,
+                delta_x: 0,
+                delta_y: -40,
+                modifiers: none,
+            },
+        ),
+        InputStage::KeyDown => host::send_view_input(
+            view_id,
+            EditorInput::Key(EditorKey {
+                kind: EditorKeyKind::Down,
+                windows_key_code: 'A' as i32,
+                character: 0,
+                modifiers: none,
+            }),
+        ),
+        InputStage::KeyChar => host::send_view_input(
+            view_id,
+            EditorInput::Key(EditorKey {
+                kind: EditorKeyKind::Char,
+                windows_key_code: 'a' as i32,
+                character: 'a' as u16,
+                modifiers: none,
+            }),
+        ),
+        InputStage::KeyUp => host::send_view_input(
+            view_id,
+            EditorInput::Key(EditorKey {
+                kind: EditorKeyKind::Up,
+                windows_key_code: 'A' as i32,
+                character: 0,
+                modifiers: none,
+            }),
+        ),
+    }
+
+    match stage {
+        InputStage::Move => InputStage::Press,
+        InputStage::Press => InputStage::Release,
+        InputStage::Release => InputStage::Wheel,
+        InputStage::Wheel => InputStage::KeyDown,
+        InputStage::KeyDown => InputStage::KeyChar,
+        InputStage::KeyChar => InputStage::KeyUp,
+        _ => InputStage::Done,
     }
 }

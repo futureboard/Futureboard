@@ -83,16 +83,6 @@ impl OffscreenSurface {
         }
     }
 
-    /// Release everything, including the visible frame — used when the window
-    /// closes or the browser goes away.
-    pub(crate) fn release_all(&mut self, window: &mut Window, cx: &mut App) {
-        if let Some(image) = self.image.take() {
-            self.stale.push(image);
-        }
-        self.generation = 0;
-        self.release_stale(window, cx);
-    }
-
     pub(crate) fn set_button(&mut self, button: EditorMouseButton, pressed: bool) {
         match button {
             EditorMouseButton::Left => self.buttons.left = pressed,

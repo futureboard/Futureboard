@@ -74,6 +74,84 @@ pub struct ViewRect {
     pub height: i32,
 }
 
+/// Whether editors are hosted **off-screen** on this platform.
+///
+/// Windows parents a real CEF child window into a `WS_CHILD` content host (see
+/// `plugin_content_host.rs`). Nothing equivalent exists on Linux: GPUI owns an
+/// X11/Wayland surface it composites itself, CEF's X11 child cannot be
+/// reparented into it, and under Wayland there is no window id to parent to at
+/// all. There the browser renders windowless and the GPUI window draws the
+/// framebuffer itself, forwarding input back in.
+pub const OFFSCREEN_HOSTING: bool = !cfg!(target_os = "windows");
+
+/// Modifier state accompanying a forwarded input event.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct EditorModifiers {
+    pub shift: bool,
+    pub control: bool,
+    pub alt: bool,
+    pub command: bool,
+    pub left_button: bool,
+    pub middle_button: bool,
+    pub right_button: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EditorMouseButton {
+    Left,
+    Middle,
+    Right,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EditorKeyKind {
+    Down,
+    Up,
+    /// A typed character. `character` carries the UTF-16 code unit; the key
+    /// code is ignored.
+    Char,
+}
+
+/// `windows_key_code` is Chromium's platform-independent `VKEY_*` value (the
+/// same numbering as Win32 `VK_*`), which CEF expects on every OS.
+#[derive(Debug, Clone, Copy)]
+pub struct EditorKey {
+    pub kind: EditorKeyKind,
+    pub windows_key_code: i32,
+    pub character: u16,
+    pub modifiers: EditorModifiers,
+}
+
+/// One input event forwarded from the GPUI shell into an off-screen browser.
+/// Coordinates are **logical** pixels relative to the view's top-left corner —
+/// the same space CEF lays the page out in.
+#[derive(Debug, Clone, Copy)]
+pub enum EditorInput {
+    MouseMove {
+        x: i32,
+        y: i32,
+        modifiers: EditorModifiers,
+        leaving: bool,
+    },
+    MouseButton {
+        x: i32,
+        y: i32,
+        button: EditorMouseButton,
+        pressed: bool,
+        click_count: i32,
+        modifiers: EditorModifiers,
+    },
+    MouseWheel {
+        x: i32,
+        y: i32,
+        delta_x: i32,
+        delta_y: i32,
+        modifiers: EditorModifiers,
+    },
+    Key(EditorKey),
+    Focus(bool),
+}
+
 /// Process-unique identity for one concrete editor window.
 ///
 /// The logical editor id (`track::insert`) can be reused after a window closes;
@@ -105,7 +183,7 @@ pub enum ViewEvent {
 
 #[cfg(not(feature = "builtin-plugin-editor"))]
 mod imp {
-    use super::{HostAvailability, ViewEvent, ViewId, ViewRect};
+    use super::{EditorInput, HostAvailability, ViewEvent, ViewId, ViewRect};
 
     pub fn availability(_plugin_id: &str) -> HostAvailability {
         HostAvailability::NotCompiledIn
@@ -119,15 +197,29 @@ mod imp {
         _plugin_id: &str,
         _parent_hwnd: u64,
         _rect: ViewRect,
+        _scale_factor: f32,
     ) -> Result<(), HostAvailability> {
         Err(HostAvailability::NotCompiledIn)
     }
+
+    pub fn view_frame_generation(_view_id: ViewId) -> u64 {
+        0
+    }
+
+    pub fn with_view_frame<R>(
+        _view_id: ViewId,
+        _read: impl FnOnce(&[u8], i32, i32) -> R,
+    ) -> Option<R> {
+        None
+    }
+
+    pub fn send_view_input(_view_id: ViewId, _input: EditorInput) {}
 
     pub fn init_at_boot() -> Result<(), HostAvailability> {
         Err(HostAvailability::NotCompiledIn)
     }
 
-    pub fn set_view_bounds(_view_id: ViewId, _rect: ViewRect) {}
+    pub fn set_view_bounds(_view_id: ViewId, _rect: ViewRect, _scale_factor: f32) {}
 
     pub fn close_view(_view_id: ViewId) {}
 
@@ -154,14 +246,20 @@ mod imp {
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex, OnceLock};
 
-    use sphere_webview::client::{plugin_browser_client, BrowserLifecycle};
+    use sphere_webview::client::{plugin_browser_client_with_surface, BrowserLifecycle};
+    use sphere_webview::osr::{
+        OsrInput, OsrKey, OsrKeyKind, OsrModifiers, OsrMouseButton, OsrSurface,
+    };
     use sphere_webview::runtime::cef::rc::Rc as _;
     use sphere_webview::runtime::{
         CefRuntime, CefRuntimeConfig, NativeParent, WebView, WebViewConfig, WindowBounds,
     };
     use sphere_webview::scheme::{register_plugin_scheme_factory, BridgeSink, SchemeAsset};
 
-    use super::{origin_for_plugin_id, HostAvailability, ViewEvent, ViewId, ViewRect};
+    use super::{
+        origin_for_plugin_id, EditorInput, EditorKey, EditorKeyKind, EditorModifiers,
+        EditorMouseButton, HostAvailability, ViewEvent, ViewId, ViewRect, OFFSCREEN_HOSTING,
+    };
 
     struct HostedView {
         _editor_id: String,
@@ -198,10 +296,19 @@ mod imp {
         rect: ViewRect,
     }
 
+    /// Physical rect plus the scale it was measured at. Off-screen browsers are
+    /// told a *logical* size and render at `scale`; a windowed child ignores the
+    /// scale and uses the physical rect directly.
+    #[derive(Debug, Clone, Copy)]
+    struct PendingBounds {
+        rect: ViewRect,
+        scale_factor: f32,
+    }
+
     #[derive(Default)]
     struct PendingViewCommands {
         open: Option<PendingOpen>,
-        bounds: Option<ViewRect>,
+        bounds: Option<PendingBounds>,
         close: bool,
     }
 
@@ -358,6 +465,9 @@ mod imp {
         let config = CefRuntimeConfig {
             cache_path: cef_cache_dir(),
             remote_debugging_port: debug_port(),
+            // Chromium decides this once, at initialize, so the whole process
+            // opts in wherever editors are hosted off-screen.
+            windowless_rendering: OFFSCREEN_HOSTING,
             ..Default::default()
         };
         let runtime = CefRuntime::initialize(config, Some(&mut app))
@@ -409,6 +519,7 @@ mod imp {
         plugin_id: &str,
         parent_hwnd: u64,
         rect: ViewRect,
+        scale_factor: f32,
     ) -> Result<(), HostAvailability> {
         match super::availability(plugin_id) {
             HostAvailability::Ready => {}
@@ -417,7 +528,9 @@ mod imp {
         let Some(origin) = origin_for_plugin_id(plugin_id) else {
             return Err(HostAvailability::NoEditorForPlugin(plugin_id.to_string()));
         };
-        if parent_hwnd == 0 {
+        // An off-screen browser has no parent window to be a child of; CEF only
+        // uses the handle to resolve monitor info, and accepts none.
+        if parent_hwnd == 0 && !OFFSCREEN_HOSTING {
             return Err(HostAvailability::RuntimeFailed(
                 "editor window has no native parent handle yet".to_string(),
             ));
@@ -439,14 +552,14 @@ mod imp {
                 parent_hwnd,
                 rect,
             });
-            pending.bounds = Some(rect);
+            pending.bounds = Some(PendingBounds { rect, scale_factor });
             Ok(())
         })
     }
 
     /// Coalesce a browser resize for the next pump. An unknown id is allowed:
     /// the latest bounds are retained while its open command is still pending.
-    pub fn set_view_bounds(view_id: ViewId, rect: ViewRect) {
+    pub fn set_view_bounds(view_id: ViewId, rect: ViewRect, scale_factor: f32) {
         if rect.width <= 0 || rect.height <= 0 {
             return;
         }
@@ -454,9 +567,146 @@ mod imp {
             let mut commands = commands.borrow_mut();
             let pending = commands.entry(view_id).or_default();
             if !pending.close {
-                pending.bounds = Some(rect);
+                pending.bounds = Some(PendingBounds { rect, scale_factor });
             }
         });
+    }
+
+    /// Logical size to hand an off-screen browser for a physical rect measured
+    /// at `scale_factor`. Clamped to at least one pixel: a zero-sized view rect
+    /// makes Chromium drop the browser's compositor frame entirely.
+    fn logical_size(rect: ViewRect, scale_factor: f32) -> (i32, i32) {
+        let scale = if scale_factor > 0.0 {
+            scale_factor
+        } else {
+            1.0
+        };
+        (
+            ((rect.width as f32) / scale).round().max(1.0) as i32,
+            ((rect.height as f32) / scale).round().max(1.0) as i32,
+        )
+    }
+
+    /// Frame counter for `view_id`'s off-screen surface. `0` while the browser
+    /// is windowed, absent, or has not painted yet.
+    pub fn view_frame_generation(view_id: ViewId) -> u64 {
+        HOST.with(|cell| {
+            cell.try_borrow()
+                .ok()
+                .and_then(|slot| {
+                    let host = slot.as_ref()?;
+                    let hosted = host.views.get(&view_id)?;
+                    Some(hosted.view.osr_surface()?.generation())
+                })
+                .unwrap_or(0)
+        })
+    }
+
+    /// Read `view_id`'s latest off-screen frame (BGRA bytes, physical width,
+    /// physical height). `None` for a windowed browser or before first paint.
+    pub fn with_view_frame<R>(
+        view_id: ViewId,
+        read: impl FnOnce(&[u8], i32, i32) -> R,
+    ) -> Option<R> {
+        HOST.with(|cell| {
+            let slot = cell.try_borrow().ok()?;
+            let host = slot.as_ref()?;
+            let hosted = host.views.get(&view_id)?;
+            hosted.view.osr_surface()?.with_frame(read)
+        })
+    }
+
+    /// Forward one input event to an off-screen browser. Silently ignored for
+    /// a windowed browser, which receives real platform input directly.
+    pub fn send_view_input(view_id: ViewId, input: EditorInput) {
+        HOST.with(|cell| {
+            let Ok(slot) = cell.try_borrow() else { return };
+            let Some(host) = slot.as_ref() else { return };
+            let Some(hosted) = host.views.get(&view_id) else {
+                return;
+            };
+            if hosted.view.osr_surface().is_none() {
+                return;
+            }
+            if let Err(error) = hosted.view.send_input(to_osr_input(input)) {
+                eprintln!("[plugin-bridge] send_input failed view_id={view_id:?} err={error}");
+            }
+        });
+    }
+
+    fn to_osr_modifiers(modifiers: EditorModifiers) -> OsrModifiers {
+        OsrModifiers {
+            shift: modifiers.shift,
+            control: modifiers.control,
+            alt: modifiers.alt,
+            command: modifiers.command,
+            left_button: modifiers.left_button,
+            middle_button: modifiers.middle_button,
+            right_button: modifiers.right_button,
+        }
+    }
+
+    fn to_osr_key(key: EditorKey) -> OsrKey {
+        OsrKey {
+            kind: match key.kind {
+                EditorKeyKind::Down => OsrKeyKind::Down,
+                EditorKeyKind::Up => OsrKeyKind::Up,
+                EditorKeyKind::Char => OsrKeyKind::Char,
+            },
+            windows_key_code: key.windows_key_code,
+            character: key.character,
+            modifiers: to_osr_modifiers(key.modifiers),
+        }
+    }
+
+    fn to_osr_input(input: EditorInput) -> OsrInput {
+        match input {
+            EditorInput::MouseMove {
+                x,
+                y,
+                modifiers,
+                leaving,
+            } => OsrInput::MouseMove {
+                x,
+                y,
+                modifiers: to_osr_modifiers(modifiers),
+                leaving,
+            },
+            EditorInput::MouseButton {
+                x,
+                y,
+                button,
+                pressed,
+                click_count,
+                modifiers,
+            } => OsrInput::MouseButton {
+                x,
+                y,
+                button: match button {
+                    EditorMouseButton::Left => OsrMouseButton::Left,
+                    EditorMouseButton::Middle => OsrMouseButton::Middle,
+                    EditorMouseButton::Right => OsrMouseButton::Right,
+                },
+                pressed,
+                click_count,
+                modifiers: to_osr_modifiers(modifiers),
+            },
+            EditorInput::MouseWheel {
+                x,
+                y,
+                delta_x,
+                delta_y,
+                modifiers,
+            } => OsrInput::MouseWheel {
+                x,
+                y,
+                delta_x,
+                delta_y,
+                modifiers: to_osr_modifiers(modifiers),
+            },
+            EditorInput::Key(key) => OsrInput::Key(to_osr_key(key)),
+            EditorInput::Focus(focused) => OsrInput::Focus(focused),
+        }
     }
 
     /// Queue a close. Close dominates an unprocessed open/resize for this unique
@@ -552,14 +802,30 @@ mod imp {
                     if host.views.contains_key(&view_id) {
                         completed.push((view_id, ViewEvent::Opened));
                     } else {
-                        let rect = pending.bounds.unwrap_or(open.rect);
+                        let bounds_command = pending.bounds.unwrap_or(PendingBounds {
+                            rect: open.rect,
+                            scale_factor: 1.0,
+                        });
+                        let rect = bounds_command.rect;
                         let url = diagnostic_control_url().unwrap_or_else(|| {
                             format!("mikoplugin://{}/index.html", open.origin)
                         });
-                        let (mut client, lifecycle) = plugin_browser_client(&url);
+                        // Off-screen: CEF lays out in logical pixels and paints
+                        // physical ones into the surface the client owns.
+                        let surface = OFFSCREEN_HOSTING.then(|| {
+                            let (width, height) =
+                                logical_size(rect, bounds_command.scale_factor);
+                            OsrSurface::new(width, height, bounds_command.scale_factor)
+                        });
+                        let (mut client, lifecycle) =
+                            plugin_browser_client_with_surface(&url, surface.clone());
                         let result = WindowBounds::new(rect.x, rect.y, rect.width, rect.height)
                             .map_err(|error| error.to_string())
                             .and_then(|bounds| {
+                                let mut config = WebViewConfig::new(url, bounds);
+                                if let Some(surface) = surface {
+                                    config = config.windowless(surface);
+                                }
                                 // SAFETY: the returned view is stored in
                                 // `host.views`, declared before `host.runtime`,
                                 // and therefore released first.
@@ -568,7 +834,7 @@ mod imp {
                                         NativeParent::from_raw(hwnd_to_cef(open.parent_hwnd));
                                     host.runtime.create_webview_detached(
                                         parent,
-                                        WebViewConfig::new(url, bounds),
+                                        config,
                                         Some(&mut client),
                                     )
                                 }
@@ -619,11 +885,20 @@ mod imp {
                 }
 
                 if !opened_now {
-                    if let Some(rect) = pending.bounds {
+                    if let Some(PendingBounds { rect, scale_factor }) = pending.bounds {
                         if let Some(hosted) = host.views.get(&view_id) {
-                            if let Ok(bounds) =
-                                WindowBounds::new(rect.x, rect.y, rect.width, rect.height)
-                            {
+                            // A windowed child is placed with the physical rect;
+                            // an off-screen browser is told the logical size it
+                            // should lay out at, and the scale it renders with.
+                            let bounds = match hosted.view.osr_surface() {
+                                Some(surface) => {
+                                    let (width, height) = logical_size(rect, scale_factor);
+                                    surface.set_view_size(width, height, scale_factor);
+                                    WindowBounds::new(0, 0, width, height)
+                                }
+                                None => WindowBounds::new(rect.x, rect.y, rect.width, rect.height),
+                            };
+                            if let Ok(bounds) = bounds {
                                 let _ = hosted.view.set_bounds(bounds);
                             }
                         }
@@ -748,7 +1023,8 @@ mod imp {
 
 pub use imp::{
     availability, close_view, init_at_boot, is_view_open, open_view, pump, reload_view,
-    send_to_view, set_view_bounds, take_inbound, take_view_events,
+    send_to_view, send_view_input, set_view_bounds, take_inbound, take_view_events,
+    view_frame_generation, with_view_frame,
 };
 
 #[cfg(test)]

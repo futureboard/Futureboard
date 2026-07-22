@@ -37,6 +37,10 @@ builtin-plugin-editor = [
 # unification. Other default features (font-kit, wayland, x11) are re-enabled
 # so non-Windows targets keep working unchanged.
 gpui.workspace = true
+# Frame containers for the off-screen plugin-editor surface: CEF hands back raw
+# BGRA bytes, gpui's `RenderImage` wants them as `image::Frame`s.
+image.workspace = true
+smallvec.workspace = true
 # Audio decoding + multi-LOD peak generation moved into DAUx
 # (SphereDirectAudioEngine) per PART 5 — the UI no longer carries its
 # own hound / symphonia decoder. Same engine, same LOD ladder, same

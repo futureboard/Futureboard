@@ -11,10 +11,10 @@ use cef::rc::Rc as _;
 use cef::{
     Browser, CefString, CefStringUtf16, Client, DisplayHandler, Errorcode, Frame, ImplBrowser,
     ImplClient, ImplDisplayHandler, ImplFrame, ImplLifeSpanHandler, ImplLoadHandler, ImplRequest,
-    ImplRequestHandler, LifeSpanHandler, LoadHandler, LogSeverity, Request, RequestHandler,
-    TerminationStatus, TransitionType, WrapClient, WrapDisplayHandler, WrapLifeSpanHandler,
-    WrapLoadHandler, WrapRequestHandler, wrap_client, wrap_display_handler, wrap_life_span_handler,
-    wrap_load_handler, wrap_request_handler,
+    ImplRequestHandler, LifeSpanHandler, LoadHandler, LogSeverity, RenderHandler, Request,
+    RequestHandler, TerminationStatus, TransitionType, WrapClient, WrapDisplayHandler,
+    WrapLifeSpanHandler, WrapLoadHandler, WrapRequestHandler, wrap_client, wrap_display_handler,
+    wrap_life_span_handler, wrap_load_handler, wrap_request_handler,
 };
 
 use crate::scheme::{PLUGIN_SCHEME, cef_diagnostics_enabled};
@@ -363,10 +363,17 @@ wrap_client! {
         life_span_handler: LifeSpanHandler,
         load_handler: LoadHandler,
         display_handler: DisplayHandler,
+        // `Some` only for a windowless browser; returning `None` here is what
+        // tells CEF the browser is windowed.
+        render_handler: Option<RenderHandler>,
         _lifetime: ObjectLifetime,
     }
 
     impl Client {
+        fn render_handler(&self) -> Option<RenderHandler> {
+            self.render_handler.clone()
+        }
+
         fn request_handler(&self) -> Option<RequestHandler> {
             Some(self.request_handler.clone())
         }
@@ -387,6 +394,18 @@ wrap_client! {
 
 /// Build one explicitly retained client and its observable lifecycle state.
 pub fn plugin_browser_client(initial_url: &str) -> (Client, BrowserLifecycle) {
+    plugin_browser_client_with_surface(initial_url, None)
+}
+
+/// As [`plugin_browser_client`], but for a windowless browser: `surface` is
+/// the off-screen framebuffer CEF paints into. Passing `Some` here and
+/// [`crate::runtime::WebViewConfig::windowless`] at creation are two halves of
+/// the same decision — a windowless browser without a render handler never
+/// paints, and a windowed browser with one is rejected by CEF.
+pub fn plugin_browser_client_with_surface(
+    initial_url: &str,
+    surface: Option<crate::osr::OsrSurface>,
+) -> (Client, BrowserLifecycle) {
     let lifecycle = BrowserLifecycle::default();
     let control_url = (!initial_url
         .to_ascii_lowercase()
@@ -410,11 +429,13 @@ pub fn plugin_browser_client(initial_url: &str) -> (Client, BrowserLifecycle) {
         lifecycle.clone(),
         ObjectLifetime::new("cef_display_handler_t"),
     );
+    let render_handler = surface.map(crate::osr::osr_render_handler);
     let client = PluginBrowserClient::new(
         request_handler,
         life_span_handler,
         load_handler,
         display_handler,
+        render_handler,
         ObjectLifetime::new("cef_client_t"),
     );
     if cef_diagnostics_enabled() {

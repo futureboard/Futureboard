@@ -1,9 +1,17 @@
 //! Floating shell window for a built-in plugin's CEF editor.
 //!
-//! GPUI draws only the chrome: a compact titlebar and, when the host is
-//! unavailable, an explanatory panel. The editor itself is a native CEF child
-//! window parented into a dedicated `WS_CHILD` content host, exactly like the
-//! VST3 editor path — GPUI never paints over the browser's rect.
+//! Two hosting modes, chosen per platform by
+//! [`host::OFFSCREEN_HOSTING`](crate::components::builtin_plugin_editor::OFFSCREEN_HOSTING):
+//!
+//! - **Windowed (Windows).** GPUI draws only the chrome: a compact titlebar
+//!   and, when the host is unavailable, an explanatory panel. The editor is a
+//!   native CEF child window parented into a dedicated `WS_CHILD` content host,
+//!   exactly like the VST3 editor path — GPUI never paints over the browser's
+//!   rect.
+//! - **Off-screen (Linux).** There is no window to parent into, so CEF renders
+//!   windowless and this window draws the resulting framebuffer as an image in
+//!   the same content region, forwarding mouse and keyboard back into the
+//!   browser. See `builtin_plugin_editor_surface.rs`.
 //!
 //! ## Lifecycle
 //!
@@ -13,6 +21,9 @@
 //! close → view closed, content child destroyed
 //! ```
 //!
+//! Off-screen hosting has no native handle to wait for, so `WaitingForHandle`
+//! resolves on the first render pass that knows the content rect.
+//!
 //! CEF's message loop is pumped from a GPUI timer for as long as this window is
 //! alive; without that the browser never paints or handles input.
 
@@ -20,13 +31,19 @@ use std::time::{Duration, Instant};
 
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    div, px, size, App, AppContext, Bounds, Context, InteractiveElement, IntoElement, MouseButton,
-    ParentElement, Pixels, Point, Render, Styled, Window, WindowBackgroundAppearance, WindowBounds,
+    canvas, div, img, px, size, App, AppContext, Bounds, Context, DispatchPhase, FocusHandle,
+    InteractiveElement, IntoElement, KeyDownEvent, KeyUpEvent, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, ObjectFit, ParentElement, Pixels, Point, Render, ScrollDelta,
+    ScrollWheelEvent, Styled, StyledImage, Window, WindowBackgroundAppearance, WindowBounds,
     WindowHandle, WindowKind,
 };
 
 use crate::components::builtin_plugin_editor::{
-    self as host, HostAvailability, ViewEvent, ViewId, ViewRect,
+    self as host, EditorInput, EditorKeyKind, HostAvailability, ViewEvent, ViewId, ViewRect,
+    OFFSCREEN_HOSTING,
+};
+use crate::components::builtin_plugin_editor_surface::{
+    editor_char_keys, editor_key, editor_mouse_button, OffscreenSurface,
 };
 use crate::components::plugin_content_host::{ContentChildHwnd, ContentRect};
 use crate::components::title_bar::{external_window_titlebar, TITLEBAR_HEIGHT};
@@ -41,6 +58,10 @@ pub const BUILTIN_EDITOR_MIN_HEIGHT: f32 = 620.0;
 /// shared external-dialog titlebar height so the browser rect and the chrome
 /// can never disagree about where the content starts.
 const HEADER_H: f32 = TITLEBAR_HEIGHT;
+
+/// Logical pixels one line-based scroll notch scrolls the page by. GPUI
+/// reports discrete wheel steps in lines; CEF wants pixel deltas.
+const SCROLL_LINE_HEIGHT: f32 = 20.0;
 
 /// Width of the native instance sidebar. Reserved out of the CEF content rect
 /// the same way `HEADER_H` is — the browser must never be told to draw under
@@ -263,6 +284,16 @@ pub struct BuiltinPluginEditorWindow {
     /// Capped so a page that *never* comes up (broken build, not a transient
     /// crash) fails loudly instead of reloading forever.
     bridge_ready_retries: u32,
+    /// Off-screen presentation state. Stays empty (no frame, no buttons held)
+    /// in windowed hosting, where CEF owns its own pixels and input.
+    surface: OffscreenSurface,
+    /// Keyboard focus for the browser region. Only meaningful off-screen —
+    /// a native CEF child window takes platform focus for itself.
+    focus: FocusHandle,
+    /// How many render passes reached `attach`. Reported in the attach-timeout
+    /// message: `0` means the window never re-rendered while waiting (a
+    /// scheduling problem), non-zero means the bounds were never usable.
+    attach_attempts: u32,
 }
 
 impl BuiltinPluginEditorWindow {
@@ -304,6 +335,9 @@ impl BuiltinPluginEditorWindow {
             browser_ready: false,
             attached_at: None,
             bridge_ready_retries: 0,
+            surface: OffscreenSurface::default(),
+            focus: cx.focus_handle(),
+            attach_attempts: 0,
         }
     }
 
@@ -569,16 +603,40 @@ impl BuiltinPluginEditorWindow {
             }
         }
 
+        // Off-screen: a newly painted frame is the only thing that makes the
+        // editor's own animation (meters, knob drags) reach the screen, so the
+        // window has to repaint whenever CEF has produced one.
+        if OFFSCREEN_HOSTING
+            && matches!(self.status, Status::Attaching | Status::Attached)
+            && self.surface.sync(self.view_id)
+        {
+            cx.notify();
+        }
+
         if let Status::WaitingForHandle { ticks } = self.status {
             let ticks = ticks + 1;
             if ticks > MAX_HANDLE_TICKS {
-                self.status = Status::Failed(
-                    "the editor window never produced a usable native handle".to_string(),
+                let reason = if OFFSCREEN_HOSTING {
+                    "the editor window never reported usable content bounds"
+                } else {
+                    "the editor window never produced a usable native handle"
+                };
+                eprintln!(
+                    "[plugin-editor-window] attach timed out after {ticks} ticks, \
+                     render_passes_that_reached_attach={} offscreen={OFFSCREEN_HOSTING}",
+                    self.attach_attempts
                 );
-                cx.notify();
+                self.status = Status::Failed(reason.to_string());
             } else {
                 self.status = Status::WaitingForHandle { ticks };
             }
+            // `attach` only runs from a render pass, so waiting must schedule
+            // one every tick. Without this the attach is attempted exactly once
+            // — and a first render that precedes the platform's window
+            // configuration (routine on Wayland, where the compositor sizes the
+            // surface asynchronously) is never retried, so the window sits here
+            // until the tick budget runs out.
+            cx.notify();
         }
 
         // Bridge inbound: only once the browser exists, keyed by the same
@@ -633,40 +691,58 @@ impl BuiltinPluginEditorWindow {
         }
     }
 
-    /// Create the content child and the CEF browser inside it. Called from the
-    /// render pass, which is the first place a valid native handle and real
-    /// content bounds are both available.
+    /// Create the CEF browser for this window. Called from the render pass,
+    /// which is the first place a valid native handle (windowed hosting) and
+    /// real content bounds are both available.
     fn attach(&mut self, window: &mut Window, bounds: Bounds<Pixels>, cx: &mut Context<Self>) {
-        let Some(top_hwnd) = native_hwnd(window) else {
-            return;
-        };
-
+        self.attach_attempts += 1;
         let scale = window.scale_factor();
         let rect = content_rect(bounds, scale, self.sidebar_width());
         if rect.width <= 0 || rect.height <= 0 {
+            // Routine for the first render pass on a compositor that sizes the
+            // surface asynchronously; the waiting tick schedules another pass.
+            eprintln!(
+                "[plugin-editor-window] attach deferred attempt={} window_bounds={:?} scale={scale} content_rect={rect:?}",
+                self.attach_attempts, bounds.size
+            );
             return;
         }
+        eprintln!(
+            "[plugin-editor-window] attach begin attempt={} offscreen={OFFSCREEN_HOSTING} content_rect={rect:?} scale={scale}",
+            self.attach_attempts
+        );
 
-        let content = match self.content.as_ref() {
-            Some(content) if content.is_valid() => content,
-            _ => {
-                let Some(created) = ContentChildHwnd::create(
-                    top_hwnd,
-                    ContentRect {
-                        x: rect.x,
-                        y: rect.y,
-                        width: rect.width,
-                        height: rect.height,
-                    },
-                ) else {
-                    self.status =
-                        Status::Failed("could not create the editor content window".to_string());
-                    cx.notify();
-                    return;
-                };
-                self.content = Some(created);
-                self.content.as_ref().expect("just installed")
-            }
+        // Off-screen hosting has no parent window and no content child: CEF
+        // paints into a buffer this window draws itself.
+        let parent_hwnd = if OFFSCREEN_HOSTING {
+            0
+        } else {
+            let Some(top_hwnd) = native_hwnd(window) else {
+                return;
+            };
+            let content = match self.content.as_ref() {
+                Some(content) if content.is_valid() => content,
+                _ => {
+                    let Some(created) = ContentChildHwnd::create(
+                        top_hwnd,
+                        ContentRect {
+                            x: rect.x,
+                            y: rect.y,
+                            width: rect.width,
+                            height: rect.height,
+                        },
+                    ) else {
+                        self.status = Status::Failed(
+                            "could not create the editor content window".to_string(),
+                        );
+                        cx.notify();
+                        return;
+                    };
+                    self.content = Some(created);
+                    self.content.as_ref().expect("just installed")
+                }
+            };
+            content.hwnd()
         };
 
         // CEF fills its parent's client area, so the browser is placed at the
@@ -681,8 +757,9 @@ impl BuiltinPluginEditorWindow {
             self.view_id,
             &self.editor_id,
             &self.plugin_id,
-            content.hwnd(),
+            parent_hwnd,
             view_rect,
+            scale,
         ) {
             Ok(()) => {
                 self.status = Status::Attaching;
@@ -719,6 +796,7 @@ impl BuiltinPluginEditorWindow {
                 width: rect.width,
                 height: rect.height,
             },
+            window.scale_factor(),
         );
         self.last_rect = Some(rect);
     }
@@ -788,6 +866,10 @@ impl Render for BuiltinPluginEditorWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let bounds = window.bounds();
 
+        // Frames superseded since the last pass still hold an atlas tile; this
+        // is the first point in the frame where a `Window` exists to free them.
+        self.surface.release_stale(window, cx);
+
         match &self.status {
             Status::WaitingForHandle { .. } => self.attach(window, bounds, cx),
             Status::Attaching | Status::Attached => self.resync_bounds(window, bounds),
@@ -831,10 +913,11 @@ impl Render for BuiltinPluginEditorWindow {
                     .flex_row()
                     .child(self.render_sidebar(cx))
                     .child(match failure {
-                        // The browser paints itself into the native child
-                        // below the header and right of the sidebar, so on
-                        // success this area stays deliberately empty.
-                        None => div().flex_1().min_h(px(0.0)),
+                        // Windowed hosting: the browser paints itself into the
+                        // native child below the header and right of the
+                        // sidebar, so that area stays deliberately empty.
+                        // Off-screen hosting: this window draws the frame.
+                        None => self.render_browser_region(cx),
                         Some(reason) => div()
                             .flex_1()
                             .min_h(px(0.0))
@@ -855,13 +938,220 @@ impl Render for BuiltinPluginEditorWindow {
                                     .text_size(px(11.0))
                                     .text_color(Colors::text_secondary())
                                     .child(reason),
-                            ),
+                            )
+                            .into_any_element(),
                     }),
             )
     }
 }
 
 impl BuiltinPluginEditorWindow {
+    /// The region the browser occupies.
+    ///
+    /// Windowed hosting leaves it empty — the native CEF child is composited
+    /// there by the platform, and anything GPUI painted would cover it.
+    /// Off-screen hosting draws the last painted frame and is the only place
+    /// the browser can receive input, so it also owns the event handlers.
+    fn render_browser_region(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let region = div().flex_1().min_h(px(0.0)).overflow_hidden();
+        if !OFFSCREEN_HOSTING {
+            return region.into_any_element();
+        }
+
+        region
+            .id("builtin-plugin-editor-surface")
+            .track_focus(&self.focus)
+            .when_some(self.surface.image(), |el, image| {
+                // The frame is already exactly the content rect in physical
+                // pixels; `Fill` maps it back 1:1 rather than letterboxing it.
+                el.child(img(image).size_full().object_fit(ObjectFit::Fill))
+            })
+            .child(self.mouse_move_forwarder(cx))
+            .on_mouse_down_out(cx.listener(|this, _event: &MouseDownEvent, _window, _cx| {
+                this.send_input(EditorInput::Focus(false));
+            }))
+            .on_scroll_wheel(cx.listener(Self::on_surface_scroll))
+            .on_key_down(cx.listener(Self::on_surface_key_down))
+            .on_key_up(cx.listener(Self::on_surface_key_up))
+            .on_mouse_down(MouseButton::Left, cx.listener(Self::on_surface_mouse_down))
+            .on_mouse_down(
+                MouseButton::Middle,
+                cx.listener(Self::on_surface_mouse_down),
+            )
+            .on_mouse_down(MouseButton::Right, cx.listener(Self::on_surface_mouse_down))
+            .on_mouse_up(MouseButton::Left, cx.listener(Self::on_surface_mouse_up))
+            .on_mouse_up(MouseButton::Middle, cx.listener(Self::on_surface_mouse_up))
+            .on_mouse_up(MouseButton::Right, cx.listener(Self::on_surface_mouse_up))
+            // A knob drag routinely leaves the browser rect; the page keeps
+            // tracking it (pointer capture) only if the release still arrives.
+            .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_surface_mouse_up))
+            .on_mouse_up_out(MouseButton::Middle, cx.listener(Self::on_surface_mouse_up))
+            .on_mouse_up_out(MouseButton::Right, cx.listener(Self::on_surface_mouse_up))
+            .into_any_element()
+    }
+
+    /// Window-wide mouse-move forwarding.
+    ///
+    /// An element-scoped `on_mouse_move` only fires while the pointer is inside
+    /// the hitbox, which would freeze any drag the moment it left the browser
+    /// rect — exactly what a knob drag does. Moves are therefore taken from the
+    /// window and translated unconditionally: a position outside the rect maps
+    /// to a coordinate outside the document, which is what the page should see
+    /// anyway.
+    fn mouse_move_forwarder(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let this = cx.weak_entity();
+        canvas(
+            |_, _, _| (),
+            move |_bounds, _, window, _cx| {
+                let this = this.clone();
+                window.on_mouse_event(move |event: &MouseMoveEvent, phase, _window, cx| {
+                    if phase != DispatchPhase::Bubble {
+                        return;
+                    }
+                    let _ = this.update(cx, |this, _cx| this.forward_mouse_move(event));
+                });
+            },
+        )
+        .absolute()
+        .size_0()
+    }
+
+    /// Window-space logical point → view-space logical point. CEF lays the page
+    /// out in the same logical pixels GPUI reports, offset by the chrome this
+    /// window reserves (see `content_rect`).
+    fn to_view_point(&self, position: Point<Pixels>) -> (i32, i32) {
+        let x: f32 = position.x.into();
+        let y: f32 = position.y.into();
+        (
+            (x - self.sidebar_width()).round() as i32,
+            (y - HEADER_H).round() as i32,
+        )
+    }
+
+    fn send_input(&self, input: EditorInput) {
+        if !OFFSCREEN_HOSTING || !matches!(self.status, Status::Attaching | Status::Attached) {
+            return;
+        }
+        host::send_view_input(self.view_id, input);
+    }
+
+    fn forward_mouse_move(&mut self, event: &MouseMoveEvent) {
+        let (x, y) = self.to_view_point(event.position);
+        self.send_input(EditorInput::MouseMove {
+            x,
+            y,
+            modifiers: self.surface.modifiers(event.modifiers),
+            leaving: false,
+        });
+    }
+
+    fn on_surface_mouse_down(
+        &mut self,
+        event: &MouseDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(button) = editor_mouse_button(event.button) else {
+            return;
+        };
+        // The page owns the keyboard while the pointer is in it; without this
+        // the browser never sees a focused document and text fields stay dead.
+        window.focus(&self.focus, cx);
+        self.send_input(EditorInput::Focus(true));
+        self.surface.set_button(button, true);
+        let (x, y) = self.to_view_point(event.position);
+        self.send_input(EditorInput::MouseButton {
+            x,
+            y,
+            button,
+            pressed: true,
+            click_count: event.click_count as i32,
+            modifiers: self.surface.modifiers(event.modifiers),
+        });
+    }
+
+    fn on_surface_mouse_up(
+        &mut self,
+        event: &MouseUpEvent,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) {
+        let Some(button) = editor_mouse_button(event.button) else {
+            return;
+        };
+        let (x, y) = self.to_view_point(event.position);
+        // Clear the held-button bit *before* sending, so the event CEF sees
+        // reports the state after the release, as a real platform event would.
+        self.surface.set_button(button, false);
+        self.send_input(EditorInput::MouseButton {
+            x,
+            y,
+            button,
+            pressed: false,
+            click_count: event.click_count.max(1) as i32,
+            modifiers: self.surface.modifiers(event.modifiers),
+        });
+    }
+
+    fn on_surface_scroll(
+        &mut self,
+        event: &ScrollWheelEvent,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) {
+        let (x, y) = self.to_view_point(event.position);
+        let (delta_x, delta_y) = match event.delta {
+            ScrollDelta::Pixels(delta) => {
+                let dx: f32 = delta.x.into();
+                let dy: f32 = delta.y.into();
+                (dx.round() as i32, dy.round() as i32)
+            }
+            ScrollDelta::Lines(delta) => (
+                (delta.x * SCROLL_LINE_HEIGHT).round() as i32,
+                (delta.y * SCROLL_LINE_HEIGHT).round() as i32,
+            ),
+        };
+        if delta_x == 0 && delta_y == 0 {
+            return;
+        }
+        self.send_input(EditorInput::MouseWheel {
+            x,
+            y,
+            delta_x,
+            delta_y,
+            modifiers: self.surface.modifiers(event.modifiers),
+        });
+    }
+
+    fn on_surface_key_down(
+        &mut self,
+        event: &KeyDownEvent,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) {
+        let modifiers = self.surface.modifiers(event.keystroke.modifiers);
+        if let Some(key) = editor_key(&event.keystroke, EditorKeyKind::Down, modifiers) {
+            self.send_input(EditorInput::Key(key));
+        }
+        // Chromium expects the typed text as its own `Char` event after the
+        // key-down; without it a key press moves focus but never inserts.
+        for key in editor_char_keys(&event.keystroke, modifiers) {
+            self.send_input(EditorInput::Key(key));
+        }
+    }
+
+    fn on_surface_key_up(
+        &mut self,
+        event: &KeyUpEvent,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) {
+        let modifiers = self.surface.modifiers(event.keystroke.modifiers);
+        if let Some(key) = editor_key(&event.keystroke, EditorKeyKind::Up, modifiers) {
+            self.send_input(EditorInput::Key(key));
+        }
+    }
+
     /// Native instance list. Reserved width matches `sidebar_width()`, which
     /// `content_rect` also reads — the CEF child and this column can never
     /// disagree about where the boundary is.

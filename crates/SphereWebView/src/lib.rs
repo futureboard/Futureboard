@@ -3,8 +3,12 @@
 //! The CEF SDK is intentionally not downloaded by normal workspace builds.
 //! Run the `install_cef` example with the `installer` feature to populate the
 //! workspace-local `build/cef` directory, then enable `cef-runtime` in the
-//! executable that owns the CEF process lifecycle. Windowless/off-screen
-//! rendering is never enabled by this crate.
+//! executable that owns the CEF process lifecycle.
+//!
+//! Two presentations are supported: a native CEF child window (Windows), and
+//! windowless/off-screen rendering into a host-owned framebuffer (see
+//! [`osr`]), which is what platforms without usable child-window embedding —
+//! Linux/Wayland in particular — use.
 
 use std::path::{Path, PathBuf};
 
@@ -191,6 +195,9 @@ pub use installer::install_cef;
 
 #[cfg(feature = "cef-runtime")]
 pub mod client;
+
+#[cfg(feature = "cef-runtime")]
+pub mod osr;
 
 #[cfg(feature = "cef-runtime")]
 pub mod runtime;

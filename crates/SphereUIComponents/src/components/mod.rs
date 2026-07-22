@@ -7,6 +7,7 @@ mod bottom_panel;
 mod bottom_panel_shell;
 pub mod box_list_view;
 pub mod builtin_plugin_editor;
+pub(crate) mod builtin_plugin_editor_surface;
 pub mod builtin_plugin_editor_window;
 pub mod color_picker;
 pub mod combo_box;

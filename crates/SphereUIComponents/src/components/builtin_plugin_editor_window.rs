@@ -510,6 +510,7 @@ impl BuiltinPluginEditorWindow {
                     Ok(tick) => {
                         // Destroying an HWND also dispatches Win32 messages, so
                         // release failed/closed content after the entity update.
+                        #[cfg(windows)]
                         drop(tick.content_to_drop);
                         if !tick.keep_going {
                             break;

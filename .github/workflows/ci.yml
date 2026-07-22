@@ -103,12 +103,12 @@ jobs:
             ~/.cargo/git
             target
             build/cef
-          key: ci-cargo-cef-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          key: ci-v2-cargo-cef-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: |
-            ci-cargo-cef-${{ runner.os }}-
+            ci-v2-cargo-cef-${{ runner.os }}-
 
       - name: Install pinned CEF SDK and runtime
-        if: steps.ci-cache.outputs.cache-hit != 'true'
+        if: hashFiles('build/cef/archive.json') == ''
         run: cargo run -p SphereWebView --example install_cef --features installer
 
       - name: Install built-in plugin editor dependencies

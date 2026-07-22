@@ -4,12 +4,13 @@ import {
   OUTPUT_TRIM,
   SILENCE_DBFS,
   calibrationFor,
+  distanceCm,
   formatDbfs,
   formatTrim,
   linearToDbfs,
   meterPosition,
+  positionLabel,
 } from "./globals";
-import { distanceCm, positionLabel } from "./Components/CabinetStage";
 
 describe("level conversion", () => {
   test("full scale is 0 dBFS", () => {

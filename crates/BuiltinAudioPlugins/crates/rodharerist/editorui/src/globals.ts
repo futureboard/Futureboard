@@ -101,3 +101,22 @@ export const calibrationLabel: Record<CalibrationState, string> = {
   hot: "Hot",
   clipping: "Clipping",
 };
+
+/**
+ * Physical range the `cab_dist` 0..100 % parameter spans, for display only.
+ * The DSP treats distance as a normalized roll-off amount; showing it in cm
+ * gives the control a meaningful scale without claiming a measured model.
+ */
+const DISTANCE_CM_MIN = 0;
+const DISTANCE_CM_MAX = 30;
+
+export function distanceCm(pct: number): number {
+  return DISTANCE_CM_MIN + (pct / 100) * (DISTANCE_CM_MAX - DISTANCE_CM_MIN);
+}
+
+/** `cab_mic` 0 % = dead centre (on-axis), 100 % = speaker edge (off-axis). */
+export function positionLabel(pct: number): string {
+  if (pct < 12) return "Centre";
+  if (pct > 78) return "Edge";
+  return "Off-centre";
+}

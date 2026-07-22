@@ -7,7 +7,7 @@ import {
   type Param,
 } from "../data";
 import type { NamCaptureLoadOptions } from "../bridge";
-import { CabinetStage } from "./CabinetStage";
+import { distanceCm, positionLabel } from "../globals";
 import { Knob } from "./Knob";
 
 type ModuleEditorProps = {
@@ -136,40 +136,37 @@ export function ModuleEditor({
         )}
 
         {isCabinet ? (
-          // The cabinet module gets a stage view plus a numeric inspector: mic
-          // placement is spatial, so it needs both a direct-manipulation view
-          // and exact values. Both edit the same two DSP parameters.
-          <div className="cab-layout">
-            <CabinetStage
-              modelId={activeModelId}
-              position={paramValue("cab_mic", 20)}
-              distance={paramValue("cab_dist", 40)}
-              bypassed={bypassed}
-              onParamChange={onParamChange}
-            />
-            <div className="cab-inspector">
-              <span className="inspector-title">Mic</span>
-              <div className="param-bank column">
-                {params.map((p) => (
-                  <Knob
-                    key={p.id}
-                    id={p.id}
-                    name={p.name}
-                    min={p.min}
-                    max={p.max}
-                    value={p.val}
-                    unit={p.unit}
-                    defaultValue={defaultValueFor(activeModelId, p.id)}
-                    onChange={onParamChange}
-                  />
-                ))}
-              </div>
-              <p className="inspector-note">
-                Position is measured from the speaker centre; distance is shown on a
-                0–30 cm scale. The cabinet is modelled as a whole, so there is no
-                per-speaker or second-mic processing yet.
-              </p>
+          // Mic placement is edited with the same knobs as every other module;
+          // the readout translates the two parameters into the terms an engineer
+          // thinks in (axis position, centimetres).
+          <div className="cab-inspector">
+            <div className="param-bank">
+              {params.map((p) => (
+                <Knob
+                  key={p.id}
+                  id={p.id}
+                  name={p.name}
+                  min={p.min}
+                  max={p.max}
+                  value={p.val}
+                  unit={p.unit}
+                  defaultValue={defaultValueFor(activeModelId, p.id)}
+                  onChange={onParamChange}
+                />
+              ))}
             </div>
+            <div className="cab-readout">
+              <span>
+                <b>{positionLabel(paramValue("cab_mic", 20))}</b>{" "}
+                {paramValue("cab_mic", 20).toFixed(0)}%
+              </span>
+              <span>{distanceCm(paramValue("cab_dist", 40)).toFixed(1)} cm</span>
+            </div>
+            <p className="inspector-note">
+              Position is measured from the speaker centre; distance is shown on a
+              0–30 cm scale. The cabinet is modelled as a whole, so there is no
+              per-speaker or second-mic processing yet.
+            </p>
           </div>
         ) : (
           <div className="param-bank">

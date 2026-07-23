@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   categories,
   defaultValueFor,
@@ -7,8 +7,16 @@ import {
   type Param,
 } from "../data";
 import type { NamCaptureLoadOptions } from "../bridge";
+import { onNativeMessage } from "../instanceBridge";
 import { distanceCm, positionLabel } from "../globals";
 import { Knob } from "./Knob";
+
+/** Lifecycle of the most recent `.nam` load request. */
+type NamLoadStatus =
+  | { kind: "idle" }
+  | { kind: "loading"; name: string }
+  | { kind: "loaded"; name: string; receptiveField: number }
+  | { kind: "error"; name: string; message: string };
 
 type ModuleEditorProps = {
   activeCat: CategoryId;
@@ -40,6 +48,29 @@ export function ModuleEditor({
   const isCabinet = activeCat === "cab";
   const [namStereo, setNamStereo] = useState(true);
   const [namFullRig, setNamFullRig] = useState(false);
+  const [namStatus, setNamStatus] = useState<NamLoadStatus>({ kind: "idle" });
+
+  // Resolve the pending load from the host's async result message.
+  useEffect(
+    () =>
+      onNativeMessage((msg) => {
+        if (msg.type !== "futureboard.namCaptureResult") return;
+        if (msg.ok) {
+          setNamStatus({
+            kind: "loaded",
+            name: msg.name,
+            receptiveField: msg.receptiveField,
+          });
+        } else {
+          setNamStatus({
+            kind: "error",
+            name: msg.name,
+            message: msg.error ?? "load failed",
+          });
+        }
+      }),
+    [],
+  );
 
   const paramValue = (id: string, fallback: number) =>
     params.find((p) => p.id === id)?.val ?? fallback;
@@ -50,8 +81,10 @@ export function ModuleEditor({
     reader.onload = () => {
       const json = reader.result;
       if (typeof json === "string") {
+        const name = file.name.replace(/\.nam$/i, "");
+        setNamStatus({ kind: "loading", name });
         onLoadNamCapture(json, {
-          name: file.name.replace(/\.nam$/i, ""),
+          name,
           stereo: namStereo,
           fullRig: namFullRig,
         });
@@ -131,6 +164,19 @@ export function ModuleEditor({
               <button type="button" className="nam-bypass-cab" onClick={onBypassCab}>
                 Bypass Cab
               </button>
+            )}
+            {namStatus.kind !== "idle" && (
+              <div
+                className={`nam-load-status ${namStatus.kind}`}
+                role="status"
+                aria-live="polite"
+              >
+                {namStatus.kind === "loading" && `Loading “${namStatus.name}”…`}
+                {namStatus.kind === "loaded" &&
+                  `Loaded “${namStatus.name}” (${namStatus.receptiveField} sample latency)`}
+                {namStatus.kind === "error" &&
+                  `“${namStatus.name}” failed: ${namStatus.message}`}
+              </div>
             )}
           </div>
         )}

@@ -9,12 +9,15 @@
 mod dsp;
 mod state;
 pub mod ui;
+mod wire;
 
 pub use dsp::{
-    AmpModel, CabModel, DriveModel, Dsp, NamCaptureInfo, NamLoadError, PLUGIN_ID, Params,
-    StageKind, ToneEngineKind, default_params, descriptor,
+    AmpModel, CabModel, DriveModel, Dsp, ModModel, NamCaptureInfo, NamLoadError, NamLoader,
+    PATH_SLOTS, PLUGIN_ID, Params, PreparedNamRuntime, StageKind, ToneEngineKind, WahModel,
+    apply_to_params, default_params, descriptor, prepare_nam_runtime, ui_values,
 };
 pub use state::{RodhareistState, SCHEMA_VERSION};
+pub use wire::{UI_PARAM_IDS, ui_param_id, ui_param_index};
 
 #[cfg(test)]
 mod tests {

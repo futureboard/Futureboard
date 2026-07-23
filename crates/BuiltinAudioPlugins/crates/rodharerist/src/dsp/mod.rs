@@ -5,8 +5,11 @@
 //! signal chain exactly:
 //!
 //! ```text
-//! Gate → Drive → Amp → Chorus → Tape Delay → Plate Reverb → Cabinet
+//! Gate → Comp → Drive → Amp → EQ → Mod → Tape Delay → Plate Reverb → Cabinet
 //! ```
+//!
+//! (user-reorderable; a Wah stage starts in the rack, and the Mod slot runs
+//! one of chorus / phaser / flanger / tremolo)
 //!
 //! ## Realtime rules
 //!
@@ -22,13 +25,22 @@
 mod amp;
 mod cab;
 mod chorus;
+mod comp;
 mod delay;
 mod drive;
+mod drive_models;
+mod eq;
+mod flanger;
 mod gate;
 mod handoff;
+mod mod_stage;
 mod nam;
+mod phaser;
 mod reverb;
+mod smooth;
 mod tone_stage;
+mod tremolo;
+mod wah;
 
 use builtin_dsp_core::{
     ParamDescriptor, PluginCategory, PluginDescriptor, StereoEffect, clamp, db_to_linear,
@@ -36,18 +48,27 @@ use builtin_dsp_core::{
 };
 
 use cab::Cabinet;
-use chorus::Chorus;
+use comp::CompStage;
 use delay::TapeDelay;
 use drive::Drive;
+use eq::EqStage;
 use gate::NoiseGate;
-pub use nam::{NamCaptureInfo, NamLoadError};
+use mod_stage::ModStage;
+pub use nam::{NamCaptureInfo, NamLoadError, NamLoader, PreparedNamRuntime, prepare_nam_runtime};
 use reverb::PlateReverb;
 pub use tone_stage::ToneEngineKind;
 use tone_stage::ToneStage;
+use wah::Wah;
 
 pub const PLUGIN_ID: &str = "futureboard.rodharerist";
 
+/// Number of slots in the user-orderable signal path (one per [`StageKind`]).
+pub const PATH_SLOTS: usize = 10;
+
 /// One slot in the Helix-style signal path. Order is user-editable.
+///
+/// Discriminants are a wire/persistence ABI (`path_slot_*` values, saved
+/// `stage_order`) — append new stages, never renumber.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[repr(u8)]
 pub enum StageKind {
@@ -58,6 +79,9 @@ pub enum StageKind {
     Delay = 4,
     Reverb = 5,
     Cab = 6,
+    Comp = 7,
+    Eq = 8,
+    Wah = 9,
 }
 
 impl StageKind {
@@ -69,6 +93,9 @@ impl StageKind {
         Self::Delay,
         Self::Reverb,
         Self::Cab,
+        Self::Comp,
+        Self::Eq,
+        Self::Wah,
     ];
 
     pub fn from_index(i: i32) -> Option<Self> {
@@ -80,6 +107,9 @@ impl StageKind {
             4 => Some(Self::Delay),
             5 => Some(Self::Reverb),
             6 => Some(Self::Cab),
+            7 => Some(Self::Comp),
+            8 => Some(Self::Eq),
+            9 => Some(Self::Wah),
             _ => None,
         }
     }
@@ -88,21 +118,34 @@ impl StageKind {
         self as u8
     }
 
-    /// Default factory path order.
-    pub fn default_path() -> [Option<Self>; 7] {
+    /// Default factory path order: comp after the gate (level control before
+    /// dirt), EQ after the amp (tone shaping before time effects). Comp and
+    /// EQ default to neutral settings, so the factory patch's character is
+    /// unchanged from the 7-stage era.
+    ///
+    /// The Wah stage is deliberately *not* in the default path — a wah is
+    /// never tonally neutral, so it starts in the editor's rack (last slot
+    /// empty) and joins the path only when the user places it.
+    pub fn default_path() -> [Option<Self>; PATH_SLOTS] {
         [
             Some(Self::Gate),
+            Some(Self::Comp),
             Some(Self::Drive),
             Some(Self::Amp),
+            Some(Self::Eq),
             Some(Self::Mod),
             Some(Self::Delay),
             Some(Self::Reverb),
             Some(Self::Cab),
+            None,
         ]
     }
 }
 
 /// Overdrive/boost voicing, matching the editor's `dist` models.
+///
+/// APPEND-ONLY: the variant order is `ALL`'s order, and that index is the
+/// `drive_model` wire value — never reorder or insert mid-list.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum DriveModel {
     /// "Green Screamer" — mid-boosted tube-screamer style overdrive.
@@ -117,6 +160,14 @@ pub enum DriveModel {
     Fuzz,
     /// "Centurion" — transparent mid-forward OD.
     Centurion,
+    /// "DS Classic" — raw orange-box hard clipper (DS-1 style).
+    DsOne,
+    /// "Super Drive" — asymmetric-diode smooth overdrive (SD-1 style).
+    SuperDrive,
+    /// "Metal Core" — huge-gain scooped-mid metal distortion (MT-2 style).
+    MetalCore,
+    /// "Tight Rift" — modern multi-stage tight high-gain (Neural-style).
+    TightRift,
 }
 
 impl DriveModel {
@@ -127,6 +178,10 @@ impl DriveModel {
         Self::Breaker,
         Self::Fuzz,
         Self::Centurion,
+        Self::DsOne,
+        Self::SuperDrive,
+        Self::MetalCore,
+        Self::TightRift,
     ];
 
     /// Map the editor model id.
@@ -138,6 +193,10 @@ impl DriveModel {
             "breaker" => Some(Self::Breaker),
             "fuzz" => Some(Self::Fuzz),
             "centurion" => Some(Self::Centurion),
+            "ds_one" => Some(Self::DsOne),
+            "super_drive" => Some(Self::SuperDrive),
+            "metal_core" => Some(Self::MetalCore),
+            "tight_rift" => Some(Self::TightRift),
             _ => None,
         }
     }
@@ -238,6 +297,70 @@ impl CabModel {
     }
 }
 
+/// Modulation algorithm in the Mod slot, matching the editor's `mod` models.
+/// All share the Rate/Depth/Mix knobs (`chorus_*` wire ids), like the Drive
+/// slot's models share `drive_*`.
+///
+/// APPEND-ONLY: index into `ALL` is the `mod_model` wire value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub enum ModModel {
+    /// "70s Analog Chorus" — dual modulated delay lines in quadrature.
+    #[default]
+    Chorus,
+    /// "Vibe Phase 90" — swept 4-stage allpass phaser.
+    Phaser,
+    /// "Jet Flanger" — short modulated delay with regeneration.
+    Flanger,
+    /// "Opto Tremolo" — amp-style amplitude modulation.
+    Tremolo,
+}
+
+impl ModModel {
+    pub const ALL: &'static [Self] = &[Self::Chorus, Self::Phaser, Self::Flanger, Self::Tremolo];
+
+    pub fn from_model_id(id: &str) -> Option<Self> {
+        match id {
+            "chorus" => Some(Self::Chorus),
+            "phaser" => Some(Self::Phaser),
+            "flanger" => Some(Self::Flanger),
+            "tremolo" => Some(Self::Tremolo),
+            _ => None,
+        }
+    }
+
+    pub fn from_index(i: u32) -> Self {
+        Self::ALL.get(i as usize).copied().unwrap_or(Self::Chorus)
+    }
+}
+
+/// Wah voicing, matching the editor's `wah` models.
+///
+/// APPEND-ONLY: index into `ALL` is the `wah_model` wire value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub enum WahModel {
+    /// "Cry Wah" — pedal-position sweep (the Position knob is the pedal).
+    #[default]
+    CryWah,
+    /// "Touch Wah" — envelope-follower auto wah.
+    TouchWah,
+}
+
+impl WahModel {
+    pub const ALL: &'static [Self] = &[Self::CryWah, Self::TouchWah];
+
+    pub fn from_model_id(id: &str) -> Option<Self> {
+        match id {
+            "cry_wah" => Some(Self::CryWah),
+            "touch_wah" => Some(Self::TouchWah),
+            _ => None,
+        }
+    }
+
+    pub fn from_index(i: u32) -> Self {
+        Self::ALL.get(i as usize).copied().unwrap_or(Self::CryWah)
+    }
+}
+
 /// Full parameter set. Knob ranges match `editorui/src/data.ts` one-to-one so the
 /// React UI and the bridge speak the same units.
 ///
@@ -246,7 +369,7 @@ impl CabModel {
 /// serialized [`Params`] wrapped in [`RodhareistState`], not a separately
 /// invented schema — there is no reason for the wire format to diverge from
 /// what the DSP actually holds.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Params {
     pub power: bool,
 
@@ -265,10 +388,21 @@ pub struct Params {
     pub delay_on: bool,
     pub reverb_on: bool,
     pub cab_on: bool,
+    #[serde(default = "default_true")]
+    pub comp_on: bool,
+    #[serde(default = "default_true")]
+    pub eq_on: bool,
+    #[serde(default = "default_true")]
+    pub wah_on: bool,
 
     pub drive_model: DriveModel,
     pub amp_model: AmpModel,
     pub cab_model: CabModel,
+    /// Which algorithm the Mod slot runs (shares the `chorus_*` knobs).
+    #[serde(default)]
+    pub mod_model: ModModel,
+    #[serde(default)]
+    pub wah_model: WahModel,
 
     /// Which engine the Tone/Amp slot runs: Classic Amp, NAM Capture, or Bypass.
     /// Mutually exclusive — never more than one processes at a time.
@@ -276,7 +410,7 @@ pub struct Params {
 
     /// Helix-style ordered path. `None` = empty slot (stage not in path).
     /// Stages absent from this list are not processed.
-    pub stage_order: [Option<StageKind>; 7],
+    pub stage_order: [Option<StageKind>; PATH_SLOTS],
 
     /// Noise gate threshold (dB, -80..0).
     pub gate_thresh_db: f32,
@@ -312,11 +446,76 @@ pub struct Params {
     pub cab_mic: f32,  // 0..100 % (mic position / brightness)
     pub cab_dist: f32, // 0..100 % (distance / roll-off)
 
+    // Wah (defaults are a mid-heel pedal; the stage starts out of the path).
+    #[serde(default = "default_wah_pos")]
+    pub wah_pos: f32, // 0..10 (pedal position / base frequency)
+    #[serde(default = "default_wah_res")]
+    pub wah_res: f32, // 0..10 (resonance)
+    #[serde(default = "default_wah_sens")]
+    pub wah_sens: f32, // 0..10 (envelope sensitivity, Touch Wah only)
+
+    // Studio compressor (defaults are gentle/neutral — see `default_params`).
+    #[serde(default = "default_comp_thresh")]
+    pub comp_thresh_db: f32, // -60..0
+    #[serde(default = "default_comp_ratio")]
+    pub comp_ratio: f32, // 1..20
+    #[serde(default = "default_comp_attack")]
+    pub comp_attack_ms: f32, // 0.1..100
+    #[serde(default = "default_comp_release")]
+    pub comp_release_ms: f32, // 10..1000
+    #[serde(default)]
+    pub comp_makeup_db: f32, // 0..24
+
+    // Studio EQ (0 dB gains = bit-transparent).
+    #[serde(default)]
+    pub eq_low_gain_db: f32, // -15..15
+    #[serde(default = "default_eq_mid1_freq")]
+    pub eq_mid1_freq_hz: f32, // 100..1000
+    #[serde(default)]
+    pub eq_mid1_gain_db: f32, // -15..15
+    #[serde(default = "default_eq_mid2_freq")]
+    pub eq_mid2_freq_hz: f32, // 600..6000
+    #[serde(default)]
+    pub eq_mid2_gain_db: f32, // -15..15
+    #[serde(default)]
+    pub eq_high_gain_db: f32, // -15..15
+
     // NAM Capture (only active while `tone_engine == ToneEngineKind::NamCapture`).
     pub nam_input_trim_db: f32,  // -24..24
     pub nam_output_trim_db: f32, // -24..24
     pub nam_mix: f32,            // 0..100 % wet
     pub nam_loudness_norm: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+fn default_comp_thresh() -> f32 {
+    -24.0
+}
+fn default_comp_ratio() -> f32 {
+    2.0
+}
+fn default_comp_attack() -> f32 {
+    10.0
+}
+fn default_comp_release() -> f32 {
+    120.0
+}
+fn default_eq_mid1_freq() -> f32 {
+    400.0
+}
+fn default_eq_mid2_freq() -> f32 {
+    2_000.0
+}
+fn default_wah_pos() -> f32 {
+    4.5
+}
+fn default_wah_res() -> f32 {
+    5.0
+}
+fn default_wah_sens() -> f32 {
+    5.0
 }
 
 /// Defaults mirror the editor's `parameterDefaults` (Mandarin patch, "06D").
@@ -332,9 +531,14 @@ pub fn default_params() -> Params {
         delay_on: true,
         reverb_on: true,
         cab_on: true,
+        comp_on: true,
+        eq_on: true,
+        wah_on: true,
         drive_model: DriveModel::Screamer,
         amp_model: AmpModel::Mandarin,
         cab_model: CabModel::Vintage4x12,
+        mod_model: ModModel::Chorus,
+        wah_model: WahModel::CryWah,
         tone_engine: ToneEngineKind::Classic,
         stage_order: StageKind::default_path(),
         gate_thresh_db: -55.0,
@@ -357,6 +561,20 @@ pub fn default_params() -> Params {
         reverb_mix: 55.0,
         cab_mic: 20.0,
         cab_dist: 40.0,
+        wah_pos: default_wah_pos(),
+        wah_res: default_wah_res(),
+        wah_sens: default_wah_sens(),
+        comp_thresh_db: default_comp_thresh(),
+        comp_ratio: default_comp_ratio(),
+        comp_attack_ms: default_comp_attack(),
+        comp_release_ms: default_comp_release(),
+        comp_makeup_db: 0.0,
+        eq_low_gain_db: 0.0,
+        eq_mid1_freq_hz: default_eq_mid1_freq(),
+        eq_mid1_gain_db: 0.0,
+        eq_mid2_freq_hz: default_eq_mid2_freq(),
+        eq_mid2_gain_db: 0.0,
+        eq_high_gain_db: 0.0,
         nam_input_trim_db: 0.0,
         nam_output_trim_db: 0.0,
         nam_mix: 100.0,
@@ -557,6 +775,118 @@ pub fn descriptor() -> PluginDescriptor {
                 max: 100.0,
                 unit: "%",
             },
+            ParamDescriptor {
+                id: "wah_pos",
+                name: "Wah Position",
+                default_value: 4.5,
+                min: 0.0,
+                max: 10.0,
+                unit: "",
+            },
+            ParamDescriptor {
+                id: "wah_res",
+                name: "Wah Resonance",
+                default_value: 5.0,
+                min: 0.0,
+                max: 10.0,
+                unit: "",
+            },
+            ParamDescriptor {
+                id: "wah_sens",
+                name: "Wah Sensitivity",
+                default_value: 5.0,
+                min: 0.0,
+                max: 10.0,
+                unit: "",
+            },
+            ParamDescriptor {
+                id: "comp_thresh",
+                name: "Comp Threshold",
+                default_value: -24.0,
+                min: -60.0,
+                max: 0.0,
+                unit: "dB",
+            },
+            ParamDescriptor {
+                id: "comp_ratio",
+                name: "Comp Ratio",
+                default_value: 2.0,
+                min: 1.0,
+                max: 20.0,
+                unit: ":1",
+            },
+            ParamDescriptor {
+                id: "comp_attack",
+                name: "Comp Attack",
+                default_value: 10.0,
+                min: 0.1,
+                max: 100.0,
+                unit: "ms",
+            },
+            ParamDescriptor {
+                id: "comp_release",
+                name: "Comp Release",
+                default_value: 120.0,
+                min: 10.0,
+                max: 1000.0,
+                unit: "ms",
+            },
+            ParamDescriptor {
+                id: "comp_makeup",
+                name: "Comp Makeup",
+                default_value: 0.0,
+                min: 0.0,
+                max: 24.0,
+                unit: "dB",
+            },
+            ParamDescriptor {
+                id: "eq_low_gain",
+                name: "EQ Low",
+                default_value: 0.0,
+                min: -15.0,
+                max: 15.0,
+                unit: "dB",
+            },
+            ParamDescriptor {
+                id: "eq_mid1_freq",
+                name: "EQ Mid1 Freq",
+                default_value: 400.0,
+                min: 100.0,
+                max: 1000.0,
+                unit: "Hz",
+            },
+            ParamDescriptor {
+                id: "eq_mid1_gain",
+                name: "EQ Mid1",
+                default_value: 0.0,
+                min: -15.0,
+                max: 15.0,
+                unit: "dB",
+            },
+            ParamDescriptor {
+                id: "eq_mid2_freq",
+                name: "EQ Mid2 Freq",
+                default_value: 2000.0,
+                min: 600.0,
+                max: 6000.0,
+                unit: "Hz",
+            },
+            ParamDescriptor {
+                id: "eq_mid2_gain",
+                name: "EQ Mid2",
+                default_value: 0.0,
+                min: -15.0,
+                max: 15.0,
+                unit: "dB",
+            },
+            ParamDescriptor {
+                id: "eq_high_gain",
+                name: "EQ High",
+                default_value: 0.0,
+                min: -15.0,
+                max: 15.0,
+                unit: "dB",
+            },
         ],
     }
 }
@@ -566,16 +896,19 @@ pub struct Dsp {
     sample_rate: f32,
     params: Params,
     gate: NoiseGate,
+    comp_stage: CompStage,
     drive: Drive,
     amp_stage: ToneStage,
-    chorus: Chorus,
+    eq_stage: EqStage,
+    mod_stage: ModStage,
+    wah: Wah,
     delay: TapeDelay,
     reverb: PlateReverb,
     cab: Cabinet,
     /// Linear gains derived from `input_trim_db` / `output_trim_db`, recomputed
     /// on the control thread so the audio path only multiplies.
-    in_gain: f32,
-    out_gain: f32,
+    in_gain: smooth::Smoothed,
+    out_gain: smooth::Smoothed,
     meters: Meters,
 }
 
@@ -635,6 +968,9 @@ impl Meters {
 /// Full scale. A sample at or beyond this is reported as a clip.
 const CLIP_THRESHOLD: f32 = 1.0;
 
+/// Glide time for the global input/output trims (see `smooth.rs`).
+const TRIM_SMOOTH_SECONDS: f32 = 0.010;
+
 impl Dsp {
     pub fn new(sample_rate: f32) -> Self {
         let sr = sample_rate.max(1.0);
@@ -642,14 +978,17 @@ impl Dsp {
             sample_rate: sr,
             params: default_params(),
             gate: NoiseGate::new(sr),
+            comp_stage: CompStage::new(sr),
             drive: Drive::new(sr),
             amp_stage: ToneStage::new(sr),
-            chorus: Chorus::new(sr),
+            eq_stage: EqStage::new(sr),
+            mod_stage: ModStage::new(sr),
+            wah: Wah::new(sr),
             delay: TapeDelay::new(sr),
             reverb: PlateReverb::new(sr),
             cab: Cabinet::new(sr),
-            in_gain: 1.0,
-            out_gain: 1.0,
+            in_gain: smooth::Smoothed::new(sr, TRIM_SMOOTH_SECONDS, 1.0),
+            out_gain: smooth::Smoothed::new(sr, TRIM_SMOOTH_SECONDS, 1.0),
             meters: Meters::new(sr),
         };
         dsp.apply_params();
@@ -700,9 +1039,14 @@ impl Dsp {
             delay_on: params.delay_on,
             reverb_on: params.reverb_on,
             cab_on: params.cab_on,
+            comp_on: params.comp_on,
+            eq_on: params.eq_on,
+            wah_on: params.wah_on,
             drive_model: params.drive_model,
             amp_model: params.amp_model,
             cab_model: params.cab_model,
+            mod_model: params.mod_model,
+            wah_model: params.wah_model,
             tone_engine: params.tone_engine,
             stage_order: sanitize_stage_order(params.stage_order),
             gate_thresh_db: clamp(params.gate_thresh_db, -80.0, 0.0),
@@ -725,6 +1069,20 @@ impl Dsp {
             reverb_mix: clamp(params.reverb_mix, 0.0, 100.0),
             cab_mic: clamp(params.cab_mic, 0.0, 100.0),
             cab_dist: clamp(params.cab_dist, 0.0, 100.0),
+            wah_pos: clamp(params.wah_pos, 0.0, 10.0),
+            wah_res: clamp(params.wah_res, 0.0, 10.0),
+            wah_sens: clamp(params.wah_sens, 0.0, 10.0),
+            comp_thresh_db: clamp(params.comp_thresh_db, -60.0, 0.0),
+            comp_ratio: clamp(params.comp_ratio, 1.0, 20.0),
+            comp_attack_ms: clamp(params.comp_attack_ms, 0.1, 100.0),
+            comp_release_ms: clamp(params.comp_release_ms, 10.0, 1_000.0),
+            comp_makeup_db: clamp(params.comp_makeup_db, 0.0, 24.0),
+            eq_low_gain_db: clamp(params.eq_low_gain_db, -15.0, 15.0),
+            eq_mid1_freq_hz: clamp(params.eq_mid1_freq_hz, 100.0, 1_000.0),
+            eq_mid1_gain_db: clamp(params.eq_mid1_gain_db, -15.0, 15.0),
+            eq_mid2_freq_hz: clamp(params.eq_mid2_freq_hz, 600.0, 6_000.0),
+            eq_mid2_gain_db: clamp(params.eq_mid2_gain_db, -15.0, 15.0),
+            eq_high_gain_db: clamp(params.eq_high_gain_db, -15.0, 15.0),
             nam_input_trim_db: clamp(params.nam_input_trim_db, -24.0, 24.0),
             nam_output_trim_db: clamp(params.nam_output_trim_db, -24.0, 24.0),
             nam_mix: clamp(params.nam_mix, 0.0, 100.0),
@@ -738,58 +1096,16 @@ impl Dsp {
     /// model selects (`drive_model`=0/1, `amp_model`=0/1). Returns `false` for an
     /// unknown id so a bridge can flag mismatches. Control-thread only.
     pub fn apply_ui_param(&mut self, id: &str, value: f32) -> bool {
+        // Not a parameter: editor's click-to-reset for the sticky clip
+        // lights, routed through the same wire so no extra transport is
+        // needed. Doesn't touch `Params` — see `apply_to_params`.
+        if id == "clear_clip" {
+            self.clear_clip();
+            return true;
+        }
         let mut p = self.params.clone();
-        let on = value >= 0.5;
-        match id {
-            "power" => p.power = on,
-            "input_trim" => p.input_trim_db = value,
-            "output_trim" => p.output_trim_db = value,
-            "gate_on" => p.gate_on = on,
-            "drive_on" => p.drive_on = on,
-            "amp_on" => p.amp_on = on,
-            "mod_on" => p.mod_on = on,
-            "delay_on" => p.delay_on = on,
-            "reverb_on" => p.reverb_on = on,
-            "cab_on" => p.cab_on = on,
-            "drive_model" => p.drive_model = DriveModel::from_index(value.round() as u32),
-            "amp_model" => {
-                p.amp_model = AmpModel::from_index(value.round() as u32);
-                p.tone_engine = ToneEngineKind::Classic;
-            }
-            "cab_model" => p.cab_model = CabModel::from_index(value.round() as u32),
-            "tone_engine" => p.tone_engine = ToneEngineKind::from_index(value.round() as u32),
-            "path_slot_0" => p.stage_order[0] = StageKind::from_index(value.round() as i32),
-            "path_slot_1" => p.stage_order[1] = StageKind::from_index(value.round() as i32),
-            "path_slot_2" => p.stage_order[2] = StageKind::from_index(value.round() as i32),
-            "path_slot_3" => p.stage_order[3] = StageKind::from_index(value.round() as i32),
-            "path_slot_4" => p.stage_order[4] = StageKind::from_index(value.round() as i32),
-            "path_slot_5" => p.stage_order[5] = StageKind::from_index(value.round() as i32),
-            "path_slot_6" => p.stage_order[6] = StageKind::from_index(value.round() as i32),
-            "gate_thresh" => p.gate_thresh_db = value,
-            "drive_gain" => p.drive_gain = value,
-            "drive_tone" => p.drive_tone = value,
-            "drive_level" => p.drive_level = value,
-            "amp_gain" => p.amp_gain = value,
-            "amp_bass" => p.amp_bass = value,
-            "amp_middle" => p.amp_middle = value,
-            "amp_treble" => p.amp_treble = value,
-            "amp_presence" => p.amp_presence = value,
-            "amp_master" => p.amp_master = value,
-            "chorus_rate" => p.chorus_rate = value,
-            "chorus_depth" => p.chorus_depth = value,
-            "chorus_mix" => p.chorus_mix = value,
-            "delay_time" => p.delay_time_ms = value,
-            "delay_fb" => p.delay_fb = value,
-            "delay_mix" => p.delay_mix = value,
-            "reverb_decay" => p.reverb_decay_s = value,
-            "reverb_mix" => p.reverb_mix = value,
-            "cab_mic" => p.cab_mic = value,
-            "cab_dist" => p.cab_dist = value,
-            "nam_input_trim" => p.nam_input_trim_db = value,
-            "nam_output_trim" => p.nam_output_trim_db = value,
-            "nam_mix" => p.nam_mix = value,
-            "nam_loudness_norm" => p.nam_loudness_norm = on,
-            _ => return false,
+        if !apply_to_params(&mut p, id, value) {
+            return false;
         }
         self.set_params(p);
         true
@@ -818,11 +1134,24 @@ impl Dsp {
                 };
                 p.drive_model = m;
             }
+            "mod" => {
+                let Some(m) = ModModel::from_model_id(model_id) else {
+                    return false;
+                };
+                p.mod_model = m;
+            }
+            "wah" => {
+                let Some(m) = WahModel::from_model_id(model_id) else {
+                    return false;
+                };
+                p.wah_model = m;
+            }
             // Single-algorithm stages: accept their canonical model ids.
             "gate" if model_id == "gate" => {}
-            "mod" if model_id == "chorus" => {}
             "delay" if model_id == "tape" => {}
             "reverb" if model_id == "plate" => {}
+            "comp" if model_id == "softknee" => {}
+            "eq" if model_id == "parametric" => {}
             "cab" => {
                 let Some(m) = CabModel::from_model_id(model_id) else {
                     return false;
@@ -838,9 +1167,24 @@ impl Dsp {
 
     fn apply_params(&mut self) {
         let p = &self.params;
-        self.in_gain = db_to_linear(p.input_trim_db);
-        self.out_gain = db_to_linear(p.output_trim_db);
+        self.in_gain.set_target(db_to_linear(p.input_trim_db));
+        self.out_gain.set_target(db_to_linear(p.output_trim_db));
         self.gate.set_threshold_db(p.gate_thresh_db);
+        self.comp_stage.configure(
+            p.comp_thresh_db,
+            p.comp_ratio,
+            p.comp_attack_ms,
+            p.comp_release_ms,
+            p.comp_makeup_db,
+        );
+        self.eq_stage.configure(
+            p.eq_low_gain_db,
+            p.eq_mid1_freq_hz,
+            p.eq_mid1_gain_db,
+            p.eq_mid2_freq_hz,
+            p.eq_mid2_gain_db,
+            p.eq_high_gain_db,
+        );
         self.drive
             .configure(p.drive_model, p.drive_gain, p.drive_tone, p.drive_level);
         self.amp_stage.set_engine(p.tone_engine);
@@ -859,8 +1203,10 @@ impl Dsp {
             p.nam_mix,
             p.nam_loudness_norm,
         );
-        self.chorus
-            .configure(p.chorus_rate, p.chorus_depth, p.chorus_mix);
+        self.mod_stage
+            .configure(p.mod_model, p.chorus_rate, p.chorus_depth, p.chorus_mix);
+        self.wah
+            .configure(p.wah_model, p.wah_pos, p.wah_res, p.wah_sens);
         self.delay
             .configure(p.delay_time_ms, p.delay_fb, p.delay_mix);
         self.reverb.configure(p.reverb_decay_s, p.reverb_mix);
@@ -868,7 +1214,7 @@ impl Dsp {
     }
 
     /// Replace the Helix path order (control thread).
-    pub fn set_path_order(&mut self, order: [Option<StageKind>; 7]) {
+    pub fn set_path_order(&mut self, order: [Option<StageKind>; PATH_SLOTS]) {
         self.params.stage_order = sanitize_stage_order(order);
     }
 
@@ -911,6 +1257,14 @@ impl Dsp {
         self.amp_stage.poll_nam_garbage();
     }
 
+    /// Clone out a control-side NAM loader handle. Lets a control thread in a
+    /// different ownership domain (the plugin-host IPC thread) prepare and
+    /// submit captures without touching this `Dsp` — the audio side adopts at
+    /// the next [`Dsp::begin_block`]. One control thread at a time.
+    pub fn nam_loader(&self) -> NamLoader {
+        self.amp_stage.nam_loader()
+    }
+
     /// Info about the currently active NAM capture, if the Tone/Amp slot has
     /// one loaded (regardless of whether `NamCapture` is the active engine).
     pub fn nam_capture_info(&self) -> Option<NamCaptureInfo> {
@@ -926,22 +1280,200 @@ impl Dsp {
     }
 }
 
-/// Keep first occurrence of each stage; pack non-empty slots left; clear rest.
-fn sanitize_stage_order(order: [Option<StageKind>; 7]) -> [Option<StageKind>; 7] {
-    let mut out = [None; 7];
-    let mut seen = [false; 7];
-    let mut w = 0usize;
-    for slot in order {
+/// Pure `Params`-level routing for a single editor parameter — the field
+/// mutation half of [`Dsp::apply_ui_param`], usable without a `Dsp` (the main
+/// process keeps an authoritative per-insert `Params` mirror this way).
+/// Returns `false` for unknown ids, including `clear_clip` (an action, not a
+/// `Params` field — only a live `Dsp` can service it). Values are raw editor
+/// units; clamping happens when the params are pushed into a `Dsp` via
+/// `set_params`.
+pub fn apply_to_params(p: &mut Params, id: &str, value: f32) -> bool {
+    let on = value >= 0.5;
+    match id {
+        "power" => p.power = on,
+        "input_trim" => p.input_trim_db = value,
+        "output_trim" => p.output_trim_db = value,
+        "gate_on" => p.gate_on = on,
+        "drive_on" => p.drive_on = on,
+        "amp_on" => p.amp_on = on,
+        "mod_on" => p.mod_on = on,
+        "delay_on" => p.delay_on = on,
+        "reverb_on" => p.reverb_on = on,
+        "cab_on" => p.cab_on = on,
+        "comp_on" => p.comp_on = on,
+        "eq_on" => p.eq_on = on,
+        "wah_on" => p.wah_on = on,
+        "drive_model" => p.drive_model = DriveModel::from_index(value.round() as u32),
+        "mod_model" => p.mod_model = ModModel::from_index(value.round() as u32),
+        "wah_model" => p.wah_model = WahModel::from_index(value.round() as u32),
+        "amp_model" => {
+            p.amp_model = AmpModel::from_index(value.round() as u32);
+            p.tone_engine = ToneEngineKind::Classic;
+        }
+        "cab_model" => p.cab_model = CabModel::from_index(value.round() as u32),
+        "tone_engine" => p.tone_engine = ToneEngineKind::from_index(value.round() as u32),
+        "path_slot_0" => p.stage_order[0] = StageKind::from_index(value.round() as i32),
+        "path_slot_1" => p.stage_order[1] = StageKind::from_index(value.round() as i32),
+        "path_slot_2" => p.stage_order[2] = StageKind::from_index(value.round() as i32),
+        "path_slot_3" => p.stage_order[3] = StageKind::from_index(value.round() as i32),
+        "path_slot_4" => p.stage_order[4] = StageKind::from_index(value.round() as i32),
+        "path_slot_5" => p.stage_order[5] = StageKind::from_index(value.round() as i32),
+        "path_slot_6" => p.stage_order[6] = StageKind::from_index(value.round() as i32),
+        "path_slot_7" => p.stage_order[7] = StageKind::from_index(value.round() as i32),
+        "path_slot_8" => p.stage_order[8] = StageKind::from_index(value.round() as i32),
+        "path_slot_9" => p.stage_order[9] = StageKind::from_index(value.round() as i32),
+        "gate_thresh" => p.gate_thresh_db = value,
+        "drive_gain" => p.drive_gain = value,
+        "drive_tone" => p.drive_tone = value,
+        "drive_level" => p.drive_level = value,
+        "amp_gain" => p.amp_gain = value,
+        "amp_bass" => p.amp_bass = value,
+        "amp_middle" => p.amp_middle = value,
+        "amp_treble" => p.amp_treble = value,
+        "amp_presence" => p.amp_presence = value,
+        "amp_master" => p.amp_master = value,
+        "chorus_rate" => p.chorus_rate = value,
+        "chorus_depth" => p.chorus_depth = value,
+        "chorus_mix" => p.chorus_mix = value,
+        "delay_time" => p.delay_time_ms = value,
+        "delay_fb" => p.delay_fb = value,
+        "delay_mix" => p.delay_mix = value,
+        "reverb_decay" => p.reverb_decay_s = value,
+        "reverb_mix" => p.reverb_mix = value,
+        "cab_mic" => p.cab_mic = value,
+        "cab_dist" => p.cab_dist = value,
+        "wah_pos" => p.wah_pos = value,
+        "wah_res" => p.wah_res = value,
+        "wah_sens" => p.wah_sens = value,
+        "comp_thresh" => p.comp_thresh_db = value,
+        "comp_ratio" => p.comp_ratio = value,
+        "comp_attack" => p.comp_attack_ms = value,
+        "comp_release" => p.comp_release_ms = value,
+        "comp_makeup" => p.comp_makeup_db = value,
+        "eq_low_gain" => p.eq_low_gain_db = value,
+        "eq_mid1_freq" => p.eq_mid1_freq_hz = value,
+        "eq_mid1_gain" => p.eq_mid1_gain_db = value,
+        "eq_mid2_freq" => p.eq_mid2_freq_hz = value,
+        "eq_mid2_gain" => p.eq_mid2_gain_db = value,
+        "eq_high_gain" => p.eq_high_gain_db = value,
+        "nam_input_trim" => p.nam_input_trim_db = value,
+        "nam_output_trim" => p.nam_output_trim_db = value,
+        "nam_mix" => p.nam_mix = value,
+        "nam_loudness_norm" => p.nam_loudness_norm = on,
+        _ => return false,
+    }
+    true
+}
+
+/// Enumerate a `Params` as `(ui id, raw value)` pairs covering every wire id
+/// except `clear_clip` (an action, not state). Replaying the returned list
+/// through [`apply_to_params`] / `Dsp::apply_ui_param` in order reproduces the
+/// source — `tone_engine` is deliberately emitted *after* `amp_model`, since
+/// applying `amp_model` resets `tone_engine` to Classic.
+pub fn ui_values(p: &Params) -> Vec<(&'static str, f32)> {
+    fn b(v: bool) -> f32 {
+        if v { 1.0 } else { 0.0 }
+    }
+    fn model_index<T: PartialEq + Copy>(all: &[T], value: T) -> f32 {
+        all.iter().position(|m| *m == value).unwrap_or(0) as f32
+    }
+    let mut out = Vec::with_capacity(70);
+    out.push(("power", b(p.power)));
+    out.push(("input_trim", p.input_trim_db));
+    out.push(("output_trim", p.output_trim_db));
+    out.push(("gate_on", b(p.gate_on)));
+    out.push(("drive_on", b(p.drive_on)));
+    out.push(("amp_on", b(p.amp_on)));
+    out.push(("mod_on", b(p.mod_on)));
+    out.push(("delay_on", b(p.delay_on)));
+    out.push(("reverb_on", b(p.reverb_on)));
+    out.push(("cab_on", b(p.cab_on)));
+    out.push(("comp_on", b(p.comp_on)));
+    out.push(("eq_on", b(p.eq_on)));
+    out.push(("wah_on", b(p.wah_on)));
+    out.push(("drive_model", model_index(DriveModel::ALL, p.drive_model)));
+    // amp_model before tone_engine (see doc comment).
+    out.push(("amp_model", model_index(AmpModel::ALL, p.amp_model)));
+    out.push(("cab_model", model_index(CabModel::ALL, p.cab_model)));
+    out.push(("mod_model", model_index(ModModel::ALL, p.mod_model)));
+    out.push(("wah_model", model_index(WahModel::ALL, p.wah_model)));
+    out.push(("tone_engine", p.tone_engine.index() as f32));
+    const PATH_SLOT_IDS: [&str; PATH_SLOTS] = [
+        "path_slot_0",
+        "path_slot_1",
+        "path_slot_2",
+        "path_slot_3",
+        "path_slot_4",
+        "path_slot_5",
+        "path_slot_6",
+        "path_slot_7",
+        "path_slot_8",
+        "path_slot_9",
+    ];
+    for (i, id) in PATH_SLOT_IDS.iter().enumerate() {
+        out.push((
+            id,
+            p.stage_order[i].map(|s| s.index() as f32).unwrap_or(-1.0),
+        ));
+    }
+    out.push(("gate_thresh", p.gate_thresh_db));
+    out.push(("drive_gain", p.drive_gain));
+    out.push(("drive_tone", p.drive_tone));
+    out.push(("drive_level", p.drive_level));
+    out.push(("amp_gain", p.amp_gain));
+    out.push(("amp_bass", p.amp_bass));
+    out.push(("amp_middle", p.amp_middle));
+    out.push(("amp_treble", p.amp_treble));
+    out.push(("amp_presence", p.amp_presence));
+    out.push(("amp_master", p.amp_master));
+    out.push(("chorus_rate", p.chorus_rate));
+    out.push(("chorus_depth", p.chorus_depth));
+    out.push(("chorus_mix", p.chorus_mix));
+    out.push(("delay_time", p.delay_time_ms));
+    out.push(("delay_fb", p.delay_fb));
+    out.push(("delay_mix", p.delay_mix));
+    out.push(("reverb_decay", p.reverb_decay_s));
+    out.push(("reverb_mix", p.reverb_mix));
+    out.push(("cab_mic", p.cab_mic));
+    out.push(("cab_dist", p.cab_dist));
+    out.push(("wah_pos", p.wah_pos));
+    out.push(("wah_res", p.wah_res));
+    out.push(("wah_sens", p.wah_sens));
+    out.push(("comp_thresh", p.comp_thresh_db));
+    out.push(("comp_ratio", p.comp_ratio));
+    out.push(("comp_attack", p.comp_attack_ms));
+    out.push(("comp_release", p.comp_release_ms));
+    out.push(("comp_makeup", p.comp_makeup_db));
+    out.push(("eq_low_gain", p.eq_low_gain_db));
+    out.push(("eq_mid1_freq", p.eq_mid1_freq_hz));
+    out.push(("eq_mid1_gain", p.eq_mid1_gain_db));
+    out.push(("eq_mid2_freq", p.eq_mid2_freq_hz));
+    out.push(("eq_mid2_gain", p.eq_mid2_gain_db));
+    out.push(("eq_high_gain", p.eq_high_gain_db));
+    out.push(("nam_input_trim", p.nam_input_trim_db));
+    out.push(("nam_output_trim", p.nam_output_trim_db));
+    out.push(("nam_mix", p.nam_mix));
+    out.push(("nam_loudness_norm", b(p.nam_loudness_norm)));
+    out
+}
+
+/// Keep the first occurrence of each stage and clear later duplicates —
+/// **without** packing slots left. Positions must be preserved: the editor
+/// (and native state replay) delivers a path as sequential `path_slot_i`
+/// writes, and packing after each write would drag later stages into
+/// just-cleared slots, silently re-adding stages the user removed. Empty
+/// slots are simply skipped by the process loop.
+fn sanitize_stage_order(order: [Option<StageKind>; PATH_SLOTS]) -> [Option<StageKind>; PATH_SLOTS] {
+    let mut out = [None; PATH_SLOTS];
+    let mut seen = [false; PATH_SLOTS];
+    for (i, slot) in order.into_iter().enumerate() {
         let Some(stage) = slot else { continue };
         let idx = stage.index() as usize;
         if seen[idx] {
             continue;
         }
         seen[idx] = true;
-        if w < 7 {
-            out[w] = Some(stage);
-            w += 1;
-        }
+        out[i] = Some(stage);
     }
     out
 }
@@ -949,22 +1481,32 @@ fn sanitize_stage_order(order: [Option<StageKind>; 7]) -> [Option<StageKind>; 7]
 impl StereoEffect for Dsp {
     fn reset(&mut self) {
         self.gate.reset();
+        self.comp_stage.reset();
         self.drive.reset();
         self.amp_stage.reset();
-        self.chorus.reset();
+        self.eq_stage.reset();
+        self.mod_stage.reset();
+        self.wah.reset();
         self.delay.reset();
         self.reverb.reset();
         self.cab.reset();
         self.meters.reset();
+        self.in_gain.snap();
+        self.out_gain.snap();
     }
 
     fn set_sample_rate(&mut self, sample_rate: f32) {
         let sr = sample_rate.max(1.0);
         self.sample_rate = sr;
+        self.in_gain.set_time(sr, TRIM_SMOOTH_SECONDS);
+        self.out_gain.set_time(sr, TRIM_SMOOTH_SECONDS);
         self.gate.set_sample_rate(sr);
+        self.comp_stage.set_sample_rate(sr);
         self.drive.set_sample_rate(sr);
         self.amp_stage.set_sample_rate(sr);
-        self.chorus.set_sample_rate(sr);
+        self.eq_stage.set_sample_rate(sr);
+        self.mod_stage.set_sample_rate(sr);
+        self.wah.set_sample_rate(sr);
         self.delay.set_sample_rate(sr);
         self.reverb.set_sample_rate(sr);
         self.cab.set_sample_rate(sr);
@@ -980,7 +1522,8 @@ impl StereoEffect for Dsp {
         // Input trim first: everything downstream — including a NAM capture,
         // whose gain and voicing depend on the level it is fed — sees the
         // trimmed signal, so that is also what the input meter must report.
-        let (mut l, mut r) = (left * self.in_gain, right * self.in_gain);
+        let in_gain = self.in_gain.tick();
+        let (mut l, mut r) = (left * in_gain, right * in_gain);
 
         let in_level = l.abs().max(r.abs());
         self.meters.in_peak = in_level.max(self.meters.in_peak - self.meters.in_peak * 0.0005);
@@ -1003,7 +1546,10 @@ impl StereoEffect for Dsp {
                     (l, r) = self.amp_stage.process(l, r);
                 }
                 StageKind::Mod if self.params.mod_on => {
-                    (l, r) = self.chorus.process(l, r);
+                    (l, r) = self.mod_stage.process(l, r);
+                }
+                StageKind::Wah if self.params.wah_on => {
+                    (l, r) = self.wah.process(l, r);
                 }
                 StageKind::Delay if self.params.delay_on => {
                     (l, r) = self.delay.process(l, r);
@@ -1013,6 +1559,12 @@ impl StereoEffect for Dsp {
                 }
                 StageKind::Cab if self.params.cab_on => {
                     (l, r) = self.cab.process(l, r);
+                }
+                StageKind::Comp if self.params.comp_on => {
+                    (l, r) = self.comp_stage.process(l, r);
+                }
+                StageKind::Eq if self.params.eq_on => {
+                    (l, r) = self.eq_stage.process(l, r);
                 }
                 _ => {}
             }
@@ -1026,8 +1578,9 @@ impl StereoEffect for Dsp {
             r = 0.0;
         }
 
-        l *= self.out_gain;
-        r *= self.out_gain;
+        let out_gain = self.out_gain.tick();
+        l *= out_gain;
+        r *= out_gain;
 
         let out_level = l.abs().max(r.abs());
         self.meters.out_peak = out_level.max(self.meters.out_peak - self.meters.out_peak * 0.0005);
@@ -1357,27 +1910,14 @@ mod tests {
         assert!(dsp.apply_ui_param("path_slot_1", 0.0)); // Gate
         assert!(dsp.apply_ui_param("path_slot_2", -1.0)); // clear
         // Remaining slots still have defaults until overwritten — sanitize packs.
-        dsp.set_path_order([
-            Some(StageKind::Amp),
-            Some(StageKind::Cab),
-            None,
-            None,
-            None,
-            None,
-            None,
-        ]);
-        assert_eq!(
-            dsp.params().stage_order,
-            [
-                Some(StageKind::Amp),
-                Some(StageKind::Cab),
-                None,
-                None,
-                None,
-                None,
-                None
-            ]
-        );
+        let mut order = [None; PATH_SLOTS];
+        order[0] = Some(StageKind::Amp);
+        order[1] = Some(StageKind::Cab);
+        dsp.set_path_order(order);
+        let mut expected = [None; PATH_SLOTS];
+        expected[0] = Some(StageKind::Amp);
+        expected[1] = Some(StageKind::Cab);
+        assert_eq!(dsp.params().stage_order, expected);
         let (l, r) = dsp.process_stereo(0.2, -0.2);
         assert!(l.is_finite() && r.is_finite());
     }
@@ -1409,13 +1949,332 @@ mod tests {
         assert!(tail < 0.2, "reverb tail did not decay: {tail}");
     }
 
+    // ---- Dedicated drive-topology battery (ds_one / super_drive /
+    // metal_core / tight_rift) --------------------------------------------
+
+    const TOPOLOGY_MODELS: [DriveModel; 4] = [
+        DriveModel::DsOne,
+        DriveModel::SuperDrive,
+        DriveModel::MetalCore,
+        DriveModel::TightRift,
+    ];
+
+    fn drive_only_dsp(model: DriveModel, gain: f32, sr: f32) -> Dsp {
+        let mut dsp = Dsp::new(sr);
+        let mut p = default_params();
+        p.stage_order = [None; PATH_SLOTS];
+        p.stage_order[0] = Some(StageKind::Drive);
+        p.drive_model = model;
+        p.drive_gain = gain;
+        dsp.set_params(p);
+        dsp.reset();
+        dsp
+    }
+
+    /// Deterministic white-ish noise without pulling in a rand dependency.
+    fn lcg_noise(state: &mut u32) -> f32 {
+        *state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        (*state >> 8) as f32 / (1 << 24) as f32 * 2.0 - 1.0
+    }
+
+    /// 1) Finite output over silence, impulse, sine, noise and hot input.
+    #[test]
+    fn topology_models_are_finite_for_hostile_inputs() {
+        for model in TOPOLOGY_MODELS {
+            let mut dsp = drive_only_dsp(model, 10.0, 48_000.0);
+            let mut noise = 0x1234_5678u32;
+            for n in 0..24_000 {
+                let x = match n / 4_000 {
+                    0 => 0.0,                   // silence
+                    1 if n % 4_000 == 0 => 1.0, // impulse
+                    1 => 0.0,
+                    2 => (n as f32 * 0.05).sin() * 0.5, // sine
+                    3 => lcg_noise(&mut noise) * 0.3,   // noise
+                    4 => (n as f32 * 0.11).sin() * 4.0, // hot input
+                    _ => lcg_noise(&mut noise) * 4.0,   // hot noise
+                };
+                let (l, r) = dsp.process_stereo(x, x);
+                assert!(l.is_finite() && r.is_finite(), "{model:?} sample {n}");
+            }
+        }
+    }
+
+    /// 2) No runaway: repeated full-scale blocks at max drive stay bounded.
+    #[test]
+    fn topology_models_do_not_run_away_at_max_drive() {
+        for model in TOPOLOGY_MODELS {
+            let mut dsp = drive_only_dsp(model, 10.0, 48_000.0);
+            let mut peak: f32 = 0.0;
+            for n in 0..48_000 {
+                let x = if (n / 64) % 2 == 0 { 1.0 } else { -1.0 };
+                let (l, r) = dsp.process_stereo(x, x);
+                peak = peak.max(l.abs()).max(r.abs());
+            }
+            assert!(peak < 4.0, "{model:?} unbounded: peak={peak}");
+            assert!(peak > 0.01, "{model:?} silent at max drive");
+        }
+    }
+
+    /// 4) Harmonic generation: the distorted sine must differ materially from
+    /// any pure rescaling of the input (i.e. real waveshaping happened).
+    #[test]
+    fn topology_models_generate_harmonics() {
+        for model in TOPOLOGY_MODELS {
+            let mut dsp = drive_only_dsp(model, 8.0, 48_000.0);
+            let mut input = Vec::new();
+            let mut output = Vec::new();
+            for n in 0..24_000 {
+                let x = (n as f32 * 2.0 * std::f32::consts::PI * 440.0 / 48_000.0).sin() * 0.5;
+                let (l, _) = dsp.process_stereo(x, x);
+                if n > 8_000 {
+                    input.push(x);
+                    output.push(l);
+                }
+            }
+            // Best-fit scale, then residual energy: pure gain would leave ~0.
+            let dot: f32 = input.iter().zip(&output).map(|(a, b)| a * b).sum();
+            let in_e: f32 = input.iter().map(|a| a * a).sum();
+            let scale = dot / in_e.max(1.0e-9);
+            let resid: f32 = input
+                .iter()
+                .zip(&output)
+                .map(|(a, b)| (b - a * scale).powi(2))
+                .sum();
+            let out_e: f32 = output.iter().map(|b| b * b).sum();
+            assert!(
+                resid / out_e.max(1.0e-9) > 0.02,
+                "{model:?} output is just a rescaled input (residual ratio {})",
+                resid / out_e.max(1.0e-9)
+            );
+        }
+    }
+
+    /// 5) Model distinction: same input, materially different outputs.
+    #[test]
+    fn topology_models_are_mutually_distinct() {
+        let mut outputs: Vec<Vec<f32>> = Vec::new();
+        for model in TOPOLOGY_MODELS {
+            let mut dsp = drive_only_dsp(model, 7.0, 48_000.0);
+            let mut buf = Vec::new();
+            let mut noise = 0xBEEF_CAFEu32;
+            for n in 0..12_000 {
+                let x = (n as f32 * 0.04).sin() * 0.4 + lcg_noise(&mut noise) * 0.05;
+                let (l, _) = dsp.process_stereo(x, x);
+                if n > 4_000 {
+                    buf.push(l);
+                }
+            }
+            outputs.push(buf);
+        }
+        for i in 0..outputs.len() {
+            for j in (i + 1)..outputs.len() {
+                let diff: f32 = outputs[i]
+                    .iter()
+                    .zip(&outputs[j])
+                    .map(|(a, b)| (a - b).powi(2))
+                    .sum::<f32>()
+                    / outputs[i].len() as f32;
+                assert!(
+                    diff.sqrt() > 0.01,
+                    "{:?} and {:?} sound effectively identical (rms diff {})",
+                    TOPOLOGY_MODELS[i],
+                    TOPOLOGY_MODELS[j],
+                    diff.sqrt()
+                );
+            }
+        }
+    }
+
+    /// 6) Instance isolation: resetting/re-configuring one instance must not
+    /// disturb another.
+    #[test]
+    fn topology_model_instances_are_isolated() {
+        let mut victim = drive_only_dsp(DriveModel::MetalCore, 7.0, 48_000.0);
+        let mut control = drive_only_dsp(DriveModel::MetalCore, 7.0, 48_000.0);
+        let mut other = drive_only_dsp(DriveModel::TightRift, 9.0, 48_000.0);
+
+        // Warm all three identically.
+        for n in 0..4_000 {
+            let x = (n as f32 * 0.05).sin() * 0.4;
+            let _ = victim.process_stereo(x, x);
+            let _ = control.process_stereo(x, x);
+            let _ = other.process_stereo(x, x);
+        }
+        // Hammer `other`: reset + retune. `victim` must keep tracking `control`.
+        other.reset();
+        assert!(other.apply_ui_param("drive_gain", 1.0));
+        for n in 0..4_000 {
+            let x = (n as f32 * 0.05).sin() * 0.4;
+            let (vl, _) = victim.process_stereo(x, x);
+            let (cl, _) = control.process_stereo(x, x);
+            let _ = other.process_stereo(x, x);
+            assert!(
+                (vl - cl).abs() < 1.0e-6,
+                "instance state leaked at sample {n}: {vl} vs {cl}"
+            );
+        }
+    }
+
+    /// 7) State restore: every topology model round-trips through the
+    /// persistence blob with its parameters intact.
+    #[test]
+    fn topology_models_restore_from_state_blob() {
+        for model in TOPOLOGY_MODELS {
+            let mut p = default_params();
+            p.drive_model = model;
+            p.drive_gain = 8.25;
+            p.drive_tone = 3.5;
+            let json = crate::RodhareistState::new(p.clone()).to_json().unwrap();
+            let restored = crate::RodhareistState::from_json(&json).unwrap();
+            assert_eq!(restored.params.drive_model, model);
+            assert_eq!(restored.params.drive_gain, 8.25);
+            assert_eq!(restored.params.drive_tone, 3.5);
+        }
+    }
+
+    /// 8) Sample-rate sweep incl. high rates.
+    #[test]
+    fn topology_models_are_stable_across_sample_rates() {
+        for &sr in &[44_100.0f32, 48_000.0, 96_000.0, 192_000.0] {
+            for model in TOPOLOGY_MODELS {
+                let mut dsp = drive_only_dsp(model, 9.0, sr);
+                let mut peak: f32 = 0.0;
+                for n in 0..(sr as usize / 4) {
+                    let x = (n as f32 * 2.0 * std::f32::consts::PI * 220.0 / sr).sin() * 0.6;
+                    let (l, r) = dsp.process_stereo(x, x);
+                    assert!(l.is_finite() && r.is_finite(), "{model:?}@{sr}");
+                    peak = peak.max(l.abs());
+                }
+                assert!(peak > 1.0e-3 && peak < 4.0, "{model:?}@{sr} peak={peak}");
+            }
+        }
+    }
+
+    /// 9) Block-size independence: the per-sample API must produce the same
+    /// stream regardless of how callers group samples around `begin_block`.
+    #[test]
+    fn topology_models_are_block_size_invariant() {
+        for &block in &[1usize, 16, 64, 128, 512, 2048] {
+            let mut chunked = drive_only_dsp(DriveModel::TightRift, 8.0, 48_000.0);
+            let mut reference = drive_only_dsp(DriveModel::TightRift, 8.0, 48_000.0);
+            reference.begin_block();
+            let mut n = 0usize;
+            while n < 8_192 {
+                chunked.begin_block();
+                for _ in 0..block.min(8_192 - n) {
+                    let x = (n as f32 * 0.03).sin() * 0.5;
+                    let (a, _) = chunked.process_stereo(x, x);
+                    let (b, _) = reference.process_stereo(x, x);
+                    assert!((a - b).abs() < 1.0e-6, "block={block} sample {n}");
+                    n += 1;
+                }
+            }
+        }
+    }
+
+    /// 10) Abrupt Drive/Tone automation: no NaN, no single-sample spike.
+    #[test]
+    fn topology_models_survive_abrupt_automation() {
+        for model in TOPOLOGY_MODELS {
+            let mut dsp = drive_only_dsp(model, 2.0, 48_000.0);
+            let mut prev = 0.0f32;
+            let mut max_step: f32 = 0.0;
+            for n in 0..48_000 {
+                if n % 6_000 == 0 {
+                    // Slam both knobs across their full range.
+                    let hi = (n / 6_000) % 2 == 0;
+                    assert!(dsp.apply_ui_param("drive_gain", if hi { 10.0 } else { 0.0 }));
+                    assert!(dsp.apply_ui_param("drive_tone", if hi { 10.0 } else { 0.0 }));
+                }
+                let x = (n as f32 * 0.05).sin() * 0.5;
+                let (l, _) = dsp.process_stereo(x, x);
+                assert!(l.is_finite(), "{model:?} NaN during automation");
+                if n > 100 {
+                    max_step = max_step.max((l - prev).abs());
+                }
+                prev = l;
+            }
+            // Filter swaps allow small discontinuities; a hard glitch would be
+            // a near-full-scale jump.
+            assert!(
+                max_step < 1.5,
+                "{model:?} automation glitch: step={max_step}"
+            );
+        }
+    }
+
+    /// Every drive voicing must process finite, audible output at high gain —
+    /// guards each new model's shape/voicing arm as the list grows.
+    #[test]
+    fn every_drive_model_processes_finite_and_audible() {
+        for (i, model) in DriveModel::ALL.iter().enumerate() {
+            let mut dsp = Dsp::new(48_000.0);
+            let mut p = default_params();
+            p.stage_order = [None; PATH_SLOTS];
+            p.stage_order[0] = Some(StageKind::Drive);
+            p.drive_model = *model;
+            p.drive_gain = 9.0;
+            dsp.set_params(p);
+            dsp.reset();
+            assert_eq!(
+                DriveModel::from_index(i as u32),
+                *model,
+                "ALL order / from_index drifted for {model:?}"
+            );
+            let mut peak: f32 = 0.0;
+            for n in 0..4_000 {
+                let x = (n as f32 * 0.03).sin() * 0.4;
+                let (l, r) = dsp.process_stereo(x, x);
+                assert!(l.is_finite() && r.is_finite(), "{model:?} NaN");
+                if n > 2_000 {
+                    peak = peak.max(l.abs());
+                }
+            }
+            assert!(peak > 1.0e-3, "{model:?} produced silence");
+            assert!(peak < 4.0, "{model:?} runaway gain: {peak}");
+        }
+    }
+
+    /// A delay-time edit mid-stream must not click: the read head glides
+    /// (tape-style pitch bend), so consecutive output samples stay close.
+    #[test]
+    fn delay_time_edits_do_not_click() {
+        let mut dsp = Dsp::new(48_000.0);
+        let mut p = default_params();
+        p.stage_order = [None; PATH_SLOTS];
+        p.stage_order[0] = Some(StageKind::Delay);
+        p.delay_mix = 100.0;
+        p.delay_fb = 20.0;
+        dsp.set_params(p);
+        dsp.reset();
+
+        let mut prev = 0.0f32;
+        let mut max_step = 0.0f32;
+        for n in 0..96_000 {
+            // Steady tone in; jump the delay time knob mid-stream.
+            if n == 48_000 {
+                assert!(dsp.apply_ui_param("delay_time", 1_100.0));
+            }
+            let x = (n as f32 * 0.05).sin() * 0.4;
+            let (l, _) = dsp.process_stereo(x, x);
+            assert!(l.is_finite());
+            if n > 48_000 {
+                max_step = max_step.max((l - prev).abs());
+            }
+            prev = l;
+        }
+        // A hard head jump on a 0.4 tone produces near full-scale steps; the
+        // slewed head keeps sample-to-sample motion in normal signal range.
+        assert!(max_step < 0.2, "delay time edit clicked: step={max_step}");
+    }
+
     /// A bare chain (every stage out of the path) must pass a signal through at
     /// exactly the combined trim gain, so the trims are usable for gain staging
     /// rather than being an approximate "level" control.
     fn bare_dsp() -> Dsp {
         let mut dsp = Dsp::new(48_000.0);
         let mut p = default_params();
-        p.stage_order = [None; 7];
+        p.stage_order = [None; PATH_SLOTS];
         dsp.set_params(p);
         dsp
     }
@@ -1424,6 +2283,9 @@ mod tests {
     fn input_trim_scales_the_signal_entering_the_chain() {
         let mut dsp = bare_dsp();
         assert!(dsp.apply_ui_param("input_trim", 6.0));
+        // Trims glide (~10 ms); snap to target so the assertion measures the
+        // settled gain, not the first sample of the ramp.
+        dsp.reset();
         let (l, _) = dsp.process_stereo(0.1, 0.1);
         // +6 dB ≈ ×1.9953.
         assert!((l - 0.199_53).abs() < 1.0e-3, "input trim not applied: {l}");
@@ -1433,10 +2295,42 @@ mod tests {
     fn output_trim_scales_the_signal_leaving_the_chain() {
         let mut dsp = bare_dsp();
         assert!(dsp.apply_ui_param("output_trim", -6.0));
+        dsp.reset();
         let (l, _) = dsp.process_stereo(0.4, 0.4);
         assert!(
             (l - 0.200_47).abs() < 1.0e-3,
             "output trim not applied: {l}"
+        );
+    }
+
+    /// Live trim edits must glide, not jump — the zipper-noise guard for the
+    /// now-wired editor knobs.
+    #[test]
+    fn trim_edits_glide_without_a_sample_step() {
+        let mut dsp = bare_dsp();
+        // Settle at unity.
+        for _ in 0..256 {
+            let _ = dsp.process_stereo(0.5, 0.5);
+        }
+        let (before, _) = dsp.process_stereo(0.5, 0.5);
+        dsp.apply_ui_param("input_trim", 24.0); // worst-case jump: +24 dB
+        let (first, _) = dsp.process_stereo(0.5, 0.5);
+        // One sample later the output may move only a small fraction of the
+        // full 16x step.
+        assert!(
+            (first - before).abs() < 0.05,
+            "trim jumped {before} -> {first} in one sample"
+        );
+        // But it does converge to the target.
+        let mut last = first;
+        for _ in 0..48_000 {
+            let (l, _) = dsp.process_stereo(0.5, 0.5);
+            last = l;
+        }
+        let expected = 0.5 * db_to_linear(24.0);
+        assert!(
+            (last - expected).abs() / expected < 0.01,
+            "trim did not converge: got {last}, expected {expected}"
         );
     }
 
@@ -1462,6 +2356,7 @@ mod tests {
     fn input_meter_reports_the_post_trim_level() {
         let mut dsp = bare_dsp();
         dsp.apply_ui_param("input_trim", 6.0);
+        dsp.reset();
         for _ in 0..64 {
             let _ = dsp.process_stereo(0.5, 0.5);
         }
@@ -1487,6 +2382,211 @@ mod tests {
             frame.in_rms
         );
         assert!(frame.in_rms <= frame.in_peak + 1.0e-4);
+    }
+
+    // ---- Mod-slot models (chorus / phaser / flanger / tremolo) and Wah ----
+
+    fn mod_only_dsp(model: ModModel) -> Dsp {
+        let mut dsp = Dsp::new(48_000.0);
+        let mut p = default_params();
+        p.stage_order = [None; PATH_SLOTS];
+        p.stage_order[0] = Some(StageKind::Mod);
+        p.mod_model = model;
+        p.chorus_rate = 6.0;
+        p.chorus_depth = 7.0;
+        p.chorus_mix = 70.0;
+        dsp.set_params(p);
+        dsp.reset();
+        dsp
+    }
+
+    /// Every mod model must process finite, non-silent output.
+    #[test]
+    fn every_mod_model_processes_finite_and_audible() {
+        for (i, model) in ModModel::ALL.iter().enumerate() {
+            assert_eq!(
+                ModModel::from_index(i as u32),
+                *model,
+                "ALL order / from_index drifted for {model:?}"
+            );
+            let mut dsp = mod_only_dsp(*model);
+            let mut peak: f32 = 0.0;
+            for n in 0..12_000 {
+                let x = (n as f32 * 0.05).sin() * 0.4;
+                let (l, r) = dsp.process_stereo(x, x);
+                assert!(l.is_finite() && r.is_finite(), "{model:?} NaN");
+                if n > 4_000 {
+                    peak = peak.max(l.abs());
+                }
+            }
+            assert!(peak > 1.0e-3, "{model:?} produced silence");
+            assert!(peak < 4.0, "{model:?} runaway gain: {peak}");
+        }
+    }
+
+    /// The four mod algorithms must not sound the same.
+    #[test]
+    fn mod_models_are_mutually_distinct() {
+        let mut outputs: Vec<Vec<f32>> = Vec::new();
+        for model in ModModel::ALL {
+            let mut dsp = mod_only_dsp(*model);
+            let mut buf = Vec::new();
+            for n in 0..24_000 {
+                let x = (n as f32 * 0.05).sin() * 0.4;
+                let (l, _) = dsp.process_stereo(x, x);
+                if n > 8_000 {
+                    buf.push(l);
+                }
+            }
+            outputs.push(buf);
+        }
+        for i in 0..outputs.len() {
+            for j in (i + 1)..outputs.len() {
+                let diff: f32 = outputs[i]
+                    .iter()
+                    .zip(&outputs[j])
+                    .map(|(a, b)| (a - b).powi(2))
+                    .sum::<f32>()
+                    / outputs[i].len() as f32;
+                assert!(
+                    diff.sqrt() > 0.005,
+                    "{:?} and {:?} sound effectively identical (rms diff {})",
+                    ModModel::ALL[i],
+                    ModModel::ALL[j],
+                    diff.sqrt()
+                );
+            }
+        }
+    }
+
+    /// Tremolo must actually modulate amplitude: over one slow LFO cycle the
+    /// per-window envelope has to rise and fall well outside measurement noise.
+    #[test]
+    fn tremolo_modulates_amplitude() {
+        let mut dsp = mod_only_dsp(ModModel::Tremolo);
+        assert!(dsp.apply_ui_param("chorus_rate", 2.0)); // slow-ish
+        assert!(dsp.apply_ui_param("chorus_depth", 9.0));
+        let mut window_peaks = Vec::new();
+        let mut peak: f32 = 0.0;
+        for n in 0..96_000 {
+            let x = (n as f32 * 0.08).sin() * 0.5;
+            let (l, _) = dsp.process_stereo(x, x);
+            peak = peak.max(l.abs());
+            if n % 2_400 == 2_399 {
+                window_peaks.push(peak);
+                peak = 0.0;
+            }
+        }
+        let hi = window_peaks.iter().cloned().fold(0.0f32, f32::max);
+        let lo = window_peaks.iter().cloned().fold(f32::MAX, f32::min);
+        assert!(hi > lo * 1.5, "tremolo did not modulate: hi={hi} lo={lo}");
+    }
+
+    fn wah_only_dsp(model: WahModel, pos: f32) -> Dsp {
+        let mut dsp = Dsp::new(48_000.0);
+        let mut p = default_params();
+        p.stage_order = [None; PATH_SLOTS];
+        p.stage_order[0] = Some(StageKind::Wah);
+        p.wah_model = model;
+        p.wah_pos = pos;
+        p.wah_res = 6.0;
+        p.wah_sens = 7.0;
+        dsp.set_params(p);
+        dsp.reset();
+        dsp
+    }
+
+    /// Both wah models stay finite and audible for normal input.
+    #[test]
+    fn wah_models_process_finite_and_audible() {
+        for model in WahModel::ALL {
+            let mut dsp = wah_only_dsp(*model, 5.0);
+            let mut peak: f32 = 0.0;
+            for n in 0..24_000 {
+                let x = (n as f32 * 0.06).sin() * 0.4;
+                let (l, r) = dsp.process_stereo(x, x);
+                assert!(l.is_finite() && r.is_finite(), "{model:?} NaN");
+                if n > 8_000 {
+                    peak = peak.max(l.abs());
+                }
+            }
+            assert!(peak > 1.0e-3, "{model:?} produced silence");
+            assert!(peak < 6.0, "{model:?} runaway resonance: {peak}");
+        }
+    }
+
+    /// The pedal position must actually move the filter: heel and toe settings
+    /// pass a fixed low tone with materially different gain.
+    #[test]
+    fn cry_wah_position_sweeps_the_filter() {
+        let level_at = |pos: f32| {
+            let mut dsp = wah_only_dsp(WahModel::CryWah, pos);
+            let mut peak: f32 = 0.0;
+            for n in 0..24_000 {
+                // ~330 Hz — near the heel resonance, far below the toe.
+                let x = (n as f32 * 2.0 * std::f32::consts::PI * 330.0 / 48_000.0).sin() * 0.3;
+                let (l, _) = dsp.process_stereo(x, x);
+                if n > 12_000 {
+                    peak = peak.max(l.abs());
+                }
+            }
+            peak
+        };
+        let heel = level_at(0.5);
+        let toe = level_at(9.5);
+        assert!(
+            heel > toe * 1.5,
+            "wah position had no effect at 330 Hz: heel={heel} toe={toe}"
+        );
+    }
+
+    /// Touch wah reacts to level: a loud passage must sweep the filter away
+    /// from where a quiet passage sits (different spectral gain at the probe).
+    #[test]
+    fn touch_wah_follows_the_envelope() {
+        let mut dsp = wah_only_dsp(WahModel::TouchWah, 2.0);
+        let probe = |dsp: &mut Dsp, amp: f32| {
+            let mut peak: f32 = 0.0;
+            for n in 0..24_000 {
+                let x = (n as f32 * 2.0 * std::f32::consts::PI * 440.0 / 48_000.0).sin() * amp;
+                let (l, _) = dsp.process_stereo(x, x);
+                if n > 12_000 {
+                    peak = peak.max(l.abs() / amp); // normalized gain
+                }
+            }
+            peak
+        };
+        let quiet_gain = probe(&mut dsp, 0.02);
+        dsp.reset();
+        let loud_gain = probe(&mut dsp, 0.6);
+        assert!(
+            (quiet_gain - loud_gain).abs() > quiet_gain * 0.2,
+            "touch wah ignored level: quiet={quiet_gain} loud={loud_gain}"
+        );
+    }
+
+    /// Mod model switching mid-stream stays finite and produces the newly
+    /// selected sound (regression guard for stale cross-model state).
+    #[test]
+    fn mod_model_switching_is_glitch_safe() {
+        let mut dsp = mod_only_dsp(ModModel::Chorus);
+        for n in 0..48_000 {
+            if n % 8_000 == 0 {
+                let next = ModModel::from_index(((n / 8_000) % 4) as u32);
+                assert!(dsp.select_model(
+                    "mod",
+                    match next {
+                        ModModel::Chorus => "chorus",
+                        ModModel::Phaser => "phaser",
+                        ModModel::Flanger => "flanger",
+                        ModModel::Tremolo => "tremolo",
+                    }
+                ));
+            }
+            let x = (n as f32 * 0.05).sin() * 0.4;
+            let (l, r) = dsp.process_stereo(x, x);
+            assert!(l.is_finite() && r.is_finite(), "switch glitch at {n}");
+        }
     }
 
     #[test]

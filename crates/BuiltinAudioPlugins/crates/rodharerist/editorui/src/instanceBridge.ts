@@ -56,12 +56,104 @@ export type InstanceRemovedMessage = {
   instanceId: string;
 };
 
-export type NativeMessage = SelectInstanceMessage | InstanceRemovedMessage;
+/** Native -> React: one ~30 Hz telemetry frame for the bound instance. */
+export type MetersMessage = {
+  type: "futureboard.meters";
+  protocolVersion: number;
+  instanceId: string;
+  inPeak: number;
+  inRms: number;
+  outPeak: number;
+  outRms: number;
+  inClip: boolean;
+  outClip: boolean;
+};
+
+/** Native -> React: low-rate footer status from the host's shared region. */
+export type HostStatusMessage = {
+  type: "futureboard.hostStatus";
+  protocolVersion: number;
+  instanceId: string;
+  sampleRate: number;
+  blockSize: number;
+  latencySamples: number;
+};
+
+/** Native -> React: async outcome of a `loadNamCapture` request. */
+export type NamCaptureResultMessage = {
+  type: "futureboard.namCaptureResult";
+  protocolVersion: number;
+  instanceId: string;
+  ok: boolean;
+  name: string;
+  error?: string | null;
+  receptiveField: number;
+  fullRig: boolean;
+};
+
+/** Which per-plugin user folder a file message targets. */
+export type FileKind = "presets" | "irs" | "nams";
+
+export type FileEntry = {
+  fileName: string;
+  sizeBytes: number;
+  modifiedMs: number;
+};
+
+/** Native -> React: one kind's user-file listing (rebuilt wholesale). */
+export type FileListMessage = {
+  type: "futureboard.fileList";
+  protocolVersion: number;
+  kind: FileKind;
+  files: FileEntry[];
+};
+
+/** Native -> React: one user file's text content (or the failure). */
+export type FileContentMessage = {
+  type: "futureboard.fileContent";
+  protocolVersion: number;
+  kind: FileKind;
+  fileName: string;
+  ok: boolean;
+  content?: string | null;
+  error?: string | null;
+};
+
+/** Native -> React: outcome of a `writeFile`. */
+export type FileWrittenMessage = {
+  type: "futureboard.fileWritten";
+  protocolVersion: number;
+  kind: FileKind;
+  fileName: string;
+  ok: boolean;
+  error?: string | null;
+};
+
+export type NativeMessage =
+  | SelectInstanceMessage
+  | InstanceRemovedMessage
+  | MetersMessage
+  | HostStatusMessage
+  | NamCaptureResultMessage
+  | FileListMessage
+  | FileContentMessage
+  | FileWrittenMessage;
+
+const NATIVE_MESSAGE_TYPES = new Set([
+  "futureboard.selectInstance",
+  "futureboard.instanceRemoved",
+  "futureboard.meters",
+  "futureboard.hostStatus",
+  "futureboard.namCaptureResult",
+  "futureboard.fileList",
+  "futureboard.fileContent",
+  "futureboard.fileWritten",
+]);
 
 function isNativeMessage(data: unknown): data is NativeMessage {
   if (!data || typeof data !== "object") return false;
   const type = (data as { type?: unknown }).type;
-  return type === "futureboard.selectInstance" || type === "futureboard.instanceRemoved";
+  return typeof type === "string" && NATIVE_MESSAGE_TYPES.has(type);
 }
 
 /**
@@ -129,5 +221,140 @@ export function requestSelectInstance(instanceId: string): void {
     type: "futureboard.requestSelectInstance",
     protocolVersion: BRIDGE_PROTOCOL_VERSION,
     instanceId,
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Live parameter edits (`futureboard.setParams`)
+//
+// Native validates every batch against the *current* binding generation, so
+// each post carries the identity of the selection it was made under. The
+// module-level binding below is the write-side mirror of what
+// `BoundInstanceProvider` renders — set on every approved `selectInstance`,
+// cleared when that instance goes away.
+
+export type ActiveParamBinding = {
+  pluginId: string;
+  instanceId: string;
+  bindingGeneration: number;
+};
+
+let activeParamBinding: ActiveParamBinding | null = null;
+
+/** Listeners that must drop pending work when the binding changes (e.g. the
+ * coalescing buffer in `bridge.ts` — edits queued against the old instance
+ * must never flush against the new one). */
+const bindingResetListeners = new Set<() => void>();
+
+export function onParamBindingReset(listener: () => void): () => void {
+  bindingResetListeners.add(listener);
+  return () => bindingResetListeners.delete(listener);
+}
+
+function notifyBindingReset(): void {
+  for (const listener of bindingResetListeners) listener();
+}
+
+/** Called by `BoundInstanceProvider` on every approved `selectInstance`. */
+export function setActiveParamBinding(binding: ActiveParamBinding): void {
+  activeParamBinding = binding;
+  notifyBindingReset();
+}
+
+/** Called when the bound instance is removed (or the page unbinds). */
+export function clearActiveParamBinding(): void {
+  activeParamBinding = null;
+  notifyBindingReset();
+}
+
+/** Test-only view of the current binding. */
+export function getActiveParamBinding(): ActiveParamBinding | null {
+  return activeParamBinding;
+}
+
+export type ParamEdit = { id: string; value: number };
+
+// --- Plugin user files (Documents/Futureboard Studio/<plugin>/...) ---------
+// File ops are plugin-global (the folders belong to the plugin, not an
+// insert); they still require an active binding so a detached dev preview
+// stays a no-op.
+
+export function postListFiles(kind: FileKind): void {
+  const binding = activeParamBinding;
+  if (!binding) return;
+  post({
+    type: "futureboard.listFiles",
+    protocolVersion: BRIDGE_PROTOCOL_VERSION,
+    pluginId: binding.pluginId,
+    kind,
+  });
+}
+
+export function postReadFile(kind: FileKind, fileName: string): void {
+  const binding = activeParamBinding;
+  if (!binding) return;
+  post({
+    type: "futureboard.readFile",
+    protocolVersion: BRIDGE_PROTOCOL_VERSION,
+    pluginId: binding.pluginId,
+    kind,
+    fileName,
+  });
+}
+
+export function postWriteFile(kind: FileKind, fileName: string, content: string): void {
+  const binding = activeParamBinding;
+  if (!binding) return;
+  post({
+    type: "futureboard.writeFile",
+    protocolVersion: BRIDGE_PROTOCOL_VERSION,
+    pluginId: binding.pluginId,
+    kind,
+    fileName,
+    content,
+  });
+}
+
+/**
+ * Post a `.nam` capture load for the bound instance. `json` is the raw file
+ * text (read client-side via `FileReader`); it rides the POST body to native
+ * and on to the plugin-host process. Silent no-op when nothing is bound.
+ * The result arrives asynchronously as a `futureboard.namCaptureResult`
+ * native message.
+ */
+export function postLoadNamCaptureForBoundInstance(
+  json: string,
+  opts: { name: string; stereo: boolean; fullRig: boolean },
+): void {
+  const binding = activeParamBinding;
+  if (!binding) return;
+  post({
+    type: "futureboard.loadNamCapture",
+    protocolVersion: BRIDGE_PROTOCOL_VERSION,
+    pluginId: binding.pluginId,
+    instanceId: binding.instanceId,
+    bindingGeneration: binding.bindingGeneration,
+    name: opts.name,
+    json,
+    stereo: opts.stereo,
+    fullRig: opts.fullRig,
+  });
+}
+
+/**
+ * Post one batch of parameter edits for the currently bound instance.
+ * Silent no-op when nothing is bound (standalone browser preview, or the
+ * window between `instanceRemoved` and the next `selectInstance`).
+ */
+export function postSetParams(edits: ParamEdit[]): void {
+  const binding = activeParamBinding;
+  if (!binding || edits.length === 0) return;
+  post({
+    type: "futureboard.setParams",
+    protocolVersion: BRIDGE_PROTOCOL_VERSION,
+    pluginId: binding.pluginId,
+    instanceId: binding.instanceId,
+    bindingGeneration: binding.bindingGeneration,
+    params: edits,
   });
 }

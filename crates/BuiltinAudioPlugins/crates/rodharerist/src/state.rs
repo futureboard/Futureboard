@@ -11,7 +11,15 @@ use crate::Params;
 /// Bump when a field is added, removed, or changes meaning in a way that
 /// would misparse against an older save. Purely additive changes (a new
 /// `Option<T>` defaulting via `#[serde(default)]`) don't require a bump.
-pub const SCHEMA_VERSION: u32 = 1;
+///
+/// v2: `stage_order` grew from 7 to 9 slots (Comp/Eq stages) — a fixed-size
+/// array change that misparses v1 blobs. New comp/eq scalar fields use
+/// `#[serde(default)]` and would not have required a bump on their own.
+///
+/// v3: `stage_order` grew from 9 to 10 slots (Wah stage). The new
+/// `mod_model`/`wah_*` fields use `#[serde(default)]` and would not have
+/// required a bump on their own.
+pub const SCHEMA_VERSION: u32 = 3;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct RodhareistState {

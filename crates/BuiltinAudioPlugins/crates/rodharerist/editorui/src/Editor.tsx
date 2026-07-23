@@ -51,6 +51,12 @@ import {
   pushSimulatedFrame,
   releasePreview,
 } from "./state/meters";
+import { snapshotFromRodhareistState } from "./stateMap";
+import {
+  presetFileName,
+  serializePreset,
+  type PresetFile,
+} from "./presetFiles";
 import "./Styles/Editor.css";
 import { HashRouter, Routes, Route } from "react-router-dom";
 import {
@@ -59,7 +65,7 @@ import {
 } from "./state/boundInstance";
 
 /** Global gain-staging state. Mirrors the DSP's global params exactly. */
-type GlobalState = {
+export type GlobalState = {
   inputTrim: number;
   outputTrim: number;
   globalBypass: boolean;
@@ -71,7 +77,7 @@ const DEFAULT_GLOBALS: GlobalState = {
   globalBypass: false,
 };
 
-type RigSnapshot = {
+export type RigSnapshot = {
   activeCat: CategoryId;
   activeModelId: string;
   stageModels: Record<CategoryId, string>;
@@ -176,22 +182,42 @@ function factorySnapshot(id: string): RigSnapshot | null {
   };
 }
 
-export function RodhareistEditor() {
+export function RodhareistEditor({
+  boundSnapshot = null,
+}: {
+  /** The bound instance's persisted state, mapped by
+   * `snapshotFromRodhareistState`. `null` = fresh insert → factory initial
+   * (which is then pushed to the DSP once, becoming the persisted baseline). */
+  boundSnapshot?: RigSnapshot | null;
+}) {
   const initial = presetsData[4]!;
   const [currentPresetId, setCurrentPresetId] = useState(initial.id);
-  const [activeCat, setActiveCat] = useState<CategoryId>(initial.category);
-  const [activeModelId, setActiveModelId] = useState(initial.model);
+  const [activeCat, setActiveCat] = useState<CategoryId>(
+    boundSnapshot?.activeCat ?? initial.category,
+  );
+  const [activeModelId, setActiveModelId] = useState(
+    boundSnapshot?.activeModelId ?? initial.model,
+  );
   const [stageModels, setStageModels] = useState<Record<CategoryId, string>>(
-    () => defaultStageModels(initial.category, initial.model),
+    () =>
+      boundSnapshot
+        ? { ...boundSnapshot.stageModels }
+        : defaultStageModels(initial.category, initial.model),
   );
-  const [pathOrder, setPathOrder] = useState<CategoryId[]>(() => defaultPath());
+  const [pathOrder, setPathOrder] = useState<CategoryId[]>(() =>
+    boundSnapshot ? [...boundSnapshot.pathOrder] : defaultPath(),
+  );
   const [bypassed, setBypassed] = useState<Partial<Record<CategoryId, boolean>>>(
-    {},
+    () => (boundSnapshot ? { ...boundSnapshot.bypassed } : {}),
   );
-  const [parameters, setParameters] = useState<Record<string, Param[]>>(
-    () => parametersForPreset(initial),
+  const [parameters, setParameters] = useState<Record<string, Param[]>>(() =>
+    boundSnapshot
+      ? cloneParameters(boundSnapshot.parameters)
+      : parametersForPreset(initial),
   );
-  const [globals, setGlobals] = useState<GlobalState>(DEFAULT_GLOBALS);
+  const [globals, setGlobals] = useState<GlobalState>(
+    () => boundSnapshot?.globals ?? DEFAULT_GLOBALS,
+  );
   const [modified, setModified] = useState(false);
   const [savedRigs, setSavedRigs] = useState<Record<string, RigSnapshot>>({});
   const [drafts, setDrafts] = useState<Record<string, RigSnapshot>>({});
@@ -211,6 +237,7 @@ export function RodhareistEditor() {
 
   const initialSnapshot = useMemo(
     () =>
+      boundSnapshot ??
       factorySnapshot(initial.id) ??
       makeSnapshot(
         initial.category,
@@ -221,7 +248,7 @@ export function RodhareistEditor() {
         parametersForPreset(initial),
         DEFAULT_GLOBALS,
       ),
-    // `initial` is a module-level constant; this runs once.
+    // Both inputs are fixed for this mount (remount on instance switch).
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [],
   );
@@ -304,6 +331,13 @@ export function RodhareistEditor() {
   useEffect(() => attachHostTelemetry(), []);
 
   useEffect(() => {
+    // Bound to an instance with real persisted state: the DSP already holds
+    // it — adopt locally, post NOTHING (a push here used to stomp the newly
+    // selected insert with factory defaults on every sidebar switch).
+    if (boundSnapshot) return;
+    // Fresh insert (no persisted state): establish the factory initial on
+    // the DSP once. These posts flow through the normal edit path, so the
+    // native state mirror records them as the insert's baseline.
     const stages = defaultStageModels(initial.category, initial.model);
     postParam("input_trim", DEFAULT_GLOBALS.inputTrim);
     postParam("output_trim", DEFAULT_GLOBALS.outputTrim);
@@ -526,6 +560,41 @@ export function RodhareistEditor() {
     [commitLoadPreset],
   );
 
+  /// A preset loaded from a sidebar file: same new-baseline semantics as
+  /// `commitLoadPreset`, but the snapshot comes from disk, not presetsData.
+  const loadPresetFile = useCallback(
+    (file: PresetFile) => {
+      suppressCommitRef.current = true;
+      applyLocalSnapshot(file.snapshot, file.id, false);
+      const freshHistory = historyReset(liveRef.current.history, file.snapshot);
+      const freshAb = createAb(file.snapshot);
+      liveRef.current.history = freshHistory;
+      liveRef.current.ab = freshAb;
+      setHistory(freshHistory);
+      setAb(freshAb);
+      setPendingSwitchId(null);
+      window.setTimeout(() => {
+        suppressCommitRef.current = false;
+      }, 0);
+    },
+    [applyLocalSnapshot],
+  );
+
+  /// Sidebar "＋ Save preset": user preset ids are `U` + base36 timestamp so
+  /// files never collide with the factory `NNX` ids.
+  const buildSavePayload = useCallback(
+    (name: string) => {
+      const snap = currentSnapshot();
+      const id = `U${Date.now().toString(36).toUpperCase().slice(-4)}`;
+      return {
+        fileName: presetFileName(id, name),
+        content: serializePreset(id, name, snap.activeCat, snap),
+      };
+    },
+    [currentSnapshot],
+  );
+
+
   const stepPreset = useCallback(
     (dir: number) => {
       const idx = presetsData.findIndex(
@@ -612,6 +681,16 @@ export function RodhareistEditor() {
       markDirty();
     },
     [markDirty],
+  );
+
+  /// NAM tab click: file text was read natively; route it into the amp slot
+  /// with sensible defaults (the ModuleEditor picker still offers
+  /// stereo/full-rig fine control).
+  const loadNamFile = useCallback(
+    (name: string, json: string) => {
+      loadNamCapture(json, { name, stereo: true, fullRig: false });
+    },
+    [loadNamCapture],
   );
 
   const bypassCab = useCallback(() => {
@@ -942,7 +1021,7 @@ export function RodhareistEditor() {
         toggleBypass();
         return;
       }
-      if (e.key >= "1" && e.key <= "7") {
+      if (e.key >= "1" && e.key <= "9") {
         const idx = Number(e.key) - 1;
         const path = liveRef.current.pathOrder;
         const cat = path[idx] ?? chainOrder[idx];
@@ -970,7 +1049,6 @@ export function RodhareistEditor() {
 
   return (
     <Layout
-      presets={presetsData}
       currentPresetId={currentPresetId}
       presetName={currentPreset.name}
       modified={modified}
@@ -1005,7 +1083,10 @@ export function RodhareistEditor() {
       onSelectAb={onSelectAb}
       onCopyAb={onCopyAb}
       onStepPreset={stepPreset}
-      onLoadPreset={loadPreset}
+      onLoadPresetFile={loadPresetFile}
+      buildSavePayload={buildSavePayload}
+      buildFactorySnapshot={factorySnapshot}
+      onLoadNamFile={loadNamFile}
       onToggleTest={() => void toggleTest()}
       onSave={saveRig}
       onRevert={revertRig}
@@ -1052,11 +1133,18 @@ function NoInstanceSelected() {
  * next instance's snapshot in, instead of discarding and starting fresh.
  */
 function BoundEditor() {
-  const { instanceId, connectionStatus } = useBoundInstance();
+  const { instanceId, connectionStatus, state } = useBoundInstance();
+  // Map the native state blob once per binding; `null` (fresh insert / no
+  // valid blob) makes the editor establish the factory initial instead.
+  const boundSnapshot = useMemo(
+    () => snapshotFromRodhareistState(state),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [instanceId, state],
+  );
   if (connectionStatus !== "active" || !instanceId) {
     return <NoInstanceSelected />;
   }
-  return <RodhareistEditor key={instanceId} />;
+  return <RodhareistEditor key={instanceId} boundSnapshot={boundSnapshot} />;
 }
 
 function AppRoot() {

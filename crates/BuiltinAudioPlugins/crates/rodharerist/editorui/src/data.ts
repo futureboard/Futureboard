@@ -1,7 +1,10 @@
 export type CategoryId =
   | "dyn"
+  | "comp"
+  | "wah"
   | "dist"
   | "amp"
+  | "eq"
   | "mod"
   | "delay"
   | "verb"
@@ -52,7 +55,7 @@ export const presetsData: Preset[] = [
     model: "mandarin",
     values: {},
     path: [],
-    bypassed: ["dyn", "dist", "amp", "mod", "delay", "verb", "cab"],
+    bypassed: ["dyn", "comp", "wah", "dist", "amp", "eq", "mod", "delay", "verb", "cab"],
   },
   {
     id: "01A",
@@ -176,6 +179,20 @@ export const categories: Record<CategoryId, Category> = {
     rgb: "91, 124, 250",
     node: "gate",
   },
+  comp: {
+    name: "Compressor",
+    short: "Comp",
+    color: "var(--c-comp)",
+    rgb: "240, 200, 80",
+    node: "comp",
+  },
+  wah: {
+    name: "Wah",
+    short: "Wah",
+    color: "var(--c-wah)",
+    rgb: "170, 200, 80",
+    node: "wah",
+  },
   dist: {
     name: "Distortion",
     short: "Dist",
@@ -189,6 +206,13 @@ export const categories: Record<CategoryId, Category> = {
     color: "var(--c-amp)",
     rgb: "232, 92, 92",
     node: "amp",
+  },
+  eq: {
+    name: "Equalizer",
+    short: "EQ",
+    color: "var(--c-eq)",
+    rgb: "120, 220, 200",
+    node: "eq",
   },
   mod: {
     name: "Modulation",
@@ -229,6 +253,22 @@ export const models: Record<CategoryId, Model[]> = {
       sub: "Dynamic threshold noise reduction",
     },
   ],
+  comp: [
+    {
+      id: "softknee",
+      name: "Studio Comp",
+      short: "Comp",
+      sub: "Stereo-linked soft-knee compressor",
+    },
+  ],
+  eq: [
+    {
+      id: "parametric",
+      name: "Studio EQ",
+      short: "EQ",
+      sub: "4-band parametric tone shaping",
+    },
+  ],
   dist: [
     {
       id: "screamer",
@@ -265,6 +305,30 @@ export const models: Record<CategoryId, Model[]> = {
       name: "Centurion OD",
       short: "Centurion",
       sub: "Transparent mid-forward overdrive",
+    },
+    {
+      id: "ds_one",
+      name: "DS Classic",
+      short: "DS-1",
+      sub: "Raw orange-box hard clipper",
+    },
+    {
+      id: "super_drive",
+      name: "Super Drive",
+      short: "SuperDrv",
+      sub: "Asymmetric smooth overdrive",
+    },
+    {
+      id: "metal_core",
+      name: "Metal Core",
+      short: "Metal",
+      sub: "Huge-gain scooped metal distortion",
+    },
+    {
+      id: "tight_rift",
+      name: "Tight Rift",
+      short: "Rift",
+      sub: "Modern tight high-gain, djent-ready",
     },
   ],
   amp: [
@@ -329,12 +393,44 @@ export const models: Record<CategoryId, Model[]> = {
       sub: "Pass the Tone/Amp slot through unprocessed",
     },
   ],
+  wah: [
+    {
+      id: "cry_wah",
+      name: "Cry Wah",
+      short: "Cry",
+      sub: "Pedal-position resonant sweep",
+    },
+    {
+      id: "touch_wah",
+      name: "Touch Wah",
+      short: "Touch",
+      sub: "Envelope-following auto wah",
+    },
+  ],
   mod: [
     {
       id: "chorus",
       name: "70s Analog Chorus",
       short: "Chorus",
       sub: "Warm analog modulated chorus",
+    },
+    {
+      id: "phaser",
+      name: "Vibe Phase 90",
+      short: "Phaser",
+      sub: "Swept 4-stage analog phaser",
+    },
+    {
+      id: "flanger",
+      name: "Jet Flanger",
+      short: "Flanger",
+      sub: "Short-delay jet-sweep flanger",
+    },
+    {
+      id: "tremolo",
+      name: "Opto Tremolo",
+      short: "Trem",
+      sub: "Amp-style optical tremolo",
     },
   ],
   delay: [
@@ -386,6 +482,21 @@ export const parameterDefaults: Record<string, Param[]> = {
       val: -55,
       unit: "dB",
     },
+  ],
+  softknee: [
+    { id: "comp_thresh", name: "Threshold", min: -60, max: 0, val: -24, unit: "dB" },
+    { id: "comp_ratio", name: "Ratio", min: 1, max: 20, val: 2, unit: ":1" },
+    { id: "comp_attack", name: "Attack", min: 0.1, max: 100, val: 10, unit: "ms" },
+    { id: "comp_release", name: "Release", min: 10, max: 1000, val: 120, unit: "ms" },
+    { id: "comp_makeup", name: "Makeup", min: 0, max: 24, val: 0, unit: "dB" },
+  ],
+  parametric: [
+    { id: "eq_low_gain", name: "Low", min: -15, max: 15, val: 0, unit: "dB" },
+    { id: "eq_mid1_freq", name: "Mid1 Freq", min: 100, max: 1000, val: 400, unit: "Hz" },
+    { id: "eq_mid1_gain", name: "Mid1", min: -15, max: 15, val: 0, unit: "dB" },
+    { id: "eq_mid2_freq", name: "Mid2 Freq", min: 600, max: 6000, val: 2000, unit: "Hz" },
+    { id: "eq_mid2_gain", name: "Mid2", min: -15, max: 15, val: 0, unit: "dB" },
+    { id: "eq_high_gain", name: "High", min: -15, max: 15, val: 0, unit: "dB" },
   ],
   screamer: [
     {
@@ -458,6 +569,26 @@ export const parameterDefaults: Record<string, Param[]> = {
     { id: "drive_gain", name: "Gain", min: 0, max: 10, val: 5.0, unit: "" },
     { id: "drive_tone", name: "Tone", min: 0, max: 10, val: 6.0, unit: "" },
     { id: "drive_level", name: "Output", min: 0, max: 10, val: 6.5, unit: "" },
+  ],
+  ds_one: [
+    { id: "drive_gain", name: "Dist", min: 0, max: 10, val: 6.5, unit: "" },
+    { id: "drive_tone", name: "Tone", min: 0, max: 10, val: 5.0, unit: "" },
+    { id: "drive_level", name: "Level", min: 0, max: 10, val: 6.0, unit: "" },
+  ],
+  super_drive: [
+    { id: "drive_gain", name: "Drive", min: 0, max: 10, val: 5.5, unit: "" },
+    { id: "drive_tone", name: "Tone", min: 0, max: 10, val: 5.5, unit: "" },
+    { id: "drive_level", name: "Level", min: 0, max: 10, val: 6.0, unit: "" },
+  ],
+  metal_core: [
+    { id: "drive_gain", name: "Dist", min: 0, max: 10, val: 7.5, unit: "" },
+    { id: "drive_tone", name: "Tone", min: 0, max: 10, val: 5.0, unit: "" },
+    { id: "drive_level", name: "Level", min: 0, max: 10, val: 5.5, unit: "" },
+  ],
+  tight_rift: [
+    { id: "drive_gain", name: "Gain", min: 0, max: 10, val: 7.0, unit: "" },
+    { id: "drive_tone", name: "Tone", min: 0, max: 10, val: 5.5, unit: "" },
+    { id: "drive_level", name: "Level", min: 0, max: 10, val: 5.5, unit: "" },
   ],
   mandarin: [
     {
@@ -613,6 +744,30 @@ export const parameterDefaults: Record<string, Param[]> = {
     { id: "nam_mix", name: "Mix", min: 0, max: 100, val: 100, unit: "%" },
   ],
   bypass: [],
+  cry_wah: [
+    { id: "wah_pos", name: "Position", min: 0, max: 10, val: 4.5, unit: "" },
+    { id: "wah_res", name: "Resonance", min: 0, max: 10, val: 5.0, unit: "" },
+  ],
+  touch_wah: [
+    { id: "wah_pos", name: "Base Freq", min: 0, max: 10, val: 2.0, unit: "" },
+    { id: "wah_res", name: "Resonance", min: 0, max: 10, val: 5.0, unit: "" },
+    { id: "wah_sens", name: "Sensitivity", min: 0, max: 10, val: 5.0, unit: "" },
+  ],
+  phaser: [
+    { id: "chorus_rate", name: "Rate", min: 0, max: 10, val: 3.0, unit: "" },
+    { id: "chorus_depth", name: "Depth", min: 0, max: 10, val: 7.0, unit: "" },
+    { id: "chorus_mix", name: "Mix", min: 0, max: 100, val: 50, unit: "%" },
+  ],
+  flanger: [
+    { id: "chorus_rate", name: "Rate", min: 0, max: 10, val: 2.5, unit: "" },
+    { id: "chorus_depth", name: "Depth", min: 0, max: 10, val: 6.0, unit: "" },
+    { id: "chorus_mix", name: "Mix", min: 0, max: 100, val: 50, unit: "%" },
+  ],
+  tremolo: [
+    { id: "chorus_rate", name: "Rate", min: 0, max: 10, val: 4.5, unit: "" },
+    { id: "chorus_depth", name: "Depth", min: 0, max: 10, val: 6.0, unit: "" },
+    { id: "chorus_mix", name: "Shape", min: 0, max: 100, val: 20, unit: "%" },
+  ],
   chorus: [
     {
       id: "chorus_rate",
@@ -703,15 +858,22 @@ export const parameterDefaults: Record<string, Param[]> = {
 
 export const chainOrder: CategoryId[] = [
   "dyn",
+  "comp",
+  "wah",
   "dist",
   "amp",
+  "eq",
   "mod",
   "delay",
   "verb",
   "cab",
 ];
 
-/** Index used by DSP `path_slot_*` / `StageKind`. */
+/** Number of DSP path slots (mirrors Rust `PATH_SLOTS`). */
+export const PATH_SLOTS = 10;
+
+/** Index used by DSP `path_slot_*` / `StageKind`. Append-only — these values
+ * are the Rust `StageKind` discriminants (comp/eq appended as 7/8, wah as 9). */
 export const stageIndex: Record<CategoryId, number> = {
   dyn: 0,
   dist: 1,
@@ -720,6 +882,9 @@ export const stageIndex: Record<CategoryId, number> = {
   delay: 4,
   verb: 5,
   cab: 6,
+  comp: 7,
+  eq: 8,
+  wah: 9,
 };
 
 export const stageByIndex: CategoryId[] = [
@@ -730,19 +895,24 @@ export const stageByIndex: CategoryId[] = [
   "delay",
   "verb",
   "cab",
+  "comp",
+  "eq",
+  "wah",
 ];
 
-/** Pack a path into 7 DSP slots (empty = -1). */
+/** Pack a path into the DSP slots (empty = -1). */
 export function pathToSlotValues(path: CategoryId[]): number[] {
-  const slots = Array.from({ length: 7 }, () => -1);
+  const slots = Array.from({ length: PATH_SLOTS }, () => -1);
   path.forEach((cat, i) => {
-    if (i < 7) slots[i] = stageIndex[cat];
+    if (i < PATH_SLOTS) slots[i] = stageIndex[cat];
   });
   return slots;
 }
 
+/** Factory default path. The wah is never tonally neutral, so it starts in
+ * the rack and joins the path only when the user places it. */
 export function defaultPath(): CategoryId[] {
-  return [...chainOrder];
+  return chainOrder.filter((c) => c !== "wah");
 }
 
 export function emptyPath(): CategoryId[] {
@@ -759,10 +929,13 @@ export const icons: Record<string, string> = {
   drive:
     '<polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/>',
   amp: '<rect x="2" y="3" width="20" height="14" rx="2"/><line x1="2" y1="10" x2="22" y2="10"/><circle cx="6" cy="14" r="1"/><circle cx="10" cy="14" r="1"/>',
+  comp: '<path d="M3 18c3 0 3-8 6-8s3 4 6 4 3-2 6-2"/><line x1="3" y1="6" x2="21" y2="6"/>',
+  eq: '<line x1="6" y1="4" x2="6" y2="20"/><line x1="12" y1="4" x2="12" y2="20"/><line x1="18" y1="4" x2="18" y2="20"/><circle cx="6" cy="14" r="2"/><circle cx="12" cy="8" r="2"/><circle cx="18" cy="16" r="2"/>',
   mod: '<path d="M2 12s2-6 5-6 5 12 10 12 5-6 5-6"/>',
   delay: '<circle cx="12" cy="12" r="9"/><polyline points="12 7 12 12 16 14"/>',
   reverb: '<path d="M12 3v18M17 6v12M22 10v4M7 6v12M2 10v4"/>',
   cab: '<ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/>',
+  wah: '<path d="M5 20 L9 4 L15 4 L19 20 Z"/><line x1="7" y1="15" x2="17" y2="15"/>',
 };
 
 export function fmt(val: number, unit: string): string {

@@ -1,64 +1,253 @@
-import { useMemo, useState } from "react";
-import { categories, type Preset } from "../data";
+// Compact tabbed sidebar: PRESET | IR | NAM, backed by real files under
+// Documents/Futureboard Studio/Rodhareist/{Presets, IRs, NAMs} via the
+// native file bridge (list/read/write postMessages). Listings rebuild
+// wholesale on tab switch and after every write — never diffed.
+
+import { useEffect, useRef, useState } from "react";
+import {
+  onNativeMessage,
+  postListFiles,
+  postReadFile,
+  postWriteFile,
+  type FileEntry,
+  type FileKind,
+} from "../instanceBridge";
+import {
+  parsePresetFile,
+  seedFactoryPresets,
+  type PresetFile,
+} from "../presetFiles";
+import type { RigSnapshot } from "../Editor";
 
 type PresetBrowserProps = {
-  presets: Preset[];
   currentPresetId: string;
   modifiedIds?: ReadonlySet<string>;
-  onLoadPreset: (id: string) => void;
+  /** Apply a successfully parsed preset file to the rig. */
+  onLoadPresetFile: (file: PresetFile) => void;
+  /** Build the save payload for a user preset name; null cancels. */
+  buildSavePayload: (name: string) => { fileName: string; content: string } | null;
+  /** Editor's factorySnapshot — used once to seed an empty Presets folder. */
+  buildFactorySnapshot: (id: string) => RigSnapshot | null;
+  /** Route a `.nam` file's text into the amp slot's NAM engine. */
+  onLoadNamFile: (name: string, json: string) => void;
 };
 
+const TABS: { kind: FileKind; label: string }[] = [
+  { kind: "presets", label: "Preset" },
+  { kind: "irs", label: "IR" },
+  { kind: "nams", label: "NAM" },
+];
+
+/** `"01A Twin Sparkle.json"` → `{ pid: "01A", pname: "Twin Sparkle" }`. */
+function displayParts(fileName: string): { pid: string; pname: string } {
+  const stem = fileName.replace(/\.[^.]+$/, "");
+  const space = stem.indexOf(" ");
+  if (space > 0 && space <= 4) {
+    return { pid: stem.slice(0, space), pname: stem.slice(space + 1) };
+  }
+  return { pid: "•", pname: stem };
+}
+
 export function PresetBrowser({
-  presets,
   currentPresetId,
   modifiedIds,
-  onLoadPreset,
+  onLoadPresetFile,
+  buildSavePayload,
+  buildFactorySnapshot,
+  onLoadNamFile,
 }: PresetBrowserProps) {
+  const [tab, setTab] = useState<FileKind>("presets");
   const [query, setQuery] = useState("");
+  const [lists, setLists] = useState<Partial<Record<FileKind, FileEntry[]>>>({});
+  const [saving, setSaving] = useState(false);
+  const [saveName, setSaveName] = useState("");
+  const [status, setStatus] = useState<string | null>(null);
+  const seededRef = useRef(false);
+  const pendingSeedWrites = useRef(0);
 
-  const filtered = useMemo(() => {
-    const q = query.trim().toLowerCase();
-    if (!q) return presets;
-    return presets.filter(
-      (p) =>
-        p.id.toLowerCase().includes(q) || p.name.toLowerCase().includes(q),
-    );
-  }, [presets, query]);
+  // One native-message subscription drives everything: listings, read
+  // results (preset load / NAM load), and write acks (refresh + status).
+  useEffect(
+    () =>
+      onNativeMessage((msg) => {
+        if (msg.type === "futureboard.fileList") {
+          setLists((prev) => ({ ...prev, [msg.kind]: msg.files }));
+          // First-run factory seeding: empty Presets folder → write the
+          // factory set once, then re-list when the last ack arrives.
+          if (
+            msg.kind === "presets" &&
+            msg.files.length === 0 &&
+            !seededRef.current
+          ) {
+            seededRef.current = true;
+            pendingSeedWrites.current = seedFactoryPresets(
+              buildFactorySnapshot,
+              (fileName, content) => postWriteFile("presets", fileName, content),
+            );
+            if (pendingSeedWrites.current > 0) {
+              setStatus("Creating factory presets…");
+            }
+          }
+        } else if (msg.type === "futureboard.fileWritten") {
+          if (pendingSeedWrites.current > 0) {
+            pendingSeedWrites.current -= 1;
+            if (pendingSeedWrites.current === 0) {
+              setStatus(null);
+              postListFiles("presets");
+            }
+          } else if (msg.kind === "presets") {
+            setStatus(msg.ok ? null : `Save failed: ${msg.error ?? "unknown"}`);
+            postListFiles("presets");
+          }
+        } else if (msg.type === "futureboard.fileContent") {
+          if (!msg.ok || typeof msg.content !== "string") {
+            setStatus(`Read failed: ${msg.error ?? "unknown"}`);
+            return;
+          }
+          if (msg.kind === "presets") {
+            const parsed = parsePresetFile(msg.content);
+            if (parsed) {
+              setStatus(null);
+              onLoadPresetFile(parsed);
+            } else {
+              setStatus(`Not a Rodhareist preset: ${msg.fileName}`);
+            }
+          } else if (msg.kind === "nams") {
+            onLoadNamFile(msg.fileName.replace(/\.nam$/i, ""), msg.content);
+          }
+        }
+      }),
+    // Stable callbacks come from Editor's useCallback wrappers.
+    [buildFactorySnapshot, onLoadPresetFile, onLoadNamFile],
+  );
+
+  // Initial + per-tab listing.
+  useEffect(() => {
+    postListFiles(tab);
+  }, [tab]);
+
+  const entries = (lists[tab] ?? []).filter((f) =>
+    f.fileName.toLowerCase().includes(query.trim().toLowerCase()),
+  );
+
+  const commitSave = () => {
+    const name = saveName.trim();
+    if (!name) {
+      setSaving(false);
+      return;
+    }
+    const payload = buildSavePayload(name);
+    if (payload) {
+      postWriteFile("presets", payload.fileName, payload.content);
+      setStatus("Saving…");
+    }
+    setSaving(false);
+    setSaveName("");
+  };
 
   return (
     <aside className="browser">
-      <div className="browser-head">Presets</div>
+      <div className="browser-tabs" role="tablist" aria-label="Plugin files">
+        {TABS.map((t) => (
+          <button
+            key={t.kind}
+            type="button"
+            role="tab"
+            aria-selected={tab === t.kind}
+            className={`browser-tab${tab === t.kind ? " active" : ""}`}
+            onClick={() => setTab(t.kind)}
+          >
+            {t.label}
+          </button>
+        ))}
+      </div>
+
       <div className="search-wrap">
         <input
           type="text"
           className="search"
-          placeholder="Search presets…"
+          placeholder="Search…"
           value={query}
           onChange={(e) => setQuery(e.target.value)}
+          aria-label={`Search ${tab}`}
         />
       </div>
-      <div className="preset-list">
-        {filtered.map((p) => {
-          const c = categories[p.category];
-          const dirty = modifiedIds?.has(p.id);
+
+      <div className="preset-list" role="listbox">
+        {entries.length === 0 && (
+          <div className="browser-empty">
+            {tab === "presets" && "No presets yet"}
+            {tab === "irs" &&
+              "Drop .wav IRs into Documents/Futureboard Studio/Rodhareist/IRs"}
+            {tab === "nams" &&
+              "Drop .nam captures into Documents/Futureboard Studio/Rodhareist/NAMs"}
+          </div>
+        )}
+        {entries.map((f) => {
+          const { pid, pname } = displayParts(f.fileName);
+          const active = tab === "presets" && pid === currentPresetId;
+          const dirty = tab === "presets" && !!modifiedIds?.has(pid);
+          const disabled = tab === "irs"; // browse-only until convolution lands
           return (
             <button
-              key={p.id}
+              key={f.fileName}
               type="button"
-              className={`preset-item${p.id === currentPresetId ? " active" : ""}`}
-              style={{ ["--pc" as string]: c.color }}
-              onClick={() => onLoadPreset(p.id)}
+              role="option"
+              aria-selected={active}
+              className={`preset-item${active ? " active" : ""}`}
+              disabled={disabled}
+              title={disabled ? "IR loading coming soon" : f.fileName}
+              onClick={() => {
+                if (tab === "presets") postReadFile("presets", f.fileName);
+                else if (tab === "nams") postReadFile("nams", f.fileName);
+              }}
             >
               <span className="dot" />
-              <span className="pid">{p.id}</span>
+              <span className="pid">{pid}</span>
               <span className="pname">
-                {p.name}
+                {pname}
                 {dirty ? " *" : ""}
               </span>
             </button>
           );
         })}
       </div>
+
+      {tab === "irs" && <div className="browser-note">IR loading coming soon</div>}
+
+      {tab === "presets" && (
+        <div className="browser-save">
+          {saving ? (
+            <input
+              type="text"
+              className="search"
+              autoFocus
+              placeholder="Preset name…"
+              value={saveName}
+              onChange={(e) => setSaveName(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") commitSave();
+                if (e.key === "Escape") {
+                  setSaving(false);
+                  setSaveName("");
+                }
+              }}
+              onBlur={() => setSaving(false)}
+              aria-label="New preset name"
+            />
+          ) : (
+            <button
+              type="button"
+              className="browser-save-btn"
+              onClick={() => setSaving(true)}
+            >
+              ＋ Save preset
+            </button>
+          )}
+        </div>
+      )}
+
+      {status && <div className="browser-note">{status}</div>}
     </aside>
   );
 }

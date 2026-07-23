@@ -1,3 +1,4 @@
+import { useEffect, useRef } from "react";
 import type { CategoryId, Param, Preset } from "./data";
 import type { NamCaptureLoadOptions } from "./bridge";
 import type { AbSlot } from "./state/history";
@@ -12,6 +13,87 @@ import { SignalChain } from "./Components/SignalChain";
 // Supports weights 100-700
 import '@fontsource-variable/ibm-plex-sans/wght.css';
 
+/** Sidebar width bounds + persistence for the drag divider. */
+const SIDEBAR_DEFAULT_PX = 176;
+const SIDEBAR_MIN_PX = 140;
+const SIDEBAR_MAX_PX = 360;
+const SIDEBAR_WIDTH_KEY = "rodhareist.sidebarWidth";
+
+function clampSidebar(px: number): number {
+  return Math.min(SIDEBAR_MAX_PX, Math.max(SIDEBAR_MIN_PX, Math.round(px)));
+}
+
+function storedSidebarWidth(): number {
+  try {
+    const raw = window.localStorage.getItem(SIDEBAR_WIDTH_KEY);
+    const parsed = raw === null ? NaN : Number(raw);
+    return Number.isFinite(parsed) ? clampSidebar(parsed) : SIDEBAR_DEFAULT_PX;
+  } catch {
+    return SIDEBAR_DEFAULT_PX;
+  }
+}
+
+/**
+ * Drag divider on the sidebar's right edge. Width is applied straight to the
+ * workspace's CSS variable during the drag (no React re-render per move) and
+ * persisted on release. Double-click resets to the default.
+ */
+function SidebarResizer({
+  workspaceRef,
+}: {
+  workspaceRef: React.RefObject<HTMLDivElement | null>;
+}) {
+  const applyWidth = (px: number) => {
+    workspaceRef.current?.style.setProperty("--sidebar-w", `${clampSidebar(px)}px`);
+  };
+
+  return (
+    <div
+      className="sidebar-resize"
+      role="separator"
+      aria-orientation="vertical"
+      aria-label="Resize sidebar"
+      onDoubleClick={() => {
+        applyWidth(SIDEBAR_DEFAULT_PX);
+        try {
+          window.localStorage.setItem(SIDEBAR_WIDTH_KEY, String(SIDEBAR_DEFAULT_PX));
+        } catch {
+          /* no-op */
+        }
+      }}
+      onPointerDown={(e) => {
+        e.preventDefault();
+        const startX = e.clientX;
+        const startW =
+          workspaceRef.current
+            ?.style.getPropertyValue("--sidebar-w")
+            .match(/^(\d+)px$/)?.[1] ?? String(storedSidebarWidth());
+        const base = Number(startW) || SIDEBAR_DEFAULT_PX;
+        const target = e.currentTarget;
+        target.setPointerCapture(e.pointerId);
+        let latest = base;
+        const onMove = (ev: PointerEvent) => {
+          latest = clampSidebar(base + (ev.clientX - startX));
+          applyWidth(latest);
+        };
+        const onUp = () => {
+          target.removeEventListener("pointermove", onMove);
+          target.removeEventListener("pointerup", onUp);
+          target.removeEventListener("pointercancel", onUp);
+          try {
+            window.localStorage.setItem(SIDEBAR_WIDTH_KEY, String(latest));
+          } catch {
+            /* no-op */
+          }
+        };
+        target.addEventListener("pointermove", onMove);
+        target.addEventListener("pointerup", onUp);
+        target.addEventListener("pointercancel", onUp);
+      }}
+    />
+  );
+}
+
 export type DiscardPrompt = {
   presetName: string;
   onSave: () => void;
@@ -20,7 +102,6 @@ export type DiscardPrompt = {
 };
 
 export type LayoutProps = {
-  presets: Preset[];
   currentPresetId: string;
   presetName: string;
   modified: boolean;
@@ -46,7 +127,10 @@ export type LayoutProps = {
   onSelectAb: (slot: AbSlot) => void;
   onCopyAb: () => void;
   onStepPreset: (dir: number) => void;
-  onLoadPreset: (id: string) => void;
+  onLoadPresetFile: (file: import("./presetFiles").PresetFile) => void;
+  buildSavePayload: (name: string) => { fileName: string; content: string } | null;
+  buildFactorySnapshot: (id: string) => import("./Editor").RigSnapshot | null;
+  onLoadNamFile: (name: string, json: string) => void;
   onToggleTest: () => void;
   onSave: () => void;
   onRevert: () => void;
@@ -66,7 +150,6 @@ export type LayoutProps = {
 };
 
 export function Layout({
-  presets,
   currentPresetId,
   presetName,
   modified,
@@ -92,7 +175,10 @@ export function Layout({
   onSelectAb,
   onCopyAb,
   onStepPreset,
-  onLoadPreset,
+  onLoadPresetFile,
+  buildSavePayload,
+  buildFactorySnapshot,
+  onLoadNamFile,
   onToggleTest,
   onSave,
   onRevert,
@@ -110,6 +196,16 @@ export function Layout({
   onLoadNamCapture,
   onBypassCab,
 }: LayoutProps) {
+  const workspaceRef = useRef<HTMLDivElement | null>(null);
+
+  // Restore the persisted sidebar width once per mount.
+  useEffect(() => {
+    workspaceRef.current?.style.setProperty(
+      "--sidebar-w",
+      `${storedSidebarWidth()}px`,
+    );
+  }, []);
+
   return (
     <div className="plugin">
       <Header
@@ -131,13 +227,16 @@ export function Layout({
         onRevert={onRevert}
       />
 
-      <div className="workspace">
+      <div className="workspace" ref={workspaceRef}>
         <PresetBrowser
-          presets={presets}
           currentPresetId={currentPresetId}
           modifiedIds={dirtyPresetIds}
-          onLoadPreset={onLoadPreset}
+          onLoadPresetFile={onLoadPresetFile}
+          buildSavePayload={buildSavePayload}
+          buildFactorySnapshot={buildFactorySnapshot}
+          onLoadNamFile={onLoadNamFile}
         />
+        <SidebarResizer workspaceRef={workspaceRef} />
 
         <main className="dashboard">
           {/* Gain staging brackets the chain so input and output levels are

@@ -1,0 +1,248 @@
+// Maps a native `RodhareistState` blob (serde-serialized Rust `Params`,
+// delivered through `selectInstance.state`) into the editor's `RigSnapshot`
+// shape, so switching instances shows that insert's real state without
+// posting anything back to the DSP (the DSP is the authority — it already
+// holds these values).
+//
+// Serde emits Rust enum *variant names* as strings (`"drive_model":
+// "Screamer"`, `"stage_order": ["Gate", null, ...]`) — the tables below are
+// the variant→editor-id halves of the cross-language contract; the Rust side
+// pins the same pairings in `wire.rs` / model `from_model_id` tests.
+
+import {
+  chainOrder,
+  cloneParameters,
+  models,
+  type CategoryId,
+  type Param,
+} from "./data";
+import type { GlobalState, RigSnapshot } from "./Editor";
+
+/** Rust `StageKind` variant → editor category. */
+export const STAGE_VARIANT_TO_CATEGORY: Record<string, CategoryId> = {
+  Gate: "dyn",
+  Drive: "dist",
+  Amp: "amp",
+  Mod: "mod",
+  Delay: "delay",
+  Reverb: "verb",
+  Cab: "cab",
+  Comp: "comp",
+  Eq: "eq",
+  Wah: "wah",
+};
+
+/** Rust `AmpModel` variant → editor model id. */
+export const AMP_VARIANT_TO_MODEL: Record<string, string> = {
+  Mandarin: "mandarin",
+  Plexi: "plexi",
+  Twin: "twin",
+  TopBoost: "topboost",
+  Recto: "recto",
+  Jcm: "jcm",
+  Slate: "slate",
+  Bassman: "bassman",
+};
+
+/** Rust `DriveModel` variant → editor model id. */
+export const DRIVE_VARIANT_TO_MODEL: Record<string, string> = {
+  Screamer: "screamer",
+  Minotaur: "minotaur",
+  Rat: "rat",
+  Breaker: "breaker",
+  Fuzz: "fuzz",
+  Centurion: "centurion",
+  DsOne: "ds_one",
+  SuperDrive: "super_drive",
+  MetalCore: "metal_core",
+  TightRift: "tight_rift",
+};
+
+/** Rust `CabModel` variant → editor model id. */
+export const CAB_VARIANT_TO_MODEL: Record<string, string> = {
+  Vintage4x12: "vintage_cab",
+  American2x12: "american_2x12",
+  Tweed1x12: "tweed_1x12",
+  Modern4x12: "modern_412",
+};
+
+/** Rust `ModModel` variant → editor model id. */
+export const MOD_VARIANT_TO_MODEL: Record<string, string> = {
+  Chorus: "chorus",
+  Phaser: "phaser",
+  Flanger: "flanger",
+  Tremolo: "tremolo",
+};
+
+/** Rust `WahModel` variant → editor model id. */
+export const WAH_VARIANT_TO_MODEL: Record<string, string> = {
+  CryWah: "cry_wah",
+  TouchWah: "touch_wah",
+};
+
+type ParamsJson = Record<string, unknown>;
+
+function num(p: ParamsJson, key: string): number | undefined {
+  const v = p[key];
+  return typeof v === "number" && Number.isFinite(v) ? v : undefined;
+}
+
+function bool(p: ParamsJson, key: string, fallback: boolean): boolean {
+  const v = p[key];
+  return typeof v === "boolean" ? v : fallback;
+}
+
+/** Set `paramId` in `list` (a cloned `Param[]`) when the blob has a value. */
+function setVal(list: Param[] | undefined, paramId: string, value: number | undefined) {
+  if (list === undefined || value === undefined) return;
+  const param = list.find((x) => x.id === paramId);
+  if (param) param.val = value;
+}
+
+/**
+ * Build a `RigSnapshot` from a `selectInstance.state` payload. Returns `null`
+ * for anything that is not a valid `RodhareistState` (fresh insert `{}`,
+ * corrupt blob, future schema) — the caller falls back to factory defaults.
+ */
+export function snapshotFromRodhareistState(state: unknown): RigSnapshot | null {
+  if (!state || typeof state !== "object") return null;
+  const root = state as { schema_version?: unknown; params?: unknown };
+  if (typeof root.schema_version !== "number") return null;
+  if (!root.params || typeof root.params !== "object") return null;
+  const p = root.params as ParamsJson;
+
+  // Path: stage_order variant names → categories, in order, holes skipped.
+  const rawOrder = Array.isArray(p.stage_order) ? p.stage_order : [];
+  const pathOrder: CategoryId[] = [];
+  for (const slot of rawOrder) {
+    if (typeof slot !== "string") continue;
+    const cat = STAGE_VARIANT_TO_CATEGORY[slot];
+    if (cat && !pathOrder.includes(cat)) pathOrder.push(cat);
+  }
+
+  // Models per category. Single-algorithm stages are fixed; amp folds in the
+  // tone engine (nam_capture / bypass override the classic model id).
+  const stageModels = {} as Record<CategoryId, string>;
+  for (const cat of chainOrder) {
+    stageModels[cat] = models[cat][0]?.id ?? "";
+  }
+  const driveVariant = typeof p.drive_model === "string" ? p.drive_model : "";
+  if (DRIVE_VARIANT_TO_MODEL[driveVariant]) {
+    stageModels.dist = DRIVE_VARIANT_TO_MODEL[driveVariant]!;
+  }
+  const cabVariant = typeof p.cab_model === "string" ? p.cab_model : "";
+  if (CAB_VARIANT_TO_MODEL[cabVariant]) {
+    stageModels.cab = CAB_VARIANT_TO_MODEL[cabVariant]!;
+  }
+  const modVariant = typeof p.mod_model === "string" ? p.mod_model : "";
+  if (MOD_VARIANT_TO_MODEL[modVariant]) {
+    stageModels.mod = MOD_VARIANT_TO_MODEL[modVariant]!;
+  }
+  const wahVariant = typeof p.wah_model === "string" ? p.wah_model : "";
+  if (WAH_VARIANT_TO_MODEL[wahVariant]) {
+    stageModels.wah = WAH_VARIANT_TO_MODEL[wahVariant]!;
+  }
+  const ampVariant = typeof p.amp_model === "string" ? p.amp_model : "";
+  const toneEngine = typeof p.tone_engine === "string" ? p.tone_engine : "Classic";
+  if (toneEngine === "NamCapture") {
+    stageModels.amp = "nam_capture";
+  } else if (toneEngine === "Bypass") {
+    stageModels.amp = "bypass";
+  } else if (AMP_VARIANT_TO_MODEL[ampVariant]) {
+    stageModels.amp = AMP_VARIANT_TO_MODEL[ampVariant]!;
+  }
+
+  // Bypasses: editor "bypassed" is the inverse of the DSP's `*_on`.
+  const bypassed: Partial<Record<CategoryId, boolean>> = {};
+  const enables: [CategoryId, string][] = [
+    ["dyn", "gate_on"],
+    ["comp", "comp_on"],
+    ["wah", "wah_on"],
+    ["dist", "drive_on"],
+    ["amp", "amp_on"],
+    ["eq", "eq_on"],
+    ["mod", "mod_on"],
+    ["delay", "delay_on"],
+    ["verb", "reverb_on"],
+    ["cab", "cab_on"],
+  ];
+  for (const [cat, key] of enables) {
+    if (!bool(p, key, true)) bypassed[cat] = true;
+  }
+
+  // Knob values: only each category's *selected* model receives blob values
+  // (Params holds one value per shared id); other models keep defaults.
+  const parameters = cloneParameters();
+  setVal(parameters.gate, "gate_thresh", num(p, "gate_thresh_db"));
+  const dist = parameters[stageModels.dist];
+  setVal(dist, "drive_gain", num(p, "drive_gain"));
+  setVal(dist, "drive_tone", num(p, "drive_tone"));
+  setVal(dist, "drive_level", num(p, "drive_level"));
+  // Amp knobs live on the classic amp models; NAM has its own ids.
+  const ampModelForParams =
+    AMP_VARIANT_TO_MODEL[ampVariant] ?? stageModels.amp;
+  const amp = parameters[ampModelForParams];
+  setVal(amp, "amp_gain", num(p, "amp_gain"));
+  setVal(amp, "amp_bass", num(p, "amp_bass"));
+  setVal(amp, "amp_middle", num(p, "amp_middle"));
+  setVal(amp, "amp_treble", num(p, "amp_treble"));
+  setVal(amp, "amp_presence", num(p, "amp_presence"));
+  setVal(amp, "amp_master", num(p, "amp_master"));
+  const nam = parameters.nam_capture;
+  setVal(nam, "nam_input_trim", num(p, "nam_input_trim_db"));
+  setVal(nam, "nam_output_trim", num(p, "nam_output_trim_db"));
+  setVal(nam, "nam_mix", num(p, "nam_mix"));
+  const softknee = parameters.softknee;
+  setVal(softknee, "comp_thresh", num(p, "comp_thresh_db"));
+  setVal(softknee, "comp_ratio", num(p, "comp_ratio"));
+  setVal(softknee, "comp_attack", num(p, "comp_attack_ms"));
+  setVal(softknee, "comp_release", num(p, "comp_release_ms"));
+  setVal(softknee, "comp_makeup", num(p, "comp_makeup_db"));
+  const parametric = parameters.parametric;
+  setVal(parametric, "eq_low_gain", num(p, "eq_low_gain_db"));
+  setVal(parametric, "eq_mid1_freq", num(p, "eq_mid1_freq_hz"));
+  setVal(parametric, "eq_mid1_gain", num(p, "eq_mid1_gain_db"));
+  setVal(parametric, "eq_mid2_freq", num(p, "eq_mid2_freq_hz"));
+  setVal(parametric, "eq_mid2_gain", num(p, "eq_mid2_gain_db"));
+  setVal(parametric, "eq_high_gain", num(p, "eq_high_gain_db"));
+  // The Mod slot's models share the chorus_* ids; only the selected model
+  // receives the blob values (same rule as dist/cab above).
+  const modParams = parameters[stageModels.mod];
+  setVal(modParams, "chorus_rate", num(p, "chorus_rate"));
+  setVal(modParams, "chorus_depth", num(p, "chorus_depth"));
+  setVal(modParams, "chorus_mix", num(p, "chorus_mix"));
+  const wahParams = parameters[stageModels.wah];
+  setVal(wahParams, "wah_pos", num(p, "wah_pos"));
+  setVal(wahParams, "wah_res", num(p, "wah_res"));
+  setVal(wahParams, "wah_sens", num(p, "wah_sens"));
+  const tape = parameters.tape;
+  setVal(tape, "delay_time", num(p, "delay_time_ms"));
+  setVal(tape, "delay_fb", num(p, "delay_fb"));
+  setVal(tape, "delay_mix", num(p, "delay_mix"));
+  const plate = parameters.plate;
+  setVal(plate, "reverb_decay", num(p, "reverb_decay_s"));
+  setVal(plate, "reverb_mix", num(p, "reverb_mix"));
+  const cab = parameters[stageModels.cab];
+  setVal(cab, "cab_mic", num(p, "cab_mic"));
+  setVal(cab, "cab_dist", num(p, "cab_dist"));
+
+  const globals: GlobalState = {
+    inputTrim: num(p, "input_trim_db") ?? 0,
+    outputTrim: num(p, "output_trim_db") ?? 0,
+    globalBypass: !bool(p, "power", true),
+  };
+
+  const activeCat: CategoryId = pathOrder.includes("amp")
+    ? "amp"
+    : (pathOrder[0] ?? "amp");
+
+  return {
+    activeCat,
+    activeModelId: stageModels[activeCat],
+    stageModels,
+    pathOrder,
+    bypassed,
+    parameters,
+    globals,
+  };
+}

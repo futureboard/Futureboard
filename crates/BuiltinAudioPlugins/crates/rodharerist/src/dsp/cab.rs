@@ -4,7 +4,11 @@
 
 use builtin_dsp_core::make_eq_biquad;
 
+use super::smooth::Smoothed;
 use super::{CabModel, StereoBiquad};
+
+/// Glide time for the distance-derived level (see `smooth.rs`).
+const SMOOTH_SECONDS: f32 = 0.010;
 
 #[derive(Debug, Clone)]
 pub(super) struct Cabinet {
@@ -13,23 +17,25 @@ pub(super) struct Cabinet {
     body: StereoBiquad,
     presence: StereoBiquad,
     lpf: StereoBiquad,
-    level: f32,
+    level: Smoothed,
 }
 
 impl Cabinet {
     pub(super) fn new(sample_rate: f32) -> Self {
+        let sr = sample_rate.max(1.0);
         Self {
-            sample_rate: sample_rate.max(1.0),
+            sample_rate: sr,
             hpf: StereoBiquad::none(),
             body: StereoBiquad::none(),
             presence: StereoBiquad::none(),
             lpf: StereoBiquad::none(),
-            level: 1.0,
+            level: Smoothed::new(sr, SMOOTH_SECONDS, 1.0),
         }
     }
 
     pub(super) fn set_sample_rate(&mut self, sample_rate: f32) {
         self.sample_rate = sample_rate.max(1.0);
+        self.level.set_time(self.sample_rate, SMOOTH_SECONDS);
     }
 
     pub(super) fn reset(&mut self) {
@@ -37,6 +43,7 @@ impl Cabinet {
         self.body.reset();
         self.presence.reset();
         self.lpf.reset();
+        self.level.snap();
     }
 
     /// `mic` and `dist` are the editor's 0..100 % knobs.
@@ -70,15 +77,16 @@ impl Cabinet {
         self.lpf
             .set(make_eq_biquad("lowpass", cutoff, 0.0, 0.707, sr));
 
-        self.level = 1.0 - d * 0.2;
+        self.level.set_target(1.0 - d * 0.2);
     }
 
     #[inline]
     pub(super) fn process(&mut self, left: f32, right: f32) -> (f32, f32) {
+        let level = self.level.tick();
         let (mut l, mut r) = self.hpf.run(left, right);
         (l, r) = self.body.run(l, r);
         (l, r) = self.presence.run(l, r);
         (l, r) = self.lpf.run(l, r);
-        (l * self.level, r * self.level)
+        (l * level, r * level)
     }
 }

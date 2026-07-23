@@ -1,0 +1,81 @@
+//! The Mod slot: one of several modulation algorithms behind a single set of
+//! Rate/Depth/Mix knobs (the same shared-knob pattern the Drive slot uses for
+//! its pedal models).
+//!
+//! Every algorithm stays allocated so switching models never allocates on a
+//! control-thread edit and never has to rebuild delay lines mid-session; only
+//! the selected one is ticked on the audio thread.
+
+use super::chorus::Chorus;
+use super::flanger::Flanger;
+use super::phaser::Phaser;
+use super::tremolo::Tremolo;
+use crate::dsp::ModModel;
+
+#[derive(Debug, Clone)]
+pub(super) struct ModStage {
+    model: ModModel,
+    chorus: Chorus,
+    phaser: Phaser,
+    flanger: Flanger,
+    tremolo: Tremolo,
+}
+
+impl ModStage {
+    pub(super) fn new(sample_rate: f32) -> Self {
+        Self {
+            model: ModModel::Chorus,
+            chorus: Chorus::new(sample_rate),
+            phaser: Phaser::new(sample_rate),
+            flanger: Flanger::new(sample_rate),
+            tremolo: Tremolo::new(sample_rate),
+        }
+    }
+
+    pub(super) fn set_sample_rate(&mut self, sample_rate: f32) {
+        self.chorus.set_sample_rate(sample_rate);
+        self.phaser.set_sample_rate(sample_rate);
+        self.flanger.set_sample_rate(sample_rate);
+        self.tremolo.set_sample_rate(sample_rate);
+    }
+
+    pub(super) fn reset(&mut self) {
+        self.chorus.reset();
+        self.phaser.reset();
+        self.flanger.reset();
+        self.tremolo.reset();
+    }
+
+    /// `rate`/`depth` are 0..10; `mix` is 0..100 % (the tremolo reads it as
+    /// its Shape control). Only the selected model is configured — the others
+    /// keep their last coefficients and are reconfigured on selection.
+    pub(super) fn configure(&mut self, model: ModModel, rate: f32, depth: f32, mix: f32) {
+        if self.model != model {
+            self.model = model;
+            // Stale delay-line/LFO state from the previous selection would
+            // bleed into the first samples of the new sound.
+            match model {
+                ModModel::Chorus => self.chorus.reset(),
+                ModModel::Phaser => self.phaser.reset(),
+                ModModel::Flanger => self.flanger.reset(),
+                ModModel::Tremolo => self.tremolo.reset(),
+            }
+        }
+        match self.model {
+            ModModel::Chorus => self.chorus.configure(rate, depth, mix),
+            ModModel::Phaser => self.phaser.configure(rate, depth, mix),
+            ModModel::Flanger => self.flanger.configure(rate, depth, mix),
+            ModModel::Tremolo => self.tremolo.configure(rate, depth, mix),
+        }
+    }
+
+    #[inline]
+    pub(super) fn process(&mut self, left: f32, right: f32) -> (f32, f32) {
+        match self.model {
+            ModModel::Chorus => self.chorus.process(left, right),
+            ModModel::Phaser => self.phaser.process(left, right),
+            ModModel::Flanger => self.flanger.process(left, right),
+            ModModel::Tremolo => self.tremolo.process(left, right),
+        }
+    }
+}

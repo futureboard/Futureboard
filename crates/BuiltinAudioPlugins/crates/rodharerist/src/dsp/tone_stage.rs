@@ -102,6 +102,11 @@ impl ToneStage {
         self.nam.submit(runtime);
     }
 
+    /// Clone out a control-side NAM loader handle (see [`super::nam::NamLoader`]).
+    pub(super) fn nam_loader(&self) -> super::nam::NamLoader {
+        self.nam.loader()
+    }
+
     /// Control thread: drop any capture the audio thread has retired.
     pub(super) fn poll_nam_garbage(&mut self) {
         self.nam.poll_garbage();

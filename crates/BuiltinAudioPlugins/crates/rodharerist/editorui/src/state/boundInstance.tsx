@@ -19,10 +19,12 @@ import {
 } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import {
+  clearActiveParamBinding,
   onNativeMessage,
   requestSelectInstance,
   sendBridgeReady,
   sendInstanceReady,
+  setActiveParamBinding,
   type InstanceDisplayMetadata,
 } from "../instanceBridge";
 
@@ -39,6 +41,9 @@ export type BoundInstanceState = {
   bindingGeneration: number;
   display: InstanceDisplayMetadata | null;
   connectionStatus: ConnectionStatus;
+  /** The instance's persisted `RodhareistState` JSON (already parsed), `{}`
+   * for a fresh insert. Mapped into editor state by `snapshotFromRodhareistState`. */
+  state: unknown;
 };
 
 const initialState: BoundInstanceState = {
@@ -47,6 +52,7 @@ const initialState: BoundInstanceState = {
   bindingGeneration: 0,
   display: null,
   connectionStatus: "waiting",
+  state: null,
 };
 
 const BoundInstanceContext = createContext<BoundInstanceState>(initialState);
@@ -73,12 +79,21 @@ export function BoundInstanceProvider({ children }: { children: ReactNode }) {
     const off = onNativeMessage((msg) => {
       if (msg.type === "futureboard.selectInstance") {
         approvedInstanceRef.current = msg.instanceId;
+        // Rebind the param write path *before* anything renders against the
+        // new instance — also drops any pending coalesced edits made under
+        // the previous binding.
+        setActiveParamBinding({
+          pluginId: msg.pluginId,
+          instanceId: msg.instanceId,
+          bindingGeneration: msg.bindingGeneration,
+        });
         setState({
           pluginId: msg.pluginId,
           instanceId: msg.instanceId,
           bindingGeneration: msg.bindingGeneration,
           display: msg.display,
           connectionStatus: "active",
+          state: msg.state,
         });
         navigate(`/instance/${msg.instanceId}`, { replace: true });
         // Acknowledge only after the state above is committed — React 19
@@ -93,6 +108,7 @@ export function BoundInstanceProvider({ children }: { children: ReactNode }) {
       } else if (msg.type === "futureboard.instanceRemoved") {
         if (approvedInstanceRef.current === msg.instanceId) {
           approvedInstanceRef.current = null;
+          clearActiveParamBinding();
           setState((prev) => ({ ...prev, connectionStatus: "waiting" }));
         }
       }

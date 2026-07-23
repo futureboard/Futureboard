@@ -1,4 +1,5 @@
-//! 70s analog-style stereo chorus — dual modulated delay lines in quadrature.
+//! Jet-style stereo flanger — one short modulated delay line per channel with
+//! regeneration, LFOs in quadrature for stereo width.
 
 use builtin_dsp_core::mix;
 
@@ -6,13 +7,17 @@ use super::smooth::Smoothed;
 use super::{InterpDelay, Lfo};
 
 /// Longest modulated delay we ever read (ms) → buffer capacity.
-const MAX_DELAY_MS: f32 = 32.0;
+const MAX_DELAY_MS: f32 = 12.0;
 
 /// Glide time for depth/mix edits (see `smooth.rs`).
 const SMOOTH_SECONDS: f32 = 0.010;
 
+/// Fixed regeneration. High enough for the metallic comb resonance a flanger
+/// is for, low enough that the loop can never run away (|fb| < 1).
+const FEEDBACK: f32 = 0.45;
+
 #[derive(Debug, Clone)]
-pub(super) struct Chorus {
+pub(super) struct Flanger {
     sample_rate: f32,
     line_l: InterpDelay,
     line_r: InterpDelay,
@@ -23,7 +28,7 @@ pub(super) struct Chorus {
     mix: Smoothed,
 }
 
-impl Chorus {
+impl Flanger {
     pub(super) fn new(sample_rate: f32) -> Self {
         let sr = sample_rate.max(1.0);
         let capacity = ((sr * MAX_DELAY_MS * 0.001) as usize).max(4);
@@ -35,9 +40,9 @@ impl Chorus {
             line_r: InterpDelay::new(capacity),
             lfo_l: Lfo::new(),
             lfo_r,
-            base_samples: 0.010 * sr,
+            base_samples: 0.0015 * sr,
             depth_samples: Smoothed::new(sr, SMOOTH_SECONDS, 0.0),
-            mix: Smoothed::new(sr, SMOOTH_SECONDS, 0.4),
+            mix: Smoothed::new(sr, SMOOTH_SECONDS, 0.5),
         }
     }
 
@@ -47,6 +52,7 @@ impl Chorus {
         self.sample_rate = sr;
         self.line_l = InterpDelay::new(capacity);
         self.line_r = InterpDelay::new(capacity);
+        self.base_samples = 0.0015 * sr;
         self.depth_samples.set_time(sr, SMOOTH_SECONDS);
         self.mix.set_time(sr, SMOOTH_SECONDS);
     }
@@ -64,14 +70,14 @@ impl Chorus {
     /// `rate` and `depth` are 0..10; `mix` is 0..100 %.
     pub(super) fn configure(&mut self, rate: f32, depth: f32, mix: f32) {
         let sr = self.sample_rate;
-        // 0.1 Hz → 6 Hz over the knob range.
-        let rate_hz = 0.1 + (rate / 10.0).clamp(0.0, 1.0) * 5.9;
+        // 0.05 Hz → 4 Hz — flangers live slower than choruses.
+        let rate_hz = 0.05 + (rate / 10.0).clamp(0.0, 1.0) * 3.95;
         self.lfo_l.set_rate(rate_hz, sr);
         self.lfo_r.set_rate(rate_hz, sr);
-        // Base 10 ms, up to ±6 ms of modulation.
-        self.base_samples = 0.010 * sr;
+        // Base 1.5 ms, up to ±1.2 ms of modulation (sweeps through the comb).
+        self.base_samples = 0.0015 * sr;
         self.depth_samples
-            .set_target((depth / 10.0).clamp(0.0, 1.0) * 0.006 * sr);
+            .set_target((depth / 10.0).clamp(0.0, 1.0) * 0.0012 * sr);
         self.mix.set_target((mix / 100.0).clamp(0.0, 1.0));
     }
 
@@ -85,8 +91,9 @@ impl Chorus {
         let wet_l = self.line_l.read_interp(self.base_samples + mod_l);
         let wet_r = self.line_r.read_interp(self.base_samples + mod_r);
 
-        self.line_l.write_sample(left);
-        self.line_r.write_sample(right);
+        // Regeneration goes back into the line with the dry input.
+        self.line_l.write_sample(left + wet_l * FEEDBACK);
+        self.line_r.write_sample(right + wet_r * FEEDBACK);
 
         (mix(left, wet_l, mix_amount), mix(right, wet_r, mix_amount))
     }

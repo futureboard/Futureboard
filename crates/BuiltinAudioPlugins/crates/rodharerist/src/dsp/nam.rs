@@ -11,6 +11,8 @@
 //! to the control thread ([`NamCapture::poll_garbage`]) to actually drop —
 //! never inside [`NamCapture::process`].
 
+use std::sync::Arc;
+
 use builtin_dsp_core::make_eq_biquad;
 use nam_rs::{Model, NamModel};
 
@@ -53,8 +55,9 @@ impl std::error::Error for NamLoadError {}
 
 /// Info handed back to the host/UI after a successful load — enough to show
 /// the capture's name, warn about startup latency, and offer "Bypass Cab" when
-/// the capture already models a full rig (amp + cab + mic).
-#[derive(Debug, Clone)]
+/// the capture already models a full rig (amp + cab + mic). Serde-serializable
+/// so it can travel over the plugin-host IPC as-is.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct NamCaptureInfo {
     pub name: String,
     pub full_rig: bool,
@@ -164,6 +167,66 @@ impl PreparedNamRuntime {
     }
 }
 
+/// The two lock-free hand-off cells between the control side and the audio
+/// side, shareable via [`NamLoader`] so a control thread in another ownership
+/// domain (e.g. the plugin-host IPC thread, which must never touch the `Dsp`
+/// the audio producer owns) can still submit captures and drain garbage.
+pub struct NamChannel {
+    /// Control thread → audio thread: a freshly built runtime awaiting adoption.
+    pending: HandoffCell<PreparedNamRuntime>,
+    /// Audio thread → control thread: a retired runtime awaiting disposal.
+    retired: HandoffCell<PreparedNamRuntime>,
+}
+
+/// Cloneable control-side handle to a [`NamCapture`]'s hand-off cells.
+///
+/// Thread contract: exactly **one** control thread may use the loader at a
+/// time (the cells are single-producer/single-consumer per direction) — the
+/// same discipline `Dsp::load_nam_capture_json` always required, now
+/// structurally separated from `&mut Dsp` so it works across the
+/// `UnsafeCell` ownership boundary in the plugin-host process.
+#[derive(Clone)]
+pub struct NamLoader {
+    channel: Arc<NamChannel>,
+}
+
+impl NamLoader {
+    /// Push a freshly-built runtime for the audio thread to adopt at the next
+    /// block boundary. A not-yet-adopted runtime already waiting is dropped
+    /// here (safe: the audio thread never touched it).
+    pub fn submit(&self, runtime: Box<PreparedNamRuntime>) {
+        if let Some(bumped) = self.channel.pending.put(runtime) {
+            drop(bumped);
+        }
+    }
+
+    /// Drop any runtime the audio thread has retired. Call periodically and
+    /// before each [`Self::submit`] as an opportunistic sweep.
+    pub fn collect_garbage(&self) {
+        if let Some(dead) = self.channel.retired.take() {
+            drop(dead);
+        }
+    }
+
+    /// Parse, build and submit a `.nam` capture in one call (control thread —
+    /// parsing allocates and can take a while for large models).
+    pub fn load_json(
+        &self,
+        json: &str,
+        name: impl Into<String>,
+        engine_sample_rate: f64,
+        stereo: bool,
+        full_rig: bool,
+    ) -> Result<NamCaptureInfo, NamLoadError> {
+        let prepared =
+            prepare_nam_runtime(json, name.into(), engine_sample_rate, stereo, full_rig)?;
+        let info = prepared.info();
+        self.collect_garbage();
+        self.submit(Box::new(prepared));
+        Ok(info)
+    }
+}
+
 /// The audio-thread-resident NAM engine: a preallocated DC blocker, live trim/
 /// mix/loudness knobs, and the lock-free hand-off machinery that lets the
 /// control thread swap in a freshly-built [`PreparedNamRuntime`] without ever
@@ -178,10 +241,8 @@ pub(super) struct NamCapture {
     /// block finds `retired` empty again.
     retire_overflow: Option<Box<PreparedNamRuntime>>,
 
-    /// Control thread → audio thread: a freshly built runtime awaiting adoption.
-    pending: HandoffCell<PreparedNamRuntime>,
-    /// Audio thread → control thread: a retired runtime awaiting disposal.
-    retired: HandoffCell<PreparedNamRuntime>,
+    /// The shared hand-off cells; [`Self::loader`] clones this out.
+    channel: Arc<NamChannel>,
 
     sample_rate: f32,
     dc_hpf: StereoBiquad,
@@ -203,8 +264,10 @@ impl NamCapture {
             active: None,
             fading_out: None,
             retire_overflow: None,
-            pending: HandoffCell::new(),
-            retired: HandoffCell::new(),
+            channel: Arc::new(NamChannel {
+                pending: HandoffCell::new(),
+                retired: HandoffCell::new(),
+            }),
             sample_rate: sample_rate.max(1.0),
             dc_hpf: StereoBiquad::none(),
             input_trim: 1.0,
@@ -259,11 +322,18 @@ impl NamCapture {
         self.loudness_norm_on = loudness_norm_on;
     }
 
+    /// Clone out a control-side loader handle for this capture's cells.
+    pub(super) fn loader(&self) -> NamLoader {
+        NamLoader {
+            channel: Arc::clone(&self.channel),
+        }
+    }
+
     /// Control thread: push a freshly-built runtime for the audio thread to
     /// adopt at the next block boundary. Any not-yet-adopted runtime already
     /// waiting is dropped here (safe: the audio thread never touched it).
     pub(super) fn submit(&self, runtime: Box<PreparedNamRuntime>) {
-        if let Some(bumped) = self.pending.put(runtime) {
+        if let Some(bumped) = self.channel.pending.put(runtime) {
             drop(bumped);
         }
     }
@@ -272,7 +342,7 @@ impl NamCapture {
     /// periodically (e.g. an idle/UI timer); also safe to call before
     /// [`Self::submit`] as an opportunistic sweep.
     pub(super) fn poll_garbage(&mut self) {
-        if let Some(dead) = self.retired.take() {
+        if let Some(dead) = self.channel.retired.take() {
             drop(dead);
         }
     }
@@ -297,7 +367,7 @@ impl NamCapture {
     pub(super) fn begin_block(&mut self) {
         // Drain a previous overflow now that a block boundary has passed.
         if let Some(carry) = self.retire_overflow.take() {
-            if let Some(bounced) = self.retired.put(carry) {
+            if let Some(bounced) = self.channel.retired.put(carry) {
                 self.retire_overflow = Some(bounced);
             }
         }
@@ -305,7 +375,7 @@ impl NamCapture {
         // Only start a new swap once any in-progress fade has fully resolved,
         // so at most one runtime is ever "in flight" toward retirement.
         if self.fading_out.is_none() {
-            if let Some(new_rt) = self.pending.take() {
+            if let Some(new_rt) = self.channel.pending.take() {
                 if let Some(old) = self.active.replace(new_rt) {
                     self.fading_out = Some(old);
                     self.fade = 0.0;
@@ -315,7 +385,7 @@ impl NamCapture {
 
         if self.fade >= 1.0 {
             if let Some(done) = self.fading_out.take() {
-                if let Some(bounced) = self.retired.put(done) {
+                if let Some(bounced) = self.channel.retired.put(done) {
                     self.retire_overflow = Some(bounced);
                 }
             }
@@ -439,6 +509,38 @@ mod tests {
 
         // Control thread drains what the audio thread retired.
         cap.poll_garbage();
+    }
+
+    /// The loader handle must reach the same cells as the capture itself:
+    /// submit through the loader, adopt via `begin_block`, retire, and drain
+    /// garbage through the loader — the cross-process (host IPC thread) flow.
+    #[test]
+    fn loader_handle_round_trips_submit_and_garbage() {
+        let mut cap = NamCapture::new(48_000.0);
+        cap.configure(0.0, 0.0, 100.0, false);
+        let loader = cap.loader();
+
+        let info = loader
+            .load_json(TINY_WAVENET_48K, "via-loader", 48_000.0, false, false)
+            .expect("load through loader");
+        assert_eq!(info.name, "via-loader");
+
+        cap.begin_block();
+        assert_eq!(cap.active_info().map(|i| i.name), Some("via-loader".into()));
+
+        // Swap in a second capture and let the fade retire the first.
+        loader
+            .load_json(TINY_WAVENET_48K, "second", 48_000.0, false, false)
+            .expect("second load");
+        cap.begin_block();
+        for _ in 0..2_000 {
+            let (l, r) = cap.process(0.2, -0.2);
+            assert!(l.is_finite() && r.is_finite());
+            cap.begin_block();
+        }
+        assert!(cap.fading_out.is_none());
+        loader.collect_garbage(); // drains the retired first capture
+        assert_eq!(cap.active_info().map(|i| i.name), Some("second".into()));
     }
 
     #[test]

@@ -276,17 +276,23 @@ export function SignalChain({
       <span className="chain-hint">
         Drag to reorder · ⋮ for block options · rack adds back
       </span>
-      <svg className="chain-svg" ref={svgRef} />
       <DndContext
         sensors={sensors}
         collisionDetection={closestCenter}
         onDragEnd={handleDragEnd}
       >
-        <div className="chain-row" ref={rowRef} id="chain-row">
-          {pathOrder.length === 0 && <EmptyPathDropTarget />}
+        {/* Scroller: with nine stages the path can outgrow the window, so the
+            board pans horizontally. The connector SVG lives INSIDE the
+            scrolled track (sized to the content, not the viewport) so the
+            wires move with the blocks. */}
+        <div className="chain-scroll">
+          <div className="chain-track">
+            <svg className="chain-svg" ref={svgRef} />
+            <div className="chain-row" ref={rowRef} id="chain-row">
+              {pathOrder.length === 0 && <EmptyPathDropTarget />}
 
-          <SortableContext items={pathOrder} strategy={horizontalListSortingStrategy}>
-            {pathOrder.map((cat) => {
+              <SortableContext items={pathOrder} strategy={horizontalListSortingStrategy}>
+                {pathOrder.map((cat) => {
               const c = categories[cat];
               const selected = cat === activeCat;
               const isBypassed = !!bypassed[cat];
@@ -333,7 +339,9 @@ export function SignalChain({
                 />
               );
             })}
-          </SortableContext>
+              </SortableContext>
+            </div>
+          </div>
         </div>
 
         {rack.length > 0 && (

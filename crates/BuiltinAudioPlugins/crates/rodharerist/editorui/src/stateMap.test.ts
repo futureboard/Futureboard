@@ -8,6 +8,7 @@ import {
   CAB_VARIANT_TO_MODEL,
   DRIVE_VARIANT_TO_MODEL,
   MOD_VARIANT_TO_MODEL,
+  REVERB_VARIANT_TO_MODEL,
   STAGE_VARIANT_TO_CATEGORY,
   WAH_VARIANT_TO_MODEL,
   snapshotFromRodhareistState,
@@ -34,6 +35,7 @@ const FIXTURE = {
     amp_model: "Recto",
     cab_model: "Tweed1x12",
     mic_model: "Ribbon",
+    reverb_model: "Plate",
     tone_engine: "Classic",
     stage_order: ["Eq", "Amp", "Cab", null, null, null, null, null, null],
     gate_thresh_db: -40,
@@ -54,6 +56,7 @@ const FIXTURE = {
     delay_mix: 25,
     reverb_decay_s: 3.5,
     reverb_mix: 60,
+    reverb_shimmer: 74,
     cab_mic: 80,
     cab_dist: 10,
     comp_thresh_db: -30,
@@ -90,9 +93,10 @@ describe("snapshotFromRodhareistState", () => {
     expect(Object.keys(STAGE_VARIANT_TO_CATEGORY)).toHaveLength(10);
     expect(Object.keys(AMP_VARIANT_TO_MODEL)).toHaveLength(8);
     expect(Object.keys(DRIVE_VARIANT_TO_MODEL)).toHaveLength(10);
-    expect(Object.keys(CAB_VARIANT_TO_MODEL)).toHaveLength(8);
+    expect(Object.keys(CAB_VARIANT_TO_MODEL)).toHaveLength(11);
     expect(Object.keys(MOD_VARIANT_TO_MODEL)).toHaveLength(4);
     expect(Object.keys(WAH_VARIANT_TO_MODEL)).toHaveLength(2);
+    expect(Object.keys(REVERB_VARIANT_TO_MODEL)).toHaveLength(4);
   });
 
   test("maps a serde fixture field-for-field", () => {
@@ -132,6 +136,15 @@ describe("snapshotFromRodhareistState", () => {
     // Amp is in the path → focused.
     expect(snap.activeCat).toBe("amp");
     expect(snap.activeModelId).toBe("recto");
+  });
+
+  test("restores the dedicated Shimmer amount only on the Shimmer model", () => {
+    const state = structuredClone(FIXTURE);
+    state.params.reverb_model = "Shimmer";
+    const snap = snapshotFromRodhareistState(state);
+    expect(snap?.stageModels.verb).toBe("shimmer");
+    expect(snap && param(snap, "shimmer", "reverb_shimmer")).toBe(74);
+    expect(snap && param(snap, "plate", "reverb_shimmer")).toBeUndefined();
   });
 
   test("tone engine overrides the amp model id but not its knob values", () => {

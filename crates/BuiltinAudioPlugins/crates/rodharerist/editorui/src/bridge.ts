@@ -188,6 +188,17 @@ export const CAB_MODEL_INDEX: Record<string, number> = {
   vintage_212: 5,
   oversized_412: 6,
   bass_cabinet: 7,
+  brit_412: 8,
+  uber_412: 9,
+  slo_412: 10,
+};
+
+/** `ReverbModel` indices (mirrors Rust `ReverbModel::ALL`). */
+export const REVERB_MODEL_INDEX: Record<string, number> = {
+  plate: 0,
+  room: 1,
+  hall: 2,
+  shimmer: 3,
 };
 
 /** `ModModel` indices (mirrors Rust `ModModel::ALL`). */
@@ -251,8 +262,13 @@ export function postModel(category: string, modelId: string): void {
       if (i !== undefined) postParam("wah_model", i);
       return;
     }
+    case "verb": {
+      const i = REVERB_MODEL_INDEX[modelId];
+      if (i !== undefined) postParam("reverb_model", i);
+      return;
+    }
     default:
-      // Single-algorithm stages (gate/delay/verb) have no model select.
+      // Single-algorithm stages (gate/delay) have no model select.
       return;
   }
 }

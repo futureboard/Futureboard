@@ -200,25 +200,31 @@ export function SignalChain({
       for (let i = 0; i < nodes.length - 1; i++) {
         const a = nodes[i]!.getBoundingClientRect();
         const b = nodes[i + 1]!.getBoundingClientRect();
-        const x1 = a.right - box.left + 2;
+        const x1 = a.right - box.left - 1;
         const y1 = a.top + a.height / 2 - box.top;
-        const x2 = b.left - box.left - 2;
+        const x2 = b.left - box.left + 1;
         const y2 = b.top + b.height / 2 - box.top;
         const path = document.createElementNS(
           "http://www.w3.org/2000/svg",
           "path",
         );
-        path.setAttribute("d", `M ${x1} ${y1} L ${x2} ${y2}`);
+        // A patch cable, not a schematic wire: sag the run between the two
+        // jacks with a shallow quadratic droop, scaled to the gap so short
+        // runs stay almost straight.
+        const sag = Math.min(10, Math.max(3, (x2 - x1) * 0.35));
+        const midX = (x1 + x2) / 2;
+        const midY = Math.max(y1, y2) + sag;
+        path.setAttribute("d", `M ${x1} ${y1} Q ${midX} ${midY} ${x2} ${y2}`);
         path.setAttribute("fill", "none");
         const dim =
           nodes[i]!.classList.contains("bypassed") ||
           nodes[i + 1]!.classList.contains("bypassed");
         path.setAttribute(
           "stroke",
-          dim ? "rgba(255,255,255,0.06)" : "rgba(255,255,255,0.18)",
+          dim ? "rgba(255,255,255,0.07)" : "rgba(255,255,255,0.22)",
         );
         path.setAttribute("stroke-width", "2");
-        path.setAttribute("stroke-linecap", "square");
+        path.setAttribute("stroke-linecap", "round");
         svg.appendChild(path);
       }
     };

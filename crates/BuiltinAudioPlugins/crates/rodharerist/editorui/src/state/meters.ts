@@ -16,6 +16,7 @@ import {
   type HostStatus,
   type MeterFrame,
 } from "../bridge";
+import { SILENCE_DBFS, linearToDbfs } from "../globals";
 
 export type { MeterFrame, HostStatus };
 
@@ -150,4 +151,91 @@ export function attachHostTelemetry(): () => void {
       for (const fn of statusListeners) fn(next);
     },
   });
+}
+
+// ---------------------------------------------------------------------------
+// Smoothed (ballistic) meter view
+//
+// Telemetry frames arrive at whatever cadence the native pump manages —
+// nominally ~30 Hz but with real jitter through the CEF bridge. Painting each
+// raw frame directly makes the bars step and stutter. This view re-times the
+// display on `requestAnimationFrame` with classic meter ballistics: peaks
+// attack instantly and fall at a fixed dB/s, RMS glides through a short time
+// constant. Purely a *display* transform in dB space — clip flags, calibration
+// and the numeric peak source stay on the raw frames.
+// ---------------------------------------------------------------------------
+
+/** Display-smoothed levels, in dBFS (floored at {@link SILENCE_DBFS}). */
+export type SmoothedLevels = {
+  inRmsDb: number;
+  inPeakDb: number;
+  outRmsDb: number;
+  outPeakDb: number;
+};
+
+type SmoothedListener = (levels: SmoothedLevels) => void;
+
+/** Peak fallback rate once below the incoming level, in dB per second. */
+const PEAK_FALL_DB_PER_S = 30;
+/** RMS glide time constants, seconds (rise faster than fall). */
+const RMS_RISE_S = 0.05;
+const RMS_FALL_S = 0.18;
+
+const smoothed: SmoothedLevels = {
+  inRmsDb: SILENCE_DBFS,
+  inPeakDb: SILENCE_DBFS,
+  outRmsDb: SILENCE_DBFS,
+  outPeakDb: SILENCE_DBFS,
+};
+
+const smoothedListeners = new Set<SmoothedListener>();
+let rafId: number | null = null;
+let lastTick = 0;
+
+function ballistics(dtSeconds: number) {
+  const dt = Math.min(Math.max(dtSeconds, 0), 0.1);
+
+  const peakStep = (cur: number, target: number) =>
+    target >= cur ? target : Math.max(target, cur - PEAK_FALL_DB_PER_S * dt);
+  const rmsStep = (cur: number, target: number) => {
+    const tau = target > cur ? RMS_RISE_S : RMS_FALL_S;
+    return cur + (target - cur) * (1 - Math.exp(-dt / tau));
+  };
+
+  smoothed.inPeakDb = peakStep(smoothed.inPeakDb, linearToDbfs(frame.inPeak));
+  smoothed.outPeakDb = peakStep(smoothed.outPeakDb, linearToDbfs(frame.outPeak));
+  smoothed.inRmsDb = rmsStep(smoothed.inRmsDb, linearToDbfs(frame.inRms));
+  smoothed.outRmsDb = rmsStep(smoothed.outRmsDb, linearToDbfs(frame.outRms));
+}
+
+function tick(now: number) {
+  rafId = null;
+  ballistics((now - lastTick) / 1000);
+  lastTick = now;
+  for (const fn of smoothedListeners) fn(smoothed);
+  if (smoothedListeners.size > 0) {
+    rafId = requestAnimationFrame(tick);
+  }
+}
+
+/**
+ * Subscribe to the rAF-timed, ballistic meter view. The loop runs only while
+ * at least one listener is attached. Safe outside a browser (tests): with no
+ * `requestAnimationFrame` the listener receives the resting state once and is
+ * never driven.
+ */
+export function subscribeSmoothedMeters(fn: SmoothedListener): () => void {
+  smoothedListeners.add(fn);
+  fn(smoothed);
+  if (rafId === null && typeof requestAnimationFrame === "function") {
+    lastTick = performance.now();
+    rafId = requestAnimationFrame(tick);
+  }
+  return () => {
+    smoothedListeners.delete(fn);
+    if (smoothedListeners.size === 0 && rafId !== null) {
+      cancelAnimationFrame(rafId);
+      rafId = null;
+    }
+  };
 }

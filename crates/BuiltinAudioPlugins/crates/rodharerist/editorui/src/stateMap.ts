@@ -68,6 +68,17 @@ export const CAB_VARIANT_TO_MODEL: Record<string, string> = {
   Vintage2x12: "vintage_212",
   Oversized4x12: "oversized_412",
   BassCabinet: "bass_cabinet",
+  Brit4x12: "brit_412",
+  Uber4x12: "uber_412",
+  Slo4x12: "slo_412",
+};
+
+/** Rust `ReverbModel` variant → editor model id. */
+export const REVERB_VARIANT_TO_MODEL: Record<string, string> = {
+  Plate: "plate",
+  Room: "room",
+  Hall: "hall",
+  Shimmer: "shimmer",
 };
 
 /** Rust `ModModel` variant → editor model id. */
@@ -146,6 +157,10 @@ export function snapshotFromRodhareistState(state: unknown): RigSnapshot | null 
   if (WAH_VARIANT_TO_MODEL[wahVariant]) {
     stageModels.wah = WAH_VARIANT_TO_MODEL[wahVariant]!;
   }
+  const reverbVariant = typeof p.reverb_model === "string" ? p.reverb_model : "";
+  if (REVERB_VARIANT_TO_MODEL[reverbVariant]) {
+    stageModels.verb = REVERB_VARIANT_TO_MODEL[reverbVariant]!;
+  }
   const ampVariant = typeof p.amp_model === "string" ? p.amp_model : "";
   const toneEngine = typeof p.tone_engine === "string" ? p.tone_engine : "Classic";
   if (toneEngine === "NamCapture") {
@@ -223,9 +238,12 @@ export function snapshotFromRodhareistState(state: unknown): RigSnapshot | null 
   setVal(tape, "delay_time", num(p, "delay_time_ms"));
   setVal(tape, "delay_fb", num(p, "delay_fb"));
   setVal(tape, "delay_mix", num(p, "delay_mix"));
-  const plate = parameters.plate;
-  setVal(plate, "reverb_decay", num(p, "reverb_decay_s"));
-  setVal(plate, "reverb_mix", num(p, "reverb_mix"));
+  // Reverb voicings share Decay/Mix; Shimmer alone also exposes its octave-up
+  // feedback amount. Write only into the active model's param set.
+  const verbParams = parameters[stageModels.verb];
+  setVal(verbParams, "reverb_decay", num(p, "reverb_decay_s"));
+  setVal(verbParams, "reverb_mix", num(p, "reverb_mix"));
+  setVal(verbParams, "reverb_shimmer", num(p, "reverb_shimmer"));
   const cab = parameters[stageModels.cab];
   const micVariant = typeof p.mic_model === "string" ? p.mic_model : "Dynamic";
   const micIndex: number | undefined = (

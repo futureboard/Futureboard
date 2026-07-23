@@ -443,6 +443,24 @@ export const models: Record<CategoryId, Model[]> = {
       short: "Plate",
       sub: "Sustained metallic plate resonance",
     },
+    {
+      id: "room",
+      name: "Tracking Room",
+      short: "Room",
+      sub: "Short, damped early reflections",
+    },
+    {
+      id: "hall",
+      name: "Concert Hall",
+      short: "Hall",
+      sub: "Long predelay and spacious tail",
+    },
+    {
+      id: "shimmer",
+      name: "Shimmer",
+      short: "Shimmer",
+      sub: "Octave-up voice ascending in the tail",
+    },
   ],
   cab: [
     {
@@ -492,6 +510,24 @@ export const models: Record<CategoryId, Model[]> = {
       name: "Bass Cabinet",
       short: "Bass",
       sub: "Extended low-end radiation with controlled breakup",
+    },
+    {
+      id: "brit_412",
+      name: "British Stack 4x12",
+      short: "Brit",
+      sub: "Mid-forward greenback-voiced closed 4x12",
+    },
+    {
+      id: "uber_412",
+      name: "Uberkab 4x12",
+      short: "Uber",
+      sub: "Tight, scooped German high-gain 4x12",
+    },
+    {
+      id: "slo_412",
+      name: "SLO Custom 4x12",
+      short: "SLO",
+      sub: "Smooth, singing high-gain 4x12",
     },
   ],
 };
@@ -862,6 +898,22 @@ export const parameterDefaults: Record<string, Param[]> = {
       unit: "%",
     },
   ],
+  // Room/Hall share the Decay/Mix knobs (the voicing is the model, as in the
+  // Mod slot) — distinct defaults suit each space. Shimmer adds a dedicated
+  // octave-up feedback amount.
+  room: [
+    { id: "reverb_decay", name: "Decay", min: 0.5, max: 15, val: 1.8, unit: "s" },
+    { id: "reverb_mix", name: "Mix", min: 0, max: 100, val: 30, unit: "%" },
+  ],
+  hall: [
+    { id: "reverb_decay", name: "Decay", min: 0.5, max: 15, val: 11, unit: "s" },
+    { id: "reverb_mix", name: "Mix", min: 0, max: 100, val: 45, unit: "%" },
+  ],
+  shimmer: [
+    { id: "reverb_decay", name: "Decay", min: 0.5, max: 15, val: 12, unit: "s" },
+    { id: "reverb_mix", name: "Mix", min: 0, max: 100, val: 40, unit: "%" },
+    { id: "reverb_shimmer", name: "Shimmer", min: 0, max: 100, val: 62, unit: "%" },
+  ],
   vintage_cab: [
     { id: "cab_mic_type", name: "Mic Type", min: 0, max: 2, val: 0, unit: "" },
     { id: "cab_mic", name: "Mic Pos", min: 0, max: 100, val: 20, unit: "%" },
@@ -901,6 +953,21 @@ export const parameterDefaults: Record<string, Param[]> = {
     { id: "cab_mic_type", name: "Mic Type", min: 0, max: 2, val: 1, unit: "" },
     { id: "cab_mic", name: "Mic Pos", min: 0, max: 100, val: 60, unit: "%" },
     { id: "cab_dist", name: "Distance", min: 0, max: 100, val: 35, unit: "%" },
+  ],
+  brit_412: [
+    { id: "cab_mic_type", name: "Mic Type", min: 0, max: 2, val: 0, unit: "" },
+    { id: "cab_mic", name: "Mic Pos", min: 0, max: 100, val: 38, unit: "%" },
+    { id: "cab_dist", name: "Distance", min: 0, max: 100, val: 25, unit: "%" },
+  ],
+  uber_412: [
+    { id: "cab_mic_type", name: "Mic Type", min: 0, max: 2, val: 0, unit: "" },
+    { id: "cab_mic", name: "Mic Pos", min: 0, max: 100, val: 48, unit: "%" },
+    { id: "cab_dist", name: "Distance", min: 0, max: 100, val: 18, unit: "%" },
+  ],
+  slo_412: [
+    { id: "cab_mic_type", name: "Mic Type", min: 0, max: 2, val: 0, unit: "" },
+    { id: "cab_mic", name: "Mic Pos", min: 0, max: 100, val: 42, unit: "%" },
+    { id: "cab_dist", name: "Distance", min: 0, max: 100, val: 28, unit: "%" },
   ],
 };
 

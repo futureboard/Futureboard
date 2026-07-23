@@ -8,6 +8,7 @@ import {
   AMP_MODEL_INDEX,
   CAB_MODEL_INDEX,
   DRIVE_MODEL_INDEX,
+  REVERB_MODEL_INDEX,
   TONE_ENGINE_INDEX,
   __flushParamEditsForTest,
   postClearClip,
@@ -83,6 +84,18 @@ describe("model-select wire values", () => {
       vintage_212: 5,
       oversized_412: 6,
       bass_cabinet: 7,
+      brit_412: 8,
+      uber_412: 9,
+      slo_412: 10,
+    });
+  });
+
+  test("reverb map mirrors ReverbModel::ALL order", () => {
+    expect(REVERB_MODEL_INDEX).toEqual({
+      plate: 0,
+      room: 1,
+      hall: 2,
+      shimmer: 3,
     });
   });
 

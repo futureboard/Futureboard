@@ -9,6 +9,7 @@ import {
 import type { NamCaptureLoadOptions } from "../bridge";
 import { onNativeMessage } from "../instanceBridge";
 import { distanceCm, micTypeLabel, positionLabel } from "../globals";
+import { GateMonitor } from "./GateMonitor";
 import { Knob } from "./Knob";
 
 /** Lifecycle of the most recent `.nam` load request. */
@@ -46,6 +47,10 @@ export function ModuleEditor({
   const cat = categories[activeCat];
   const isNamCapture = activeCat === "amp" && activeModelId === "nam_capture";
   const isCabinet = activeCat === "cab";
+  const gateThresh =
+    activeModelId === "gate"
+      ? (params.find((p) => p.id === "gate_thresh") ?? null)
+      : null;
   const [namStereo, setNamStereo] = useState(true);
   const [namFullRig, setNamFullRig] = useState(false);
   const [namStatus, setNamStatus] = useState<NamLoadStatus>({ kind: "idle" });
@@ -120,21 +125,27 @@ export function ModuleEditor({
           </button>
         </div>
 
-        <div className="model-strip" role="listbox" aria-label="Model">
-          {list.map((m) => (
-            <button
-              key={m.id}
-              type="button"
-              role="option"
-              aria-selected={m.id === activeModelId}
-              className={`model-chip${m.id === activeModelId ? " active" : ""}`}
-              onClick={() => onSelectModel(m.id)}
-            >
-              <span className="mt">{m.name}</span>
-              <span className="ms">{m.sub}</span>
-            </button>
-          ))}
-        </div>
+        {/* A single-model stage has nothing to choose — the identity header
+            already names it, so skip the redundant chip row. Chips are
+            compact (name only); the active model's description lives in the
+            header, the rest surface theirs as a tooltip. */}
+        {list.length > 1 && (
+          <div className="model-strip" role="listbox" aria-label="Model">
+            {list.map((m) => (
+              <button
+                key={m.id}
+                type="button"
+                role="option"
+                aria-selected={m.id === activeModelId}
+                className={`model-chip${m.id === activeModelId ? " active" : ""}`}
+                title={m.sub}
+                onClick={() => onSelectModel(m.id)}
+              >
+                {m.name}
+              </button>
+            ))}
+          </div>
+        )}
 
         {isNamCapture && (
           <div className="nam-capture-controls">
@@ -234,6 +245,15 @@ export function ModuleEditor({
                 onChange={onParamChange}
               />
             ))}
+            {gateThresh && (
+              <GateMonitor
+                paramId={gateThresh.id}
+                threshold={gateThresh.val}
+                min={gateThresh.min}
+                max={gateThresh.max}
+                onChange={onParamChange}
+              />
+            )}
           </div>
         )}
       </div>

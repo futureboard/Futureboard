@@ -1,6 +1,10 @@
 import { useEffect, useRef } from "react";
 import { formatDbfs, linearToDbfs, meterPosition } from "../globals";
-import { getFrame, getHold, subscribeMeters, type MeterFrame } from "../state/meters";
+import {
+  getHold,
+  subscribeSmoothedMeters,
+  type SmoothedLevels,
+} from "../state/meters";
 
 type LevelMeterProps = {
   /** Which end of the chain to display. */
@@ -12,10 +16,11 @@ type LevelMeterProps = {
  * A compact horizontal level meter with an RMS bar, a peak overlay and a
  * peak-hold tick.
  *
- * This component subscribes to the meter store and writes straight to its own
- * DOM nodes — it never calls `setState`, so meter frames (~30 Hz) do not
- * re-render the header, preset browser or module editor. It renders exactly
- * once per mount.
+ * Painted from the rAF-timed ballistic meter view ({@link subscribeSmoothedMeters})
+ * so the bars glide at display rate instead of stepping at whatever cadence
+ * telemetry frames actually arrive. Writes straight to its own DOM nodes — it
+ * never calls `setState`, so meter motion re-renders nothing else. It renders
+ * exactly once per mount.
  *
  * The DSP reports one peak/RMS pair across both channels rather than per-channel
  * levels, so this is a single bar. It is not drawn as a stereo pair, because
@@ -28,14 +33,13 @@ export function LevelMeter({ side, label }: LevelMeterProps) {
   const readoutRef = useRef<HTMLSpanElement>(null);
 
   useEffect(() => {
-    const paint = (frame: MeterFrame) => {
-      const peak = side === "in" ? frame.inPeak : frame.outPeak;
-      const rms = side === "in" ? frame.inRms : frame.outRms;
+    const paint = (levels: SmoothedLevels) => {
+      const peakDb = side === "in" ? levels.inPeakDb : levels.outPeakDb;
+      const rmsDb = side === "in" ? levels.inRmsDb : levels.outRmsDb;
       const hold = side === "in" ? getHold().in : getHold().out;
 
-      const peakDb = linearToDbfs(peak);
       if (rmsRef.current) {
-        rmsRef.current.style.width = `${meterPosition(linearToDbfs(rms)) * 100}%`;
+        rmsRef.current.style.width = `${meterPosition(rmsDb) * 100}%`;
       }
       if (peakRef.current) {
         peakRef.current.style.width = `${meterPosition(peakDb) * 100}%`;
@@ -50,8 +54,7 @@ export function LevelMeter({ side, label }: LevelMeterProps) {
       }
     };
 
-    paint(getFrame());
-    return subscribeMeters(paint);
+    return subscribeSmoothedMeters(paint);
   }, [side]);
 
   return (

@@ -408,10 +408,12 @@ body {
   display: flex; align-items: center; justify-content: center;
 }
 .chain-row {
-  display: flex; align-items: center; justify-content: center; gap: 4px;
+  /* Wide enough gaps that the patch cables between blocks actually read as
+     cables (they sag — see the connector drawing in SignalChain). */
+  display: flex; align-items: center; justify-content: center; gap: 18px;
   width: max-content; position: relative; z-index: 2;
-  min-height: 112px;
-  padding: 0 8px;
+  min-height: 126px;
+  padding: 0 10px;
 }
 .module-wrap { display: flex; align-items: center; gap: 4px; }
 .path-empty {
@@ -551,63 +553,112 @@ body {
 .io-bypass.engaged { color: var(--text-dim); }
 .io-bypass.engaged .led { background: var(--text-faint); }
 
+/* A block reads as a piece of gear: a colour-coded enclosure with a bevelled
+   top edge, a glowing power LED, an inset name plate, and jack nubs the patch
+   cables plug into. Depth comes from layered inset shadows, not decoration. */
 .module {
-  width: 112px; height: 108px; cursor: pointer; position: relative;
-  background: var(--bg-block);
-  border: 1px solid var(--stroke-2);
-  border-radius: var(--radius);
+  width: 114px; height: 112px; cursor: pointer; position: relative;
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--mc) 16%, #1d1d22) 0%,
+    color-mix(in srgb, var(--mc) 9%, #17171b) 55%,
+    color-mix(in srgb, var(--mc) 6%, #121215) 100%
+  );
+  border: 1px solid color-mix(in srgb, var(--mc) 30%, var(--stroke-2));
+  border-radius: 7px;
   display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px;
   overflow: visible;
   flex-shrink: 0;
-  transition: border-color 0.12s var(--ease), background 0.12s var(--ease);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.09),
+    inset 0 -8px 14px rgba(0, 0, 0, 0.32),
+    0 3px 8px rgba(0, 0, 0, 0.38);
+  transition: border-color 0.12s var(--ease), box-shadow 0.12s var(--ease),
+    filter 0.12s var(--ease), opacity 0.12s var(--ease);
 }
+/* Output jack nub (right side) — where the next patch cable leaves. */
+.module::after {
+  content: '';
+  position: absolute; right: -4px; top: 50%; margin-top: -4px;
+  width: 8px; height: 8px; border-radius: 50%;
+  background: radial-gradient(circle at 35% 35%, #3d3d44, #212126 70%);
+  border: 1px solid rgba(0, 0, 0, 0.55);
+  box-shadow: inset 0 1px 1px rgba(255, 255, 255, 0.12);
+}
+/* Input jack nub (left side). */
 .module::before {
   content: '';
-  position: absolute; top: 0; left: 0; right: 0; height: 3px;
-  background: var(--mc);
+  position: absolute; left: -4px; top: 50%; margin-top: -4px;
+  width: 8px; height: 8px; border-radius: 50%;
+  background: radial-gradient(circle at 35% 35%, #3d3d44, #212126 70%);
+  border: 1px solid rgba(0, 0, 0, 0.55);
+  box-shadow: inset 0 1px 1px rgba(255, 255, 255, 0.12);
 }
+/* Power LED: lit and glowing while active, dark glass when bypassed. */
 .blk-power {
-  position: absolute; top: 11px; left: 10px; z-index: 3;
-  width: 10px; height: 10px; padding: 0; border-radius: 50%; cursor: pointer;
-  background: var(--mc); border: 1px solid rgba(0,0,0,0.4);
-  transition: filter 0.12s var(--ease);
+  position: absolute; top: 10px; left: 10px; z-index: 3;
+  width: 9px; height: 9px; padding: 0; border-radius: 50%; cursor: pointer;
+  background: radial-gradient(
+    circle at 35% 35%,
+    color-mix(in srgb, var(--mc) 55%, white),
+    var(--mc) 65%
+  );
+  border: 1px solid rgba(0, 0, 0, 0.5);
+  box-shadow: 0 0 6px 1px color-mix(in srgb, var(--mc) 70%, transparent);
+  transition: filter 0.12s var(--ease), box-shadow 0.12s var(--ease),
+    background 0.12s var(--ease);
 }
-.blk-power:hover { filter: brightness(1.2); }
-.module.bypassed .blk-power { background: var(--text-faint); }
+.blk-power:hover { filter: brightness(1.25); }
+.module.bypassed .blk-power {
+  background: radial-gradient(circle at 35% 35%, #3a3a40, #232328 70%);
+  box-shadow: none;
+}
 .module:hover {
-  border-color: var(--stroke-3);
-  background: var(--bg-raised);
+  border-color: color-mix(in srgb, var(--mc) 50%, var(--stroke-3));
 }
 .module.selected {
   border-color: color-mix(in srgb, var(--accent) 70%, var(--stroke-3));
-  background: color-mix(in srgb, var(--mc) 10%, var(--bg-raised));
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.11),
+    inset 0 -8px 14px rgba(0, 0, 0, 0.32),
+    0 0 0 1px color-mix(in srgb, var(--accent) 35%, transparent),
+    0 4px 12px rgba(0, 0, 0, 0.45);
 }
-.module.bypassed { opacity: 0.38; }
+/* Bypassed gear goes cold: dimmed and drained of colour, LED off. */
+.module.bypassed { opacity: 0.5; filter: saturate(0.35); }
 .module .ic {
-  width: 32px; height: 32px; display: flex; align-items: center; justify-content: center;
+  width: 34px; height: 34px; display: flex; align-items: center; justify-content: center;
   color: var(--mc);
-  background: color-mix(in srgb, var(--mc) 10%, var(--bg-inset));
-  border: 1px solid color-mix(in srgb, var(--mc) 22%, transparent);
+  background: color-mix(in srgb, var(--mc) 12%, var(--bg-inset));
+  border: 1px solid color-mix(in srgb, var(--mc) 26%, transparent);
   border-radius: var(--radius-sm);
-  margin-top: 6px;
+  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.5);
+  margin-top: 4px;
 }
 .module.selected .ic {
   color: var(--text-hi);
-  background: color-mix(in srgb, var(--mc) 18%, var(--bg-inset));
+  background: color-mix(in srgb, var(--mc) 20%, var(--bg-inset));
 }
 .module .mtext {
-  display: flex; flex-direction: column; align-items: center; gap: 1px;
-  min-width: 0; width: 100%; padding: 0 6px;
+  display: flex; flex-direction: column; align-items: center; gap: 3px;
+  min-width: 0; width: 100%; padding: 0 8px;
 }
 .module .mtitle {
-  font-size: 11px; font-weight: 600; color: var(--text-dim);
-  letter-spacing: 0.06em; text-transform: uppercase;
+  font-size: 9.5px; font-weight: 600; color: var(--text-dim);
+  letter-spacing: 0.09em; text-transform: uppercase;
 }
+/* Inset name plate, like the model label screened onto a pedal. */
 .module .mmodel {
-  font-size: 12px; font-weight: 600; color: var(--text-hi);
+  font-size: 11.5px; font-weight: 600; color: var(--text-hi);
   letter-spacing: 0.01em;
   max-width: 100%;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  background: rgba(0, 0, 0, 0.35);
+  border: 1px solid rgba(0, 0, 0, 0.5);
+  border-radius: 3px;
+  padding: 2px 8px;
+  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.5),
+    0 1px 0 rgba(255, 255, 255, 0.05);
 }
 .module.selected .mtitle { color: var(--text); }
 
@@ -661,14 +712,25 @@ body {
   color: var(--text-faint); text-transform: uppercase;
   margin-right: 4px;
 }
+/* Rack items are the same gear in miniature: tinted enclosure, bevel, done. */
 .rack-item {
-  background: var(--bg-block); border: 1px solid var(--stroke-2);
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--mc) 14%, #1d1d22),
+    color-mix(in srgb, var(--mc) 7%, #141418)
+  );
+  border: 1px solid color-mix(in srgb, var(--mc) 28%, var(--stroke-2));
   color: var(--text); font-family: inherit;
   font-size: 11px; font-weight: 600; letter-spacing: 0.04em;
-  padding: 5px 10px; cursor: grab; border-radius: var(--radius-sm);
-  border-top: 2px solid var(--mc);
+  padding: 5px 12px; cursor: grab; border-radius: var(--radius-sm);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.08),
+    0 2px 5px rgba(0, 0, 0, 0.3);
 }
-.rack-item:hover { border-color: var(--stroke-3); color: var(--text-hi); }
+.rack-item:hover {
+  border-color: color-mix(in srgb, var(--mc) 50%, var(--stroke-3));
+  color: var(--text-hi);
+}
 
 /* ── Editor ─────────────────────────────────────── */
 .editor {
@@ -723,13 +785,12 @@ body {
 .bypass.off .led { background: var(--text-faint); }
 
 .model-strip {
-  /* Wrap instead of hiding the tail behind a scrollbar — with ten amp
-     models (incl. NAM Capture and Bypass) the last chips were effectively
-     invisible on narrow editors. */
-  display: flex; flex-wrap: wrap; gap: 8px;
-  /* Cap at ~two rows so an extreme window width can't squeeze the knobs out;
-     beyond that the strip scrolls vertically. */
-  max-height: 140px; overflow-y: auto; overflow-x: hidden;
+  /* Compact single-line chips (name only; description is the tooltip and the
+     active model's lives in the header) — even the ten amp models fit one or
+     two tidy rows without a scrollbar. Wrap instead of clipping the tail. */
+  display: flex; flex-wrap: wrap; gap: 6px;
+  /* Safety cap for extreme cases so the strip can't squeeze the knobs out. */
+  max-height: 76px; overflow-y: auto; overflow-x: hidden;
   padding: 0 0 2px;
   flex-shrink: 0;
   scrollbar-width: thin;
@@ -742,29 +803,28 @@ body {
 
 .model-chip {
   flex: 0 0 auto;
-  min-width: 186px; max-width: 270px;
   background: var(--bg-panel);
   border: 1px solid var(--stroke-1);
   border-radius: var(--radius);
-  padding: 11px 14px;
+  padding: 7px 14px;
   cursor: pointer;
-  text-align: left;
-  color: inherit; font-family: inherit;
-  transition: border-color 0.12s var(--ease), background 0.12s var(--ease);
+  color: var(--text); font-family: inherit;
+  font-size: 12.5px; font-weight: 500;
+  white-space: nowrap;
+  transition: border-color 0.12s var(--ease), background 0.12s var(--ease),
+    color 0.12s var(--ease);
 }
-.model-chip:hover { border-color: var(--stroke-3); background: var(--bg-raised); }
+.model-chip:hover {
+  border-color: var(--stroke-3);
+  background: var(--bg-raised);
+  color: var(--text-hi);
+}
 .model-chip.active {
   border-color: color-mix(in srgb, var(--cat-color) 45%, var(--stroke-2));
-  background: color-mix(in srgb, var(--cat-color) 8%, var(--bg-panel));
-  box-shadow: inset 3px 0 0 var(--cat-color);
-}
-.model-chip .mt {
-  font-size: 14px; font-weight: 600; color: var(--text-hi);
-  display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-}
-.model-chip .ms {
-  font-size: 12px; color: var(--text-dim); margin-top: 3px;
-  display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  background: color-mix(in srgb, var(--cat-color) 10%, var(--bg-panel));
+  color: var(--text-hi);
+  font-weight: 600;
+  box-shadow: inset 0 -2px 0 var(--cat-color);
 }
 
 .nam-capture-controls {
@@ -889,6 +949,82 @@ body {
 .inspector-note {
   margin: 0; font-size: 10px; line-height: 1.5; color: var(--text-faint);
 }
+
+/* Gate monitor: live input level vs a draggable threshold on a dB rail.
+   Level bars are written directly by the meter subscription (no re-render);
+   spans the full param-bank width below the knobs. */
+.gate-monitor {
+  grid-column: 1 / -1;
+  justify-self: stretch;
+  width: 100%;
+  max-width: 560px;
+  margin: 0 auto;
+  display: flex; flex-direction: column; gap: 8px;
+}
+.gate-monitor-head {
+  display: flex; align-items: baseline; justify-content: space-between;
+}
+.gate-monitor-title {
+  font-size: 10px; font-weight: 600; letter-spacing: 0.1em;
+  text-transform: uppercase; color: var(--text-dim);
+}
+.gate-state {
+  font-size: 10px; font-weight: 600; letter-spacing: 0.08em;
+  text-transform: uppercase; color: var(--text-faint);
+}
+.gate-state.open { color: var(--c-dyn); }
+
+.gate-rail {
+  position: relative;
+  height: 26px;
+  background: var(--bg-inset);
+  border: 1px solid var(--stroke-1);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  cursor: ew-resize;
+  touch-action: none;
+}
+.gate-level-rms {
+  position: absolute; inset: 0 auto 0 0;
+  background: color-mix(in srgb, var(--c-dyn) 28%, transparent);
+  border-right: 1px solid color-mix(in srgb, var(--c-dyn) 55%, transparent);
+  pointer-events: none;
+  will-change: width;
+}
+.gate-level-peak {
+  position: absolute; top: 0; bottom: 0;
+  width: 1px;
+  background: color-mix(in srgb, var(--c-dyn) 80%, white 10%);
+  pointer-events: none;
+  will-change: left;
+}
+.gate-thresh-handle {
+  position: absolute; top: 0; bottom: 0;
+  width: 2px; margin-left: -1px;
+  background: var(--text-hi);
+  pointer-events: none;
+}
+.gate-thresh-readout {
+  position: absolute; top: 50%; left: 6px;
+  transform: translateY(-50%);
+  font-size: 10px; color: var(--text-hi);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.gate-thresh-handle:has(.gate-thresh-readout) { overflow: visible; }
+
+.gate-scale {
+  position: relative;
+  height: 12px;
+  font-size: 9px; color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
+}
+.gate-scale span {
+  position: absolute; top: 0;
+  transform: translateX(-50%);
+}
+.gate-scale span:first-child { transform: none; }
+.gate-scale span:last-child { transform: translateX(-100%); }
 
 .footer {
   display: flex; align-items: center; justify-content: space-between;

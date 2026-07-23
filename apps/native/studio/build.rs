@@ -28,6 +28,14 @@ fn main() {
     }
 
     let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    // `libcef` (and the staged ONNX Runtime) ship beside the binary in the
+    // packaged tree, so the loader must search the executable's own directory.
+    // Windows already searches it; ELF/Mach-O need an explicit run path.
+    match target_os.as_str() {
+        "linux" => println!("cargo:rustc-link-arg-bins=-Wl,-rpath,$ORIGIN"),
+        "macos" => println!("cargo:rustc-link-arg-bins=-Wl,-rpath,@executable_path"),
+        _ => {}
+    }
     if target_os == "windows" {
         embed_resource::compile(
             "../../../packages/shared/app/windows/app.rc",

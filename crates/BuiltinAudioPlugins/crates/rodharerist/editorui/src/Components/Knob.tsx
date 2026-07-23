@@ -7,7 +7,7 @@ import {
 } from "react";
 import { fmt } from "../data";
 
-type SliderProps = {
+type KnobProps = {
   id: string;
   name: string;
   min: number;
@@ -20,7 +20,31 @@ type SliderProps = {
 
 const clamp01 = (v: number) => Math.max(0, Math.min(1, v));
 
-/** Helix-style horizontal parameter fader. */
+/**
+ * Rotary sweep, in SVG degrees (0 = +x, clockwise because y points down).
+ * 135°..405° puts the dead zone at the bottom, the way a hardware pot reads.
+ */
+const ANGLE_START = 135;
+const ANGLE_SWEEP = 270;
+/** Pixels of vertical drag that span the whole range. */
+const DRAG_SPAN_PX = 190;
+
+const polar = (cx: number, cy: number, r: number, deg: number) => {
+  const rad = (deg * Math.PI) / 180;
+  return [cx + r * Math.cos(rad), cy + r * Math.sin(rad)] as const;
+};
+
+/** Arc path between two sweep angles on the knob's ring. */
+function arc(pct: number, r: number): string {
+  const from = ANGLE_START;
+  const to = ANGLE_START + ANGLE_SWEEP * clamp01(pct);
+  const [x1, y1] = polar(50, 50, r, from);
+  const [x2, y2] = polar(50, 50, r, to);
+  const large = to - from > 180 ? 1 : 0;
+  return `M ${x1} ${y1} A ${r} ${r} 0 ${large} 1 ${x2} ${y2}`;
+}
+
+/** Rotary parameter knob: drag vertically, wheel, or type an exact value. */
 export function Knob({
   id,
   name,
@@ -30,51 +54,51 @@ export function Knob({
   unit,
   defaultValue,
   onChange,
-}: SliderProps) {
+}: KnobProps) {
   const [active, setActive] = useState(false);
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState("");
-  const trackRef = useRef<HTMLDivElement>(null);
+  const dialRef = useRef<HTMLDivElement>(null);
+  // Drag origin, so a gesture is measured from where it started rather than
+  // accumulating rounding error through the parameter round-trip.
+  const dragRef = useRef<{ y: number; pct: number } | null>(null);
 
   const range = max - min;
-  const pct = range === 0 ? 0 : (value - min) / range;
+  const pct = range === 0 ? 0 : clamp01((value - min) / range);
   const defPct =
     defaultValue !== undefined && range !== 0
       ? clamp01((defaultValue - min) / range)
       : null;
 
-  const setFromClientX = useCallback(
-    (clientX: number) => {
-      const el = trackRef.current;
-      if (!el) return;
-      const rect = el.getBoundingClientRect();
-      if (rect.width <= 0) return;
-      const p = clamp01((clientX - rect.left) / rect.width);
-      onChange(id, min + p * range);
-    },
-    [id, min, onChange, range],
-  );
+  const angle = ANGLE_START + ANGLE_SWEEP * pct;
+  const [px1, py1] = polar(50, 50, 14, angle);
+  const [px2, py2] = polar(50, 50, 33, angle);
 
   const onPointerDown = useCallback(
     (e: ReactPointerEvent<HTMLDivElement>) => {
       if (editing) return;
       e.preventDefault();
       e.currentTarget.setPointerCapture(e.pointerId);
+      dragRef.current = { y: e.clientY, pct };
       setActive(true);
-      setFromClientX(e.clientX);
     },
-    [editing, setFromClientX],
+    [editing, pct],
   );
 
   const onPointerMove = useCallback(
     (e: ReactPointerEvent<HTMLDivElement>) => {
-      if (!active) return;
-      setFromClientX(e.clientX);
+      const start = dragRef.current;
+      if (!start) return;
+      // Up increases. Shift takes a fifth of the gesture for fine trimming.
+      const dy = (start.y - e.clientY) / DRAG_SPAN_PX;
+      const next = clamp01(start.pct + (e.shiftKey ? dy * 0.2 : dy));
+      onChange(id, min + next * range);
     },
-    [active, setFromClientX],
+    [id, min, onChange, range],
   );
 
   const onPointerUp = useCallback((e: ReactPointerEvent<HTMLDivElement>) => {
+    dragRef.current = null;
     setActive(false);
     if (e.currentTarget.hasPointerCapture(e.pointerId)) {
       e.currentTarget.releasePointerCapture(e.pointerId);
@@ -87,7 +111,7 @@ export function Knob({
   }, [defaultValue, id, max, min, onChange]);
 
   useEffect(() => {
-    const el = trackRef.current;
+    const el = dialRef.current;
     if (!el) return;
     const onWheel = (e: WheelEvent) => {
       e.preventDefault();
@@ -113,42 +137,20 @@ export function Knob({
   }, [draft, id, max, min, onChange]);
 
   return (
-    <div className={`fader${active ? " active" : ""}`}>
-      <div className="fader-meta">
-        <span className="fader-label">{name}</span>
-        {editing ? (
-          <input
-            className="fader-input"
-            autoFocus
-            value={draft}
-            onChange={(e) => setDraft(e.target.value)}
-            onBlur={commitEdit}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") commitEdit();
-              else if (e.key === "Escape") setEditing(false);
-            }}
-          />
-        ) : (
-          <button
-            type="button"
-            className="fader-value"
-            title="Click to type a value"
-            onClick={startEdit}
-          >
-            {fmt(value, unit)}
-          </button>
-        )}
-      </div>
+    <div className={`knob${active ? " active" : ""}`}>
+      <span className="knob-label">{name}</span>
+
       <div
-        ref={trackRef}
-        className="fader-track"
+        ref={dialRef}
+        className="knob-dial"
         role="slider"
         aria-label={name}
         aria-valuemin={min}
         aria-valuemax={max}
         aria-valuenow={value}
+        aria-valuetext={fmt(value, unit)}
         tabIndex={0}
-        title={`${name} — drag (Shift+wheel = fine), double-click to reset`}
+        title={`${name} — drag up/down (Shift = fine), double-click to reset`}
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
         onPointerUp={onPointerUp}
@@ -175,16 +177,51 @@ export function Knob({
           }
         }}
       >
-        <div className="fader-fill" style={{ width: `${pct * 100}%` }} />
-        {defPct !== null && (
-          <span
-            className="fader-tick"
-            style={{ left: `${defPct * 100}%` }}
-            aria-hidden
+        <svg viewBox="0 0 100 100" aria-hidden>
+          <path className="knob-arc-bg" d={arc(1, 43)} />
+          <path className="knob-arc" d={arc(pct, 43)} />
+          {defPct !== null && (
+            <line
+              className="knob-tick"
+              x1={polar(50, 50, 46, ANGLE_START + ANGLE_SWEEP * defPct)[0]}
+              y1={polar(50, 50, 46, ANGLE_START + ANGLE_SWEEP * defPct)[1]}
+              x2={polar(50, 50, 50, ANGLE_START + ANGLE_SWEEP * defPct)[0]}
+              y2={polar(50, 50, 50, ANGLE_START + ANGLE_SWEEP * defPct)[1]}
+            />
+          )}
+          <circle className="knob-body" cx="50" cy="50" r="33" />
+          <line
+            className="knob-pointer"
+            x1={px1}
+            y1={py1}
+            x2={px2}
+            y2={py2}
           />
-        )}
-        <div className="fader-thumb" style={{ left: `${pct * 100}%` }} />
+        </svg>
       </div>
+
+      {editing ? (
+        <input
+          className="knob-input"
+          autoFocus
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          onBlur={commitEdit}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") commitEdit();
+            else if (e.key === "Escape") setEditing(false);
+          }}
+        />
+      ) : (
+        <button
+          type="button"
+          className="knob-value"
+          title="Click to type a value"
+          onClick={startEdit}
+        >
+          {fmt(value, unit)}
+        </button>
+      )}
     </div>
   );
 }

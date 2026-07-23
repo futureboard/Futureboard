@@ -11,6 +11,13 @@ use thiserror::Error;
 
 pub use cef;
 
+/// Opaque ARGB background for windowless browsers (`#111318`, the panel
+/// surface the editor chrome uses) so an unpainted frame is never transparent.
+const OPAQUE_BACKGROUND: u32 = 0xFF11_1318;
+
+/// Windowless paint rate cap. CEF clamps this to 1..=60.
+const WINDOWLESS_FRAME_RATE: i32 = 60;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProcessDispatch {
     BrowserProcess,
@@ -96,6 +103,10 @@ pub struct CefRuntimeConfig {
     pub locale: Option<String>,
     pub user_agent: Option<String>,
     pub remote_debugging_port: Option<u16>,
+    /// Allow [`RenderMode::Windowless`] browsers in this process. Chromium
+    /// decides this once, at `cef_initialize`, so a runtime that may ever need
+    /// off-screen rendering must opt in before any browser is created.
+    pub windowless_rendering: bool,
 }
 
 /// Pixel bounds in the native parent's client coordinate space.
@@ -149,10 +160,33 @@ impl NativeParent {
     }
 }
 
+/// How a browser is presented: a real native child window, or an off-screen
+/// framebuffer the embedder draws itself.
+#[derive(Clone)]
+pub enum RenderMode {
+    /// A native CEF child window inside `parent`. No render handler, shared
+    /// texture, or off-screen rendering path is used.
+    Windowed,
+    /// Windowless rendering into `surface`. `parent` is still passed to CEF —
+    /// it is only used to resolve monitor info and to parent dialogs — and may
+    /// be null on platforms where no such handle exists.
+    Windowless { surface: crate::osr::OsrSurface },
+}
+
+impl std::fmt::Debug for RenderMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Windowed => write!(f, "Windowed"),
+            Self::Windowless { .. } => write!(f, "Windowless"),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct WebViewConfig {
     pub url: String,
     pub bounds: WindowBounds,
+    pub render_mode: RenderMode,
 }
 
 impl WebViewConfig {
@@ -160,7 +194,14 @@ impl WebViewConfig {
         Self {
             url: url.into(),
             bounds,
+            render_mode: RenderMode::Windowed,
         }
+    }
+
+    /// Render off-screen into `surface` instead of a native child window.
+    pub fn windowless(mut self, surface: crate::osr::OsrSurface) -> Self {
+        self.render_mode = RenderMode::Windowless { surface };
+        self
     }
 }
 
@@ -187,8 +228,7 @@ impl CefRuntime {
             no_sandbox: 1,
             multi_threaded_message_loop: 0,
             external_message_pump: 0,
-            // This library only creates WindowInfo::set_as_child browsers.
-            windowless_rendering_enabled: 0,
+            windowless_rendering_enabled: i32::from(config.windowless_rendering),
             cache_path: cef_path(config.cache_path.as_ref()),
             root_cache_path: cef_path(config.root_cache_path.as_ref()),
             // Intentionally empty during CEF integration diagnosis: every CEF
@@ -226,12 +266,15 @@ impl CefRuntime {
         Ok(())
     }
 
-    /// Create a real native CEF child window. No render handler, shared texture,
-    /// or off-screen rendering path is used.
+    /// Create a browser: either a real native CEF child window, or — when the
+    /// config selects [`RenderMode::Windowless`] — an off-screen browser that
+    /// paints into the supplied [`crate::osr::OsrSurface`].
     ///
     /// `client` should normally be `Some` — see [`crate::client`]. `None` is
     /// still accepted (e.g. a test double) but gives the browser zero
-    /// navigation policy and no crash signal.
+    /// navigation policy and no crash signal. A windowless browser additionally
+    /// needs the client to expose an OSR render handler, otherwise CEF has
+    /// nowhere to paint.
     pub fn create_webview<'runtime>(
         &'runtime self,
         parent: NativeParent,
@@ -242,21 +285,37 @@ impl CefRuntime {
         if config.url.trim().is_empty() {
             return Err(CefRuntimeError::EmptyUrl);
         }
-        let window_info =
-            cef::WindowInfo::default().set_as_child(parent.as_raw(), &config.bounds.as_cef_rect());
-        debug_assert_eq!(window_info.windowless_rendering_enabled, 0);
+        let windowless = matches!(config.render_mode, RenderMode::Windowless { .. });
+        let window_info = if windowless {
+            cef::WindowInfo::default().set_as_windowless(parent.as_raw())
+        } else {
+            cef::WindowInfo::default().set_as_child(parent.as_raw(), &config.bounds.as_cef_rect())
+        };
+        debug_assert_eq!(
+            window_info.windowless_rendering_enabled,
+            i32::from(windowless)
+        );
         eprintln!(
-            "[cef-lifecycle] event=CreateBrowserSync begin url={:?} parent={:?} bounds={:?} thread={:?}",
+            "[cef-lifecycle] event=CreateBrowserSync begin url={:?} parent={:?} bounds={:?} render_mode={:?} thread={:?}",
             config.url,
             parent.as_raw(),
             config.bounds,
+            config.render_mode,
             std::thread::current().id()
         );
+        let browser_settings = cef::BrowserSettings {
+            // A transparent windowless surface would composite the timeline
+            // through the editor; an opaque background also lets the host
+            // upload frames without premultiplied-alpha handling.
+            background_color: if windowless { OPAQUE_BACKGROUND } else { 0 },
+            windowless_frame_rate: if windowless { WINDOWLESS_FRAME_RATE } else { 0 },
+            ..Default::default()
+        };
         let browser = cef::browser_host_create_browser_sync(
             Some(&window_info),
             client,
             Some(&cef::CefString::from(config.url.as_str())),
-            Some(&cef::BrowserSettings::default()),
+            Some(&browser_settings),
             None,
             None,
         );
@@ -277,6 +336,7 @@ impl CefRuntime {
 
         Ok(WebView {
             browser,
+            render_mode: config.render_mode,
             owner_thread: self.owner_thread,
             _runtime: PhantomData,
             _not_send: PhantomData,
@@ -306,6 +366,7 @@ impl CefRuntime {
         // its thread affinity are carried over unchanged.
         Ok(WebView {
             browser: view.browser.clone(),
+            render_mode: view.render_mode.clone(),
             owner_thread: view.owner_thread,
             _runtime: PhantomData,
             _not_send: PhantomData,
@@ -340,6 +401,7 @@ impl Drop for CefRuntime {
 
 pub struct WebView<'runtime> {
     browser: cef::Browser,
+    render_mode: RenderMode,
     owner_thread: ThreadId,
     _runtime: PhantomData<&'runtime CefRuntime>,
     _not_send: PhantomData<Rc<()>>,
@@ -389,14 +451,66 @@ impl WebView<'_> {
         Ok(())
     }
 
+    /// Resize the view. For a windowed browser this moves the native child
+    /// window; for a windowless one it republishes the logical view size to the
+    /// off-screen surface and asks CEF to re-read it, which produces a fresh
+    /// `OnPaint` at the new size.
     pub fn set_bounds(&self, bounds: WindowBounds) -> Result<(), CefRuntimeError> {
         self.ensure_thread()?;
         let host = self
             .browser
             .host()
             .ok_or(CefRuntimeError::MissingBrowserHost)?;
-        platform_set_bounds(host.window_handle(), bounds)?;
-        host.notify_move_or_resize_started();
+        match &self.render_mode {
+            RenderMode::Windowed => {
+                platform_set_bounds(host.window_handle(), bounds)?;
+                host.notify_move_or_resize_started();
+            }
+            RenderMode::Windowless { surface } => {
+                let (width, height) = surface.view_size();
+                if (width, height) != (bounds.width, bounds.height) {
+                    surface.set_view_size(bounds.width, bounds.height, surface.scale_factor());
+                }
+                host.was_resized();
+            }
+        }
+        Ok(())
+    }
+
+    /// The off-screen surface this view paints into, if it is windowless.
+    pub fn osr_surface(&self) -> Option<&crate::osr::OsrSurface> {
+        match &self.render_mode {
+            RenderMode::Windowed => None,
+            RenderMode::Windowless { surface } => Some(surface),
+        }
+    }
+
+    /// Tell CEF the windowless view rect changed (after updating the surface).
+    /// No-op for a windowed browser, which resizes through its own HWND.
+    pub fn notify_windowless_resized(&self) -> Result<(), CefRuntimeError> {
+        self.ensure_thread()?;
+        if matches!(self.render_mode, RenderMode::Windowed) {
+            return Ok(());
+        }
+        self.browser
+            .host()
+            .ok_or(CefRuntimeError::MissingBrowserHost)?
+            .was_resized();
+        Ok(())
+    }
+
+    /// Replay one input event into a windowless browser. Rejected for a
+    /// windowed browser, which receives real platform input directly.
+    pub fn send_input(&self, input: crate::osr::OsrInput) -> Result<(), CefRuntimeError> {
+        self.ensure_thread()?;
+        if matches!(self.render_mode, RenderMode::Windowed) {
+            return Err(CefRuntimeError::NotWindowless);
+        }
+        let host = self
+            .browser
+            .host()
+            .ok_or(CefRuntimeError::MissingBrowserHost)?;
+        crate::osr::dispatch_input(&host, input);
         Ok(())
     }
 
@@ -570,6 +684,8 @@ pub enum CefRuntimeError {
     MissingBrowserHost,
     #[error("native web view resize failed: {0}")]
     PlatformResizeFailed(String),
+    #[error("this operation is only valid for a windowless (off-screen) web view")]
+    NotWindowless,
     #[error("failed to resolve the current executable: {0}")]
     CurrentExecutable(#[from] std::io::Error),
     #[cfg(target_os = "macos")]

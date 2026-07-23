@@ -1,0 +1,317 @@
+//! GPUI presentation of an **off-screen** built-in plugin editor.
+//!
+//! On Windows the CEF browser is a real child window and GPUI never touches
+//! its pixels (see `plugin_content_host.rs`). Where that is impossible — Linux,
+//! and any host without child-window embedding — CEF renders windowless and
+//! hands the host a BGRA framebuffer instead. This module owns the two halves
+//! of that arrangement:
+//!
+//! - **Out:** turning the latest painted frame into a GPUI texture, and
+//!   releasing the previous one so the sprite atlas does not grow per frame.
+//! - **In:** translating GPUI mouse/keyboard events into the logical-pixel,
+//!   `VKEY_*`-coded events CEF expects.
+//!
+//! Everything here runs on the GPUI UI thread, which is also CEF's UI thread.
+
+use std::sync::Arc;
+
+use gpui::{App, Keystroke, Modifiers, MouseButton, RenderImage, Window};
+use image::{Frame, ImageBuffer};
+use smallvec::SmallVec;
+
+use crate::components::builtin_plugin_editor::{
+    self as host, EditorKey, EditorKeyKind, EditorModifiers, EditorMouseButton, ViewId,
+};
+
+/// The frame currently uploaded to GPUI, plus the mouse-button state CEF needs
+/// echoed back in every event's modifier mask.
+#[derive(Default)]
+pub(crate) struct OffscreenSurface {
+    image: Option<Arc<RenderImage>>,
+    /// Surface generation `image` was built from. `0` means "nothing yet".
+    generation: u64,
+    /// Frames replaced since the last render pass. Their atlas tiles can only
+    /// be dropped with a `Window` in hand, which `sync` does not have.
+    stale: Vec<Arc<RenderImage>>,
+    buttons: ButtonState,
+}
+
+#[derive(Default, Clone, Copy)]
+struct ButtonState {
+    left: bool,
+    middle: bool,
+    right: bool,
+}
+
+impl OffscreenSurface {
+    /// Pull the latest painted frame for `view_id`. Returns `true` when a new
+    /// frame was taken and the window therefore needs to repaint.
+    pub(crate) fn sync(&mut self, view_id: ViewId) -> bool {
+        let generation = host::view_frame_generation(view_id);
+        if generation == 0 || generation == self.generation {
+            return false;
+        }
+        let Some(Some(image)) = host::with_view_frame(view_id, |bgra, width, height| {
+            // GPUI's `RenderImage` is BGRA with premultiplied alpha, which is
+            // exactly CEF's `OnPaint` layout — no channel swap needed.
+            let buffer = ImageBuffer::from_raw(width as u32, height as u32, bgra.to_vec())?;
+            Some(Arc::new(RenderImage::new(SmallVec::from_elem(
+                Frame::new(buffer),
+                1,
+            ))))
+        }) else {
+            return false;
+        };
+
+        self.generation = generation;
+        if let Some(previous) = self.image.replace(image) {
+            self.stale.push(previous);
+        }
+        true
+    }
+
+    /// The texture to draw, if a frame has arrived.
+    pub(crate) fn image(&self) -> Option<Arc<RenderImage>> {
+        self.image.clone()
+    }
+
+    /// Drop the atlas tiles of every superseded frame. Must be called from a
+    /// render pass; without it each uploaded frame would leak a texture.
+    pub(crate) fn release_stale(&mut self, window: &mut Window, cx: &mut App) {
+        for image in self.stale.drain(..) {
+            cx.drop_image(image, Some(window));
+        }
+    }
+
+    pub(crate) fn set_button(&mut self, button: EditorMouseButton, pressed: bool) {
+        match button {
+            EditorMouseButton::Left => self.buttons.left = pressed,
+            EditorMouseButton::Middle => self.buttons.middle = pressed,
+            EditorMouseButton::Right => self.buttons.right = pressed,
+        }
+    }
+
+    /// Modifier mask for an outgoing event: keyboard modifiers from GPUI plus
+    /// the buttons this surface believes are held.
+    pub(crate) fn modifiers(&self, modifiers: Modifiers) -> EditorModifiers {
+        EditorModifiers {
+            shift: modifiers.shift,
+            control: modifiers.control,
+            alt: modifiers.alt,
+            command: modifiers.platform,
+            left_button: self.buttons.left,
+            middle_button: self.buttons.middle,
+            right_button: self.buttons.right,
+        }
+    }
+}
+
+/// GPUI button → CEF button. Back/forward have no CEF equivalent and are
+/// dropped rather than mapped onto a real button.
+pub(crate) fn editor_mouse_button(button: MouseButton) -> Option<EditorMouseButton> {
+    match button {
+        MouseButton::Left => Some(EditorMouseButton::Left),
+        MouseButton::Middle => Some(EditorMouseButton::Middle),
+        MouseButton::Right => Some(EditorMouseButton::Right),
+        _ => None,
+    }
+}
+
+/// Chromium `VKEY_*` code for a GPUI key name, or `None` for a key CEF has no
+/// virtual code for (the character still travels as a `Char` event).
+pub(crate) fn windows_key_code(key: &str) -> Option<i32> {
+    let code = match key {
+        "backspace" => 0x08,
+        "tab" => 0x09,
+        "enter" => 0x0D,
+        "shift" => 0x10,
+        "control" => 0x11,
+        "alt" => 0x12,
+        "capslock" => 0x14,
+        "escape" => 0x1B,
+        "space" => 0x20,
+        "pageup" => 0x21,
+        "pagedown" => 0x22,
+        "end" => 0x23,
+        "home" => 0x24,
+        "left" => 0x25,
+        "up" => 0x26,
+        "right" => 0x27,
+        "down" => 0x28,
+        "insert" => 0x2D,
+        "delete" => 0x2E,
+        ";" => 0xBA,
+        "=" => 0xBB,
+        "," => 0xBC,
+        "-" => 0xBD,
+        "." => 0xBE,
+        "/" => 0xBF,
+        "`" => 0xC0,
+        "[" => 0xDB,
+        "\\" => 0xDC,
+        "]" => 0xDD,
+        "'" => 0xDE,
+        _ => {
+            let mut chars = key.chars();
+            match (chars.next(), chars.next()) {
+                // Single ASCII alphanumerics share their uppercase code point.
+                (Some(c), None) if c.is_ascii_digit() => c as i32,
+                (Some(c), None) if c.is_ascii_alphabetic() => c.to_ascii_uppercase() as i32,
+                _ => {
+                    // f1..f24
+                    let function = key
+                        .strip_prefix('f')
+                        .and_then(|n| n.parse::<i32>().ok())
+                        .filter(|n| (1..=24).contains(n))?;
+                    0x70 + function - 1
+                }
+            }
+        }
+    };
+    Some(code)
+}
+
+/// The key-down/key-up event for `keystroke`, if it maps to a virtual code.
+pub(crate) fn editor_key(
+    keystroke: &Keystroke,
+    kind: EditorKeyKind,
+    modifiers: EditorModifiers,
+) -> Option<EditorKey> {
+    Some(EditorKey {
+        kind,
+        windows_key_code: windows_key_code(&keystroke.key)?,
+        character: 0,
+        modifiers,
+    })
+}
+
+/// The `Char` events for the text `keystroke` would type, one per UTF-16 code
+/// unit. Empty when the keystroke produced no text (a bare modifier, an
+/// accelerator, a navigation key).
+pub(crate) fn editor_char_keys(
+    keystroke: &Keystroke,
+    modifiers: EditorModifiers,
+) -> Vec<EditorKey> {
+    // A key_char alongside control/platform is an accelerator, not typed text;
+    // forwarding it would insert a character *and* run the shortcut.
+    if modifiers.control || modifiers.command {
+        return Vec::new();
+    }
+    let Some(text) = keystroke.key_char.as_deref() else {
+        return Vec::new();
+    };
+    text.encode_utf16()
+        .map(|unit| EditorKey {
+            kind: EditorKeyKind::Char,
+            windows_key_code: unit as i32,
+            character: unit,
+            modifiers,
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn keystroke(key: &str, key_char: Option<&str>) -> Keystroke {
+        Keystroke {
+            modifiers: Modifiers::default(),
+            key: key.to_string(),
+            key_char: key_char.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn named_keys_map_to_their_chromium_virtual_codes() {
+        assert_eq!(windows_key_code("enter"), Some(0x0D));
+        assert_eq!(windows_key_code("backspace"), Some(0x08));
+        assert_eq!(windows_key_code("left"), Some(0x25));
+        assert_eq!(windows_key_code("delete"), Some(0x2E));
+    }
+
+    #[test]
+    fn ascii_keys_use_their_uppercase_code_point() {
+        assert_eq!(windows_key_code("a"), Some('A' as i32));
+        assert_eq!(windows_key_code("z"), Some('Z' as i32));
+        assert_eq!(windows_key_code("7"), Some('7' as i32));
+    }
+
+    #[test]
+    fn function_keys_are_offsets_from_vkey_f1() {
+        assert_eq!(windows_key_code("f1"), Some(0x70));
+        assert_eq!(windows_key_code("f12"), Some(0x7B));
+        assert_eq!(windows_key_code("f99"), None);
+    }
+
+    #[test]
+    fn unmapped_keys_produce_no_key_event() {
+        assert_eq!(windows_key_code("brightnessup"), None);
+        assert!(editor_key(
+            &keystroke("brightnessup", None),
+            EditorKeyKind::Down,
+            EditorModifiers::default()
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn typed_text_becomes_one_char_event_per_utf16_unit() {
+        let keys = editor_char_keys(&keystroke("a", Some("a")), EditorModifiers::default());
+        assert_eq!(keys.len(), 1);
+        assert_eq!(keys[0].character, 'a' as u16);
+        assert_eq!(keys[0].kind, EditorKeyKind::Char);
+
+        // Outside the BMP: two surrogate halves, both forwarded.
+        let keys = editor_char_keys(&keystroke("g", Some("𝄞")), EditorModifiers::default());
+        assert_eq!(keys.len(), 2);
+    }
+
+    #[test]
+    fn accelerators_do_not_type_a_character() {
+        let modifiers = EditorModifiers {
+            control: true,
+            ..Default::default()
+        };
+        assert!(editor_char_keys(&keystroke("a", Some("a")), modifiers).is_empty());
+    }
+
+    #[test]
+    fn a_keystroke_without_text_types_nothing() {
+        assert!(editor_char_keys(&keystroke("left", None), EditorModifiers::default()).is_empty());
+    }
+
+    #[test]
+    fn button_state_is_echoed_into_the_modifier_mask() {
+        let mut surface = OffscreenSurface::default();
+        assert!(!surface.modifiers(Modifiers::default()).left_button);
+        surface.set_button(EditorMouseButton::Left, true);
+        assert!(surface.modifiers(Modifiers::default()).left_button);
+        surface.set_button(EditorMouseButton::Left, false);
+        assert!(!surface.modifiers(Modifiers::default()).left_button);
+    }
+
+    #[test]
+    fn gpui_modifiers_map_onto_cef_flags() {
+        let surface = OffscreenSurface::default();
+        let modifiers = surface.modifiers(Modifiers {
+            shift: true,
+            platform: true,
+            ..Default::default()
+        });
+        assert!(modifiers.shift && modifiers.command);
+        assert!(!modifiers.control && !modifiers.alt);
+    }
+
+    #[test]
+    fn navigation_buttons_are_not_forwarded() {
+        assert_eq!(
+            editor_mouse_button(MouseButton::Left),
+            Some(EditorMouseButton::Left)
+        );
+        assert_eq!(
+            editor_mouse_button(MouseButton::Navigate(gpui::NavigationDirection::Back)),
+            None
+        );
+    }
+}

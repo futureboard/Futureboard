@@ -733,9 +733,10 @@ body {
 .param-bank {
   flex: 1;
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(112px, 1fr));
   align-content: center;
-  gap: 20px 36px;
+  justify-items: center;
+  gap: 22px 20px;
   min-height: 0;
   padding: 22px 24px;
   background: var(--bg-panel);
@@ -744,185 +745,79 @@ body {
   overflow: auto;
 }
 
-.fader {
+.knob {
   display: flex;
   flex-direction: column;
-  gap: 9px;
+  align-items: center;
+  gap: 6px;
   min-width: 0;
 }
-.fader-meta {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 10px;
-}
-.fader-label {
-  font-size: 12px; font-weight: 600; letter-spacing: 0.06em;
+.knob-label {
+  font-size: 10px; font-weight: 600; letter-spacing: 0.12em;
   color: var(--text-dim); text-transform: uppercase;
+  text-align: center;
 }
-.fader-value {
-  font-size: 14px; font-weight: 600;
+
+.knob-dial {
+  width: 62px; height: 62px;
+  cursor: ns-resize;
+  touch-action: none;
+  outline: none;
+}
+.knob-dial svg { display: block; width: 100%; height: 100%; overflow: visible; }
+.knob-dial:focus-visible svg { filter: drop-shadow(0 0 3px var(--accent)); }
+
+.knob-arc-bg {
+  fill: none; stroke: var(--stroke-1); stroke-width: 6; stroke-linecap: round;
+}
+.knob-arc {
+  fill: none; stroke: var(--cat-color, var(--accent));
+  stroke-width: 6; stroke-linecap: round;
+}
+.knob-tick { stroke: rgba(255,255,255,0.28); stroke-width: 2; }
+.knob-body {
+  fill: var(--bg-block);
+  stroke: var(--stroke-2); stroke-width: 1;
+}
+.knob-pointer {
+  stroke: var(--text-hi); stroke-width: 3; stroke-linecap: round;
+}
+.knob.active .knob-body { stroke: var(--stroke-3); }
+.knob.active .knob-pointer { stroke: #fff; }
+
+.knob-value {
+  font-size: 12px; font-weight: 600;
   color: var(--text-hi); font-variant-numeric: tabular-nums;
   cursor: text;
   background: transparent; border: none; padding: 0;
   font-family: inherit;
   transition: color 0.1s var(--ease);
 }
-.fader-value:hover { color: var(--accent); }
-.fader-input {
-  width: 68px; text-align: right;
-  font-family: inherit; font-size: 14px; font-weight: 600;
+.knob-value:hover { color: var(--accent); }
+.knob-input {
+  width: 62px; text-align: center;
+  font-family: inherit; font-size: 12px; font-weight: 600;
   color: var(--text-hi); background: var(--bg-inset);
   border: 1px solid rgba(232,162,58,0.5); border-radius: var(--radius-sm);
-  padding: 2px 5px; outline: none; font-variant-numeric: tabular-nums;
+  padding: 1px 4px; outline: none; font-variant-numeric: tabular-nums;
   user-select: text;
 }
 
-.fader-track {
-  position: relative;
-  height: 10px;
-  background: var(--bg-inset);
-  border: 1px solid var(--stroke-1);
-  border-radius: 999px;
-  cursor: ew-resize;
-  touch-action: none;
-}
-.fader-fill {
-  position: absolute; left: 0; top: 0; bottom: 0;
-  background: var(--cat-color, var(--accent));
-  border-radius: 999px;
-  pointer-events: none;
-  opacity: 0.9;
-}
-.fader-tick {
-  position: absolute; top: -3px; bottom: -3px;
-  width: 1px; margin-left: -0.5px;
-  background: rgba(255,255,255,0.28);
-  pointer-events: none; z-index: 1;
-}
-.fader-thumb {
-  position: absolute; top: 50%;
-  width: 16px; height: 16px;
-  margin-left: -8px; margin-top: -8px;
-  border-radius: 50%;
-  background: #ececef;
-  border: 2px solid #0c0c0e;
-  pointer-events: none; z-index: 2;
-}
-.fader.active .fader-track { border-color: var(--stroke-3); }
-.fader.active .fader-thumb { background: #fff; }
-
-/* ── Cabinet stage ──────────────────────────────── */
-.cab-layout {
-  flex: 1;
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 230px;
-  gap: 14px;
-  min-height: 0;
-}
-
-.cab-stage {
-  display: flex; flex-direction: column; gap: 8px;
-  min-width: 0; min-height: 0;
-  padding: 12px 14px;
-  background: var(--bg-panel);
-  border: 1px solid var(--stroke-1);
-  border-radius: var(--radius);
-}
-.cab-stage.bypassed { opacity: 0.45; }
-.cab-stage-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
-.cab-stage-title {
-  font-size: 10px; font-weight: 600; letter-spacing: 0.12em;
-  color: var(--text-faint); text-transform: uppercase;
-}
-.cab-stage-hint { font-size: 10px; color: var(--text-faint); }
-
-.cab-stage-canvas {
-  position: relative; flex: 1; min-height: 180px;
-  background: var(--bg-inset);
-  border: 1px solid var(--stroke-1); border-radius: var(--radius-sm);
-  cursor: crosshair;
-  overflow: hidden;
-}
-
-/* Front elevation: an abstract technical diagram, never a photo-real cab. */
-.cab-box {
-  position: absolute; left: 50%; top: 10%;
-  transform: translateX(-50%);
-  height: 36%; aspect-ratio: var(--cab-cols) / var(--cab-rows);
-  display: grid;
-  grid-template-columns: repeat(var(--cab-cols), 1fr);
-  grid-template-rows: repeat(var(--cab-rows), 1fr);
-  gap: 4px; padding: 5px;
-  background: var(--bg-block);
-  border: 1px solid var(--stroke-3);
-  border-radius: 3px;
-}
-.cab-speaker {
-  position: relative;
-  display: flex; align-items: center; justify-content: center;
-  border: 1px solid var(--stroke-2); border-radius: 50%;
-  background: #0b0b0d;
-}
-.cab-cone {
-  width: 62%; height: 62%; border-radius: 50%;
-  border: 1px solid var(--stroke-2);
-}
-.cab-dust {
-  position: absolute; width: 22%; height: 22%; border-radius: 50%;
-  background: var(--cat-color); opacity: 0.5;
-}
-
-.cab-axis {
-  position: absolute; left: 50%; top: 8%; bottom: 18%; width: 1px;
-  background: var(--stroke-1);
-}
-.cab-leader {
-  position: absolute; inset: 0; width: 100%; height: 100%;
-  color: var(--stroke-3); pointer-events: none;
-}
-
-.cab-mic {
-  position: absolute; width: 16px; height: 16px;
-  transform: translate(-50%, -50%);
-  display: flex; align-items: center; justify-content: center;
-  cursor: grab;
-}
-.cab-mic-body {
-  width: 10px; height: 10px; border-radius: 50%;
-  background: var(--accent);
-  border: 2px solid var(--bg-inset);
-  box-shadow: 0 0 0 1px var(--accent);
-}
-.cab-mic:focus-visible { outline: 1px solid var(--accent); outline-offset: 2px; border-radius: 50%; }
-
-.cab-stage-readout {
-  position: absolute; left: 10px; bottom: 8px;
-  display: flex; gap: 12px;
-  font-size: 11px; color: var(--text-dim);
-  font-variant-numeric: tabular-nums;
-  pointer-events: none;
-}
-.cab-stage-readout b { color: var(--text-hi); font-weight: 600; }
-.cab-stage-model { color: var(--text-faint); }
-
+/* ── Cabinet mic controls ───────────────────────── */
 .cab-inspector {
+  flex: 1;
   display: flex; flex-direction: column; gap: 10px;
   min-width: 0; min-height: 0;
-  padding: 12px 14px;
-  background: var(--bg-panel);
-  border: 1px solid var(--stroke-1);
-  border-radius: var(--radius);
-  overflow: auto;
 }
-.inspector-title {
-  font-size: 10px; font-weight: 600; letter-spacing: 0.12em;
-  color: var(--text-faint); text-transform: uppercase;
+.cab-inspector .param-bank { flex: 1; }
+
+.cab-readout {
+  display: flex; gap: 16px;
+  font-size: 11px; color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
 }
-.param-bank.column {
-  display: flex; flex-direction: column; gap: 14px;
-  flex: none; padding: 0; background: none; border: none; overflow: visible;
-}
+.cab-readout b { color: var(--text-hi); font-weight: 600; }
+
 .inspector-note {
   margin: 0; font-size: 10px; line-height: 1.5; color: var(--text-faint);
 }
@@ -984,9 +879,8 @@ body {
   .rig-lcd { min-width: 240px; padding-left: 16px; padding-right: 16px; }
   .rig-name { font-size: 16px; }
   .fp-name { font-size: 19px; }
-  .param-bank { grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 16px 24px; }
+  .param-bank { grid-template-columns: repeat(auto-fit, minmax(96px, 1fr)); gap: 18px 14px; }
   .chain-region { grid-template-columns: 148px minmax(0, 1fr) 148px; }
-  .cab-layout { grid-template-columns: minmax(0, 1fr) 196px; }
 }
 
 @media (max-width: 820px) {
@@ -1007,7 +901,6 @@ body {
   .io-strip-head { flex-direction: column; align-items: flex-start; gap: 2px; }
   .io-strip .lvl, .io-strip .trim { flex: 1; min-width: 0; }
 
-  .cab-layout { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(150px, 1fr) auto; }
   /* Undo/redo and the A/B toggles stay; only the A→B copy shortcut drops out
      (it has no keyboard equivalent, but it is not needed to compare). */
   .ab-group .hdr-btn { display: none; }

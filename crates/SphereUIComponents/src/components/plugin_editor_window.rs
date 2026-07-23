@@ -1149,7 +1149,10 @@ impl PluginEditorWindow {
             // PluginBridgeRuntime; nothing to fold into editor status.
             ClientEvent::Host(HostEvent::PluginState { .. })
             | ClientEvent::Host(HostEvent::PluginStateSet { .. })
-            | ClientEvent::Host(HostEvent::PluginParameters { .. }) => {}
+            | ClientEvent::Host(HostEvent::PluginParameters { .. })
+            // Built-in NAM results are routed to the built-in editor windows
+            // by `poll_plugin_bridge_runtime`, not this VST3 state machine.
+            | ClientEvent::Host(HostEvent::BuiltinNamCaptureResult { .. }) => {}
             ClientEvent::Host(HostEvent::Log { level, message }) => {
                 eprintln!("[plugin-view][host][{level}] {message}");
             }

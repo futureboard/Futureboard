@@ -687,6 +687,31 @@ impl PluginBridgeRuntime {
         self.client.send(command)
     }
 
+    /// Latest built-in DSP telemetry for `instance_id`'s shared region, plus
+    /// footer status straight from the region header. `None` when no region is
+    /// mapped for the instance. Pure atomic loads — cheap enough for a ~30 Hz
+    /// UI poll.
+    pub fn builtin_meter_frame(
+        &self,
+        instance_id: &str,
+    ) -> Option<SpherePluginHost::audio_bridge::BuiltinMeterFrame> {
+        let region = self.shared_audio.get(instance_id)?;
+        Some(region.bridge().builtin_meters())
+    }
+
+    /// Region-header status for the footer: (sample_rate, block_frames,
+    /// latency_samples). `None` when no region is mapped.
+    pub fn builtin_host_status(&self, instance_id: &str) -> Option<(u32, u32, u32)> {
+        use std::sync::atomic::Ordering;
+        let region = self.shared_audio.get(instance_id)?;
+        let bridge = region.bridge();
+        Some((
+            bridge.sample_rate.load(Ordering::Relaxed),
+            bridge.max_block_size.load(Ordering::Relaxed),
+            bridge.latency_samples.load(Ordering::Relaxed),
+        ))
+    }
+
     /// Graceful shutdown of the shared bridge host. Drains the runtime slot so
     /// the [`PluginHostClient`] is dropped and process handles are released.
     pub fn shutdown_shared(slot: &mut Option<SharedPluginBridgeRuntime>) {

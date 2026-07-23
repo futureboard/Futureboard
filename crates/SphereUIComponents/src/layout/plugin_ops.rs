@@ -349,6 +349,32 @@ impl StudioLayout {
                         "plugin_loaded",
                     );
                 }
+                ClientEvent::Host(HostEvent::BuiltinNamCaptureResult {
+                    plugin_instance_id,
+                    ok,
+                    name,
+                    error,
+                    receptive_field,
+                    full_rig,
+                }) => {
+                    eprintln!(
+                        "[plugin-bridge] event BuiltinNamCaptureResult instance={plugin_instance_id} ok={ok} name={name} error={error:?}"
+                    );
+                    // Route into whichever shared built-in editor is bound to
+                    // this insert; the window checks the match itself.
+                    for handle in self.plugin_editors.builtin.values() {
+                        let _ = handle.update(cx, |editor, _window, _cx| {
+                            editor.notify_nam_capture_result(
+                                &plugin_instance_id,
+                                ok,
+                                &name,
+                                error.as_deref(),
+                                receptive_field,
+                                full_rig,
+                            );
+                        });
+                    }
+                }
                 ClientEvent::Host(HostEvent::PluginLoadFailed {
                     plugin_instance_id,
                     error,
@@ -1935,6 +1961,21 @@ impl StudioLayout {
                 if slot_plugin_id != plugin_id {
                     continue;
                 }
+                // The live mirror is authoritative (it carries edits made
+                // since the last save); the persisted blob covers a project
+                // that was loaded but never edited this session — seed the
+                // mirror from it so a later replay/save also sees it. `None`
+                // only for a truly fresh insert (editor falls back to DSP
+                // defaults).
+                if let Some(persisted) = slot.vst3_state.as_deref() {
+                    crate::components::builtin_plugin_editor::builtin_state_seed(
+                        &slot.id, persisted,
+                    );
+                }
+                let state_bytes =
+                    crate::components::builtin_plugin_editor::builtin_state_bytes(&slot.id)
+                        .map(std::sync::Arc::new)
+                        .or_else(|| slot.vst3_state.clone());
                 instances.push(PluginInstanceDescriptor {
                     instance_key: PluginInstanceKey {
                         track_id: track.id.clone(),
@@ -1945,12 +1986,7 @@ impl StudioLayout {
                     insert_name: slot.display_name.clone(),
                     bypassed: slot.bypassed,
                     enabled: slot.enabled,
-                    // Whatever's persisted for this insert (see the doc
-                    // comment on `InsertSlotState::vst3_state` — reused
-                    // generically, not VST3-only). `None` for a fresh insert
-                    // that was never saved; the editor host falls back to
-                    // DSP defaults in that case.
-                    state_bytes: slot.vst3_state.clone(),
+                    state_bytes,
                 });
             }
         }
@@ -1972,7 +2008,11 @@ impl StudioLayout {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        use crate::components::builtin_plugin_editor_window::PluginInstanceKey;
+        use crate::components::builtin_plugin_editor_window::{
+            BuiltinEditorHostOps, BuiltinHostStatusSource, BuiltinMeterSource,
+            BuiltinNamLoadForwarder, BuiltinNamLoadRequest, BuiltinParamForwarder,
+            PluginInstanceKey,
+        };
 
         let target = PluginInstanceKey {
             track_id: track_id.to_string(),
@@ -1980,10 +2020,96 @@ impl StudioLayout {
         };
         let instances = self.collect_builtin_instances(plugin_id, cx);
 
+        // Live param edits from the editor go to the engine's realtime command
+        // path; the callback thread pushes them into this insert's shared
+        // param ring (the ring's sole producer). `None` while the engine is
+        // still warming up — the focus path re-installs a live one later.
+        let forward_param: Option<BuiltinParamForwarder> =
+            self.audio_bridge.engine.clone().map(|engine| {
+                std::sync::Arc::new(
+                    move |key: &PluginInstanceKey, index: u32, value: f32| {
+                        // UI thread, non-realtime: string alloc + command send.
+                        if let Err(error) = engine.set_insert_param(
+                            key.track_id.clone(),
+                            key.insert_id.clone(),
+                            index.to_string(),
+                            value,
+                        ) {
+                            eprintln!(
+                                "[BuiltinPluginEditor] setParams forward failed insert={} index={index} error={error}",
+                                key.insert_id
+                            );
+                        }
+                        // Fold into the authoritative main-process mirror —
+                        // the source for selectInstance state, project save,
+                        // and host-restore replay.
+                        crate::components::builtin_plugin_editor::builtin_state_apply(
+                            &key.insert_id,
+                            index,
+                            value,
+                        );
+                    },
+                ) as BuiltinParamForwarder
+            });
+
+        // `.nam` loads and telemetry polls go through the plugin-host bridge
+        // runtime (the DSP lives in the host process).
+        let bridge_runtime = self.plugin_editors.bridge_runtime.clone();
+        let load_nam_capture: Option<BuiltinNamLoadForwarder> =
+            bridge_runtime.clone().map(|runtime| {
+                std::sync::Arc::new(
+                    move |key: &PluginInstanceKey, request: BuiltinNamLoadRequest| {
+                        let command = SpherePluginHost::ipc::HostCommand::LoadBuiltinNamCapture {
+                            plugin_instance_id: key.insert_id.clone(),
+                            name: request.name,
+                            json: request.json,
+                            stereo: request.stereo,
+                            full_rig: request.full_rig,
+                        };
+                        match runtime.lock() {
+                            Ok(mut bridge) => {
+                                if let Err(error) = bridge.send_raw(&command) {
+                                    eprintln!(
+                                        "[BuiltinPluginEditor] loadNamCapture send failed insert={} error={error}",
+                                        key.insert_id
+                                    );
+                                }
+                            }
+                            Err(_) => eprintln!(
+                                "[BuiltinPluginEditor] loadNamCapture dropped: bridge runtime poisoned"
+                            ),
+                        }
+                    },
+                ) as BuiltinNamLoadForwarder
+            });
+        let meter_source: Option<BuiltinMeterSource> = bridge_runtime.clone().map(|runtime| {
+            std::sync::Arc::new(move |key: &PluginInstanceKey| {
+                runtime
+                    .lock()
+                    .ok()
+                    .and_then(|bridge| bridge.builtin_meter_frame(&key.insert_id))
+            }) as BuiltinMeterSource
+        });
+        let host_status_source: Option<BuiltinHostStatusSource> = bridge_runtime.map(|runtime| {
+            std::sync::Arc::new(move |key: &PluginInstanceKey| {
+                runtime
+                    .lock()
+                    .ok()
+                    .and_then(|bridge| bridge.builtin_host_status(&key.insert_id))
+            }) as BuiltinHostStatusSource
+        });
+        let host_ops = BuiltinEditorHostOps {
+            forward_param,
+            load_nam_capture,
+            meter_source,
+            host_status_source,
+        };
+
         // Focus the existing shared window and rebind it to this instance,
         // rather than creating a second browser for the same plugin_id.
         if let Some(handle) = self.plugin_editors.builtin.get(plugin_id) {
             let result = handle.update(cx, |editor, window, cx| {
+                editor.set_host_ops(host_ops.clone());
                 editor.set_instances(instances.clone(), cx);
                 editor.select_instance(target.clone(), cx);
                 window.activate_window();
@@ -2004,6 +2130,7 @@ impl StudioLayout {
             display_name,
             instances,
             Some(target),
+            host_ops,
             cx,
         ) {
             Ok(handle) => {
@@ -2152,6 +2279,10 @@ impl StudioLayout {
                 }
             }
         }
+
+        // 4. Built-in state mirror: this instance id is dead; a future insert
+        //    always gets a fresh id, so the entry would only leak.
+        crate::components::builtin_plugin_editor::builtin_state_remove(insert_id);
 
         eprintln!("[PluginUnload] complete track={track_id} instance={insert_id}");
     }
@@ -3336,6 +3467,34 @@ impl StudioLayout {
     /// them. Bounded request/response — call on save, not per frame. Slots the
     /// host did not answer for keep their previously captured state.
     pub(super) fn refresh_bridge_plugin_states(&mut self, cx: &mut Context<Self>) {
+        // Built-in inserts: flush the main-process state mirror into each
+        // slot's persisted blob so the imminent save writes real state (the
+        // mirror is authoritative; nothing is fetched from the host).
+        self.timeline.update(cx, |timeline, _cx| {
+            let flush =
+                |slot: &mut crate::components::timeline::timeline_state::InsertSlotState| {
+                    let Some(plugin_id) = slot.plugin_id.as_deref() else {
+                        return;
+                    };
+                    if !SpherePluginHost::builtin_audio_bridge_supported(plugin_id) {
+                        return;
+                    }
+                    if let Some(bytes) =
+                        crate::components::builtin_plugin_editor::builtin_state_bytes(&slot.id)
+                    {
+                        slot.vst3_state = Some(std::sync::Arc::new(bytes));
+                    }
+                };
+            for slot in &mut timeline.state.master.inserts {
+                flush(slot);
+            }
+            for track in &mut timeline.state.tracks {
+                for slot in &mut track.inserts {
+                    flush(slot);
+                }
+            }
+        });
+
         let slots = self.bridge_vst3_insert_slots(cx);
         if slots.is_empty() {
             return;
@@ -3492,12 +3651,70 @@ impl StudioLayout {
         }
         eprintln!("[plugin-runtime] state Loading -> Ready source={source}");
         self.sync_plugin_bridge_sinks_to_engine(cx, source);
+        // Built-in insert: the host DSP always (re)starts at defaults —
+        // replay the mirrored/persisted state through the live param channel
+        // now that the sink is installed. Covers project open and host
+        // crash/respawn.
+        self.replay_builtin_insert_state(plugin_instance_id, cx);
         if slot_changed {
             self.audio_bridge.project_dirty = true;
             self.schedule_audio_project_sync(cx, true, source);
         }
         self.request_bridge_insert_parameters(plugin_instance_id);
         slot_changed
+    }
+
+    /// Push a built-in insert's mirrored parameter state into its
+    /// freshly-loaded host DSP as ordered wire-index param events (same
+    /// channel as live editor edits: engine command → callback thread → SPSC
+    /// ring → host producer). No-op for VST3 inserts, missing engine, or an
+    /// insert with no mirrored/persisted state (host defaults already match).
+    fn replay_builtin_insert_state(&self, plugin_instance_id: &str, cx: &Context<Self>) {
+        use crate::components::builtin_plugin_editor as host;
+        let Some(engine) = self.audio_bridge.engine.as_ref() else {
+            return;
+        };
+        let state = &self.timeline.read(cx).state;
+        for track in &state.tracks {
+            for slot in &track.inserts {
+                if slot.id != plugin_instance_id {
+                    continue;
+                }
+                let Some(plugin_id) = slot.plugin_id.as_deref() else {
+                    return;
+                };
+                if !SpherePluginHost::builtin_audio_bridge_supported(plugin_id) {
+                    return;
+                }
+                if let Some(blob) = slot.vst3_state.as_deref() {
+                    host::builtin_state_seed(&slot.id, blob);
+                }
+                let values = host::builtin_state_replay(&slot.id);
+                if values.is_empty() {
+                    return;
+                }
+                eprintln!(
+                    "[PluginRestore] builtin state replay instance={} params={}",
+                    slot.id,
+                    values.len()
+                );
+                for (index, value) in values {
+                    if let Err(error) = engine.set_insert_param(
+                        track.id.clone(),
+                        slot.id.clone(),
+                        index.to_string(),
+                        value,
+                    ) {
+                        eprintln!(
+                            "[PluginRestore] builtin state replay failed instance={} index={index} error={error}",
+                            slot.id
+                        );
+                        return;
+                    }
+                }
+                return;
+            }
+        }
     }
 
     fn host_plugin_parameter_to_ui(
@@ -3789,6 +4006,10 @@ impl StudioLayout {
     /// After a project document is applied to the timeline, drop stale bridge
     /// instances before the awaitable restore batch runs.
     pub(super) fn prepare_bridge_plugin_restore_batch(&mut self, cx: &mut Context<Self>) {
+        // A new project document owns different insert ids — the built-in
+        // state mirror from the previous document must not leak across.
+        // Entries for the incoming project reseed from the loaded blobs.
+        crate::components::builtin_plugin_editor::builtin_state_clear();
         if !super::plugin_bridge_runtime::bridge_enabled() {
             eprintln!(
                 "[PluginRestore] in-process path — engine sync will instantiate native inserts"

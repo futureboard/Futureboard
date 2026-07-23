@@ -11,15 +11,15 @@ use sphere_ui_components::layout::{
     PendingCloseAction, PreparedWorkspaceFinish, ProjectOpenOptions, StudioLayout,
 };
 use sphere_ui_components::loading_session::{
-    begin_pre_studio_workspace_prepare, begin_project_session_load,
+    LoadFailedContext, LoadedSessionPackage, ProjectLifecycleTarget, SessionRollbackSnapshot,
+    SessionShutdownReason, begin_pre_studio_workspace_prepare, begin_project_session_load,
     begin_studio_project_session_load, begin_studio_session_shutdown, complete_project_lifecycle,
-    show_loading_session_error, update_loading_session_progress, LoadFailedContext,
-    LoadedSessionPackage, ProjectLifecycleTarget, SessionRollbackSnapshot, SessionShutdownReason,
+    show_loading_session_error, update_loading_session_progress,
 };
 use sphere_ui_components::project::{FutureboardProject, ProjectTemplate};
 use sphere_ui_components::splash::SplashWindowHandle;
 use sphere_ui_components::startup::{
-    log_startup_phase, run_lightweight_boot, StartupPhase, StartupRoute,
+    StartupPhase, StartupRoute, log_startup_phase, run_lightweight_boot,
 };
 #[cfg(feature = "exclusive")]
 use sphere_ui_components::welcome::WelcomeFooterAction;
@@ -86,9 +86,26 @@ pub fn setup(cx: &mut App) {
     // CEF may synchronously dispatch Win32 messages while initializing; running
     // it as foreground work prevents those messages from re-entering a borrowed
     // AppCell. A failure stays non-fatal and is surfaced by the editor window.
-    cx.spawn(async move |_cx| {
-        match sphere_ui_components::components::builtin_plugin_editor::init_at_boot() {
-            Ok(()) => boot::log("builtin plugin editor host (CEF) initialized"),
+    cx.spawn(async move |cx| {
+        use sphere_ui_components::components::builtin_plugin_editor;
+        match builtin_plugin_editor::init_at_boot() {
+            Ok(()) => {
+                boot::log("builtin plugin editor host (CEF) initialized");
+                // Warm-up browser: spawns Chromium's helper processes (GPU,
+                // network, renderer) behind the loading screen so the first
+                // editor open only pays for its own page.
+                builtin_plugin_editor::preload();
+                // Drive CEF briefly — with no editor window open nothing else
+                // pumps its message loop, and the warm-up needs it to finish
+                // launching those processes.
+                for _ in 0..150 {
+                    cx.background_executor()
+                        .timer(std::time::Duration::from_millis(16))
+                        .await;
+                    builtin_plugin_editor::pump();
+                }
+                boot::log("builtin plugin editor warm-up pump finished");
+            }
             Err(err) => boot::log(&format!("builtin plugin editor host unavailable: {err}")),
         }
     })

@@ -9,6 +9,7 @@ pub mod box_list_view;
 pub mod builtin_plugin_editor;
 pub(crate) mod builtin_plugin_editor_surface;
 pub mod builtin_plugin_editor_window;
+pub mod builtin_plugin_files;
 pub mod color_picker;
 pub mod combo_box;
 pub mod command_palette;

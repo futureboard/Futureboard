@@ -174,11 +174,96 @@ struct InstanceRemovedMsg {
     instance_id: String,
 }
 
-/// React->native. Only these three are actionable without Phase 5 (real
-/// state); `rodhareist.setParam` / `applyStatePatch` / `requestFullState`
-/// have no canonical state to validate against yet and are intentionally not
-/// modeled here until that lands — sending them today is inert (logged, not
-/// acted on) rather than silently mis-acted-on.
+/// Native -> React: one ~30 Hz telemetry frame for the bound instance.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MetersMsg {
+    r#type: &'static str,
+    protocol_version: u32,
+    instance_id: String,
+    in_peak: f32,
+    in_rms: f32,
+    out_peak: f32,
+    out_rms: f32,
+    in_clip: bool,
+    out_clip: bool,
+}
+
+/// Native -> React: low-rate footer status from the shared-region header.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct HostStatusMsg {
+    r#type: &'static str,
+    protocol_version: u32,
+    instance_id: String,
+    sample_rate: u32,
+    block_size: u32,
+    latency_samples: u32,
+}
+
+/// Native -> React: one kind's user-file listing (rebuilt wholesale).
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FileListMsg {
+    r#type: &'static str,
+    protocol_version: u32,
+    kind: String,
+    files: Vec<crate::components::builtin_plugin_files::BuiltinFileEntry>,
+}
+
+/// Native -> React: one user file's text content (or the failure).
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FileContentMsg {
+    r#type: &'static str,
+    protocol_version: u32,
+    kind: String,
+    file_name: String,
+    ok: bool,
+    content: Option<String>,
+    error: Option<String>,
+}
+
+/// Native -> React: outcome of a `writeFile`.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FileWrittenMsg {
+    r#type: &'static str,
+    protocol_version: u32,
+    kind: String,
+    file_name: String,
+    ok: bool,
+    error: Option<String>,
+}
+
+/// Native -> React: async outcome of a `futureboard.loadNamCapture` request.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct NamCaptureResultMsg {
+    r#type: &'static str,
+    protocol_version: u32,
+    instance_id: String,
+    ok: bool,
+    name: String,
+    error: Option<String>,
+    receptive_field: u64,
+    full_rig: bool,
+}
+
+/// One parameter edit inside a `futureboard.setParams` batch. `id` is the
+/// editor's string param id (the `Dsp::apply_ui_param` contract); it is
+/// resolved to the plugin's u32 wire index before leaving the UI thread.
+#[derive(Debug, Clone, serde::Deserialize)]
+struct ParamEditMsg {
+    id: String,
+    value: f32,
+}
+
+/// React->native. `setParams` batches live parameter edits toward the DSP in
+/// the plugin-host process (via the engine's param ring); `applyStatePatch` /
+/// `requestFullState` still have no canonical state to validate against and
+/// remain unmodeled — sending them today is inert (dropped as `Unknown`)
+/// rather than silently mis-acted-on.
 #[derive(Debug, Clone, serde::Deserialize)]
 #[serde(tag = "type")]
 enum InboundMsg {
@@ -200,8 +285,116 @@ enum InboundMsg {
     },
     #[serde(rename = "futureboard.requestSelectInstance", rename_all = "camelCase")]
     RequestSelectInstance { instance_id: String },
+    /// Batched live parameter edits for the currently bound instance. Stale
+    /// generations and mismatched instance ids are rejected, same as
+    /// `instanceReady` — a message referencing a superseded selection must
+    /// never mutate whatever instance is active when it arrives.
+    #[serde(rename = "futureboard.setParams", rename_all = "camelCase")]
+    SetParams {
+        #[allow(dead_code)]
+        plugin_id: String,
+        instance_id: String,
+        binding_generation: u64,
+        params: Vec<ParamEditMsg>,
+    },
+    /// List the plugin's user files of one kind (Presets/IRs/NAMs). File ops
+    /// are plugin-global (the folders belong to the plugin, not an insert), so
+    /// there is no instance/generation staleness to check.
+    #[serde(rename = "futureboard.listFiles", rename_all = "camelCase")]
+    ListFiles {
+        #[allow(dead_code)]
+        plugin_id: String,
+        kind: String,
+    },
+    /// Read one user file's text content (preset JSON / `.nam` capture).
+    #[serde(rename = "futureboard.readFile", rename_all = "camelCase")]
+    ReadFile {
+        #[allow(dead_code)]
+        plugin_id: String,
+        kind: String,
+        file_name: String,
+    },
+    /// Write one user file (preset save / factory seeding). Native only
+    /// sanitizes the leaf name — the content format is editor-owned.
+    #[serde(rename = "futureboard.writeFile", rename_all = "camelCase")]
+    WriteFile {
+        #[allow(dead_code)]
+        plugin_id: String,
+        kind: String,
+        file_name: String,
+        content: String,
+    },
+    /// Load a `.nam` capture into the bound instance's Tone/Amp slot. Same
+    /// staleness rules as `setParams`; the (potentially multi-MB) file text
+    /// rides the POST body and is forwarded verbatim to the plugin host.
+    #[serde(rename = "futureboard.loadNamCapture", rename_all = "camelCase")]
+    LoadNamCapture {
+        #[allow(dead_code)]
+        plugin_id: String,
+        instance_id: String,
+        binding_generation: u64,
+        name: String,
+        json: String,
+        stereo: bool,
+        full_rig: bool,
+    },
     #[serde(other)]
     Unknown,
+}
+
+/// UI-thread-only forwarder for one resolved parameter edit:
+/// `(instance, wire index, raw editor-unit value)` toward the engine's
+/// realtime command path (`AudioEngine::set_insert_param`), which pushes the
+/// per-insert shared param ring from the audio callback thread. Built by
+/// `open_builtin_insert_editor` in `plugin_ops.rs`, which owns the engine
+/// handle this window deliberately does not.
+pub type BuiltinParamForwarder = std::sync::Arc<dyn Fn(&PluginInstanceKey, u32, f32)>;
+
+/// A validated `.nam` load request on its way to the plugin-host process.
+#[derive(Debug, Clone)]
+pub struct BuiltinNamLoadRequest {
+    pub name: String,
+    pub json: String,
+    pub stereo: bool,
+    pub full_rig: bool,
+}
+
+/// Forwards a `.nam` load toward the plugin-host bridge
+/// (`HostCommand::LoadBuiltinNamCapture`). UI thread; the host replies
+/// asynchronously with `BuiltinNamCaptureResult`, routed back through
+/// `notify_nam_capture_result`.
+pub type BuiltinNamLoadForwarder =
+    std::sync::Arc<dyn Fn(&PluginInstanceKey, BuiltinNamLoadRequest)>;
+
+/// Polls the latest telemetry frame for an instance's shared region (pure
+/// atomic loads). UI thread, ~30 Hz.
+pub type BuiltinMeterSource = std::sync::Arc<
+    dyn Fn(&PluginInstanceKey) -> Option<SpherePluginHost::audio_bridge::BuiltinMeterFrame>,
+>;
+
+/// Polls (sample_rate, block_frames, latency_samples) from the region header.
+pub type BuiltinHostStatusSource =
+    std::sync::Arc<dyn Fn(&PluginInstanceKey) -> Option<(u32, u32, u32)>>;
+
+/// Everything the shared editor window can do against the live host, injected
+/// by `plugin_ops.rs` (the owner of the engine handle and bridge runtime this
+/// window deliberately does not hold). Any member may be `None` while the
+/// engine/bridge is still warming up; the focus path re-installs a live set.
+#[derive(Clone, Default)]
+pub struct BuiltinEditorHostOps {
+    pub forward_param: Option<BuiltinParamForwarder>,
+    pub load_nam_capture: Option<BuiltinNamLoadForwarder>,
+    pub meter_source: Option<BuiltinMeterSource>,
+    pub host_status_source: Option<BuiltinHostStatusSource>,
+}
+
+impl BuiltinEditorHostOps {
+    fn is_empty(&self) -> bool {
+        self.forward_param.is_none()
+            && self.load_nam_capture.is_none()
+            && self.meter_source.is_none()
+            && self.host_status_source.is_none()
+    }
 }
 
 /// CEF pump interval. 8 ms keeps the editor responsive without spinning the UI
@@ -300,6 +493,16 @@ pub struct BuiltinPluginEditorWindow {
     /// Whether the pointer is currently outside the browser rect. Keeps the
     /// leave notification edge-triggered rather than sent on every move.
     pointer_left: bool,
+    /// Live-host operations (param forwarding, NAM load, telemetry polls)
+    /// injected by the opener. Empty until the engine/bridge is up; requests
+    /// arriving before then are dropped.
+    host_ops: BuiltinEditorHostOps,
+    /// Pump-tick counter driving the telemetry push cadence (every 4th 8 ms
+    /// tick ≈ 30 Hz meters; every 128th ≈ 1 Hz host status).
+    telemetry_tick: u32,
+    /// Cached `Documents/Futureboard Studio/<plugin>/` root, resolved and
+    /// created lazily on the first file message from the page.
+    files_root: Option<std::path::PathBuf>,
 }
 
 impl BuiltinPluginEditorWindow {
@@ -308,6 +511,7 @@ impl BuiltinPluginEditorWindow {
         display_name: String,
         instances: Vec<PluginInstanceDescriptor>,
         active_instance: Option<PluginInstanceKey>,
+        host_ops: BuiltinEditorHostOps,
         cx: &mut Context<Self>,
     ) -> Self {
         // Refuse early and clearly when the host cannot serve this plugin, so
@@ -346,11 +550,44 @@ impl BuiltinPluginEditorWindow {
             attach_attempts: 0,
             last_scale: 1.0,
             pointer_left: true,
+            host_ops,
+            telemetry_tick: 0,
+            files_root: None,
         }
+    }
+
+    /// Resolve + create the plugin's user-content folders once. Returns
+    /// `None` (and logs) when Documents is unwritable — the editor keeps
+    /// running, file tabs just stay empty.
+    fn ensure_files_root(&mut self) -> Option<std::path::PathBuf> {
+        if self.files_root.is_none() {
+            let root =
+                crate::components::builtin_plugin_files::plugin_files_root(&self.display_name);
+            match crate::components::builtin_plugin_files::ensure_plugin_dirs(&root) {
+                Ok(()) => self.files_root = Some(root),
+                Err(error) => {
+                    eprintln!(
+                        "[plugin-files] cannot create {} folders: {error}",
+                        root.display()
+                    );
+                    return None;
+                }
+            }
+        }
+        self.files_root.clone()
     }
 
     pub fn plugin_id(&self) -> &str {
         &self.plugin_id
+    }
+
+    /// (Re)install the host ops. Called on the focus/reuse path so a window
+    /// opened before the engine/bridge finished warmup starts forwarding once
+    /// live handles exist. An empty set never clobbers a live one.
+    pub(crate) fn set_host_ops(&mut self, ops: BuiltinEditorHostOps) {
+        if !ops.is_empty() {
+            self.host_ops = ops;
+        }
     }
 
     /// Replace the sidebar's instance list wholesale. Called whenever an
@@ -518,7 +755,258 @@ impl BuiltinPluginEditorWindow {
                 };
                 self.select_instance(key, cx);
             }
+            InboundMsg::SetParams {
+                instance_id,
+                binding_generation,
+                params,
+                ..
+            } => {
+                if binding_generation != self.binding_generation {
+                    eprintln!(
+                        "[plugin-bridge] setParams stale plugin={} instance={instance_id} \
+                         edit_generation={binding_generation} current_generation={}",
+                        self.plugin_id, self.binding_generation
+                    );
+                    return;
+                }
+                let Some(active) = self.active_instance.as_ref() else {
+                    return;
+                };
+                if wire_instance_id(active) != instance_id {
+                    eprintln!(
+                        "[plugin-bridge] setParams instance mismatch plugin={} got={instance_id} active={}",
+                        self.plugin_id,
+                        wire_instance_id(active)
+                    );
+                    return;
+                }
+                let Some(forwarder) = self.host_ops.forward_param.as_ref() else {
+                    // Engine not wired yet (warmup); drop rather than queue —
+                    // the editor keeps sending fresh values on interaction.
+                    return;
+                };
+                for edit in &params {
+                    match host::builtin_param_index(&self.plugin_id, &edit.id) {
+                        Some(index) => forwarder(active, index, edit.value),
+                        None => eprintln!(
+                            "[plugin-bridge] setParams unknown param plugin={} id={}",
+                            self.plugin_id, edit.id
+                        ),
+                    }
+                }
+            }
+            InboundMsg::ListFiles { kind, .. } => {
+                use crate::components::builtin_plugin_files as files;
+                let Some(file_kind) = files::BuiltinFileKind::from_wire(&kind) else {
+                    return;
+                };
+                let listing = self
+                    .ensure_files_root()
+                    .map(|root| files::list_files(&root, file_kind))
+                    .unwrap_or_default();
+                self.post_to_view(&FileListMsg {
+                    r#type: "futureboard.fileList",
+                    protocol_version: BRIDGE_PROTOCOL_VERSION,
+                    kind,
+                    files: listing,
+                });
+            }
+            InboundMsg::WriteFile {
+                kind,
+                file_name,
+                content,
+                ..
+            } => {
+                use crate::components::builtin_plugin_files as files;
+                let Some(file_kind) = files::BuiltinFileKind::from_wire(&kind) else {
+                    return;
+                };
+                let result = match self.ensure_files_root() {
+                    Some(root) => files::write_file(&root, file_kind, &file_name, &content)
+                        .map_err(|e| e.to_string()),
+                    None => Err("user folder unavailable".to_string()),
+                };
+                let (ok, written_name, error) = match result {
+                    Ok(clean) => (true, clean, None),
+                    Err(e) => (false, file_name, Some(e)),
+                };
+                self.post_to_view(&FileWrittenMsg {
+                    r#type: "futureboard.fileWritten",
+                    protocol_version: BRIDGE_PROTOCOL_VERSION,
+                    kind,
+                    file_name: written_name,
+                    ok,
+                    error,
+                });
+            }
+            InboundMsg::ReadFile {
+                kind, file_name, ..
+            } => {
+                use crate::components::builtin_plugin_files as files;
+                let Some(file_kind) = files::BuiltinFileKind::from_wire(&kind) else {
+                    return;
+                };
+                let Some(root) = self.ensure_files_root() else {
+                    self.post_to_view(&FileContentMsg {
+                        r#type: "futureboard.fileContent",
+                        protocol_version: BRIDGE_PROTOCOL_VERSION,
+                        kind,
+                        file_name,
+                        ok: false,
+                        content: None,
+                        error: Some("user folder unavailable".to_string()),
+                    });
+                    return;
+                };
+                // A `.nam` capture can be multi-MB: read off the UI thread,
+                // post the result back on it (`post_to_view` is UI-only).
+                cx.spawn(async move |this, cx| {
+                    let read_name = file_name.clone();
+                    let result = cx
+                        .background_executor()
+                        .spawn(async move { files::read_file(&root, file_kind, &read_name) })
+                        .await;
+                    let _ = this.update(cx, |this, _cx| {
+                        let (ok, content, error) = match result {
+                            Ok(text) => (true, Some(text), None),
+                            Err(e) => (false, None, Some(e.to_string())),
+                        };
+                        this.post_to_view(&FileContentMsg {
+                            r#type: "futureboard.fileContent",
+                            protocol_version: BRIDGE_PROTOCOL_VERSION,
+                            kind,
+                            file_name,
+                            ok,
+                            content,
+                            error,
+                        });
+                    });
+                })
+                .detach();
+            }
+            InboundMsg::LoadNamCapture {
+                instance_id,
+                binding_generation,
+                name,
+                json,
+                stereo,
+                full_rig,
+                ..
+            } => {
+                if binding_generation != self.binding_generation {
+                    eprintln!(
+                        "[plugin-bridge] loadNamCapture stale plugin={} instance={instance_id}",
+                        self.plugin_id
+                    );
+                    return;
+                }
+                let Some(active) = self.active_instance.as_ref() else {
+                    return;
+                };
+                if wire_instance_id(active) != instance_id {
+                    eprintln!(
+                        "[plugin-bridge] loadNamCapture instance mismatch plugin={} got={instance_id}",
+                        self.plugin_id
+                    );
+                    return;
+                }
+                let Some(forwarder) = self.host_ops.load_nam_capture.as_ref() else {
+                    eprintln!(
+                        "[plugin-bridge] loadNamCapture dropped (bridge not wired) plugin={}",
+                        self.plugin_id
+                    );
+                    return;
+                };
+                eprintln!(
+                    "[plugin-bridge] loadNamCapture plugin={} instance={instance_id} name={name} bytes={} stereo={stereo} full_rig={full_rig}",
+                    self.plugin_id,
+                    json.len()
+                );
+                forwarder(
+                    active,
+                    BuiltinNamLoadRequest {
+                        name,
+                        json,
+                        stereo,
+                        full_rig,
+                    },
+                );
+            }
             InboundMsg::Unknown => {}
+        }
+    }
+
+    /// Route a host `BuiltinNamCaptureResult` into the page, if this window's
+    /// bound instance matches the reporting insert. Called from
+    /// `poll_plugin_bridge_runtime` in `plugin_ops.rs`.
+    pub(crate) fn notify_nam_capture_result(
+        &self,
+        plugin_instance_id: &str,
+        ok: bool,
+        name: &str,
+        error: Option<&str>,
+        receptive_field: u64,
+        full_rig: bool,
+    ) {
+        let Some(active) = self.active_instance.as_ref() else {
+            return;
+        };
+        if active.insert_id != plugin_instance_id {
+            return;
+        }
+        self.post_to_view(&NamCaptureResultMsg {
+            r#type: "futureboard.namCaptureResult",
+            protocol_version: BRIDGE_PROTOCOL_VERSION,
+            instance_id: wire_instance_id(active),
+            ok,
+            name: name.to_string(),
+            error: error.map(str::to_string),
+            receptive_field,
+            full_rig,
+        });
+    }
+
+    /// Telemetry push, called from `tick()` while attached: meters at every
+    /// 4th pump tick (~30 Hz), host status at every 128th (~1 Hz). No-ops
+    /// until the page announced `bridgeReady` and an instance is bound.
+    fn push_telemetry(&mut self) {
+        if !self.browser_ready {
+            return;
+        }
+        let Some(active) = self.active_instance.as_ref() else {
+            return;
+        };
+        self.telemetry_tick = self.telemetry_tick.wrapping_add(1);
+        if self.telemetry_tick % 4 == 0 {
+            if let Some(source) = self.host_ops.meter_source.as_ref() {
+                if let Some(frame) = source(active) {
+                    self.post_to_view(&MetersMsg {
+                        r#type: "futureboard.meters",
+                        protocol_version: BRIDGE_PROTOCOL_VERSION,
+                        instance_id: wire_instance_id(active),
+                        in_peak: frame.in_peak,
+                        in_rms: frame.in_rms,
+                        out_peak: frame.out_peak,
+                        out_rms: frame.out_rms,
+                        in_clip: frame.in_clip,
+                        out_clip: frame.out_clip,
+                    });
+                }
+            }
+        }
+        if self.telemetry_tick % 128 == 0 {
+            if let Some(source) = self.host_ops.host_status_source.as_ref() {
+                if let Some((sample_rate, block_size, latency_samples)) = source(active) {
+                    self.post_to_view(&HostStatusMsg {
+                        r#type: "futureboard.hostStatus",
+                        protocol_version: BRIDGE_PROTOCOL_VERSION,
+                        instance_id: wire_instance_id(active),
+                        sample_rate,
+                        block_size,
+                        latency_samples,
+                    });
+                }
+            }
         }
     }
 
@@ -661,6 +1149,12 @@ impl BuiltinPluginEditorWindow {
                     }
                 }
             }
+        }
+
+        // Telemetry push (meters ~30 Hz, host status ~1 Hz) for the bound
+        // instance — rate-derived from this pump's own 8 ms cadence.
+        if self.status == Status::Attached {
+            self.push_telemetry();
         }
 
         // Bridge-ready watchdog (see `attached_at`'s doc comment). Only
@@ -1274,6 +1768,7 @@ pub fn open_builtin_editor_window(
     display_name: String,
     instances: Vec<PluginInstanceDescriptor>,
     active_instance: Option<PluginInstanceKey>,
+    host_ops: BuiltinEditorHostOps,
     cx: &mut App,
 ) -> Result<WindowHandle<BuiltinPluginEditorWindow>, String> {
     let parent_x: f32 = owner_bounds.origin.x.into();
@@ -1303,7 +1798,14 @@ pub fn open_builtin_editor_window(
 
     cx.open_window(options, |window, cx| {
         let view = cx.new(|cx| {
-            BuiltinPluginEditorWindow::new(plugin_id, display_name, instances, active_instance, cx)
+            BuiltinPluginEditorWindow::new(
+                plugin_id,
+                display_name,
+                instances,
+                active_instance,
+                host_ops,
+                cx,
+            )
         });
         let weak = view.downgrade();
         window.on_window_should_close(cx, move |_window, cx| {
@@ -1510,6 +2012,92 @@ mod tests {
         let raw = br#"{"type":"something.the.host.does.not.know"}"#;
         let msg: InboundMsg = serde_json::from_slice(raw).unwrap();
         assert!(matches!(msg, InboundMsg::Unknown));
+    }
+
+    #[test]
+    fn inbound_set_params_parses_a_batch() {
+        let raw = br#"{
+            "type":"futureboard.setParams",
+            "protocolVersion":1,
+            "pluginId":"rodharerist",
+            "instanceId":"track-3::insert-9",
+            "bindingGeneration":7,
+            "params":[{"id":"drive_gain","value":8.5},{"id":"amp_on","value":0.0}]
+        }"#;
+        let msg: InboundMsg = serde_json::from_slice(raw).unwrap();
+        match msg {
+            InboundMsg::SetParams {
+                instance_id,
+                binding_generation,
+                params,
+                ..
+            } => {
+                assert_eq!(instance_id, "track-3::insert-9");
+                assert_eq!(binding_generation, 7);
+                assert_eq!(params.len(), 2);
+                assert_eq!(params[0].id, "drive_gain");
+                assert_eq!(params[0].value, 8.5);
+                assert_eq!(params[1].id, "amp_on");
+                assert_eq!(params[1].value, 0.0);
+            }
+            other => panic!("expected SetParams, got {other:?}"),
+        }
+    }
+
+    #[cfg(feature = "builtin-plugin-editor")]
+    #[test]
+    fn set_params_ids_resolve_through_the_shared_wire_table() {
+        // The window resolves ids via `host::builtin_param_index`; pin the
+        // contract here so a table rename breaks visibly in this crate too.
+        assert_eq!(
+            host::builtin_param_index("builtin:rodharerist", "drive_gain"),
+            Some(22)
+        );
+        assert_eq!(
+            host::builtin_param_index("rodharerist", "drive_gain"),
+            Some(22)
+        );
+        assert_eq!(
+            host::builtin_param_index("rodharerist", "not_a_param"),
+            None
+        );
+        assert_eq!(
+            host::builtin_param_index("some.external.vst3", "drive_gain"),
+            None
+        );
+    }
+
+    #[test]
+    fn inbound_file_messages_parse_by_tag() {
+        let list = br#"{"type":"futureboard.listFiles","pluginId":"rodharerist","kind":"presets"}"#;
+        assert!(matches!(
+            serde_json::from_slice::<InboundMsg>(list).unwrap(),
+            InboundMsg::ListFiles { .. }
+        ));
+        let read = br#"{"type":"futureboard.readFile","pluginId":"rodharerist","kind":"nams","fileName":"amp.nam"}"#;
+        match serde_json::from_slice::<InboundMsg>(read).unwrap() {
+            InboundMsg::ReadFile {
+                kind, file_name, ..
+            } => {
+                assert_eq!(kind, "nams");
+                assert_eq!(file_name, "amp.nam");
+            }
+            other => panic!("expected ReadFile, got {other:?}"),
+        }
+        let write = br#"{"type":"futureboard.writeFile","pluginId":"rodharerist","kind":"presets","fileName":"My Lead","content":"{}"}"#;
+        match serde_json::from_slice::<InboundMsg>(write).unwrap() {
+            InboundMsg::WriteFile {
+                kind,
+                file_name,
+                content,
+                ..
+            } => {
+                assert_eq!(kind, "presets");
+                assert_eq!(file_name, "My Lead");
+                assert_eq!(content, "{}");
+            }
+            other => panic!("expected WriteFile, got {other:?}"),
+        }
     }
 
     #[test]

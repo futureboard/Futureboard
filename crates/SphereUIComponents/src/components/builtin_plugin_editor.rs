@@ -65,6 +65,141 @@ pub fn origin_for_plugin_id(plugin_id: &str) -> Option<&'static str> {
     SpherePluginHost::resolve_builtin_stem(plugin_id)
 }
 
+/// Map an editor's string param id to `plugin_id`'s u32 wire index (the id
+/// carried by the shared param ring into the plugin-host process). `None` for
+/// unknown plugins or ids — the caller logs and drops, never guesses.
+#[cfg(feature = "builtin-plugin-editor")]
+pub fn builtin_param_index(plugin_id: &str, param_id: &str) -> Option<u32> {
+    match origin_for_plugin_id(plugin_id)? {
+        rodharerist::ui::UI_ORIGIN => rodharerist::ui_param_index(param_id),
+        _ => None,
+    }
+}
+
+/// Without the editor feature no plugin table is linked in; every id is
+/// unknown (and no editor exists to send one anyway).
+#[cfg(not(feature = "builtin-plugin-editor"))]
+pub fn builtin_param_index(_plugin_id: &str, _param_id: &str) -> Option<u32> {
+    None
+}
+
+/// Authoritative main-process mirror of every built-in insert's parameter
+/// state, keyed by insert slot id. The single source of truth for what a
+/// built-in insert *is*: seeded from the project blob, updated by every
+/// forwarded editor edit, read back for `selectInstance` state, project save,
+/// and host restore/respawn replay. Process-wide `Mutex` like `INBOUND` —
+/// touched only from the UI thread today, but nothing about it is
+/// thread-bound.
+#[cfg(feature = "builtin-plugin-editor")]
+mod state_mirror {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+
+    static BUILTIN_STATE: OnceLock<Mutex<HashMap<String, rodharerist::Params>>> = OnceLock::new();
+
+    fn map() -> &'static Mutex<HashMap<String, rodharerist::Params>> {
+        BUILTIN_STATE.get_or_init(|| Mutex::new(HashMap::new()))
+    }
+
+    /// Fold one forwarded editor edit (wire index + raw value) into the
+    /// insert's mirrored params. Creates the entry at defaults on first edit.
+    /// `clear_clip` (an action, not state) is ignored.
+    pub fn builtin_state_apply(insert_id: &str, wire_index: u32, value: f32) {
+        let Some(id) = rodharerist::ui_param_id(wire_index) else {
+            return;
+        };
+        if let Ok(mut states) = map().lock() {
+            let params = states
+                .entry(insert_id.to_string())
+                .or_insert_with(rodharerist::default_params);
+            let _ = rodharerist::apply_to_params(params, id, value);
+        }
+    }
+
+    /// Seed the mirror from a persisted `RodhareistState` blob — only when no
+    /// entry exists yet, so live edits always win over stale disk state.
+    pub fn builtin_state_seed(insert_id: &str, state_bytes: &[u8]) {
+        let Ok(text) = std::str::from_utf8(state_bytes) else {
+            return;
+        };
+        let Ok(state) = rodharerist::RodhareistState::from_json(text) else {
+            return;
+        };
+        if let Ok(mut states) = map().lock() {
+            states.entry(insert_id.to_string()).or_insert(state.params);
+        }
+    }
+
+    /// Serialized `RodhareistState` blob for persistence / `selectInstance`.
+    pub fn builtin_state_bytes(insert_id: &str) -> Option<Vec<u8>> {
+        let states = map().lock().ok()?;
+        let params = states.get(insert_id)?;
+        rodharerist::RodhareistState::new(params.clone())
+            .to_json()
+            .ok()
+            .map(String::into_bytes)
+    }
+
+    /// The mirrored state as `(wire index, raw value)` pairs, in replay-safe
+    /// order — pushed through the live param channel to rebuild a host DSP
+    /// after project open or host respawn. Empty when the insert has no
+    /// mirrored state (fresh insert: host defaults already match).
+    pub fn builtin_state_replay(insert_id: &str) -> Vec<(u32, f32)> {
+        let Ok(states) = map().lock() else {
+            return Vec::new();
+        };
+        let Some(params) = states.get(insert_id) else {
+            return Vec::new();
+        };
+        rodharerist::ui_values(params)
+            .into_iter()
+            .filter_map(|(id, value)| rodharerist::ui_param_index(id).map(|i| (i, value)))
+            .collect()
+    }
+
+    /// Drop one insert's mirrored state (insert removed/unloaded).
+    pub fn builtin_state_remove(insert_id: &str) {
+        if let Ok(mut states) = map().lock() {
+            states.remove(insert_id);
+        }
+    }
+
+    /// Drop everything (project close).
+    pub fn builtin_state_clear() {
+        if let Ok(mut states) = map().lock() {
+            states.clear();
+        }
+    }
+}
+
+#[cfg(feature = "builtin-plugin-editor")]
+pub use state_mirror::{
+    builtin_state_apply, builtin_state_bytes, builtin_state_clear, builtin_state_remove,
+    builtin_state_replay, builtin_state_seed,
+};
+
+/// Featureless no-ops: without the editor there is no param wire, so there is
+/// no state to mirror.
+#[cfg(not(feature = "builtin-plugin-editor"))]
+mod state_mirror_stubs {
+    pub fn builtin_state_apply(_insert_id: &str, _wire_index: u32, _value: f32) {}
+    pub fn builtin_state_seed(_insert_id: &str, _state_bytes: &[u8]) {}
+    pub fn builtin_state_bytes(_insert_id: &str) -> Option<Vec<u8>> {
+        None
+    }
+    pub fn builtin_state_replay(_insert_id: &str) -> Vec<(u32, f32)> {
+        Vec::new()
+    }
+    pub fn builtin_state_remove(_insert_id: &str) {}
+    pub fn builtin_state_clear() {}
+}
+
+#[cfg(not(feature = "builtin-plugin-editor"))]
+pub use state_mirror_stubs::{
+    builtin_state_apply, builtin_state_bytes, builtin_state_clear, builtin_state_remove,
+    builtin_state_replay, builtin_state_seed,
+};
+
 /// Physical-pixel rect the editor view occupies inside its parent window.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct ViewRect {
@@ -219,6 +354,8 @@ mod imp {
         Err(HostAvailability::NotCompiledIn)
     }
 
+    pub fn preload() {}
+
     pub fn set_view_bounds(_view_id: ViewId, _rect: ViewRect, _scale_factor: f32) {}
 
     pub fn close_view(_view_id: ViewId) {}
@@ -246,7 +383,7 @@ mod imp {
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex, OnceLock};
 
-    use sphere_webview::client::{plugin_browser_client_with_surface, BrowserLifecycle};
+    use sphere_webview::client::{BrowserLifecycle, plugin_browser_client_with_surface};
     use sphere_webview::osr::{
         OsrInput, OsrKey, OsrKeyKind, OsrModifiers, OsrMouseButton, OsrSurface,
     };
@@ -254,11 +391,11 @@ mod imp {
     use sphere_webview::runtime::{
         CefRuntime, CefRuntimeConfig, NativeParent, WebView, WebViewConfig, WindowBounds,
     };
-    use sphere_webview::scheme::{register_plugin_scheme_factory, BridgeSink, SchemeAsset};
+    use sphere_webview::scheme::{BridgeSink, SchemeAsset, register_plugin_scheme_factory};
 
     use super::{
-        origin_for_plugin_id, EditorInput, EditorKey, EditorKeyKind, EditorModifiers,
-        EditorMouseButton, HostAvailability, ViewEvent, ViewId, ViewRect, OFFSCREEN_HOSTING,
+        EditorInput, EditorKey, EditorKeyKind, EditorModifiers, EditorMouseButton,
+        HostAvailability, OFFSCREEN_HOSTING, ViewEvent, ViewId, ViewRect, origin_for_plugin_id,
     };
 
     struct HostedView {
@@ -278,6 +415,38 @@ mod imp {
 
     const MAX_CLOSE_PUMP_TICKS: u16 = 250;
 
+    /// Boot-time warm-up browser (see [`preload`]).
+    ///
+    /// Kept alive for the whole session: it pins Chromium's helper processes
+    /// (GPU, network service, a renderer) so every editor open — not just the
+    /// first — skips the multi-hundred-millisecond subprocess spawn.
+    struct WarmupBrowser {
+        // Drop the browser before the explicitly retained client.
+        _view: WebView<'static>,
+        _client: sphere_webview::runtime::cef::Client,
+        _lifecycle: BrowserLifecycle,
+        /// Hidden native parent for the windowed (Windows) case; destroyed
+        /// after the browser it hosts.
+        hidden_parent: u64,
+    }
+
+    impl Drop for WarmupBrowser {
+        fn drop(&mut self) {
+            #[cfg(target_os = "windows")]
+            if self.hidden_parent != 0 {
+                use windows::Win32::Foundation::HWND;
+                use windows::Win32::UI::WindowsAndMessaging::{DestroyWindow, IsWindow};
+                unsafe {
+                    let hwnd = HWND(self.hidden_parent as *mut core::ffi::c_void);
+                    if IsWindow(Some(hwnd)).as_bool() {
+                        let _ = DestroyWindow(hwnd);
+                    }
+                }
+            }
+            let _ = self.hidden_parent;
+        }
+    }
+
     /// One CEF runtime plus every open editor view.
     ///
     /// Field order is load-bearing: Rust drops fields in declaration order, and
@@ -286,6 +455,7 @@ mod imp {
     struct Host {
         views: HashMap<ViewId, HostedView>,
         closing_views: HashMap<ViewId, ClosingView>,
+        warmup: Option<WarmupBrowser>,
         runtime: CefRuntime,
     }
 
@@ -482,9 +652,137 @@ mod imp {
         *slot = Some(Host {
             views: HashMap::new(),
             closing_views: HashMap::new(),
+            warmup: None,
             runtime,
         });
         Ok(())
+    }
+
+    /// Hidden 2×2 native window to parent the warm-up browser to on windowed
+    /// platforms. `0` where off-screen hosting needs no parent.
+    #[cfg(target_os = "windows")]
+    fn create_hidden_warmup_parent() -> u64 {
+        use windows::Win32::UI::WindowsAndMessaging::{
+            CreateWindowExW, HMENU, WINDOW_EX_STYLE, WS_POPUP,
+        };
+        use windows::core::w;
+        // The predefined STATIC class is fine here: the window is never shown,
+        // it exists only so CEF has a real HWND to create its child under.
+        unsafe {
+            CreateWindowExW(
+                WINDOW_EX_STYLE(0),
+                w!("STATIC"),
+                w!("futureboard-cef-warmup"),
+                WS_POPUP, // not WS_VISIBLE — never shown
+                0,
+                0,
+                2,
+                2,
+                None,
+                None::<HMENU>,
+                None,
+                None,
+            )
+            .map(|hwnd| hwnd.0 as u64)
+            .unwrap_or(0)
+        }
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    fn create_hidden_warmup_parent() -> u64 {
+        0
+    }
+
+    /// Create the boot-time warm-up browser (idempotent).
+    ///
+    /// The first `CreateBrowserSync` of a session pays for spawning Chromium's
+    /// helper processes (GPU, network service, renderer) and initializing the
+    /// profile — several hundred milliseconds that used to land inside the
+    /// first editor open. Creating a hidden `about:blank` browser during boot
+    /// moves that cost behind the loading screen.
+    ///
+    /// `about:blank` is deliberate: preloading the real editor URL would run
+    /// its page JS, whose `bridgeReady` POST lands in the origin-keyed
+    /// [`INBOUND`] queue and would be misread as the real editor's handshake
+    /// when one opens later.
+    fn ensure_warmup(host: &mut Host) {
+        if host.warmup.is_some() {
+            return;
+        }
+        let url = "about:blank".to_string();
+        let surface = OFFSCREEN_HOSTING.then(|| OsrSurface::new(2, 2, 1.0));
+        let hidden_parent = if OFFSCREEN_HOSTING {
+            0
+        } else {
+            let hwnd = create_hidden_warmup_parent();
+            if hwnd == 0 {
+                eprintln!("[cef-warmup] hidden parent creation failed; skipping warm-up");
+                return;
+            }
+            hwnd
+        };
+        let (mut client, lifecycle) = plugin_browser_client_with_surface(&url, surface.clone());
+        let result = WindowBounds::new(0, 0, 2, 2)
+            .map_err(|error| error.to_string())
+            .and_then(|bounds| {
+                let mut config = WebViewConfig::new(url, bounds);
+                if let Some(surface) = surface {
+                    config = config.windowless(surface);
+                }
+                // SAFETY: the warm-up view is stored in `host.warmup`,
+                // declared before `host.runtime`, and therefore released
+                // first.
+                unsafe {
+                    let parent = NativeParent::from_raw(hwnd_to_cef(hidden_parent));
+                    host.runtime
+                        .create_webview_detached(parent, config, Some(&mut client))
+                }
+                .map_err(|error| error.to_string())
+            });
+        match result {
+            Ok(view) => {
+                eprintln!(
+                    "[cef-warmup] warm-up browser created browser_id={}",
+                    view.browser_identifier()
+                );
+                host.warmup = Some(WarmupBrowser {
+                    _view: view,
+                    _client: client,
+                    _lifecycle: lifecycle,
+                    hidden_parent,
+                });
+            }
+            Err(error) => {
+                eprintln!("[cef-warmup] warm-up browser failed: {error}");
+                #[cfg(target_os = "windows")]
+                if hidden_parent != 0 {
+                    use windows::Win32::Foundation::HWND;
+                    use windows::Win32::UI::WindowsAndMessaging::DestroyWindow;
+                    unsafe {
+                        let _ = DestroyWindow(HWND(hidden_parent as *mut core::ffi::c_void));
+                    }
+                }
+            }
+        }
+    }
+
+    /// Boot-time preload: start CEF *and* spawn the warm-up browser so the
+    /// first editor open only pays for its own page. Idempotent; failure is
+    /// non-fatal (editors fall back to cold opens).
+    ///
+    /// Call from the UI thread, then drive [`pump`] for a couple of seconds
+    /// (the boot pump loop) so the warm-up finishes spawning Chromium's helper
+    /// processes while the loading screen is still up — with no editor window
+    /// open nothing else pumps CEF.
+    pub fn preload() {
+        HOST.with(|cell| {
+            let mut slot = cell.borrow_mut();
+            if ensure_runtime(&mut slot).is_ok() {
+                if let Some(host) = slot.as_mut() {
+                    ensure_warmup(host);
+                }
+            }
+        });
     }
 
     /// Start CEF during application boot, on the UI thread.
@@ -1022,7 +1320,7 @@ mod imp {
 }
 
 pub use imp::{
-    availability, close_view, init_at_boot, is_view_open, open_view, pump, reload_view,
+    availability, close_view, init_at_boot, is_view_open, open_view, preload, pump, reload_view,
     send_to_view, send_view_input, set_view_bounds, take_inbound, take_view_events,
     view_frame_generation, with_view_frame,
 };
@@ -1113,9 +1411,11 @@ mod tests {
             availability("builtin:rodharerist"),
             HostAvailability::NotCompiledIn
         );
-        assert!(HostAvailability::NotCompiledIn
-            .to_string()
-            .contains("builtin-plugin-editor"));
+        assert!(
+            HostAvailability::NotCompiledIn
+                .to_string()
+                .contains("builtin-plugin-editor")
+        );
     }
 
     #[cfg(feature = "builtin-plugin-editor")]

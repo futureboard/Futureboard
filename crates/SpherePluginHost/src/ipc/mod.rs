@@ -61,6 +61,12 @@ pub enum HostCommand {
         plugin_id: String,
         sample_rate: u32,
         max_block_size: u32,
+        /// Persisted state blob (e.g. a `RodhareistState` JSON) applied to the
+        /// freshly built DSP *before* it is published to the audio producer —
+        /// no engine-graph or param-ring timing involved, so project restore
+        /// cannot race the graph sync. `None` = start at defaults.
+        #[serde(default)]
+        state_json: Option<String>,
     },
     /// Attach a VST3 editor view into an HWND owned by the main app.
     ///
@@ -486,6 +492,7 @@ mod tests {
             plugin_id: "rodharerist".into(),
             sample_rate: 48_000,
             max_block_size: 256,
+            state_json: Some("{\"schema_version\":3}".into()),
         };
         let mut buf = Vec::new();
         write_frame(&mut buf, &cmd).unwrap();

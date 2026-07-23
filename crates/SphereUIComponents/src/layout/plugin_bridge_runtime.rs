@@ -268,11 +268,16 @@ impl PluginBridgeRuntime {
         }
     }
 
+    /// `state_json` is the persisted built-in state blob (e.g. a
+    /// `RodhareistState` JSON) the host applies to the DSP before publishing
+    /// it to the audio producer — the race-free restore path for project open
+    /// and host respawn. `None` = start at defaults.
     pub fn send_load_builtin_plugin(
         &mut self,
         descriptor: BridgePluginDescriptor,
         sample_rate: u32,
         max_block_size: u32,
+        state_json: Option<String>,
     ) -> Result<(), PluginHostClientError> {
         let _ = self.configure_audio_bridge(sample_rate, max_block_size);
         if self.loaded.contains_key(&descriptor.insert_id) {
@@ -284,8 +289,10 @@ impl PluginBridgeRuntime {
         }
         let instance = descriptor.insert_id.clone();
         eprintln!(
-            "[plugin-bridge] sending LoadBuiltinPlugin instance={} plugin={}",
-            instance, descriptor.class_id
+            "[plugin-bridge] sending LoadBuiltinPlugin instance={} plugin={} state_bytes={}",
+            instance,
+            descriptor.class_id,
+            state_json.as_deref().map(str::len).unwrap_or(0)
         );
         self.establish_shared_audio_for_instance(&instance, sample_rate, max_block_size);
         self.client.load_builtin_plugin(
@@ -293,6 +300,7 @@ impl PluginBridgeRuntime {
             descriptor.class_id.clone(),
             sample_rate,
             max_block_size,
+            state_json,
         )?;
         self.loaded.insert(
             instance,

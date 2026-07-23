@@ -257,9 +257,26 @@ unsafe impl Send for BuiltinHostProcessor {}
 unsafe impl Sync for BuiltinHostProcessor {}
 
 impl BuiltinHostProcessor {
-    fn rodhareist(sample_rate: u32) -> Self {
+    fn rodhareist(sample_rate: u32, state_json: Option<&str>) -> Self {
         let sr = sample_rate.max(1) as f32;
-        let dsp = rodharerist::Dsp::new(sr);
+        let mut dsp = rodharerist::Dsp::new(sr);
+        // Apply persisted project state here, before the processor is
+        // published to the audio producer — the only window where touching
+        // the DSP from this (IPC) thread is race-free by construction.
+        if let Some(json) = state_json {
+            match rodharerist::RodhareistState::from_json(json) {
+                Ok(state) => {
+                    dsp.set_params(state.params);
+                    eprintln!(
+                        "[plugin-host-builtin] restored state schema_version={}",
+                        state.schema_version
+                    );
+                }
+                Err(error) => {
+                    eprintln!("[plugin-host-builtin] state blob rejected, using defaults: {error}");
+                }
+            }
+        }
         let nam_loader = dsp.nam_loader();
         Self {
             dsp: UnsafeCell::new(dsp),
@@ -325,7 +342,7 @@ mod builtin_processor_tests {
 
     #[test]
     fn rodhareist_processes_daw_input_to_stereo_output() {
-        let processor = BuiltinHostProcessor::rodhareist(48_000);
+        let processor = BuiltinHostProcessor::rodhareist(48_000, None);
         let in_l = [0.2f32; 32];
         let in_r = [-0.1f32; 32];
         let mut output = [0.0f32; 64];
@@ -338,7 +355,7 @@ mod builtin_processor_tests {
     /// shared table's index mutes the output; out-of-range indices are no-ops.
     #[test]
     fn apply_param_routes_wire_indices_into_the_dsp() {
-        let processor = BuiltinHostProcessor::rodhareist(48_000);
+        let processor = BuiltinHostProcessor::rodhareist(48_000, None);
         let power = rodharerist::ui_param_index("power").expect("power in wire table");
         processor.apply_param(power, 0.0);
 
@@ -353,6 +370,33 @@ mod builtin_processor_tests {
         processor.apply_param(u32::MAX, 1.0);
         processor.apply_param(rodharerist::UI_PARAM_IDS.len() as u32, 1.0);
         processor.process_block(&in_l, &in_r, &mut output, 64);
+        assert!(output.iter().all(|sample| sample.is_finite()));
+    }
+
+    /// A persisted state blob handed to the constructor must configure the DSP
+    /// before any processing: power=off state makes the chain a pure bypass,
+    /// observable as the output mirroring the dry input exactly.
+    #[test]
+    fn constructor_state_blob_configures_the_dsp() {
+        let mut params = rodharerist::default_params();
+        params.power = false;
+        let json = rodharerist::RodhareistState::new(params)
+            .to_json()
+            .expect("state serializes");
+
+        let restored = BuiltinHostProcessor::rodhareist(48_000, Some(&json));
+        let in_l = [0.25f32; 32];
+        let in_r = [-0.5f32; 32];
+        let mut output = [0.0f32; 64];
+        restored.process_block(&in_l, &in_r, &mut output, 32);
+        for i in 0..32 {
+            assert_eq!(output[i * 2], in_l[i], "power-off state must bypass");
+            assert_eq!(output[i * 2 + 1], in_r[i], "power-off state must bypass");
+        }
+
+        // A corrupt blob must fall back to defaults, not panic.
+        let fallback = BuiltinHostProcessor::rodhareist(48_000, Some("not json"));
+        fallback.process_block(&in_l, &in_r, &mut output, 32);
         assert!(output.iter().all(|sample| sample.is_finite()));
     }
 }
@@ -1425,6 +1469,7 @@ fn dispatch(
             plugin_id,
             sample_rate,
             max_block_size,
+            state_json,
         } => {
             let Some(stem) = SpherePluginHost::resolve_builtin_stem(&plugin_id) else {
                 let _ = ipc::write_frame(
@@ -1456,7 +1501,10 @@ fn dispatch(
                 );
                 return;
             }
-            let processor = Arc::new(BuiltinHostProcessor::rodhareist(sample_rate));
+            let processor = Arc::new(BuiltinHostProcessor::rodhareist(
+                sample_rate,
+                state_json.as_deref(),
+            ));
             if let Ok(mut processors) = builtin_processors.lock() {
                 Arc::make_mut(&mut processors).insert(plugin_instance_id.clone(), processor);
             }

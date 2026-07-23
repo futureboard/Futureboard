@@ -537,12 +537,14 @@ impl PluginHostClient {
         plugin_id: impl Into<String>,
         sample_rate: u32,
         max_block_size: u32,
+        state_json: Option<String>,
     ) -> Result<(), PluginHostClientError> {
         self.send(&HostCommand::LoadBuiltinPlugin {
             plugin_instance_id: plugin_instance_id.into(),
             plugin_id: plugin_id.into(),
             sample_rate,
             max_block_size,
+            state_json,
         })
     }
 

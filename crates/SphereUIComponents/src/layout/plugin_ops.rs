@@ -2869,10 +2869,18 @@ impl StudioLayout {
                         match runtime.lock() {
                             Ok(mut runtime) => {
                                 let load_result = if is_builtin {
+                                    // Re-adding an insert whose state mirror is
+                                    // still alive (e.g. host respawn): restore it.
+                                    let state_json =
+                                        crate::components::builtin_plugin_editor::builtin_state_bytes(
+                                            &slot_id,
+                                        )
+                                        .and_then(|bytes| String::from_utf8(bytes).ok());
                                     runtime.send_load_builtin_plugin(
                                         descriptor,
                                         sample_rate,
                                         max_block_size,
+                                        state_json,
                                     )
                                 } else {
                                     runtime.send_load_plugin(
@@ -3675,8 +3683,15 @@ impl StudioLayout {
             return;
         };
         let state = &self.timeline.read(cx).state;
-        for track in &state.tracks {
-            for slot in &track.inserts {
+        let master_id = crate::components::timeline::timeline_state::MASTER_TRACK_ID;
+        let owners = std::iter::once((master_id, &state.master.inserts)).chain(
+            state
+                .tracks
+                .iter()
+                .map(|track| (track.id.as_str(), &track.inserts)),
+        );
+        for (track_id, inserts) in owners {
+            for slot in inserts {
                 if slot.id != plugin_instance_id {
                     continue;
                 }
@@ -3700,7 +3715,7 @@ impl StudioLayout {
                 );
                 for (index, value) in values {
                     if let Err(error) = engine.set_insert_param(
-                        track.id.clone(),
+                        track_id.to_string(),
                         slot.id.clone(),
                         index.to_string(),
                         value,
@@ -3909,10 +3924,19 @@ impl StudioLayout {
                 let bridge_sink = match runtime.lock() {
                     Ok(mut runtime) => {
                         let load_result = if is_builtin {
+                            // Project restore: hand the persisted state blob to
+                            // the host so the DSP is built already configured —
+                            // immune to the engine graph/param-ring sync race
+                            // that made replayed params silently drop.
+                            let state_json = slot
+                                .vst3_state
+                                .as_deref()
+                                .and_then(|bytes| String::from_utf8(bytes.clone()).ok());
                             runtime.send_load_builtin_plugin(
                                 descriptor,
                                 sample_rate,
                                 max_block_size,
+                                state_json,
                             )
                         } else {
                             runtime.send_load_plugin(descriptor, sample_rate, max_block_size)

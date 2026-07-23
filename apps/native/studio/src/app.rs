@@ -11,15 +11,15 @@ use sphere_ui_components::layout::{
     PendingCloseAction, PreparedWorkspaceFinish, ProjectOpenOptions, StudioLayout,
 };
 use sphere_ui_components::loading_session::{
-    LoadFailedContext, LoadedSessionPackage, ProjectLifecycleTarget, SessionRollbackSnapshot,
-    SessionShutdownReason, begin_pre_studio_workspace_prepare, begin_project_session_load,
+    begin_pre_studio_workspace_prepare, begin_project_session_load,
     begin_studio_project_session_load, begin_studio_session_shutdown, complete_project_lifecycle,
-    show_loading_session_error, update_loading_session_progress,
+    show_loading_session_error, update_loading_session_progress, LoadFailedContext,
+    LoadedSessionPackage, ProjectLifecycleTarget, SessionRollbackSnapshot, SessionShutdownReason,
 };
 use sphere_ui_components::project::{FutureboardProject, ProjectTemplate};
 use sphere_ui_components::splash::SplashWindowHandle;
 use sphere_ui_components::startup::{
-    StartupPhase, StartupRoute, log_startup_phase, run_lightweight_boot,
+    log_startup_phase, run_lightweight_boot, StartupPhase, StartupRoute,
 };
 #[cfg(feature = "exclusive")]
 use sphere_ui_components::welcome::WelcomeFooterAction;

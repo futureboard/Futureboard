@@ -383,7 +383,7 @@ mod imp {
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex, OnceLock};
 
-    use sphere_webview::client::{BrowserLifecycle, plugin_browser_client_with_surface};
+    use sphere_webview::client::{plugin_browser_client_with_surface, BrowserLifecycle};
     use sphere_webview::osr::{
         OsrInput, OsrKey, OsrKeyKind, OsrModifiers, OsrMouseButton, OsrSurface,
     };
@@ -391,11 +391,11 @@ mod imp {
     use sphere_webview::runtime::{
         CefRuntime, CefRuntimeConfig, NativeParent, WebView, WebViewConfig, WindowBounds,
     };
-    use sphere_webview::scheme::{BridgeSink, SchemeAsset, register_plugin_scheme_factory};
+    use sphere_webview::scheme::{register_plugin_scheme_factory, BridgeSink, SchemeAsset};
 
     use super::{
-        EditorInput, EditorKey, EditorKeyKind, EditorModifiers, EditorMouseButton,
-        HostAvailability, OFFSCREEN_HOSTING, ViewEvent, ViewId, ViewRect, origin_for_plugin_id,
+        origin_for_plugin_id, EditorInput, EditorKey, EditorKeyKind, EditorModifiers,
+        EditorMouseButton, HostAvailability, ViewEvent, ViewId, ViewRect, OFFSCREEN_HOSTING,
     };
 
     struct HostedView {
@@ -662,10 +662,10 @@ mod imp {
     /// platforms. `0` where off-screen hosting needs no parent.
     #[cfg(target_os = "windows")]
     fn create_hidden_warmup_parent() -> u64 {
+        use windows::core::w;
         use windows::Win32::UI::WindowsAndMessaging::{
             CreateWindowExW, HMENU, WINDOW_EX_STYLE, WS_POPUP,
         };
-        use windows::core::w;
         // The predefined STATIC class is fine here: the window is never shown,
         // it exists only so CEF has a real HWND to create its child under.
         unsafe {
@@ -1411,11 +1411,9 @@ mod tests {
             availability("builtin:rodharerist"),
             HostAvailability::NotCompiledIn
         );
-        assert!(
-            HostAvailability::NotCompiledIn
-                .to_string()
-                .contains("builtin-plugin-editor")
-        );
+        assert!(HostAvailability::NotCompiledIn
+            .to_string()
+            .contains("builtin-plugin-editor"));
     }
 
     #[cfg(feature = "builtin-plugin-editor")]

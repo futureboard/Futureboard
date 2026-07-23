@@ -37,21 +37,21 @@ fn debug_enabled() -> bool {
 
 #[cfg(target_os = "windows")]
 mod imp {
-    use std::sync::Once;
     use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Once;
 
-    use super::{ContentRect, debug_enabled};
+    use super::{debug_enabled, ContentRect};
+    use windows::core::{w, PCWSTR};
     use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
-    use windows::Win32::Graphics::Gdi::{BLACK_BRUSH, FillRect, GetStockObject, HBRUSH, HDC};
+    use windows::Win32::Graphics::Gdi::{FillRect, GetStockObject, BLACK_BRUSH, HBRUSH, HDC};
     use windows::Win32::UI::Input::KeyboardAndMouse::SetFocus;
     use windows::Win32::UI::WindowsAndMessaging::{
-        CreateWindowExW, DefWindowProcW, DestroyWindow, GW_CHILD, GWL_STYLE, GetClientRect,
-        GetParent, GetWindow, GetWindowLongPtrW, GetWindowRect, HMENU, IsChild, IsWindow,
-        RegisterClassW, SWP_NOACTIVATE, SWP_NOZORDER, SetWindowPos, WINDOW_EX_STYLE, WM_ERASEBKGND,
+        CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect, GetParent, GetWindow,
+        GetWindowLongPtrW, GetWindowRect, IsChild, IsWindow, RegisterClassW, SetWindowPos,
+        GWL_STYLE, GW_CHILD, HMENU, SWP_NOACTIVATE, SWP_NOZORDER, WINDOW_EX_STYLE, WM_ERASEBKGND,
         WM_LBUTTONDOWN, WM_MBUTTONDOWN, WM_PARENTNOTIFY, WM_RBUTTONDOWN, WM_SETFOCUS,
         WM_XBUTTONDOWN, WNDCLASSW, WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_VISIBLE,
     };
-    use windows::core::{PCWSTR, w};
 
     fn hwnd_from(handle: u64) -> HWND {
         HWND(handle as *mut core::ffi::c_void)

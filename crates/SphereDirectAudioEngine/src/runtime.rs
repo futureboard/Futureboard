@@ -626,6 +626,11 @@ pub struct RuntimeInsert {
     /// For [`RuntimeInsertKind::ExternalBridge`]: `params["role"] == "effect"`,
     /// resolved at build time so the block path never reads the params map.
     pub bridge_is_effect: bool,
+    /// For [`RuntimeInsertKind::ExternalBridge`]: `params["format"] == "BuiltIn"`
+    /// (a Futureboard built-in DSP hosted in the bridge process), resolved at
+    /// build time. Built-in param edits travel as raw editor-unit values over
+    /// the shared param ring, not normalized VST3 0..1.
+    pub bridge_is_builtin: bool,
     /// For bridged instruments: 1-based plugin output channels selected by the
     /// inspector for the engine-side stereo downmix. Empty means all reported
     /// bridge channels so legacy/unsynced projects still pass multi-out audio.
@@ -1494,6 +1499,12 @@ impl RuntimeProject {
                         .get("role")
                         .and_then(Value::as_str)
                         .map(|role| role.eq_ignore_ascii_case("effect"))
+                        .unwrap_or(false),
+                    bridge_is_builtin: insert
+                        .params
+                        .get("format")
+                        .and_then(Value::as_str)
+                        .map(|format| format.eq_ignore_ascii_case("builtin"))
                         .unwrap_or(false),
                     bridge_enabled_output_channels: bridge_enabled_output_channels_from_params(
                         &insert.params,
@@ -2734,17 +2745,29 @@ impl RuntimeProject {
             return;
         }
 
-        // Bridged plugin (runs in the host process): forward the numeric VST3
-        // ParamID + normalized value to the host through the shared param ring,
-        // and persist it in the params map for snapshot/recall. Previously this
-        // fell through to the built-in branch and was silently dropped.
+        // Bridged plugin (runs in the host process): forward the numeric
+        // param id through the shared param ring. Previously this fell
+        // through to the built-in branch and was silently dropped.
         if insert.kind_tag == RuntimeInsertKind::ExternalBridge {
-            if let Ok(vst3_param_id) = param_id.parse::<u32>() {
-                insert
-                    .params
-                    .insert(param_id.to_string(), Value::from(value as f64));
-                if let Some(sink) = insert.bridge_sink.as_ref() {
-                    sink.push_param(vst3_param_id, value.clamp(0.0, 1.0), 0);
+            if let Ok(wire_param_id) = param_id.parse::<u32>() {
+                if insert.bridge_is_builtin {
+                    // Built-in DSP params travel in raw editor units (e.g.
+                    // delay_time 40..1200, path_slot -1..6); the DSP clamps
+                    // per-field itself. Not persisted into the params map —
+                    // built-in state persistence is a separate path, and the
+                    // insert would only accumulate numeric-index keys (plus a
+                    // per-edit heap alloc on the callback thread).
+                    if let Some(sink) = insert.bridge_sink.as_ref() {
+                        sink.push_param(wire_param_id, value, 0);
+                    }
+                } else {
+                    // VST3: normalized value; persist for snapshot/recall.
+                    insert
+                        .params
+                        .insert(param_id.to_string(), Value::from(value as f64));
+                    if let Some(sink) = insert.bridge_sink.as_ref() {
+                        sink.push_param(wire_param_id, value.clamp(0.0, 1.0), 0);
+                    }
                 }
             }
             return;
@@ -4493,6 +4516,7 @@ mod midi_tests {
                 enabled: true,
                 params: HashMap::new(),
                 bridge_is_effect: false,
+                bridge_is_builtin: false,
                 bridge_enabled_output_channels: Vec::new(),
                 bridge_sink: None,
                 dsp: InsertDspState::default(),

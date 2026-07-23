@@ -35,11 +35,25 @@ pub const BRIDGE_MAGIC: u32 = 0x4642_4142;
 /// v2 added the transport / ProcessContext block (tempo, time signature,
 /// project position, playing/recording). v3 added VSTi output-channel metadata.
 /// v5 expands the shared audio buffers to carry up to 32 plugin output channels.
-pub const BRIDGE_LAYOUT_VERSION: u32 = 5;
+/// v6 adds the built-in DSP telemetry block (in/out peak+rms, clip flags).
+pub const BRIDGE_LAYOUT_VERSION: u32 = 6;
 
 /// `transport_flags` bits.
 pub const TRANSPORT_FLAG_PLAYING: u32 = 1 << 0;
 pub const TRANSPORT_FLAG_RECORDING: u32 = 1 << 1;
+
+/// One telemetry frame from a built-in DSP: linear 0..1 levels measured after
+/// the corresponding trim, plus sticky clip latches. Mirrors rodharerist's
+/// `MeterFrame` (and the editor's TS `MeterFrame`) field-for-field.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct BuiltinMeterFrame {
+    pub in_peak: f32,
+    pub in_rms: f32,
+    pub out_peak: f32,
+    pub out_rms: f32,
+    pub in_clip: bool,
+    pub out_clip: bool,
+}
 
 /// Maximum block size (frames) the region can carry. The engine's actual block
 /// must be `<=` this; the region is sized for the worst case so it never
@@ -479,6 +493,19 @@ pub struct SharedAudioBridge {
     /// [`TRANSPORT_FLAG_PLAYING`] / [`TRANSPORT_FLAG_RECORDING`].
     pub transport_flags: AtomicU32,
 
+    // --- Built-in DSP telemetry (host → engine, f32 bits / flags) ---
+    // Written per block by the host producer for built-in plugins (from the
+    // DSP's own `MeterFrame`); zero for external VST3 instances. Levels are
+    // linear 0..1 measured after the corresponding trim; clip flags are
+    // sticky in the DSP until it receives a `clear_clip` param event.
+    pub builtin_in_peak: AtomicU32,
+    pub builtin_in_rms: AtomicU32,
+    pub builtin_out_peak: AtomicU32,
+    pub builtin_out_rms: AtomicU32,
+    /// Bit 0: input clip latched; bit 1: output clip latched.
+    pub builtin_clip_flags: AtomicU32,
+    pub _pad_builtin_meters: AtomicU32,
+
     // --- Lock-free rings (engine → host) ---
     pub midi: SpscRing<SharedMidiEvent, MIDI_RING_CAP>,
     pub params: SpscRing<SharedParamEvent, PARAM_RING_CAP>,
@@ -565,6 +592,39 @@ impl SharedAudioBridge {
             f32::from_bits(self.meter_peak_l.load(Ordering::Relaxed)),
             f32::from_bits(self.meter_peak_r.load(Ordering::Relaxed)),
         )
+    }
+
+    /// Publish a built-in DSP's telemetry frame (host producer, per block).
+    pub fn store_builtin_meters(&self, frame: &BuiltinMeterFrame) {
+        self.builtin_in_peak
+            .store(frame.in_peak.to_bits(), Ordering::Relaxed);
+        self.builtin_in_rms
+            .store(frame.in_rms.to_bits(), Ordering::Relaxed);
+        self.builtin_out_peak
+            .store(frame.out_peak.to_bits(), Ordering::Relaxed);
+        self.builtin_out_rms
+            .store(frame.out_rms.to_bits(), Ordering::Relaxed);
+        let mut flags = 0u32;
+        if frame.in_clip {
+            flags |= 1;
+        }
+        if frame.out_clip {
+            flags |= 2;
+        }
+        self.builtin_clip_flags.store(flags, Ordering::Relaxed);
+    }
+
+    /// Read the built-in DSP's telemetry frame (engine/UI side).
+    pub fn builtin_meters(&self) -> BuiltinMeterFrame {
+        let flags = self.builtin_clip_flags.load(Ordering::Relaxed);
+        BuiltinMeterFrame {
+            in_peak: f32::from_bits(self.builtin_in_peak.load(Ordering::Relaxed)),
+            in_rms: f32::from_bits(self.builtin_in_rms.load(Ordering::Relaxed)),
+            out_peak: f32::from_bits(self.builtin_out_peak.load(Ordering::Relaxed)),
+            out_rms: f32::from_bits(self.builtin_out_rms.load(Ordering::Relaxed)),
+            in_clip: flags & 1 != 0,
+            out_clip: flags & 2 != 0,
+        }
     }
 
     /// Publish the transport ProcessContext for the next block (engine side).

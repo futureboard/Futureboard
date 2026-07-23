@@ -205,6 +205,22 @@ pub enum HostCommand {
     GetPluginParameters {
         plugin_instance_id: String,
     },
+    /// Load a `.nam` neural capture into a built-in DSP instance (rodharerist's
+    /// Tone/Amp slot). `json` is the raw `.nam` file text — the newline-framed
+    /// transport caps a line at 128 MiB, ample for real captures. The host
+    /// parses/builds on its IPC thread and hands the runtime to the audio
+    /// producer for block-boundary adoption; it replies
+    /// [`HostEvent::BuiltinNamCaptureResult`] either way.
+    LoadBuiltinNamCapture {
+        plugin_instance_id: String,
+        /// Display name (usually the file stem) echoed back in the result.
+        name: String,
+        json: String,
+        /// Build two independent models (true stereo) vs mirror one.
+        stereo: bool,
+        /// Capture already models amp + cab + mic ("Bypass Cab" hint).
+        full_rig: bool,
+    },
     /// Graceful host shutdown: detach everything and exit 0.
     Shutdown,
 }
@@ -346,6 +362,25 @@ pub enum HostEvent {
         plugin_instance_id: String,
         ok: bool,
         parameters: Vec<HostPluginParameter>,
+    },
+    /// Reply to [`HostCommand::LoadBuiltinNamCapture`]. On success the capture
+    /// has been submitted and will be adopted at the next audio block; on
+    /// failure `error` carries the human-readable reason (parse failure,
+    /// sample-rate mismatch, unknown instance).
+    BuiltinNamCaptureResult {
+        plugin_instance_id: String,
+        ok: bool,
+        /// Display name echoed from the request.
+        name: String,
+        #[serde(default)]
+        error: Option<String>,
+        /// Receptive field of the loaded model in samples (0 on failure) —
+        /// the capture's contribution to plugin latency.
+        #[serde(default)]
+        receptive_field: u64,
+        /// Capture already models amp + cab + mic ("Bypass Cab" hint).
+        #[serde(default)]
+        full_rig: bool,
     },
 }
 

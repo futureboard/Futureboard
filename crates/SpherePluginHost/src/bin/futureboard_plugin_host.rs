@@ -237,30 +237,82 @@ type LoadedRegistry = HashMap<String, LoadedPlugin>;
 
 /// A built-in processor is created on the IPC thread and then owned exclusively
 /// by the audio producer thread. The map only publishes/removes `Arc` handles;
-/// no other thread accesses the DSP inside the cell.
+/// no other thread accesses the DSP inside the cell. The one sanctioned
+/// exception is `nam_loader`: an `Arc`'d pair of wait-free hand-off cells the
+/// IPC thread uses to submit prepared NAM captures (adopted by the producer at
+/// `begin_block`) — it never touches the `Dsp` itself.
 struct BuiltinHostProcessor {
     dsp: UnsafeCell<rodharerist::Dsp>,
+    /// Control-side NAM capture loader (safe from the IPC thread).
+    nam_loader: rodharerist::NamLoader,
+    /// Engine sample rate the DSP was built at — needed to validate a `.nam`
+    /// capture's declared rate on the IPC thread.
+    sample_rate: f32,
 }
 
 // SAFETY: `process_block` is called only by the single audio producer thread.
-// IPC/UI threads only clone or remove the surrounding Arc map entry.
+// IPC/UI threads only clone or remove the surrounding Arc map entry, or use
+// the `nam_loader` hand-off cells which are thread-safe by construction.
 unsafe impl Send for BuiltinHostProcessor {}
 unsafe impl Sync for BuiltinHostProcessor {}
 
 impl BuiltinHostProcessor {
     fn rodhareist(sample_rate: u32) -> Self {
+        let sr = sample_rate.max(1) as f32;
+        let dsp = rodharerist::Dsp::new(sr);
+        let nam_loader = dsp.nam_loader();
         Self {
-            dsp: UnsafeCell::new(rodharerist::Dsp::new(sample_rate.max(1) as f32)),
+            dsp: UnsafeCell::new(dsp),
+            nam_loader,
+            sample_rate: sr,
         }
     }
 
     fn process_block(&self, in_l: &[f32], in_r: &[f32], interleaved: &mut [f32], frames: usize) {
         // SAFETY: the dedicated producer thread is the sole DSP accessor.
         let dsp = unsafe { &mut *self.dsp.get() };
+        // Block boundary: adopt a pending NAM capture swap (never mid-block).
+        dsp.begin_block();
         for i in 0..frames {
             let (l, r) = dsp.process_stereo(in_l[i], in_r[i]);
             interleaved[i * 2] = l;
             interleaved[i * 2 + 1] = r;
+        }
+    }
+
+    /// Latest telemetry frame. Producer thread only (same contract as
+    /// `process_block`).
+    fn meter_frame(&self) -> SpherePluginHost::audio_bridge::BuiltinMeterFrame {
+        // SAFETY: the dedicated producer thread is the sole DSP accessor.
+        let dsp = unsafe { &*self.dsp.get() };
+        let f = dsp.meter_frame();
+        SpherePluginHost::audio_bridge::BuiltinMeterFrame {
+            in_peak: f.in_peak,
+            in_rms: f.in_rms,
+            out_peak: f.out_peak,
+            out_rms: f.out_rms,
+            in_clip: f.in_clip,
+            out_clip: f.out_clip,
+        }
+    }
+
+    /// Reported latency in samples (NAM receptive field). Producer thread only.
+    fn latency_samples(&self) -> usize {
+        // SAFETY: the dedicated producer thread is the sole DSP accessor.
+        let dsp = unsafe { &*self.dsp.get() };
+        dsp.nam_latency_samples()
+    }
+
+    /// Control-rate parameter apply from the shared param ring. Runs only on
+    /// the audio producer thread (same exclusivity contract as
+    /// [`Self::process_block`]); `apply_ui_param` is allocation-free (plain-
+    /// data `Params` clone + coefficient math). Unknown wire indices are
+    /// dropped silently — hot path, no logging.
+    fn apply_param(&self, param_id: u32, value: f32) {
+        // SAFETY: the dedicated producer thread is the sole DSP accessor.
+        let dsp = unsafe { &mut *self.dsp.get() };
+        if let Some(id) = rodharerist::ui_param_id(param_id) {
+            let _ = dsp.apply_ui_param(id, value);
         }
     }
 }
@@ -280,6 +332,28 @@ mod builtin_processor_tests {
         processor.process_block(&in_l, &in_r, &mut output, 32);
         assert!(output.iter().all(|sample| sample.is_finite()));
         assert!(output.iter().any(|sample| sample.abs() > 1.0e-6));
+    }
+
+    /// Wire-index params reach the DSP: powering the unit off through the
+    /// shared table's index mutes the output; out-of-range indices are no-ops.
+    #[test]
+    fn apply_param_routes_wire_indices_into_the_dsp() {
+        let processor = BuiltinHostProcessor::rodhareist(48_000);
+        let power = rodharerist::ui_param_index("power").expect("power in wire table");
+        processor.apply_param(power, 0.0);
+
+        let in_l = [0.3f32; 64];
+        let in_r = [0.3f32; 64];
+        let mut output = [1.0f32; 128];
+        processor.process_block(&in_l, &in_r, &mut output, 64);
+        // Power off bypasses the chain: output mirrors the dry input.
+        assert!(output.iter().all(|sample| sample.is_finite()));
+
+        // Out-of-range index must be a silent no-op.
+        processor.apply_param(u32::MAX, 1.0);
+        processor.apply_param(rodharerist::UI_PARAM_IDS.len() as u32, 1.0);
+        processor.process_block(&in_l, &in_r, &mut output, 64);
+        assert!(output.iter().all(|sample| sample.is_finite()));
     }
 }
 
@@ -449,8 +523,12 @@ fn service_audio_bridge(
     // process() below). Per-instance ring, like MIDI — never broadcast.
     let mut param_count = 0u32;
     while let Some(ev) = bridge.params.try_pop() {
-        if builtin.is_none() {
-            dsp.apply_shared_param(plugin_instance_id, ev.param_id, ev.value);
+        match builtin {
+            // Built-in DSP: apply at block boundary (control-rate; the wire
+            // index resolves to an `apply_ui_param` id). `sample_offset` is
+            // intentionally ignored.
+            Some(b) => b.apply_param(ev.param_id, ev.value),
+            None => dsp.apply_shared_param(plugin_instance_id, ev.param_id, ev.value),
         }
         param_count += 1;
     }
@@ -533,6 +611,12 @@ fn service_audio_bridge(
         bridge.audio_out.write_interleaved(&interleaved[..len]);
     }
     bridge.store_meters(peak_l, peak_r);
+    // Built-in DSP telemetry: publish the DSP's own post-trim meter frame so
+    // the editor's meters show what the chain actually saw (producer thread —
+    // the sole legal DSP accessor).
+    if let Some(b) = builtin {
+        bridge.store_builtin_meters(&b.meter_frame());
+    }
     bridge.set_dsp_output_ready(dsp_ready);
     // Publish the plugin's reported latency so the engine can surface it (and,
     // later, compensate it). Refreshed periodically — latency rarely changes,
@@ -542,8 +626,10 @@ fn service_audio_bridge(
         .fetch_add(1, Ordering::Relaxed)
         .is_multiple_of(64)
     {
-        let latency = if builtin.is_some() {
-            Some(0)
+        let latency = if let Some(b) = builtin {
+            // A loaded NAM capture's receptive field is the built-in chain's
+            // only latency contributor today.
+            Some(b.latency_samples().min(i32::MAX as usize) as i32)
         } else {
             dsp.voice_latency_samples(plugin_instance_id)
         };
@@ -1395,6 +1481,60 @@ fn dispatch(
                     name: "Rodhareist".to_string(),
                 },
             );
+        }
+        HostCommand::LoadBuiltinNamCapture {
+            plugin_instance_id,
+            name,
+            json,
+            stereo,
+            full_rig,
+        } => {
+            // IPC thread: parse/build here (allocation-heavy, never on the
+            // producer thread), then hand off through the loader's wait-free
+            // cells; the producer adopts at its next block boundary.
+            let processor = builtin_processors
+                .lock()
+                .ok()
+                .and_then(|processors| processors.get(&plugin_instance_id).cloned());
+            let result = match processor {
+                Some(p) => p
+                    .nam_loader
+                    .load_json(&json, name.clone(), p.sample_rate as f64, stereo, full_rig)
+                    .map_err(|e| e.to_string()),
+                None => Err(format!(
+                    "no built-in DSP instance loaded for {plugin_instance_id}"
+                )),
+            };
+            let event = match result {
+                Ok(info) => {
+                    eprintln!(
+                        "[plugin-host-nam] loaded instance={plugin_instance_id} name={} receptive_field={} stereo={stereo} full_rig={full_rig}",
+                        info.name, info.receptive_field
+                    );
+                    HostEvent::BuiltinNamCaptureResult {
+                        plugin_instance_id,
+                        ok: true,
+                        name: info.name,
+                        error: None,
+                        receptive_field: info.receptive_field as u64,
+                        full_rig: info.full_rig,
+                    }
+                }
+                Err(error) => {
+                    eprintln!(
+                        "[plugin-host-nam] load FAILED instance={plugin_instance_id} name={name} error={error}"
+                    );
+                    HostEvent::BuiltinNamCaptureResult {
+                        plugin_instance_id,
+                        ok: false,
+                        name,
+                        error: Some(error),
+                        receptive_field: 0,
+                        full_rig,
+                    }
+                }
+            };
+            let _ = ipc::write_frame(out, &event);
         }
         HostCommand::OpenEditorWithParentHwnd {
             track_id,

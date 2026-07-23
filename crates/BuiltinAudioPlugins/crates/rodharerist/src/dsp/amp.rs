@@ -1052,24 +1052,23 @@ mod tests {
         out
     }
 
-    fn residual_harmonics(input_amp: f32, output: &[f32]) -> f32 {
-        let start = 8_000;
-        let mut dot = 0.0;
-        let mut input_energy = 0.0;
-        for (n, &y) in output.iter().enumerate().skip(start) {
-            let x = (n as f32 * 440.0 * std::f32::consts::TAU / 48_000.0).sin() * input_amp;
-            dot += x * y;
-            input_energy += x * x;
-        }
-        let scale = dot / input_energy.max(1.0e-9);
-        let mut residual = 0.0;
-        let mut energy = 0.0;
-        for (n, &y) in output.iter().enumerate().skip(start) {
-            let x = (n as f32 * 440.0 * std::f32::consts::TAU / 48_000.0).sin() * input_amp;
-            residual += (y - x * scale).powi(2);
-            energy += y * y;
-        }
-        residual / energy.max(1.0e-9)
+    fn harmonic_ratio(output: &[f32]) -> f32 {
+        // 375 Hz completes exactly 64 cycles in this 8192-sample window, so
+        // filter phase and spectral leakage are not mistaken for harmonics.
+        let window = &output[output.len() - 8_192..];
+        let magnitude = |harmonic: usize| {
+            let frequency = 375.0 * harmonic as f32;
+            let mut real = 0.0;
+            let mut imag = 0.0;
+            for (n, &sample) in window.iter().enumerate() {
+                let phase = n as f32 * frequency * std::f32::consts::TAU / 48_000.0;
+                real += sample * phase.cos();
+                imag -= sample * phase.sin();
+            }
+            (real * real + imag * imag).sqrt()
+        };
+        let fundamental = magnitude(1).max(1.0e-9);
+        (2..=8).map(magnitude).sum::<f32>() / fundamental
     }
 
     #[test]
@@ -1128,13 +1127,13 @@ mod tests {
             amp.reset();
             (0..16_000)
                 .map(|n| {
-                    let x = (n as f32 * 440.0 * std::f32::consts::TAU / 48_000.0).sin() * 0.12;
+                    let x = (n as f32 * 375.0 * std::f32::consts::TAU / 48_000.0).sin() * 0.12;
                     amp.process(x, x).0
                 })
                 .collect::<Vec<_>>()
         };
-        let low = residual_harmonics(0.12, &render_sine(1.0));
-        let high = residual_harmonics(0.12, &render_sine(9.0));
+        let low = harmonic_ratio(&render_sine(1.0));
+        let high = harmonic_ratio(&render_sine(9.0));
         assert!(
             high > low * 1.08,
             "harmonics did not progress: low={low} high={high}"

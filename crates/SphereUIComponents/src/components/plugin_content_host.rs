@@ -37,19 +37,21 @@ fn debug_enabled() -> bool {
 
 #[cfg(target_os = "windows")]
 mod imp {
-    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Once;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
-    use super::{debug_enabled, ContentRect};
-    use windows::core::{w, PCWSTR};
+    use super::{ContentRect, debug_enabled};
     use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
-    use windows::Win32::Graphics::Gdi::{FillRect, GetStockObject, BLACK_BRUSH, HBRUSH, HDC};
+    use windows::Win32::Graphics::Gdi::{BLACK_BRUSH, FillRect, GetStockObject, HBRUSH, HDC};
+    use windows::Win32::UI::Input::KeyboardAndMouse::SetFocus;
     use windows::Win32::UI::WindowsAndMessaging::{
-        CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect, GetParent,
-        GetWindowLongPtrW, GetWindowRect, IsChild, IsWindow, RegisterClassW, SetWindowPos,
-        GWL_STYLE, HMENU, SWP_NOACTIVATE, SWP_NOZORDER, WINDOW_EX_STYLE, WM_ERASEBKGND, WNDCLASSW,
-        WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_VISIBLE,
+        CreateWindowExW, DefWindowProcW, DestroyWindow, GW_CHILD, GWL_STYLE, GetClientRect,
+        GetParent, GetWindow, GetWindowLongPtrW, GetWindowRect, HMENU, IsChild, IsWindow,
+        RegisterClassW, SWP_NOACTIVATE, SWP_NOZORDER, SetWindowPos, WINDOW_EX_STYLE, WM_ERASEBKGND,
+        WM_LBUTTONDOWN, WM_MBUTTONDOWN, WM_PARENTNOTIFY, WM_RBUTTONDOWN, WM_SETFOCUS,
+        WM_XBUTTONDOWN, WNDCLASSW, WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_VISIBLE,
     };
+    use windows::core::{PCWSTR, w};
 
     fn hwnd_from(handle: u64) -> HWND {
         HWND(handle as *mut core::ffi::c_void)
@@ -76,6 +78,37 @@ mod imp {
         });
     }
 
+    /// Route Win32 keyboard focus to the embedded child view (the CEF browser
+    /// or a VST3 editor).
+    ///
+    /// The GPUI shell never hands keyboard focus to native children on its
+    /// own: its top-level HWND keeps focus through activation, so a text
+    /// field inside an embedded editor could be clicked but never typed into.
+    /// Two signals close that gap:
+    ///
+    /// - `WM_PARENTNOTIFY` with a button-down event — the one notification
+    ///   this host reliably receives when a click lands anywhere inside the
+    ///   embedded child, even though the click itself is consumed by the
+    ///   child's own window procedure.
+    /// - `WM_SETFOCUS` — anything that focuses this host (tabbing, an
+    ///   explicit `SetFocus` from the shell) is really meant for the view
+    ///   inside it.
+    ///
+    /// Both forward focus to the first child; Chromium (and VST3 views)
+    /// route it on to their inner widget from there.
+    unsafe fn focus_embedded_child(hwnd: HWND) {
+        if let Ok(child) = unsafe { GetWindow(hwnd, GW_CHILD) } {
+            let _ = unsafe { SetFocus(Some(child)) };
+            static LOGGED: AtomicBool = AtomicBool::new(false);
+            if !LOGGED.swap(true, Ordering::Relaxed) {
+                eprintln!(
+                    "[plugin-content-hwnd] keyboard focus routed to embedded child=0x{:x}",
+                    child.0 as u64
+                );
+            }
+        }
+    }
+
     /// Suppress the default white erase: fill the content host's client area
     /// black so the plugin's WS_CHILD view (created by the host process) is never
     /// preceded by a white flash, and any uncovered region stays dark. WS_CLIPCHILDREN
@@ -86,6 +119,20 @@ mod imp {
         wparam: WPARAM,
         lparam: LPARAM,
     ) -> LRESULT {
+        if msg == WM_PARENTNOTIFY {
+            let event = (wparam.0 as u32) & 0xFFFF;
+            if matches!(
+                event,
+                WM_LBUTTONDOWN | WM_MBUTTONDOWN | WM_RBUTTONDOWN | WM_XBUTTONDOWN
+            ) {
+                unsafe { focus_embedded_child(hwnd) };
+            }
+            return unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) };
+        }
+        if msg == WM_SETFOCUS {
+            unsafe { focus_embedded_child(hwnd) };
+            return LRESULT(0);
+        }
         if msg == WM_ERASEBKGND {
             let hdc = HDC(wparam.0 as *mut core::ffi::c_void);
             let mut rc = RECT::default();

@@ -715,6 +715,11 @@ impl Cabinet {
     }
 
     pub(super) fn reset(&mut self) {
+        // State restore is normally followed by reset before playback. Adopt
+        // the prepared lane so reset never silently reverts the selected cab.
+        if self.switching {
+            std::mem::swap(&mut self.active, &mut self.standby);
+        }
         self.active.reset();
         self.standby.reset();
         self.switching = false;

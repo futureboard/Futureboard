@@ -3,8 +3,8 @@
 
 use builtin_dsp_core::mix;
 
-use super::Lfo;
 use super::smooth::Smoothed;
+use super::Lfo;
 
 /// Glide time for depth/mix edits (see `smooth.rs`).
 const SMOOTH_SECONDS: f32 = 0.010;

@@ -5,7 +5,7 @@
 use builtin_dsp_core::{make_eq_biquad, mix};
 
 use super::smooth::Smoothed;
-use super::{InterpDelay, Lfo, StereoBiquad, soft_clip};
+use super::{soft_clip, InterpDelay, Lfo, StereoBiquad};
 
 const MAX_DELAY_MS: f32 = 1_300.0; // headroom above the 1200 ms max knob
 

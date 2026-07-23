@@ -43,8 +43,8 @@ mod tremolo;
 mod wah;
 
 use builtin_dsp_core::{
-    ParamDescriptor, PluginCategory, PluginDescriptor, StereoEffect, clamp, db_to_linear,
-    time_constant,
+    clamp, db_to_linear, time_constant, ParamDescriptor, PluginCategory, PluginDescriptor,
+    StereoEffect,
 };
 
 use cab::Cabinet;
@@ -54,7 +54,7 @@ use drive::Drive;
 use eq::EqStage;
 use gate::NoiseGate;
 use mod_stage::ModStage;
-pub use nam::{NamCaptureInfo, NamLoadError, NamLoader, PreparedNamRuntime, prepare_nam_runtime};
+pub use nam::{prepare_nam_runtime, NamCaptureInfo, NamLoadError, NamLoader, PreparedNamRuntime};
 use reverb::PlateReverb;
 pub use tone_stage::ToneEngineKind;
 use tone_stage::ToneStage;
@@ -1426,7 +1426,11 @@ pub fn apply_to_params(p: &mut Params, id: &str, value: f32) -> bool {
 /// applying `amp_model` resets `tone_engine` to Classic.
 pub fn ui_values(p: &Params) -> Vec<(&'static str, f32)> {
     fn b(v: bool) -> f32 {
-        if v { 1.0 } else { 0.0 }
+        if v {
+            1.0
+        } else {
+            0.0
+        }
     }
     fn model_index<T: PartialEq + Copy>(all: &[T], value: T) -> f32 {
         all.iter().position(|m| *m == value).unwrap_or(0) as f32
@@ -1789,13 +1793,6 @@ pub(crate) fn soft_clip(x: f32) -> f32 {
     x.tanh()
 }
 
-/// Asymmetric tube-ish saturation: even-harmonic bias plus soft clipping.
-#[inline]
-pub(crate) fn tube_stage(x: f32, bias: f32, drive: f32) -> f32 {
-    let biased = x * drive + bias;
-    (biased.tanh() - bias.tanh()) / drive.max(1.0e-6)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1964,7 +1961,7 @@ mod tests {
         assert!(dsp.apply_ui_param("path_slot_0", 2.0)); // Amp first
         assert!(dsp.apply_ui_param("path_slot_1", 0.0)); // Gate
         assert!(dsp.apply_ui_param("path_slot_2", -1.0)); // clear
-        // Remaining slots still have defaults until overwritten — sanitize packs.
+                                                          // Remaining slots still have defaults until overwritten — sanitize packs.
         let mut order = [None; PATH_SLOTS];
         order[0] = Some(StageKind::Amp);
         order[1] = Some(StageKind::Cab);

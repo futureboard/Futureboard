@@ -10,8 +10,8 @@
 
 use builtin_dsp_core::time_constant;
 
-use super::AmpModel;
 use super::smooth::{Oversampler4x, Oversampler8x, Smoothed};
+use super::AmpModel;
 
 const MAX_PREAMP_STAGES: usize = 4;
 const CONTROL_SMOOTH_SECONDS: f32 = 0.012;
@@ -945,6 +945,11 @@ impl Amp {
     }
 
     pub(super) fn reset(&mut self) {
+        // A host commonly applies state and immediately resets before first
+        // audio. Commit a prepared model in that case instead of discarding it.
+        if self.switching {
+            std::mem::swap(&mut self.active, &mut self.standby);
+        }
         self.active.reset();
         self.standby.reset();
         self.switching = false;

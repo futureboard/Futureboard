@@ -16,8 +16,8 @@ use std::sync::Arc;
 use builtin_dsp_core::make_eq_biquad;
 use nam_rs::{Model, NamModel};
 
-use super::StereoBiquad;
 use super::handoff::HandoffCell;
+use super::StereoBiquad;
 
 /// Target integrated loudness (LUFS) captures are normalized to when loudness
 /// normalization is enabled, matching the reference NAM plugin's convention.

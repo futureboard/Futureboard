@@ -1,10 +1,9 @@
-//! Stage the shared CEF runtime **flat** beside the application binary.
+//! Stage the shared CEF runtime beside the application binary.
 //!
 //! CEF is a single, shared runtime — never one copy per plugin and never a
-//! `CEF/` subdirectory. Chromium resolves `libcef`, the `.pak` resources,
-//! `icudtl.dat` and `locales/` relative to the host executable's own directory,
-//! so every required file is copied directly into the staging root (with
-//! `locales/` kept as the one subdirectory CEF requires).
+//! `CEF/` subdirectory. Windows and Linux use a flat runtime with `locales/`;
+//! macOS keeps `Chromium Embedded Framework.framework` intact so the app
+//! bundler can place it under `Contents/Frameworks`.
 //!
 //! The file list is taken from the CEF distribution the repository already uses
 //! (`<workspace>/build/cef`, populated by `SphereWebView`'s `install_cef`). We do
@@ -23,6 +22,7 @@ const RELEASE_DIR: &str = "Release";
 /// Directory (relative to `build/cef`) holding the `.pak`/`icu` resources.
 const RESOURCES_DIR: &str = "Resources";
 const PINNED_CEF_VERSION: &str = "150.0.11";
+const MAC_FRAMEWORK_DIR: &str = "Chromium Embedded Framework.framework";
 /// The one CEF subdirectory that must keep its name at the app root.
 pub const LOCALES_DIR: &str = "locales";
 
@@ -89,6 +89,19 @@ fn validate_pinned_distribution(dist: &Path) -> Result<()> {
 /// assert staging succeeded and by package validation. Resource files are
 /// platform-independent; only the shared library name differs.
 pub fn required_runtime_files(triple: &str) -> Vec<String> {
+    if triple.ends_with("apple-darwin") {
+        return [
+            "Chromium Embedded Framework",
+            "Resources/resources.pak",
+            "Resources/chrome_100_percent.pak",
+            "Resources/chrome_200_percent.pak",
+            "Resources/icudtl.dat",
+        ]
+        .into_iter()
+        .map(|path| format!("{MAC_FRAMEWORK_DIR}/{path}"))
+        .collect();
+    }
+
     let mut files = vec![
         "resources.pak".to_string(),
         "chrome_100_percent.pak".to_string(),
@@ -101,7 +114,7 @@ pub fn required_runtime_files(triple: &str) -> Vec<String> {
             files.push("libcef.dll".to_string());
             files.push("chrome_elf.dll".to_string());
         }
-        "dylib" => files.push("libcef.dylib".to_string()),
+        "dylib" => unreachable!("macOS framework paths are handled above"),
         _ => files.push("libcef.so".to_string()),
     }
     files
@@ -119,6 +132,15 @@ pub fn stage_cef(staging_dir: &Path, dist_dir: &Path, triple: &str) -> Result<Ce
     let mut report = CefStageReport::default();
 
     validate_pinned_distribution(dist_dir)?;
+    if triple.ends_with("apple-darwin") {
+        let framework = dist_dir.join(RELEASE_DIR).join(MAC_FRAMEWORK_DIR);
+        copy_macos_framework(&framework, staging_dir, &mut report)?;
+        report.runtime_files.sort();
+        report.runtime_files.dedup();
+        validate_staged_runtime(staging_dir, dist_dir, triple, report.locale_count)?;
+        return Ok(report);
+    }
+
     let release = if dist_dir.join(RELEASE_DIR).is_dir() {
         dist_dir.join(RELEASE_DIR)
     } else {
@@ -159,7 +181,16 @@ pub fn stage_cef(staging_dir: &Path, dist_dir: &Path, triple: &str) -> Result<Ce
     report.runtime_files.sort();
     report.runtime_files.dedup();
 
-    // Guard: the flat layout must be complete for CEF to boot.
+    validate_staged_runtime(staging_dir, dist_dir, triple, report.locale_count)?;
+    Ok(report)
+}
+
+fn validate_staged_runtime(
+    staging_dir: &Path,
+    dist_dir: &Path,
+    triple: &str,
+    locale_count: usize,
+) -> Result<()> {
     for required in required_runtime_files(triple) {
         if !staging_dir.join(&required).is_file() {
             bail!(
@@ -168,14 +199,65 @@ pub fn stage_cef(staging_dir: &Path, dist_dir: &Path, triple: &str) -> Result<Ce
             );
         }
     }
-    if report.locale_count == 0 {
+    if locale_count == 0 {
         bail!(
-            "CEF `locales/` is empty or missing under {}",
-            resources.display()
+            "CEF locale resources are empty or missing under {}",
+            dist_dir.display()
         );
     }
+    Ok(())
+}
 
-    Ok(report)
+fn copy_macos_framework(
+    framework: &Path,
+    staging_dir: &Path,
+    report: &mut CefStageReport,
+) -> Result<()> {
+    if !framework.is_dir() {
+        bail!("CEF macOS framework is missing: {}", framework.display());
+    }
+    copy_macos_framework_dir(framework, framework, staging_dir, report)
+}
+
+fn copy_macos_framework_dir(
+    framework: &Path,
+    directory: &Path,
+    staging_dir: &Path,
+    report: &mut CefStageReport,
+) -> Result<()> {
+    for entry in fs::read_dir(directory).with_context(|| {
+        format!(
+            "cannot read CEF framework directory {}",
+            directory.display()
+        )
+    })? {
+        let entry = entry?;
+        let source = entry.path();
+        if source.is_dir() {
+            copy_macos_framework_dir(framework, &source, staging_dir, report)?;
+            continue;
+        }
+        if !source.is_file() {
+            continue;
+        }
+        let relative = source
+            .strip_prefix(framework)
+            .expect("framework entry must remain under framework root");
+        let relative_string = Path::new(MAC_FRAMEWORK_DIR)
+            .join(relative)
+            .to_string_lossy()
+            .replace('\\', "/");
+        copy_into(staging_dir, &relative_string, &source)?;
+        if source.file_name().is_some_and(|name| name == "locale.pak")
+            || relative
+                .components()
+                .any(|component| component.as_os_str() == LOCALES_DIR)
+        {
+            report.locale_count += 1;
+        }
+        report.runtime_files.push(relative_string);
+    }
+    Ok(())
 }
 
 /// File names (not directories) directly inside `dir`.
@@ -345,8 +427,54 @@ mod tests {
         assert!(
             required_runtime_files("x86_64-unknown-linux-gnu").contains(&"libcef.so".to_string())
         );
+        assert!(required_runtime_files("aarch64-apple-darwin").contains(
+            &"Chromium Embedded Framework.framework/Chromium Embedded Framework".to_string()
+        ));
+    }
+
+    #[test]
+    fn stages_macos_framework_with_resources_and_locales() {
+        let temp = tempfile::tempdir().unwrap();
+        let dist = temp.path().join("cef");
+        let framework = dist.join(RELEASE_DIR).join(MAC_FRAMEWORK_DIR);
+        let resources = framework.join("Resources");
+        fs::create_dir_all(resources.join("en.lproj")).unwrap();
+        fs::create_dir_all(dist.join("include")).unwrap();
+        fs::write(
+            dist.join("include/cef_version.h"),
+            "#define CEF_VERSION \"150.0.11+gtest+chromium-150.0.0.0\"\n",
+        )
+        .unwrap();
+        fs::write(
+            dist.join("archive.json"),
+            "{\"name\":\"cef_binary_150.0.11+gtest_macosarm64.tar.bz2\"}",
+        )
+        .unwrap();
+        for required in required_runtime_files("aarch64-apple-darwin") {
+            let relative = Path::new(&required)
+                .strip_prefix(MAC_FRAMEWORK_DIR)
+                .unwrap();
+            let path = framework.join(relative);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, b"x").unwrap();
+        }
+        fs::write(resources.join("en.lproj/locale.pak"), b"x").unwrap();
+
+        let staging = temp.path().join("stage");
+        fs::create_dir_all(&staging).unwrap();
+        let report = stage_cef(&staging, &dist, "aarch64-apple-darwin").unwrap();
+        assert_eq!(report.locale_count, 1);
         assert!(
-            required_runtime_files("aarch64-apple-darwin").contains(&"libcef.dylib".to_string())
+            staging
+                .join(MAC_FRAMEWORK_DIR)
+                .join("Resources/resources.pak")
+                .is_file()
+        );
+        assert!(
+            staging
+                .join(MAC_FRAMEWORK_DIR)
+                .join("Resources/en.lproj/locale.pak")
+                .is_file()
         );
     }
 }

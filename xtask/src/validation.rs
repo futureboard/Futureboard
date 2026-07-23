@@ -107,8 +107,8 @@ fn check_plugin_naming(staging_dir: &Path, triple: &str) -> Result<()> {
     Ok(())
 }
 
-/// The shared CEF runtime is present flat beside the binary, with a populated
-/// `locales/`.
+/// The shared CEF runtime is complete: flat with `locales/` on Windows/Linux,
+/// or as a framework with `.lproj` locales on macOS.
 fn check_cef_layout(staging_dir: &Path, triple: &str) -> Result<()> {
     for required in required_runtime_files(triple) {
         let path = staging_dir.join(&required);
@@ -119,11 +119,26 @@ fn check_cef_layout(staging_dir: &Path, triple: &str) -> Result<()> {
             );
         }
     }
-    let locales = staging_dir.join(LOCALES_DIR);
-    let populated = locales.is_dir()
-        && fs::read_dir(&locales)
-            .map(|mut entries| entries.next().is_some())
-            .unwrap_or(false);
+    let locales = if triple.ends_with("apple-darwin") {
+        staging_dir.join("Chromium Embedded Framework.framework/Resources")
+    } else {
+        staging_dir.join(LOCALES_DIR)
+    };
+    let populated = if triple.ends_with("apple-darwin") {
+        fs::read_dir(&locales)
+            .map(|entries| {
+                entries.filter_map(Result::ok).any(|entry| {
+                    entry.path().extension().is_some_and(|ext| ext == "lproj")
+                        && entry.path().join("locale.pak").is_file()
+                })
+            })
+            .unwrap_or(false)
+    } else {
+        locales.is_dir()
+            && fs::read_dir(&locales)
+                .map(|mut entries| entries.next().is_some())
+                .unwrap_or(false)
+    };
     if !populated {
         bail!(
             "required CEF `locales/` directory missing or empty: {}",

@@ -50,10 +50,15 @@ mkdir -p "$MACOS" "$RESOURCES" "$FRAMEWORKS"
 # Existing Info.plist
 cp "$PLIST_SRC" "$CONTENTS/Info.plist"
 
-# Preserve the complete validated xtask runtime layout beside the executable.
-# This includes helper processes, CEF files/locales, built-in plugins, runtime
-# libraries and build-info.json.
+# Preserve the validated xtask runtime layout, then place CEF in the standard
+# macOS framework location expected by cef-rs' library loader.
 cp -a "$PACKAGE_DIR/." "$MACOS/"
+CEF_FRAMEWORK="$MACOS/Chromium Embedded Framework.framework"
+if [[ ! -d "$CEF_FRAMEWORK" ]]; then
+  echo "error: staged CEF framework not found: $CEF_FRAMEWORK" >&2
+  exit 1
+fi
+mv "$CEF_FRAMEWORK" "$FRAMEWORKS/"
 chmod +x "$MACOS/$APP_EXECUTABLE_NAME"
 chmod +x "$MACOS/FutureboardPluginHostX64" "$MACOS/FutureboardPluginScanner"
 

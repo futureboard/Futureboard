@@ -82,6 +82,12 @@ fn main() {
         DriveModel::SuperDrive,
         DriveModel::MetalCore,
         DriveModel::TightRift,
+        DriveModel::Screamer,
+        DriveModel::Minotaur,
+        DriveModel::Rat,
+        DriveModel::Breaker,
+        DriveModel::Fuzz,
+        DriveModel::Centurion,
     ];
     let sines = [100.0f32, 440.0, 1_000.0];
 
@@ -103,7 +109,9 @@ fn main() {
             );
         }
         // Impulse train (transient behavior) and low-level noise.
-        let imp = |n: usize| if n % 4_800 == 0 { 0.9 } else { 0.0 };
+        let imp = |n: usize| {
+            if n.is_multiple_of(4_800) { 0.9 } else { 0.0 }
+        };
         let s = stats(&render(model, 8.0, &imp));
         println!(
             "   impulses        peak={:>6.3}  rms={:>6.3}  crest={:>5.1} dB  dc={:>+8.5}",

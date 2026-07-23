@@ -41,7 +41,7 @@ fn sanitize(x: f32) -> f32 {
 
 /// One-pole DC blocker (~18 Hz), stereo. `y = x - x1 + r·y1`.
 #[derive(Debug, Clone)]
-struct DcBlock {
+pub(super) struct DcBlock {
     r: f32,
     x1_l: f32,
     y1_l: f32,
@@ -50,7 +50,7 @@ struct DcBlock {
 }
 
 impl DcBlock {
-    fn new(sample_rate: f32) -> Self {
+    pub(super) fn new(sample_rate: f32) -> Self {
         let mut s = Self {
             r: 0.0,
             x1_l: 0.0,
@@ -62,12 +62,12 @@ impl DcBlock {
         s
     }
 
-    fn set_sample_rate(&mut self, sample_rate: f32) {
+    pub(super) fn set_sample_rate(&mut self, sample_rate: f32) {
         let sr = sample_rate.max(1.0);
         self.r = (1.0 - (2.0 * std::f32::consts::PI * 18.0) / sr).clamp(0.9, 0.999_99);
     }
 
-    fn reset(&mut self) {
+    pub(super) fn reset(&mut self) {
         self.x1_l = 0.0;
         self.y1_l = 0.0;
         self.x1_r = 0.0;
@@ -75,7 +75,7 @@ impl DcBlock {
     }
 
     #[inline]
-    fn run(&mut self, l: f32, r: f32) -> (f32, f32) {
+    pub(super) fn run(&mut self, l: f32, r: f32) -> (f32, f32) {
         let yl = l - self.x1_l + self.r * self.y1_l;
         let yr = r - self.x1_r + self.r * self.y1_r;
         self.x1_l = l;

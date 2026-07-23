@@ -1,66 +1,238 @@
-//! Studio plate reverb — a Freeverb-style bank of parallel comb filters into
-//! series all-pass diffusers (the classic Schroeder/Moorer topology popularised
-//! by Jezar's public-domain Freeverb). All buffers are preallocated.
+//! Studio reverb — a Freeverb-style bank of parallel comb filters into series
+//! all-pass diffusers (the classic Schroeder/Moorer topology popularised by
+//! Jezar's public-domain Freeverb), fronted by a fractional predelay and, for
+//! the Shimmer voicing, an octave-up granular pitch shifter folded into the
+//! comb feedback. Four voicings — Plate, Room, Hall, Shimmer — share one
+//! preallocated buffer set; a model change only re-targets smoothed voicing
+//! parameters (damping, loop gain, predelay tap, shimmer amount), never
+//! reallocates, so it is safe from the audio-producer thread.
+//!
+//! All buffers are allocated in [`PlateReverb::new`] / `rebuild` (control
+//! thread). [`PlateReverb::process`] performs no allocation or locking.
 
 use builtin_dsp_core::mix;
 
+use super::ReverbModel;
 use super::smooth::Smoothed;
 
-/// Glide time for decay/mix edits (see `smooth.rs`).
+/// Glide time for decay/mix/voicing edits (see `smooth.rs`).
 const SMOOTH_SECONDS: f32 = 0.010;
+/// Longer glide for predelay so a model swap slides the tap instead of clicking.
+const PREDELAY_SMOOTH_SECONDS: f32 = 0.060;
 
-// Freeverb tunings in samples at 44.1 kHz; scaled to the runtime rate.
+// Freeverb tunings in samples at 44.1 kHz; scaled to the runtime rate. Hall and
+// Shimmer read the buffers at a longer effective size via a scale tap (see
+// `size` in the voicing), so the buffers are allocated at the largest scale.
 const COMB_TUNINGS: [usize; 8] = [1116, 1188, 1277, 1356, 1422, 1491, 1557, 1617];
 const ALLPASS_TUNINGS: [usize; 4] = [556, 441, 341, 225];
 const STEREO_SPREAD: usize = 23;
 
+/// Comb buffers are allocated at this multiple of the base tuning so the larger
+/// voicings (Hall/Shimmer) have real modal length to read into.
+const SIZE_HEADROOM: f32 = 1.6;
+/// Longest predelay any voicing asks for, in seconds — sizes the predelay line.
+const MAX_PREDELAY_S: f32 = 0.060;
+
 const FIXED_GAIN: f32 = 0.015;
-const SCALE_ROOM: f32 = 0.28;
-const OFFSET_ROOM: f32 = 0.7;
 const SCALE_DAMP: f32 = 0.4;
 const ALLPASS_FEEDBACK: f32 = 0.5;
-const DAMP: f32 = 0.28;
+
+/// Per-voicing tuning. A model switch re-targets these; nothing reallocates.
+#[derive(Debug, Clone, Copy)]
+struct Voicing {
+    /// Predelay before the reverb, in seconds.
+    predelay_s: f32,
+    /// Fraction of the allocated comb length actually used (0..1]. Smaller =
+    /// tighter, faster echo density (Room); larger = longer, more spacious
+    /// (Hall/Shimmer).
+    size: f32,
+    /// Loop-gain range the decay knob maps into: `offset + amount * scale`.
+    fb_offset: f32,
+    fb_scale: f32,
+    /// Comb damping (HF loss per pass): darker tails at higher values.
+    damp: f32,
+}
+
+impl Voicing {
+    fn for_model(model: ReverbModel) -> Self {
+        match model {
+            // Bright, dense, immediate — the original plate.
+            ReverbModel::Plate => Self {
+                predelay_s: 0.0,
+                size: 0.72,
+                fb_offset: 0.70,
+                fb_scale: 0.28,
+                damp: 0.28,
+            },
+            // Short, damped, early — a tight tracking room.
+            ReverbModel::Room => Self {
+                predelay_s: 0.008,
+                size: 0.55,
+                fb_offset: 0.64,
+                fb_scale: 0.24,
+                damp: 0.55,
+            },
+            // Long predelay, long tail, gentle damping — a large hall.
+            ReverbModel::Hall => Self {
+                predelay_s: 0.028,
+                size: 1.0,
+                fb_offset: 0.74,
+                fb_scale: 0.245,
+                damp: 0.36,
+            },
+            // Hall-sized bed with an octave-up voice regenerating in the tail.
+            ReverbModel::Shimmer => Self {
+                predelay_s: 0.020,
+                size: 0.94,
+                fb_offset: 0.74,
+                fb_scale: 0.235,
+                damp: 0.40,
+            },
+        }
+    }
+}
+
+/// Fractional delay line with linear-interpolated taps, for the predelay and
+/// the shimmer pitch shifter. Preallocated; reads never allocate.
+#[derive(Debug, Clone)]
+struct DelayLine {
+    buffer: Vec<f32>,
+    write: usize,
+}
+
+impl DelayLine {
+    fn new(len: usize) -> Self {
+        Self {
+            buffer: vec![0.0; len.max(1)],
+            write: 0,
+        }
+    }
+
+    fn clear(&mut self) {
+        self.buffer.fill(0.0);
+        self.write = 0;
+    }
+
+    #[inline]
+    fn push(&mut self, x: f32) {
+        self.buffer[self.write] = x;
+        self.write += 1;
+        if self.write >= self.buffer.len() {
+            self.write = 0;
+        }
+    }
+
+    /// Read `delay` samples behind the write head (fractional, linear interp).
+    #[inline]
+    fn read(&self, delay: f32) -> f32 {
+        let len = self.buffer.len();
+        let d = delay.clamp(1.0, (len - 1) as f32);
+        let base = d.floor();
+        let frac = d - base;
+        let i0 = (self.write + len - base as usize) % len;
+        let i1 = (i0 + len - 1) % len;
+        self.buffer[i0] * (1.0 - frac) + self.buffer[i1] * frac
+    }
+}
+
+/// Octave-up granular pitch shifter: two delay taps sweeping in antiphase with
+/// a sinusoidal crossfade (the Bode/Dattorro two-grain shifter). Feeds the
+/// shimmer voicing's regenerating tail. Allocation-free in `process`.
+#[derive(Debug, Clone)]
+struct OctaveUp {
+    line: DelayLine,
+    window: f32,
+    phase: f32,
+    inc: f32,
+}
+
+impl OctaveUp {
+    fn new(sample_rate: f32) -> Self {
+        // ~50 ms grain window: long enough that the octave transposition reads
+        // smoothly, short enough that the tail stays tight.
+        let window = (sample_rate * 0.050).max(2.0);
+        Self {
+            line: DelayLine::new(window as usize + 4),
+            window,
+            phase: 0.0,
+            // Octave up (ratio 2): the read delay sweeps one window per grain,
+            // so the read head advances at twice the write rate.
+            inc: 1.0 / window,
+        }
+    }
+
+    fn clear(&mut self) {
+        self.line.clear();
+        self.phase = 0.0;
+    }
+
+    #[inline]
+    fn process(&mut self, x: f32) -> f32 {
+        self.line.push(x);
+        self.phase -= self.inc;
+        if self.phase < 0.0 {
+            self.phase += 1.0;
+        }
+        let p2 = if self.phase + 0.5 >= 1.0 {
+            self.phase - 0.5
+        } else {
+            self.phase + 0.5
+        };
+        let d1 = self.phase * self.window + 1.0;
+        let d2 = p2 * self.window + 1.0;
+        // sin() crossfade is constant-power across the grain overlap.
+        let g1 = (std::f32::consts::PI * self.phase).sin();
+        let g2 = (std::f32::consts::PI * p2).sin();
+        self.line.read(d1) * g1 + self.line.read(d2) * g2
+    }
+}
 
 #[derive(Debug, Clone)]
 struct Comb {
     buffer: Vec<f32>,
-    index: usize,
+    write: usize,
     filter_store: f32,
-    damp1: f32,
-    damp2: f32,
 }
 
 impl Comb {
     fn new(size: usize) -> Self {
         Self {
             buffer: vec![0.0; size.max(1)],
-            index: 0,
+            write: 0,
             filter_store: 0.0,
-            damp1: DAMP * SCALE_DAMP,
-            damp2: 1.0 - DAMP * SCALE_DAMP,
         }
     }
 
     fn clear(&mut self) {
         self.buffer.fill(0.0);
         self.filter_store = 0.0;
-        self.index = 0;
+        self.write = 0;
     }
 
-    /// `feedback` is passed per sample so the decay knob can glide instead of
-    /// jumping every comb's loop gain at once (audible thump on drags).
+    /// `read_len` selects the effective loop length (≤ allocated), so the
+    /// voicing can trade modal density without reallocating. `feedback` and the
+    /// damping coefficients are passed per sample so decay/voicing edits glide.
     #[inline]
-    fn process(&mut self, input: f32, feedback: f32) -> f32 {
-        let output = self.buffer[self.index];
-        self.filter_store = output * self.damp2 + self.filter_store * self.damp1;
+    fn process(
+        &mut self,
+        input: f32,
+        read_len: usize,
+        feedback: f32,
+        damp1: f32,
+        damp2: f32,
+    ) -> f32 {
+        let len = self.buffer.len();
+        let read = (self.write + len - read_len.clamp(1, len)) % len;
+        let output = self.buffer[read];
+        self.filter_store = output * damp2 + self.filter_store * damp1;
         // Flush denormals to keep the tail cheap.
         if self.filter_store.abs() < 1.0e-18 {
             self.filter_store = 0.0;
         }
-        self.buffer[self.index] = input + self.filter_store * feedback;
-        self.index += 1;
-        if self.index >= self.buffer.len() {
-            self.index = 0;
+        self.buffer[self.write] = input + self.filter_store * feedback;
+        self.write += 1;
+        if self.write >= len {
+            self.write = 0;
         }
         output
     }
@@ -105,21 +277,47 @@ pub(super) struct PlateReverb {
     combs_r: Vec<Comb>,
     allpass_l: Vec<Allpass>,
     allpass_r: Vec<Allpass>,
+    /// Base (unscaled, sample-rate-adjusted) comb read lengths, one per comb.
+    comb_base_l: Vec<usize>,
+    comb_base_r: Vec<usize>,
+    predelay_l: DelayLine,
+    predelay_r: DelayLine,
+    shimmer_l: OctaveUp,
+    shimmer_r: OctaveUp,
     feedback: Smoothed,
     mix: Smoothed,
+    damp: Smoothed,
+    size: Smoothed,
+    shimmer: Smoothed,
+    predelay_samples: Smoothed,
+    /// Octave-up energy carried into the next block's comb input, so the
+    /// transposed voice regenerates. Bounded to keep the shimmer loop stable.
+    shimmer_fb: f32,
 }
 
 impl PlateReverb {
     pub(super) fn new(sample_rate: f32) -> Self {
         let sr = sample_rate.max(1.0);
+        let base = Voicing::for_model(ReverbModel::Plate);
         let mut reverb = Self {
             sample_rate: sr,
             combs_l: Vec::new(),
             combs_r: Vec::new(),
             allpass_l: Vec::new(),
             allpass_r: Vec::new(),
-            feedback: Smoothed::new(sr, SMOOTH_SECONDS, 0.5),
+            comb_base_l: Vec::new(),
+            comb_base_r: Vec::new(),
+            predelay_l: DelayLine::new(1),
+            predelay_r: DelayLine::new(1),
+            shimmer_l: OctaveUp::new(sr),
+            shimmer_r: OctaveUp::new(sr),
+            feedback: Smoothed::new(sr, SMOOTH_SECONDS, base.fb_offset),
             mix: Smoothed::new(sr, SMOOTH_SECONDS, 0.55),
+            damp: Smoothed::new(sr, SMOOTH_SECONDS, base.damp),
+            size: Smoothed::new(sr, SMOOTH_SECONDS, base.size),
+            shimmer: Smoothed::new(sr, SMOOTH_SECONDS, 0.0),
+            predelay_samples: Smoothed::new(sr, PREDELAY_SMOOTH_SECONDS, 1.0),
+            shimmer_fb: 0.0,
         };
         reverb.rebuild();
         reverb
@@ -129,6 +327,13 @@ impl PlateReverb {
         self.sample_rate = sample_rate.max(1.0);
         self.feedback.set_time(self.sample_rate, SMOOTH_SECONDS);
         self.mix.set_time(self.sample_rate, SMOOTH_SECONDS);
+        self.damp.set_time(self.sample_rate, SMOOTH_SECONDS);
+        self.size.set_time(self.sample_rate, SMOOTH_SECONDS);
+        self.shimmer.set_time(self.sample_rate, SMOOTH_SECONDS);
+        self.predelay_samples
+            .set_time(self.sample_rate, PREDELAY_SMOOTH_SECONDS);
+        self.shimmer_l = OctaveUp::new(self.sample_rate);
+        self.shimmer_r = OctaveUp::new(self.sample_rate);
         self.rebuild();
     }
 
@@ -139,50 +344,99 @@ impl PlateReverb {
         for a in self.allpass_l.iter_mut().chain(self.allpass_r.iter_mut()) {
             a.clear();
         }
+        self.predelay_l.clear();
+        self.predelay_r.clear();
+        self.shimmer_l.clear();
+        self.shimmer_r.clear();
+        self.shimmer_fb = 0.0;
         self.feedback.snap();
         self.mix.snap();
+        self.damp.snap();
+        self.size.snap();
+        self.shimmer.snap();
+        self.predelay_samples.snap();
     }
 
-    /// Allocate all comb/allpass buffers for the current sample rate.
+    /// Allocate all buffers at the largest voicing size for the current sample
+    /// rate. Runs on construction / sample-rate change only.
     fn rebuild(&mut self) {
         let scale = self.sample_rate / 44_100.0;
-        let s = |len: usize| ((len as f32 * scale) as usize).max(1);
+        // Allocate with size headroom so Hall/Shimmer have real length to read.
+        let alloc = |len: usize| ((len as f32 * scale * SIZE_HEADROOM) as usize).max(1);
+        let base = |len: usize| ((len as f32 * scale) as usize).max(1);
 
-        self.combs_l = COMB_TUNINGS.iter().map(|&t| Comb::new(s(t))).collect();
+        self.combs_l = COMB_TUNINGS.iter().map(|&t| Comb::new(alloc(t))).collect();
         self.combs_r = COMB_TUNINGS
             .iter()
-            .map(|&t| Comb::new(s(t + STEREO_SPREAD)))
+            .map(|&t| Comb::new(alloc(t + STEREO_SPREAD)))
+            .collect();
+        self.comb_base_l = COMB_TUNINGS.iter().map(|&t| base(t)).collect();
+        self.comb_base_r = COMB_TUNINGS
+            .iter()
+            .map(|&t| base(t + STEREO_SPREAD))
             .collect();
         self.allpass_l = ALLPASS_TUNINGS
             .iter()
-            .map(|&t| Allpass::new(s(t)))
+            .map(|&t| Allpass::new(base(t)))
             .collect();
         self.allpass_r = ALLPASS_TUNINGS
             .iter()
-            .map(|&t| Allpass::new(s(t + STEREO_SPREAD)))
+            .map(|&t| Allpass::new(base(t + STEREO_SPREAD)))
             .collect();
+
+        let predelay_len = (self.sample_rate * MAX_PREDELAY_S) as usize + 2;
+        self.predelay_l = DelayLine::new(predelay_len);
+        self.predelay_r = DelayLine::new(predelay_len);
     }
 
-    /// `decay_s` 0.5..15, `mix` 0..100 %.
-    pub(super) fn configure(&mut self, decay_s: f32, mix: f32) {
-        let room = ((decay_s - 0.5) / 14.5).clamp(0.0, 1.0);
-        self.feedback.set_target(room * SCALE_ROOM + OFFSET_ROOM); // 0.70 .. 0.98
+    /// `model` selects the voicing; `decay_s` is 0.5..15 and the percentage
+    /// controls are 0..100. `shimmer` is ignored by non-Shimmer models.
+    pub(super) fn configure(&mut self, model: ReverbModel, decay_s: f32, mix: f32, shimmer: f32) {
+        let v = Voicing::for_model(model);
+        let amount = ((decay_s - 0.5) / 14.5).clamp(0.0, 1.0);
+        self.feedback
+            .set_target((v.fb_offset + amount * v.fb_scale).clamp(0.0, 0.985));
         self.mix.set_target((mix / 100.0).clamp(0.0, 1.0));
+        self.damp.set_target(v.damp);
+        self.size.set_target(v.size);
+        self.shimmer.set_target(if model == ReverbModel::Shimmer {
+            (shimmer / 100.0).clamp(0.0, 1.0)
+        } else {
+            0.0
+        });
+        self.predelay_samples
+            .set_target((v.predelay_s * self.sample_rate).max(1.0));
     }
 
     #[inline]
     pub(super) fn process(&mut self, left: f32, right: f32) -> (f32, f32) {
-        let input = (left + right) * FIXED_GAIN;
         let feedback = self.feedback.tick();
         let mix_amount = self.mix.tick();
+        let damp = self.damp.tick();
+        let size = self.size.tick().clamp(0.2, 1.0);
+        let shimmer = self.shimmer.tick();
+        let predelay = self.predelay_samples.tick();
+
+        let damp1 = damp * SCALE_DAMP;
+        let damp2 = 1.0 - damp1;
+
+        // Predelay the dry sum before the reverb bank; the shimmer voice's
+        // octave-up energy from the previous sample re-enters here.
+        self.predelay_l.push(left);
+        self.predelay_r.push(right);
+        let pd_l = self.predelay_l.read(predelay);
+        let pd_r = self.predelay_r.read(predelay);
+        let input = (pd_l + pd_r) * FIXED_GAIN + self.shimmer_fb;
 
         let mut wet_l = 0.0;
-        for comb in &mut self.combs_l {
-            wet_l += comb.process(input, feedback);
+        for (comb, &base) in self.combs_l.iter_mut().zip(self.comb_base_l.iter()) {
+            let read_len = ((base as f32 * size) as usize).max(1);
+            wet_l += comb.process(input, read_len, feedback, damp1, damp2);
         }
         let mut wet_r = 0.0;
-        for comb in &mut self.combs_r {
-            wet_r += comb.process(input, feedback);
+        for (comb, &base) in self.combs_r.iter_mut().zip(self.comb_base_r.iter()) {
+            let read_len = ((base as f32 * size) as usize).max(1);
+            wet_r += comb.process(input, read_len, feedback, damp1, damp2);
         }
 
         for allpass in &mut self.allpass_l {
@@ -190,6 +444,19 @@ impl PlateReverb {
         }
         for allpass in &mut self.allpass_r {
             wet_r = allpass.process(wet_r);
+        }
+
+        // Shimmer: transpose the diffused tail an octave up and carry it into
+        // the next sample's comb input, so the shifted voice regenerates and
+        // ascends. Off (0) for every non-Shimmer voicing. The carry is bounded
+        // and scaled well below unity so the second loop can only sustain, not
+        // run away, on top of the comb bank's own sub-unity feedback.
+        if shimmer > 1.0e-4 {
+            let up = (self.shimmer_l.process(wet_l) + self.shimmer_r.process(wet_r)) * 0.5;
+            let fb = (up * shimmer * FIXED_GAIN * 8.0).clamp(-4.0, 4.0);
+            self.shimmer_fb = if fb.is_finite() { fb } else { 0.0 };
+        } else {
+            self.shimmer_fb = 0.0;
         }
 
         (mix(left, wet_l, mix_amount), mix(right, wet_r, mix_amount))

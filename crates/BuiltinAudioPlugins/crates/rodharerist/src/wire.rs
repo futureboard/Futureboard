@@ -82,6 +82,8 @@ pub const UI_PARAM_IDS: &[&str] = &[
     "wah_res",           // 66
     "wah_sens",          // 67
     "cab_mic_type",      // 68
+    "reverb_model",      // 69
+    "reverb_shimmer",    // 70
 ];
 
 /// String id → wire index. Linear scan over a small table — control/UI
@@ -100,8 +102,8 @@ pub fn ui_param_id(index: u32) -> Option<&'static str> {
 mod tests {
     use super::*;
     use crate::dsp::{
-        AmpModel, CabModel, DriveModel, Dsp, ModModel, StageKind, ToneEngineKind, WahModel,
-        apply_to_params, default_params, ui_values,
+        AmpModel, CabModel, DriveModel, Dsp, ModModel, ReverbModel, StageKind, ToneEngineKind,
+        WahModel, apply_to_params, default_params, ui_values,
     };
 
     #[test]
@@ -133,7 +135,7 @@ mod tests {
     /// accidental reorder/insert must fail here, loudly.
     #[test]
     fn wire_indices_are_pinned() {
-        assert_eq!(UI_PARAM_IDS.len(), 69);
+        assert_eq!(UI_PARAM_IDS.len(), 71);
         assert_eq!(ui_param_index("power"), Some(0));
         assert_eq!(ui_param_index("gate_on"), Some(3));
         assert_eq!(ui_param_index("drive_model"), Some(10));
@@ -163,6 +165,8 @@ mod tests {
         assert_eq!(ui_param_index("wah_res"), Some(66));
         assert_eq!(ui_param_index("wah_sens"), Some(67));
         assert_eq!(ui_param_index("cab_mic_type"), Some(68));
+        assert_eq!(ui_param_index("reverb_model"), Some(69));
+        assert_eq!(ui_param_index("reverb_shimmer"), Some(70));
     }
 
     /// `ui_values` must cover every wire id except `clear_clip` (an action,
@@ -198,6 +202,8 @@ mod tests {
         src.amp_model = AmpModel::Recto;
         src.drive_model = DriveModel::Fuzz;
         src.cab_model = CabModel::Tweed1x12;
+        src.reverb_model = ReverbModel::Shimmer;
+        src.reverb_shimmer = 37.0;
         src.mod_model = ModModel::Phaser;
         src.wah_model = WahModel::TouchWah;
         src.wah_on = false;
@@ -277,6 +283,14 @@ mod tests {
                 CabModel::from_model_id(id),
                 Some(CabModel::ALL[i]),
                 "cab `{id}`"
+            );
+        }
+        let reverb = ["plate", "room", "hall", "shimmer"];
+        for (i, id) in reverb.iter().enumerate() {
+            assert_eq!(
+                ReverbModel::from_model_id(id),
+                Some(ReverbModel::ALL[i]),
+                "reverb `{id}`"
             );
         }
         let mod_models = ["chorus", "phaser", "flanger", "tremolo"];

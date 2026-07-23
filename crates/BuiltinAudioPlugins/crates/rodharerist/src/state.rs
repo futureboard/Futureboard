@@ -97,4 +97,16 @@ mod tests {
         let restored: RodhareistState = serde_json::from_value(value).unwrap();
         assert_eq!(restored.params.mic_model, MicModel::Dynamic);
     }
+
+    #[test]
+    fn legacy_state_without_shimmer_amount_keeps_original_voicing() {
+        let state = RodhareistState::new(default_params());
+        let mut value = serde_json::to_value(state).unwrap();
+        value["params"]
+            .as_object_mut()
+            .unwrap()
+            .remove("reverb_shimmer");
+        let restored: RodhareistState = serde_json::from_value(value).unwrap();
+        assert_eq!(restored.params.reverb_shimmer, 62.0);
+    }
 }

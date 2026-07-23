@@ -524,6 +524,21 @@ cpal = { git = "https://github.com/futureboard/cpal" }
 # Profiles
 # =============================================================================
 
+# Realtime DSP must run optimized even in dev builds: NAM neural inference
+# (nam-rs WaveNet/LSTM) and the 4×/8× oversampled amp core cannot hit realtime
+# at opt-level 0 — debug builds audibly stutter without these overrides.
+[profile.dev.package.nam-rs]
+opt-level = 3
+
+[profile.dev.package.rodharerist]
+opt-level = 3
+
+[profile.dev.package.builtin_dsp_core]
+opt-level = 3
+
+[profile.dev.package.biquad]
+opt-level = 3
+
 [profile.release]
 opt-level = 3
 lto = true

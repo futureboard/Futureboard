@@ -277,6 +277,15 @@ pub enum CabModel {
     Oversized4x12,
     /// Extended-low-frequency bass cabinet.
     BassCabinet,
+    /// "British Stack 4x12" — mid-forward greenback-voiced closed 4x12
+    /// (Marshall-1960-style, trademark-free voicing).
+    Brit4x12,
+    /// "Uberkab 4x12" — tight, scooped German high-gain closed 4x12
+    /// (ENGL-style voicing).
+    Uber4x12,
+    /// "SLO Custom 4x12" — smooth, singing high-gain closed 4x12
+    /// (Soldano-style voicing).
+    Slo4x12,
 }
 
 impl CabModel {
@@ -289,6 +298,9 @@ impl CabModel {
         Self::Vintage2x12,
         Self::Oversized4x12,
         Self::BassCabinet,
+        Self::Brit4x12,
+        Self::Uber4x12,
+        Self::Slo4x12,
     ];
 
     pub fn from_model_id(id: &str) -> Option<Self> {
@@ -301,6 +313,9 @@ impl CabModel {
             "vintage_212" => Some(Self::Vintage2x12),
             "oversized_412" => Some(Self::Oversized4x12),
             "bass_cabinet" => Some(Self::BassCabinet),
+            "brit_412" => Some(Self::Brit4x12),
+            "uber_412" => Some(Self::Uber4x12),
+            "slo_412" => Some(Self::Slo4x12),
             _ => None,
         }
     }
@@ -401,6 +416,42 @@ impl WahModel {
     }
 }
 
+/// Reverb voicing in the Reverb slot, matching the editor's `verb` models. All
+/// share the Decay/Mix knobs (`reverb_*` wire ids), like the Mod slot's models
+/// share `chorus_*`.
+///
+/// APPEND-ONLY: index into `ALL` is the `reverb_model` wire value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub enum ReverbModel {
+    /// "Studio Plate" — bright, dense, immediate metallic plate.
+    #[default]
+    Plate,
+    /// "Tracking Room" — short, damped, early — a tight room.
+    Room,
+    /// "Concert Hall" — long predelay and tail, spacious.
+    Hall,
+    /// "Shimmer" — hall bed with an octave-up voice regenerating in the tail.
+    Shimmer,
+}
+
+impl ReverbModel {
+    pub const ALL: &'static [Self] = &[Self::Plate, Self::Room, Self::Hall, Self::Shimmer];
+
+    pub fn from_model_id(id: &str) -> Option<Self> {
+        match id {
+            "plate" => Some(Self::Plate),
+            "room" => Some(Self::Room),
+            "hall" => Some(Self::Hall),
+            "shimmer" => Some(Self::Shimmer),
+            _ => None,
+        }
+    }
+
+    pub fn from_index(i: u32) -> Self {
+        Self::ALL.get(i as usize).copied().unwrap_or(Self::Plate)
+    }
+}
+
 /// Full parameter set. Knob ranges match `editorui/src/data.ts` one-to-one so the
 /// React UI and the bridge speak the same units.
 ///
@@ -445,6 +496,9 @@ pub struct Params {
     pub mod_model: ModModel,
     #[serde(default)]
     pub wah_model: WahModel,
+    /// Which algorithm the Reverb slot runs (shares the `reverb_*` knobs).
+    #[serde(default)]
+    pub reverb_model: ReverbModel,
 
     /// Which engine the Tone/Amp slot runs: Classic Amp, NAM Capture, or Bypass.
     /// Mutually exclusive — never more than one processes at a time.
@@ -480,9 +534,13 @@ pub struct Params {
     pub delay_fb: f32,      // 0..100 %
     pub delay_mix: f32,     // 0..100 %
 
-    // Plate reverb.
+    // Reverb.
     pub reverb_decay_s: f32, // 0.5..15
     pub reverb_mix: f32,     // 0..100 %
+    /// Octave-up feedback amount for the Shimmer model (0..100 %). Other
+    /// reverb models ignore it while preserving the value for model switches.
+    #[serde(default = "default_reverb_shimmer")]
+    pub reverb_shimmer: f32,
 
     // Cabinet.
     pub cab_mic: f32,  // 0..100 % (mic position / brightness)
@@ -531,6 +589,9 @@ pub struct Params {
 
 fn default_true() -> bool {
     true
+}
+fn default_reverb_shimmer() -> f32 {
+    62.0
 }
 fn default_comp_thresh() -> f32 {
     -24.0
@@ -582,6 +643,7 @@ pub fn default_params() -> Params {
         mic_model: MicModel::Dynamic,
         mod_model: ModModel::Chorus,
         wah_model: WahModel::CryWah,
+        reverb_model: ReverbModel::Plate,
         tone_engine: ToneEngineKind::Classic,
         stage_order: StageKind::default_path(),
         gate_thresh_db: -55.0,
@@ -602,6 +664,7 @@ pub fn default_params() -> Params {
         delay_mix: 30.0,
         reverb_decay_s: 8.5,
         reverb_mix: 55.0,
+        reverb_shimmer: default_reverb_shimmer(),
         cab_mic: 20.0,
         cab_dist: 40.0,
         wah_pos: default_wah_pos(),
@@ -798,6 +861,14 @@ pub fn descriptor() -> PluginDescriptor {
                 id: "reverb_mix",
                 name: "Reverb Mix",
                 default_value: 55.0,
+                min: 0.0,
+                max: 100.0,
+                unit: "%",
+            },
+            ParamDescriptor {
+                id: "reverb_shimmer",
+                name: "Shimmer",
+                default_value: 62.0,
                 min: 0.0,
                 max: 100.0,
                 unit: "%",
@@ -1099,6 +1170,7 @@ impl Dsp {
             mic_model: params.mic_model,
             mod_model: params.mod_model,
             wah_model: params.wah_model,
+            reverb_model: params.reverb_model,
             tone_engine: params.tone_engine,
             stage_order: sanitize_stage_order(params.stage_order),
             gate_thresh_db: clamp(params.gate_thresh_db, -80.0, 0.0),
@@ -1119,6 +1191,7 @@ impl Dsp {
             delay_mix: clamp(params.delay_mix, 0.0, 100.0),
             reverb_decay_s: clamp(params.reverb_decay_s, 0.5, 15.0),
             reverb_mix: clamp(params.reverb_mix, 0.0, 100.0),
+            reverb_shimmer: clamp(params.reverb_shimmer, 0.0, 100.0),
             cab_mic: clamp(params.cab_mic, 0.0, 100.0),
             cab_dist: clamp(params.cab_dist, 0.0, 100.0),
             wah_pos: clamp(params.wah_pos, 0.0, 10.0),
@@ -1198,10 +1271,15 @@ impl Dsp {
                 };
                 p.wah_model = m;
             }
+            "reverb" => {
+                let Some(m) = ReverbModel::from_model_id(model_id) else {
+                    return false;
+                };
+                p.reverb_model = m;
+            }
             // Single-algorithm stages: accept their canonical model ids.
             "gate" if model_id == "gate" => {}
             "delay" if model_id == "tape" => {}
-            "reverb" if model_id == "plate" => {}
             "comp" if model_id == "softknee" => {}
             "eq" if model_id == "parametric" => {}
             "cab" => {
@@ -1261,7 +1339,12 @@ impl Dsp {
             .configure(p.wah_model, p.wah_pos, p.wah_res, p.wah_sens);
         self.delay
             .configure(p.delay_time_ms, p.delay_fb, p.delay_mix);
-        self.reverb.configure(p.reverb_decay_s, p.reverb_mix);
+        self.reverb.configure(
+            p.reverb_model,
+            p.reverb_decay_s,
+            p.reverb_mix,
+            p.reverb_shimmer,
+        );
         self.cab
             .configure(p.cab_model, p.mic_model, p.cab_mic, p.cab_dist);
     }
@@ -1359,6 +1442,7 @@ pub fn apply_to_params(p: &mut Params, id: &str, value: f32) -> bool {
         "drive_model" => p.drive_model = DriveModel::from_index(value.round() as u32),
         "mod_model" => p.mod_model = ModModel::from_index(value.round() as u32),
         "wah_model" => p.wah_model = WahModel::from_index(value.round() as u32),
+        "reverb_model" => p.reverb_model = ReverbModel::from_index(value.round() as u32),
         "amp_model" => {
             p.amp_model = AmpModel::from_index(value.round() as u32);
             p.tone_engine = ToneEngineKind::Classic;
@@ -1394,6 +1478,7 @@ pub fn apply_to_params(p: &mut Params, id: &str, value: f32) -> bool {
         "delay_mix" => p.delay_mix = value,
         "reverb_decay" => p.reverb_decay_s = value,
         "reverb_mix" => p.reverb_mix = value,
+        "reverb_shimmer" => p.reverb_shimmer = value,
         "cab_mic" => p.cab_mic = value,
         "cab_dist" => p.cab_dist = value,
         "wah_pos" => p.wah_pos = value,
@@ -1431,7 +1516,7 @@ pub fn ui_values(p: &Params) -> Vec<(&'static str, f32)> {
     fn model_index<T: PartialEq + Copy>(all: &[T], value: T) -> f32 {
         all.iter().position(|m| *m == value).unwrap_or(0) as f32
     }
-    let mut out = Vec::with_capacity(70);
+    let mut out = Vec::with_capacity(71);
     out.push(("power", b(p.power)));
     out.push(("input_trim", p.input_trim_db));
     out.push(("output_trim", p.output_trim_db));
@@ -1451,6 +1536,10 @@ pub fn ui_values(p: &Params) -> Vec<(&'static str, f32)> {
     out.push(("cab_model", model_index(CabModel::ALL, p.cab_model)));
     out.push(("mod_model", model_index(ModModel::ALL, p.mod_model)));
     out.push(("wah_model", model_index(WahModel::ALL, p.wah_model)));
+    out.push((
+        "reverb_model",
+        model_index(ReverbModel::ALL, p.reverb_model),
+    ));
     out.push(("tone_engine", p.tone_engine.index() as f32));
     const PATH_SLOT_IDS: [&str; PATH_SLOTS] = [
         "path_slot_0",
@@ -1488,6 +1577,7 @@ pub fn ui_values(p: &Params) -> Vec<(&'static str, f32)> {
     out.push(("delay_mix", p.delay_mix));
     out.push(("reverb_decay", p.reverb_decay_s));
     out.push(("reverb_mix", p.reverb_mix));
+    out.push(("reverb_shimmer", p.reverb_shimmer));
     out.push(("cab_mic", p.cab_mic));
     out.push(("cab_dist", p.cab_dist));
     out.push(("cab_mic_type", p.mic_model.index() as f32));
@@ -2005,6 +2095,7 @@ mod tests {
             "delay_mix",
             "reverb_decay",
             "reverb_mix",
+            "reverb_shimmer",
             "cab_mic",
             "cab_dist",
             // Global gain staging (editorui/src/globals.ts).
@@ -2079,6 +2170,37 @@ mod tests {
             tail = tail.max(l.abs()).max(r.abs());
         }
         assert!(tail < 0.2, "reverb tail did not decay: {tail}");
+    }
+
+    /// Every reverb voicing must stay finite and bounded under sustained
+    /// excitation — the Shimmer voicing has a second (octave-up) feedback path,
+    /// so this specifically guards it from running away.
+    #[test]
+    fn all_reverb_models_stay_bounded() {
+        for &model in ReverbModel::ALL {
+            let mut dsp = Dsp::new(48_000.0);
+            let mut p = default_params();
+            p.gate_on = false;
+            p.drive_on = false;
+            p.amp_on = false;
+            p.mod_on = false;
+            p.delay_on = false;
+            p.cab_on = false;
+            p.reverb_model = model;
+            p.reverb_decay_s = 15.0; // worst case for tail buildup
+            p.reverb_mix = 100.0;
+            p.reverb_shimmer = 100.0;
+            dsp.set_params(p);
+            let mut peak = 0.0f32;
+            for n in 0..48_000 {
+                // Continuous 220 Hz excitation feeds the shimmer loop hard.
+                let x = (n as f32 * 220.0 * std::f32::consts::TAU / 48_000.0).sin() * 0.6;
+                let (l, r) = dsp.process_stereo(x, -x);
+                assert!(l.is_finite() && r.is_finite(), "{model:?} went non-finite");
+                peak = peak.max(l.abs()).max(r.abs());
+            }
+            assert!(peak < 8.0, "{model:?} ran away: peak={peak}");
+        }
     }
 
     // ---- Dedicated drive-topology battery (ds_one / super_drive /

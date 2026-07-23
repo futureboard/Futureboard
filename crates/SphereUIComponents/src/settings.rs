@@ -180,10 +180,11 @@ pub fn sanitize_audio_driver_type(driver_type: &str) -> String {
     if available.iter().any(|backend| backend == driver_type) {
         driver_type.to_string()
     } else {
+        let platform_default = default_audio_driver_type();
         available
             .into_iter()
-            .next()
-            .unwrap_or_else(default_audio_driver_type)
+            .find(|backend| backend == &platform_default)
+            .unwrap_or(platform_default)
     }
 }
 

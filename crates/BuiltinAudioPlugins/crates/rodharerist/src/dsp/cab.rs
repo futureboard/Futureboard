@@ -463,7 +463,7 @@ impl CabLane {
         let speaker_cutoff = self.profile.cutoff_hz * (1.12 - p * 0.32);
         self.speaker_lpf_alpha
             .set_target(alpha(speaker_cutoff, self.sample_rate));
-        let air_cutoff = (speaker_cutoff * capsule_extension * (1.0 - d * 0.38))
+        let air_cutoff = (speaker_cutoff * capsule_extension * (1.0 - d * 0.58))
             .clamp(2_200.0, self.sample_rate * 0.45);
         self.air_alpha
             .set_target(alpha(air_cutoff, self.sample_rate));
@@ -629,7 +629,7 @@ impl CabLane {
         // delayed early-room reflection.
         channel.proximity_low += alpha(170.0, sample_rate) * (acoustic - channel.proximity_low);
         let proximity =
-            channel.proximity_low * (1.0 - controls.distance) * (0.20 - controls.position * 0.07);
+            channel.proximity_low * (1.0 - controls.distance) * (0.36 - controls.position * 0.10);
         let close = acoustic + proximity;
 
         // Three capsule topologies, continuously crossfaded for automation.
@@ -638,7 +638,7 @@ impl CabLane {
             + (close - channel.dynamic_mid) * (0.13 + center * 0.12)
             + breakup * center * 0.035;
         channel.ribbon_low += alpha(3_650.0, sample_rate) * (close - channel.ribbon_low);
-        let ribbon = channel.ribbon_low + channel.proximity_low * 0.10;
+        let ribbon = channel.ribbon_low + channel.proximity_low * 0.15 * (1.0 - controls.distance);
         channel.condenser_low += alpha(7_600.0, sample_rate) * (close - channel.condenser_low);
         let condenser = close + (close - channel.condenser_low) * 0.10 + breakup * center * 0.025;
         let mic = if controls.mic_kind <= 1.0 {

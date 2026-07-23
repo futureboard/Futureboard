@@ -728,6 +728,13 @@ struct AmpLane {
     presence: Smoothed,
     master_drive: Smoothed,
     master_level: Smoothed,
+    pi_attack_coeff: f32,
+    pi_release_coeff: f32,
+    sag_attack_coeff: f32,
+    sag_release_coeff: f32,
+    transformer_alpha_coeff: f32,
+    speaker_alpha_coeff: f32,
+    feedback_high_alpha_coeff: f32,
 }
 
 impl AmpLane {
@@ -758,6 +765,13 @@ impl AmpLane {
             presence: Smoothed::new(sr, CONTROL_SMOOTH_SECONDS, 0.5),
             master_drive: Smoothed::new(sr, CONTROL_SMOOTH_SECONDS, 1.0),
             master_level: Smoothed::new(sr, CONTROL_SMOOTH_SECONDS, 0.5),
+            pi_attack_coeff: 0.0,
+            pi_release_coeff: 0.0,
+            sag_attack_coeff: 0.0,
+            sag_release_coeff: 0.0,
+            transformer_alpha_coeff: 0.0,
+            speaker_alpha_coeff: 0.0,
+            feedback_high_alpha_coeff: 0.0,
         };
         lane.configure(model, Settings::default());
         lane.snap_controls();
@@ -801,9 +815,9 @@ impl AmpLane {
         // Gain moves stage gain, interstage drive, bias, compression and the
         // coupling corner together. It is deliberately not an input multiply.
         self.stage_gain
-            .set_target(self.profile.pre_gain * (0.58 + g * 1.65));
+            .set_target(self.profile.pre_gain * (0.20 + g * 1.65));
         self.inter_gain
-            .set_target(self.profile.inter_gain * (0.72 + g * 0.78));
+            .set_target(self.profile.inter_gain * (0.35 + g * 1.10));
         self.bias.set_target(self.profile.bias * (0.65 + g * 0.70));
         self.bias_move
             .set_target(self.profile.bias_move * (0.30 + g * 0.90));
@@ -837,6 +851,16 @@ impl AmpLane {
         self.master_drive
             .set_target((0.04 + m.powf(1.35) * 2.45) * self.profile.power_drive);
         self.master_level.set_target(0.10 + m.sqrt() * 0.90);
+
+        // All time constants are prepared on the control path. The audio
+        // callback only reads these scalars.
+        self.pi_attack_coeff = time_constant(osr, 0.0015);
+        self.pi_release_coeff = time_constant(osr, 0.055);
+        self.sag_attack_coeff = time_constant(osr, self.profile.sag_attack);
+        self.sag_release_coeff = time_constant(osr, self.profile.sag_release);
+        self.transformer_alpha_coeff = alpha(72.0, osr);
+        self.speaker_alpha_coeff = alpha(115.0, osr);
+        self.feedback_high_alpha_coeff = alpha(3_100.0, osr);
     }
 
     fn snap_controls(&mut self) {
@@ -871,7 +895,6 @@ impl AmpLane {
 
     #[inline]
     fn held_controls(&mut self) -> HeldControls {
-        let osr = self.sample_rate * self.profile.oversample as f32;
         HeldControls {
             stage_gain: self.stage_gain.tick(),
             inter_gain: self.inter_gain.tick(),
@@ -888,13 +911,13 @@ impl AmpLane {
             presence: self.presence.tick(),
             master_drive: self.master_drive.tick(),
             master_level: self.master_level.tick(),
-            pi_attack: time_constant(osr, 0.0015),
-            pi_release: time_constant(osr, 0.055),
-            sag_attack: time_constant(osr, self.profile.sag_attack),
-            sag_release: time_constant(osr, self.profile.sag_release),
-            transformer_alpha: alpha(72.0, osr),
-            speaker_alpha: alpha(115.0, osr),
-            feedback_high_alpha: alpha(3_100.0, osr),
+            pi_attack: self.pi_attack_coeff,
+            pi_release: self.pi_release_coeff,
+            sag_attack: self.sag_attack_coeff,
+            sag_release: self.sag_release_coeff,
+            transformer_alpha: self.transformer_alpha_coeff,
+            speaker_alpha: self.speaker_alpha_coeff,
+            feedback_high_alpha: self.feedback_high_alpha_coeff,
         }
     }
 

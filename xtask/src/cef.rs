@@ -133,7 +133,13 @@ pub fn stage_cef(staging_dir: &Path, dist_dir: &Path, triple: &str) -> Result<Ce
 
     validate_pinned_distribution(dist_dir)?;
     if triple.ends_with("apple-darwin") {
-        let framework = dist_dir.join(RELEASE_DIR).join(MAC_FRAMEWORK_DIR);
+        let root_framework = dist_dir.join(MAC_FRAMEWORK_DIR);
+        let release_framework = dist_dir.join(RELEASE_DIR).join(MAC_FRAMEWORK_DIR);
+        let framework = if root_framework.is_dir() {
+            root_framework
+        } else {
+            release_framework
+        };
         copy_macos_framework(&framework, staging_dir, &mut report)?;
         report.runtime_files.sort();
         report.runtime_files.dedup();
@@ -436,7 +442,7 @@ mod tests {
     fn stages_macos_framework_with_resources_and_locales() {
         let temp = tempfile::tempdir().unwrap();
         let dist = temp.path().join("cef");
-        let framework = dist.join(RELEASE_DIR).join(MAC_FRAMEWORK_DIR);
+        let framework = dist.join(MAC_FRAMEWORK_DIR);
         let resources = framework.join("Resources");
         fs::create_dir_all(resources.join("en.lproj")).unwrap();
         fs::create_dir_all(dist.join("include")).unwrap();

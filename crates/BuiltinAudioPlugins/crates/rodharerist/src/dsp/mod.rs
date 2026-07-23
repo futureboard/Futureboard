@@ -269,6 +269,14 @@ pub enum CabModel {
     Tweed1x12,
     /// "Modern 4x12" — tight, scooped, extended highs.
     Modern4x12,
+    /// Wide open-back cabinet with front/rear cancellation.
+    OpenBack,
+    /// Warm, moderately damped vintage 2x12.
+    Vintage2x12,
+    /// Deep, tightly damped oversized closed 4x12.
+    Oversized4x12,
+    /// Extended-low-frequency bass cabinet.
+    BassCabinet,
 }
 
 impl CabModel {
@@ -277,6 +285,10 @@ impl CabModel {
         Self::American2x12,
         Self::Tweed1x12,
         Self::Modern4x12,
+        Self::OpenBack,
+        Self::Vintage2x12,
+        Self::Oversized4x12,
+        Self::BassCabinet,
     ];
 
     pub fn from_model_id(id: &str) -> Option<Self> {
@@ -285,6 +297,10 @@ impl CabModel {
             "american_2x12" => Some(Self::American2x12),
             "tweed_1x12" => Some(Self::Tweed1x12),
             "modern_412" => Some(Self::Modern4x12),
+            "open_back" => Some(Self::OpenBack),
+            "vintage_212" => Some(Self::Vintage2x12),
+            "oversized_412" => Some(Self::Oversized4x12),
+            "bass_cabinet" => Some(Self::BassCabinet),
             _ => None,
         }
     }
@@ -294,6 +310,30 @@ impl CabModel {
             .get(i as usize)
             .copied()
             .unwrap_or(Self::Vintage4x12)
+    }
+}
+
+/// Microphone capsule topology used by the cabinet stage.
+///
+/// APPEND-ONLY: the index is persisted and automated through
+/// `cab_mic_type`; old state defaults to Dynamic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub enum MicModel {
+    #[default]
+    Dynamic,
+    Ribbon,
+    Condenser,
+}
+
+impl MicModel {
+    pub const ALL: &'static [Self] = &[Self::Dynamic, Self::Ribbon, Self::Condenser];
+
+    pub fn from_index(i: u32) -> Self {
+        Self::ALL.get(i as usize).copied().unwrap_or(Self::Dynamic)
+    }
+
+    pub fn index(self) -> u8 {
+        self as u8
     }
 }
 
@@ -398,6 +438,8 @@ pub struct Params {
     pub drive_model: DriveModel,
     pub amp_model: AmpModel,
     pub cab_model: CabModel,
+    #[serde(default)]
+    pub mic_model: MicModel,
     /// Which algorithm the Mod slot runs (shares the `chorus_*` knobs).
     #[serde(default)]
     pub mod_model: ModModel,
@@ -537,6 +579,7 @@ pub fn default_params() -> Params {
         drive_model: DriveModel::Screamer,
         amp_model: AmpModel::Mandarin,
         cab_model: CabModel::Vintage4x12,
+        mic_model: MicModel::Dynamic,
         mod_model: ModModel::Chorus,
         wah_model: WahModel::CryWah,
         tone_engine: ToneEngineKind::Classic,
@@ -774,6 +817,14 @@ pub fn descriptor() -> PluginDescriptor {
                 min: 0.0,
                 max: 100.0,
                 unit: "%",
+            },
+            ParamDescriptor {
+                id: "cab_mic_type",
+                name: "Microphone Type",
+                default_value: 0.0,
+                min: 0.0,
+                max: 2.0,
+                unit: "type",
             },
             ParamDescriptor {
                 id: "wah_pos",
@@ -1045,6 +1096,7 @@ impl Dsp {
             drive_model: params.drive_model,
             amp_model: params.amp_model,
             cab_model: params.cab_model,
+            mic_model: params.mic_model,
             mod_model: params.mod_model,
             wah_model: params.wah_model,
             tone_engine: params.tone_engine,
@@ -1210,7 +1262,8 @@ impl Dsp {
         self.delay
             .configure(p.delay_time_ms, p.delay_fb, p.delay_mix);
         self.reverb.configure(p.reverb_decay_s, p.reverb_mix);
-        self.cab.configure(p.cab_model, p.cab_mic, p.cab_dist);
+        self.cab
+            .configure(p.cab_model, p.mic_model, p.cab_mic, p.cab_dist);
     }
 
     /// Replace the Helix path order (control thread).
@@ -1311,6 +1364,7 @@ pub fn apply_to_params(p: &mut Params, id: &str, value: f32) -> bool {
             p.tone_engine = ToneEngineKind::Classic;
         }
         "cab_model" => p.cab_model = CabModel::from_index(value.round() as u32),
+        "cab_mic_type" => p.mic_model = MicModel::from_index(value.round() as u32),
         "tone_engine" => p.tone_engine = ToneEngineKind::from_index(value.round() as u32),
         "path_slot_0" => p.stage_order[0] = StageKind::from_index(value.round() as i32),
         "path_slot_1" => p.stage_order[1] = StageKind::from_index(value.round() as i32),
@@ -1436,6 +1490,7 @@ pub fn ui_values(p: &Params) -> Vec<(&'static str, f32)> {
     out.push(("reverb_mix", p.reverb_mix));
     out.push(("cab_mic", p.cab_mic));
     out.push(("cab_dist", p.cab_dist));
+    out.push(("cab_mic_type", p.mic_model.index() as f32));
     out.push(("wah_pos", p.wah_pos));
     out.push(("wah_res", p.wah_res));
     out.push(("wah_sens", p.wah_sens));

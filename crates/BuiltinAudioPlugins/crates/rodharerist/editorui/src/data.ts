@@ -469,6 +469,30 @@ export const models: Record<CategoryId, Model[]> = {
       short: "Modern",
       sub: "Tight, scooped, extended highs",
     },
+    {
+      id: "open_back",
+      name: "Open Back",
+      short: "Open",
+      sub: "Wide front/rear cancellation and open dynamics",
+    },
+    {
+      id: "vintage_212",
+      name: "Vintage 2x12",
+      short: "Vint 2x12",
+      sub: "Warm paired speakers with damped cone breakup",
+    },
+    {
+      id: "oversized_412",
+      name: "Oversized 4x12",
+      short: "Oversized",
+      sub: "Deep closed-box modes and tight upper mids",
+    },
+    {
+      id: "bass_cabinet",
+      name: "Bass Cabinet",
+      short: "Bass",
+      sub: "Extended low-end radiation with controlled breakup",
+    },
   ],
 };
 
@@ -839,20 +863,44 @@ export const parameterDefaults: Record<string, Param[]> = {
     },
   ],
   vintage_cab: [
+    { id: "cab_mic_type", name: "Mic Type", min: 0, max: 2, val: 0, unit: "" },
     { id: "cab_mic", name: "Mic Pos", min: 0, max: 100, val: 20, unit: "%" },
     { id: "cab_dist", name: "Distance", min: 0, max: 100, val: 40, unit: "%" },
   ],
   american_2x12: [
+    { id: "cab_mic_type", name: "Mic Type", min: 0, max: 2, val: 0, unit: "" },
     { id: "cab_mic", name: "Mic Pos", min: 0, max: 100, val: 35, unit: "%" },
     { id: "cab_dist", name: "Distance", min: 0, max: 100, val: 30, unit: "%" },
   ],
   tweed_1x12: [
+    { id: "cab_mic_type", name: "Mic Type", min: 0, max: 2, val: 1, unit: "" },
     { id: "cab_mic", name: "Mic Pos", min: 0, max: 100, val: 15, unit: "%" },
     { id: "cab_dist", name: "Distance", min: 0, max: 100, val: 55, unit: "%" },
   ],
   modern_412: [
+    { id: "cab_mic_type", name: "Mic Type", min: 0, max: 2, val: 0, unit: "" },
     { id: "cab_mic", name: "Mic Pos", min: 0, max: 100, val: 45, unit: "%" },
     { id: "cab_dist", name: "Distance", min: 0, max: 100, val: 20, unit: "%" },
+  ],
+  open_back: [
+    { id: "cab_mic_type", name: "Mic Type", min: 0, max: 2, val: 2, unit: "" },
+    { id: "cab_mic", name: "Mic Pos", min: 0, max: 100, val: 55, unit: "%" },
+    { id: "cab_dist", name: "Distance", min: 0, max: 100, val: 45, unit: "%" },
+  ],
+  vintage_212: [
+    { id: "cab_mic_type", name: "Mic Type", min: 0, max: 2, val: 1, unit: "" },
+    { id: "cab_mic", name: "Mic Pos", min: 0, max: 100, val: 40, unit: "%" },
+    { id: "cab_dist", name: "Distance", min: 0, max: 100, val: 30, unit: "%" },
+  ],
+  oversized_412: [
+    { id: "cab_mic_type", name: "Mic Type", min: 0, max: 2, val: 0, unit: "" },
+    { id: "cab_mic", name: "Mic Pos", min: 0, max: 100, val: 32, unit: "%" },
+    { id: "cab_dist", name: "Distance", min: 0, max: 100, val: 18, unit: "%" },
+  ],
+  bass_cabinet: [
+    { id: "cab_mic_type", name: "Mic Type", min: 0, max: 2, val: 1, unit: "" },
+    { id: "cab_mic", name: "Mic Pos", min: 0, max: 100, val: 60, unit: "%" },
+    { id: "cab_dist", name: "Distance", min: 0, max: 100, val: 35, unit: "%" },
   ],
 };
 

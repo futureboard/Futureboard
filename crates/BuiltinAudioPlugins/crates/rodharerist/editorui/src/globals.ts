@@ -120,3 +120,8 @@ export function positionLabel(pct: number): string {
   if (pct > 78) return "Edge";
   return "Off-centre";
 }
+
+/** `cab_mic_type` append-only enum: Dynamic=0, Ribbon=1, Condenser=2. */
+export function micTypeLabel(value: number): string {
+  return ["Dynamic", "Ribbon", "Condenser"][Math.round(value)] ?? "Dynamic";
+}

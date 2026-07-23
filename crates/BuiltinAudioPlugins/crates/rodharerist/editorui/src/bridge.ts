@@ -184,6 +184,10 @@ export const CAB_MODEL_INDEX: Record<string, number> = {
   american_2x12: 1,
   tweed_1x12: 2,
   modern_412: 3,
+  open_back: 4,
+  vintage_212: 5,
+  oversized_412: 6,
+  bass_cabinet: 7,
 };
 
 /** `ModModel` indices (mirrors Rust `ModModel::ALL`). */

@@ -8,7 +8,7 @@ import {
 } from "../data";
 import type { NamCaptureLoadOptions } from "../bridge";
 import { onNativeMessage } from "../instanceBridge";
-import { distanceCm, positionLabel } from "../globals";
+import { distanceCm, micTypeLabel, positionLabel } from "../globals";
 import { Knob } from "./Knob";
 
 /** Lifecycle of the most recent `.nam` load request. */
@@ -203,6 +203,9 @@ export function ModuleEditor({
             </div>
             <div className="cab-readout">
               <span>
+                <b>{micTypeLabel(paramValue("cab_mic_type", 0))}</b>
+              </span>
+              <span>
                 <b>{positionLabel(paramValue("cab_mic", 20))}</b>{" "}
                 {paramValue("cab_mic", 20).toFixed(0)}%
               </span>
@@ -210,8 +213,8 @@ export function ModuleEditor({
             </div>
             <p className="inspector-note">
               Position is measured from the speaker centre; distance is shown on a
-              0–30 cm scale. The cabinet is modelled as a whole, so there is no
-              per-speaker or second-mic processing yet.
+              0–30 cm scale. Capsule type, cone position, proximity, air absorption
+              and the first room reflection are modelled independently.
             </p>
           </div>
         ) : (

@@ -74,6 +74,8 @@ export function ModuleEditor({
 
   const paramValue = (id: string, fallback: number) =>
     params.find((p) => p.id === id)?.val ?? fallback;
+  const handleCabParamChange = (id: string, value: number) =>
+    onParamChange(id, id === "cab_mic_type" ? Math.round(value) : value);
 
   const handleNamFile = (file: File | undefined) => {
     if (!file) return;
@@ -197,7 +199,7 @@ export function ModuleEditor({
                   value={p.val}
                   unit={p.unit}
                   defaultValue={defaultValueFor(activeModelId, p.id)}
-                  onChange={onParamChange}
+                  onChange={handleCabParamChange}
                 />
               ))}
             </div>

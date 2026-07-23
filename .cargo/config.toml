@@ -102,5 +102,6 @@ package-exclusive = [
 LIBCLANG_PATH = { value = ".bin/bin", relative = true, force = false }
 
 # cef-dll-sys reads CEF_PATH during compilation.
-# relative = true anchors it at the workspace root.
-CEF_PATH = { value = "build/cef", relative = true, force = false }
+# This is the Windows developer default. Linux/macOS builds export their
+# platform-specific versioned path (as CI does) before invoking Cargo.
+CEF_PATH = { value = "build/cef/150.0.11/cef_windows_x86_64", relative = true, force = false }

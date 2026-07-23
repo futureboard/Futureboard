@@ -1,12 +1,14 @@
 import { defineConfig } from "vite";
 import tailwindcss from "@tailwindcss/vite";
 import { viteSingleFile } from "vite-plugin-singlefile";
+import { fileURLToPath } from "node:url";
 
 // The editor is embedded into the plugin dynamic library as a single, fully
 // self-contained `index.html` (JS/CSS/assets inlined). It is served to CEF via
 // the `mikoplugin://<plugin>/index.html` custom scheme, so there are no sibling
 // asset requests to resolve.
 export default defineConfig({
+  root: fileURLToPath(new URL(".", import.meta.url)),
   plugins: [tailwindcss(), viteSingleFile()],
   // This package lives inside a Bun workspace, so a dependency can resolve
   // `react` to the hoisted root copy while the app resolves its own — two React

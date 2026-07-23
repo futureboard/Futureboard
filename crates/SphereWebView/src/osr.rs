@@ -545,7 +545,7 @@ mod tests {
     #[test]
     fn a_view_paint_becomes_the_composited_frame() {
         let surface = OsrSurface::new(2, 2, 1.0);
-        let pixels = vec![7u8; 2 * 2 * 4];
+        let pixels = [7u8; 2 * 2 * 4];
         surface.on_paint(PaintElementType::VIEW, pixels.as_ptr(), 2, 2);
         assert_eq!(surface.generation(), 1);
         let (len, w, h) = surface
@@ -557,7 +557,7 @@ mod tests {
     #[test]
     fn a_popup_paint_is_composited_over_the_view_at_its_rect() {
         let surface = OsrSurface::new(4, 4, 1.0);
-        let view = vec![0u8; 4 * 4 * 4];
+        let view = [0u8; 4 * 4 * 4];
         surface.on_paint(PaintElementType::VIEW, view.as_ptr(), 4, 4);
         surface.set_popup_rect(Rect {
             x: 1,
@@ -566,7 +566,7 @@ mod tests {
             height: 2,
         });
         surface.set_popup_visible(true);
-        let popup = vec![9u8; 2 * 2 * 4];
+        let popup = [9u8; 2 * 2 * 4];
         surface.on_paint(PaintElementType::POPUP, popup.as_ptr(), 2, 2);
 
         let bytes = surface
@@ -580,10 +580,10 @@ mod tests {
     #[test]
     fn hiding_a_popup_restores_the_view_underneath() {
         let surface = OsrSurface::new(2, 2, 1.0);
-        let view = vec![0u8; 2 * 2 * 4];
+        let view = [0u8; 2 * 2 * 4];
         surface.on_paint(PaintElementType::VIEW, view.as_ptr(), 2, 2);
         surface.set_popup_visible(true);
-        let popup = vec![9u8; 2 * 2 * 4];
+        let popup = [9u8; 2 * 2 * 4];
         surface.on_paint(PaintElementType::POPUP, popup.as_ptr(), 2, 2);
         surface.set_popup_visible(false);
 

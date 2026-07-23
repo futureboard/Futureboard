@@ -104,18 +104,21 @@ jobs:
           restore-keys: |
             desktop-v2-cargo-cef-${{ runner.os }}-
 
+      - name: Configure versioned CEF path
+        shell: bash
+        run: bash .github/workflows/set-cef-path.sh
+
       - name: Install pinned CEF SDK and runtime
-        if: hashFiles('build/cef/archive.json') == ''
+        if: hashFiles('build/cef/150.0.11/**/archive.json') == ''
         run: cargo run -p SphereWebView --example install_cef --features installer
 
       - name: Install built-in plugin editor dependencies
-        run: bun install --frozen-lockfile
+        run: |
+          bun install --frozen-lockfile
+          bun install --cwd crates/BuiltinAudioPlugins/crates/equz8/editor --frozen-lockfile
 
       - name: Build embedded built-in plugin editors
-        run: |
-          bun run --cwd crates/BuiltinAudioPlugins/crates/meowsyn/editor build
-          bun run --cwd crates/BuiltinAudioPlugins/crates/opensampler/editor build
-          bun run --cwd crates/BuiltinAudioPlugins/crates/rodharerist/editorui build
+        run: bun run build:plugin-editors
 
       - name: Verify shared app assets
         shell: bash

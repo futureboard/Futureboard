@@ -7,20 +7,24 @@ use crate::{
 };
 
 /// Downloads and installs the pinned minimal CEF distribution into
-/// `<workspace>/build/cef`.
+/// `<workspace>/build/cef/<version>/<platform>`.
 ///
 /// This is an explicit tooling operation, never a Cargo build-script side
 /// effect. Existing SDKs are preserved unless `force` is true.
 pub fn install_cef(force: bool) -> Result<PathBuf, CefDistributionError> {
     let target = CefTarget::current()?;
-    let destination = workspace_cef_path();
+    let destination = workspace_cef_path(target);
     if destination.exists() && !force {
-        return Err(CefDistributionError::DestinationExists(destination));
+        validate_cef_path(&destination, target)?;
+        return Ok(destination);
     }
 
-    let build_dir = workspace_root().join("build");
-    fs::create_dir_all(&build_dir)?;
-    let staging = build_dir.join(format!(".cef-install-{}", std::process::id()));
+    let cef_root = workspace_root().join("build").join("cef");
+    let destination_parent = destination
+        .parent()
+        .expect("versioned CEF destination must have a parent");
+    fs::create_dir_all(destination_parent)?;
+    let staging = cef_root.join(format!(".cef-install-{}", std::process::id()));
     if staging.exists() {
         fs::remove_dir_all(&staging)?;
     }

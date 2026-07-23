@@ -2,8 +2,8 @@
 //!
 //! The CEF SDK is intentionally not downloaded by normal workspace builds.
 //! Run the `install_cef` example with the `installer` feature to populate the
-//! workspace-local `build/cef` directory, then enable `cef-runtime` in the
-//! executable that owns the CEF process lifecycle.
+//! workspace-local `build/cef/<version>/<platform>` directory, then enable
+//! `cef-runtime` in the executable that owns the CEF process lifecycle.
 //!
 //! Two presentations are supported: a native CEF child window (Windows), and
 //! windowless/off-screen rendering into a host-owned framebuffer (see
@@ -15,6 +15,7 @@ use std::path::{Path, PathBuf};
 use thiserror::Error;
 
 /// CEF release selected for every supported desktop target.
+pub const CEF_SHORT_VERSION: &str = "150.0.11";
 pub const CEF_VERSION: &str = "150.0.11+gb887805";
 pub const CHROMIUM_VERSION: &str = "150.0.7871.115";
 
@@ -68,6 +69,15 @@ impl CefTarget {
         }
     }
 
+    pub const fn directory_name(self) -> &'static str {
+        match self {
+            Self::WindowsX86_64 => "cef_windows_x86_64",
+            Self::LinuxX86_64 => "cef_linux_x86_64",
+            Self::MacOsX86_64 => "cef_macos_x86_64",
+            Self::MacOsAarch64 => "cef_macos_aarch64",
+        }
+    }
+
     pub fn from_target_triple(target: &str) -> Result<Self, CefDistributionError> {
         match target {
             "x86_64-pc-windows-msvc" => Ok(Self::WindowsX86_64),
@@ -106,9 +116,14 @@ impl CefTarget {
     }
 }
 
-/// Returns `<workspace>/build/cef`, the path consumed by `cef-dll-sys`.
-pub fn cef_path(workspace_root: impl AsRef<Path>) -> PathBuf {
-    workspace_root.as_ref().join("build").join("cef")
+/// Returns the versioned, platform-specific path consumed by `cef-dll-sys`.
+pub fn cef_path(workspace_root: impl AsRef<Path>, target: CefTarget) -> PathBuf {
+    workspace_root
+        .as_ref()
+        .join("build")
+        .join("cef")
+        .join(CEF_SHORT_VERSION)
+        .join(target.directory_name())
 }
 
 /// Resolves the Futureboard workspace from this crate's compile-time location.
@@ -120,8 +135,8 @@ pub fn workspace_root() -> PathBuf {
         .to_path_buf()
 }
 
-pub fn workspace_cef_path() -> PathBuf {
-    cef_path(workspace_root())
+pub fn workspace_cef_path(target: CefTarget) -> PathBuf {
+    cef_path(workspace_root(), target)
 }
 
 /// Verifies that a prepared SDK has the headers, CMake metadata, archive
@@ -212,24 +227,37 @@ mod tests {
     #[test]
     fn maps_supported_targets_to_the_pinned_archives() {
         let cases = [
-            ("x86_64-pc-windows-msvc", "windows64"),
-            ("x86_64-unknown-linux-gnu", "linux64"),
-            ("x86_64-apple-darwin", "macosx64"),
-            ("aarch64-apple-darwin", "macosarm64"),
+            ("x86_64-pc-windows-msvc", "windows64", "cef_windows_x86_64"),
+            ("x86_64-unknown-linux-gnu", "linux64", "cef_linux_x86_64"),
+            ("x86_64-apple-darwin", "macosx64", "cef_macos_x86_64"),
+            ("aarch64-apple-darwin", "macosarm64", "cef_macos_aarch64"),
         ];
-        for (triple, archive_platform) in cases {
+        for (triple, archive_platform, directory_name) in cases {
             let target = CefTarget::from_target_triple(triple).unwrap();
             assert_eq!(target.target_triple(), triple);
+            assert_eq!(target.directory_name(), directory_name);
             assert!(target.archive_url().contains(archive_platform));
             assert!(target.archive_name().contains(archive_platform));
         }
     }
 
     #[test]
-    fn cef_path_is_workspace_local() {
+    fn cef_paths_are_versioned_and_platform_specific() {
         assert_eq!(
-            cef_path(Path::new("workspace")),
-            Path::new("workspace").join("build").join("cef")
+            cef_path(Path::new("workspace"), CefTarget::WindowsX86_64),
+            Path::new("workspace")
+                .join("build")
+                .join("cef")
+                .join("150.0.11")
+                .join("cef_windows_x86_64")
+        );
+        assert_eq!(
+            cef_path(Path::new("workspace"), CefTarget::LinuxX86_64),
+            Path::new("workspace")
+                .join("build")
+                .join("cef")
+                .join("150.0.11")
+                .join("cef_linux_x86_64")
         );
     }
 

@@ -54,7 +54,7 @@ impl RodhareistState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{default_params, CabModel, MicModel};
+    use crate::{CabModel, MicModel, default_params};
 
     #[test]
     fn round_trips_through_json() {

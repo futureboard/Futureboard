@@ -43,8 +43,8 @@ mod tremolo;
 mod wah;
 
 use builtin_dsp_core::{
-    clamp, db_to_linear, time_constant, ParamDescriptor, PluginCategory, PluginDescriptor,
-    StereoEffect,
+    ParamDescriptor, PluginCategory, PluginDescriptor, StereoEffect, clamp, db_to_linear,
+    time_constant,
 };
 
 use cab::Cabinet;
@@ -54,7 +54,7 @@ use drive::Drive;
 use eq::EqStage;
 use gate::NoiseGate;
 use mod_stage::ModStage;
-pub use nam::{prepare_nam_runtime, NamCaptureInfo, NamLoadError, NamLoader, PreparedNamRuntime};
+pub use nam::{NamCaptureInfo, NamLoadError, NamLoader, PreparedNamRuntime, prepare_nam_runtime};
 use reverb::PlateReverb;
 pub use tone_stage::ToneEngineKind;
 use tone_stage::ToneStage;
@@ -1426,11 +1426,7 @@ pub fn apply_to_params(p: &mut Params, id: &str, value: f32) -> bool {
 /// applying `amp_model` resets `tone_engine` to Classic.
 pub fn ui_values(p: &Params) -> Vec<(&'static str, f32)> {
     fn b(v: bool) -> f32 {
-        if v {
-            1.0
-        } else {
-            0.0
-        }
+        if v { 1.0 } else { 0.0 }
     }
     fn model_index<T: PartialEq + Copy>(all: &[T], value: T) -> f32 {
         all.iter().position(|m| *m == value).unwrap_or(0) as f32
@@ -2045,7 +2041,7 @@ mod tests {
         assert!(dsp.apply_ui_param("path_slot_0", 2.0)); // Amp first
         assert!(dsp.apply_ui_param("path_slot_1", 0.0)); // Gate
         assert!(dsp.apply_ui_param("path_slot_2", -1.0)); // clear
-                                                          // Remaining slots still have defaults until overwritten — sanitize packs.
+        // Remaining slots still have defaults until overwritten — sanitize packs.
         let mut order = [None; PATH_SLOTS];
         order[0] = Some(StageKind::Amp);
         order[1] = Some(StageKind::Cab);

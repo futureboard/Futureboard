@@ -8,7 +8,7 @@ use builtin_dsp_core::{make_eq_biquad, mix};
 
 use super::drive_models::{DsClassic, MetalCore, SuperDrive, TightRift};
 use super::smooth::{Oversampler2x, Smoothed};
-use super::{soft_clip, DriveModel, StereoBiquad};
+use super::{DriveModel, StereoBiquad, soft_clip};
 
 /// Glide time for gain/level/mix edits (fast enough to feel immediate).
 const SMOOTH_SECONDS: f32 = 0.010;

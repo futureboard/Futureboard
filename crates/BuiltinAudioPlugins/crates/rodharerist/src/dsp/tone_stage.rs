@@ -4,9 +4,9 @@
 //! classic amp implementation (they're two independent processors this stage
 //! merely dispatches between).
 
+use super::AmpModel;
 use super::amp::Amp;
 use super::nam::{NamCapture, NamCaptureInfo, PreparedNamRuntime};
-use super::AmpModel;
 
 /// Which engine the Tone/Amp slot currently runs. Mutually exclusive.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

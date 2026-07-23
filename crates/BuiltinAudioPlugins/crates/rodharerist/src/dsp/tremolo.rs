@@ -1,8 +1,8 @@
 //! Amp-style stereo tremolo — LFO amplitude modulation with a shape control
 //! that morphs the wave from smooth sine toward a choppy square.
 
-use super::smooth::Smoothed;
 use super::Lfo;
+use super::smooth::Smoothed;
 
 /// Glide time for depth/shape edits (see `smooth.rs`).
 const SMOOTH_SECONDS: f32 = 0.010;

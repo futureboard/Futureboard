@@ -16,8 +16,8 @@
 
 use builtin_dsp_core::{db_to_linear, make_eq_biquad, time_constant};
 
-use super::smooth::{Oversampler4x, Oversampler8x, Smoothed};
 use super::StereoBiquad;
+use super::smooth::{Oversampler4x, Oversampler8x, Smoothed};
 
 /// Glide time for all smoothed drive internals.
 const SMOOTH_SECONDS: f32 = 0.010;
@@ -32,11 +32,7 @@ fn drive_curve(g01: f32) -> f32 {
 /// Flush a possibly-denormal/non-finite intermediate back to safe territory.
 #[inline]
 fn sanitize(x: f32) -> f32 {
-    if x.is_finite() {
-        x
-    } else {
-        0.0
-    }
+    if x.is_finite() { x } else { 0.0 }
 }
 
 // ---------------------------------------------------------------------------

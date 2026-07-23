@@ -8,11 +8,15 @@ use builtin_dsp_core::{
     ParamDescriptor, PluginCategory, PluginDescriptor, StereoEffect, clamp, db_to_linear,
     make_eq_biquad, mix,
 };
+use serde::{Deserialize, Serialize};
+
+pub mod ipc;
 
 pub const PLUGIN_ID: &str = "futureboard.equz8";
 pub const BAND_COUNT: usize = 8;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum BandType {
     HighPass,
     LowShelf,
@@ -45,9 +49,32 @@ impl BandType {
             _ => None,
         }
     }
+
+    pub const fn to_wire(self) -> f32 {
+        match self {
+            Self::HighPass => 0.0,
+            Self::LowShelf => 1.0,
+            Self::Bell => 2.0,
+            Self::Notch => 3.0,
+            Self::HighShelf => 4.0,
+            Self::LowPass => 5.0,
+        }
+    }
+
+    pub fn from_wire(value: f32) -> Self {
+        match value.round() as i32 {
+            0 => Self::HighPass,
+            1 => Self::LowShelf,
+            3 => Self::Notch,
+            4 => Self::HighShelf,
+            5 => Self::LowPass,
+            _ => Self::Bell,
+        }
+    }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct BandParams {
     pub active: bool,
     pub band_type: BandType,
@@ -56,7 +83,8 @@ pub struct BandParams {
     pub q: f32,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Params {
     pub power: bool,
     pub output_db: f32,
@@ -194,35 +222,58 @@ impl Dsp {
 
     pub fn set_params(&mut self, params: Params) {
         self.params = params;
-        self.params.output_db = clamp(self.params.output_db, -24.0, 12.0);
-        self.params.mix = clamp(self.params.mix, 0.0, 100.0);
-        for band in &mut self.params.bands {
-            band.freq = clamp(band.freq, 20.0, 20_000.0);
-            band.gain_db = clamp(band.gain_db, -18.0, 18.0);
-            band.q = clamp(band.q, 0.1, 12.0);
-        }
+        ipc::sanitize_params(&mut self.params);
         self.rebuild();
+    }
+
+    /// Apply a compact wire update already resolved by the UI/control thread.
+    ///
+    /// The audio path never parses JSON or looks up string parameter ids.
+    /// A future host bridge can drain its bounded parameter ring between
+    /// blocks and call this method directly.
+    pub fn apply_wire_param(&mut self, wire_index: u32, value: f32) -> bool {
+        if !ipc::apply_wire_param(&mut self.params, wire_index, value) {
+            return false;
+        }
+
+        match wire_index {
+            ipc::POWER_INDEX => {}
+            ipc::MIX_INDEX => {}
+            ipc::OUTPUT_INDEX => {
+                self.output_gain = db_to_linear(self.params.output_db);
+            }
+            _ => {
+                if let Some((band, _)) = ipc::decode_band_wire(wire_index) {
+                    self.rebuild_band(band);
+                }
+            }
+        }
+        true
     }
 
     fn rebuild(&mut self) {
         self.output_gain = db_to_linear(self.params.output_db);
         for i in 0..BAND_COUNT {
-            let band = self.params.bands[i];
-            if !band.active {
-                self.left[i] = None;
-                self.right[i] = None;
-                continue;
-            }
-            let filter = make_eq_biquad(
-                band.band_type.as_str(),
-                band.freq,
-                band.gain_db,
-                band.q,
-                self.sample_rate,
-            );
-            self.left[i] = filter;
-            self.right[i] = filter;
+            self.rebuild_band(i);
         }
+    }
+
+    fn rebuild_band(&mut self, index: usize) {
+        let band = self.params.bands[index];
+        if !band.active {
+            self.left[index] = None;
+            self.right[index] = None;
+            return;
+        }
+        let filter = make_eq_biquad(
+            band.band_type.as_str(),
+            band.freq,
+            band.gain_db,
+            band.q,
+            self.sample_rate,
+        );
+        self.left[index] = filter;
+        self.right[index] = filter;
     }
 }
 
@@ -285,5 +336,13 @@ mod tests {
         let mut dsp = Dsp::new(48_000.0);
         let (l, r) = dsp.process_stereo(0.5, -0.5);
         assert!(l.is_finite() && r.is_finite());
+    }
+
+    #[test]
+    fn wire_update_changes_only_authoritative_params() {
+        let mut dsp = Dsp::new(48_000.0);
+        assert!(dsp.apply_wire_param(ipc::band_wire_index(2, ipc::BAND_GAIN), 6.0));
+        assert_eq!(dsp.params().bands[2].gain_db, 6.0);
+        assert!(!dsp.apply_wire_param(u32::MAX, 0.0));
     }
 }

@@ -2506,6 +2506,8 @@ version = "0.1.0"
 dependencies = [
  "biquad",
  "builtin_dsp_core",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

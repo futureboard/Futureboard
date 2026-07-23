@@ -33,6 +33,7 @@ const FIXTURE = {
     drive_model: "Rat",
     amp_model: "Recto",
     cab_model: "Tweed1x12",
+    mic_model: "Ribbon",
     tone_engine: "Classic",
     stage_order: ["Eq", "Amp", "Cab", null, null, null, null, null, null],
     gate_thresh_db: -40,
@@ -89,7 +90,7 @@ describe("snapshotFromRodhareistState", () => {
     expect(Object.keys(STAGE_VARIANT_TO_CATEGORY)).toHaveLength(10);
     expect(Object.keys(AMP_VARIANT_TO_MODEL)).toHaveLength(8);
     expect(Object.keys(DRIVE_VARIANT_TO_MODEL)).toHaveLength(10);
-    expect(Object.keys(CAB_VARIANT_TO_MODEL)).toHaveLength(4);
+    expect(Object.keys(CAB_VARIANT_TO_MODEL)).toHaveLength(8);
     expect(Object.keys(MOD_VARIANT_TO_MODEL)).toHaveLength(4);
     expect(Object.keys(WAH_VARIANT_TO_MODEL)).toHaveLength(2);
   });
@@ -114,6 +115,7 @@ describe("snapshotFromRodhareistState", () => {
     expect(param(snap, "tape", "delay_time")).toBe(640);
     expect(param(snap, "plate", "reverb_decay")).toBe(3.5);
     expect(param(snap, "tweed_1x12", "cab_mic")).toBe(80);
+    expect(param(snap, "tweed_1x12", "cab_mic_type")).toBe(1);
     expect(param(snap, "softknee", "comp_ratio")).toBe(4);
     expect(param(snap, "parametric", "eq_mid2_gain")).toBe(4);
     expect(param(snap, "nam_capture", "nam_mix")).toBe(90);

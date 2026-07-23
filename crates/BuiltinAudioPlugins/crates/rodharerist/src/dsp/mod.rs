@@ -43,8 +43,8 @@ mod tremolo;
 mod wah;
 
 use builtin_dsp_core::{
-    ParamDescriptor, PluginCategory, PluginDescriptor, StereoEffect, clamp, db_to_linear,
-    time_constant,
+    clamp, db_to_linear, time_constant, ParamDescriptor, PluginCategory, PluginDescriptor,
+    StereoEffect,
 };
 
 use cab::Cabinet;
@@ -54,7 +54,7 @@ use drive::Drive;
 use eq::EqStage;
 use gate::NoiseGate;
 use mod_stage::ModStage;
-pub use nam::{NamCaptureInfo, NamLoadError, NamLoader, PreparedNamRuntime, prepare_nam_runtime};
+pub use nam::{prepare_nam_runtime, NamCaptureInfo, NamLoadError, NamLoader, PreparedNamRuntime};
 use reverb::PlateReverb;
 pub use tone_stage::ToneEngineKind;
 use tone_stage::ToneStage;
@@ -1426,7 +1426,11 @@ pub fn apply_to_params(p: &mut Params, id: &str, value: f32) -> bool {
 /// applying `amp_model` resets `tone_engine` to Classic.
 pub fn ui_values(p: &Params) -> Vec<(&'static str, f32)> {
     fn b(v: bool) -> f32 {
-        if v { 1.0 } else { 0.0 }
+        if v {
+            1.0
+        } else {
+            0.0
+        }
     }
     fn model_index<T: PartialEq + Copy>(all: &[T], value: T) -> f32 {
         all.iter().position(|m| *m == value).unwrap_or(0) as f32
@@ -1887,6 +1891,90 @@ mod tests {
     }
 
     #[test]
+    fn boost_amp_cab_chain_adds_saturation_without_runaway_clipping() {
+        let make = |drive_on: bool| {
+            let mut dsp = Dsp::new(48_000.0);
+            let mut p = default_params();
+            p.stage_order = [None; PATH_SLOTS];
+            p.stage_order[0] = Some(StageKind::Drive);
+            p.stage_order[1] = Some(StageKind::Amp);
+            p.stage_order[2] = Some(StageKind::Cab);
+            p.drive_on = drive_on;
+            p.drive_model = DriveModel::Screamer;
+            p.drive_gain = 2.0;
+            p.drive_tone = 6.5;
+            p.drive_level = 9.0;
+            p.amp_model = AmpModel::Recto;
+            p.amp_gain = 7.5;
+            p.amp_master = 5.0;
+            p.cab_model = CabModel::Modern4x12;
+            p.mic_model = MicModel::Dynamic;
+            dsp.set_params(p);
+            dsp.reset();
+            dsp
+        };
+        let mut boosted = make(true);
+        let mut bare = make(false);
+        let mut difference = 0.0;
+        let mut peak = 0.0f32;
+        for n in 0..24_000 {
+            let t = n as f32 / 48_000.0;
+            let x = (t * 110.0 * std::f32::consts::TAU).sin() * 0.55
+                + (t * 1_700.0 * std::f32::consts::TAU).sin() * 0.04;
+            let with_boost = boosted.process_stereo(x, x).0;
+            let without = bare.process_stereo(x, x).0;
+            assert!(with_boost.is_finite());
+            peak = peak.max(with_boost.abs());
+            if n > 8_000 {
+                difference += (with_boost - without).powi(2);
+            }
+        }
+        let rms_difference = (difference / 16_000.0).sqrt();
+        assert!(rms_difference > 0.005, "boost did not drive the amp");
+        assert!(peak < 4.0, "boost caused uncontrolled clipping: {peak}");
+    }
+
+    #[test]
+    fn amp_cab_chain_is_stable_at_required_rates_and_block_sizes() {
+        for &sample_rate in &[44_100.0, 48_000.0, 96_000.0, 192_000.0] {
+            for &block_size in &[1usize, 16, 64, 128, 512, 2_048] {
+                let mut dsp = Dsp::new(sample_rate);
+                let mut p = default_params();
+                p.stage_order = [None; PATH_SLOTS];
+                p.stage_order[0] = Some(StageKind::Amp);
+                p.stage_order[1] = Some(StageKind::Cab);
+                p.amp_model = AmpModel::Slate;
+                p.amp_gain = 9.0;
+                p.amp_master = 7.0;
+                p.cab_model = CabModel::Oversized4x12;
+                p.mic_model = MicModel::Condenser;
+                dsp.set_params(p);
+                dsp.reset();
+                let mut sample = 0usize;
+                let mut peak = 0.0f32;
+                while sample < 4_096 {
+                    dsp.begin_block();
+                    for _ in 0..block_size.min(4_096 - sample) {
+                        let x = (sample as f32 * 220.0 * std::f32::consts::TAU / sample_rate).sin()
+                            * 0.7;
+                        let (left, right) = dsp.process_stereo(x, -x);
+                        assert!(
+                            left.is_finite() && right.is_finite(),
+                            "rate={sample_rate} block={block_size}"
+                        );
+                        peak = peak.max(left.abs()).max(right.abs());
+                        sample += 1;
+                    }
+                }
+                assert!(
+                    peak > 0.001 && peak < 4.0,
+                    "rate={sample_rate} block={block_size} peak={peak}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn power_off_is_bit_transparent() {
         let mut dsp = Dsp::new(48_000.0);
         let mut p = default_params();
@@ -1957,7 +2045,7 @@ mod tests {
         assert!(dsp.apply_ui_param("path_slot_0", 2.0)); // Amp first
         assert!(dsp.apply_ui_param("path_slot_1", 0.0)); // Gate
         assert!(dsp.apply_ui_param("path_slot_2", -1.0)); // clear
-        // Remaining slots still have defaults until overwritten — sanitize packs.
+                                                          // Remaining slots still have defaults until overwritten — sanitize packs.
         let mut order = [None; PATH_SLOTS];
         order[0] = Some(StageKind::Amp);
         order[1] = Some(StageKind::Cab);

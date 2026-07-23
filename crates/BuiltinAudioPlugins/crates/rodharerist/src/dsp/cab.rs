@@ -261,8 +261,7 @@ struct Resonator {
 
 impl Resonator {
     #[inline]
-    fn tick(&mut self, x: f32, frequency: f32, damping: f32, sample_rate: f32) -> f32 {
-        let f = (2.0 * (std::f32::consts::PI * frequency / sample_rate).sin()).clamp(0.0, 0.95);
+    fn tick(&mut self, x: f32, f: f32, damping: f32) -> f32 {
         let high = x - self.low - damping.clamp(0.08, 1.8) * self.band;
         self.band = finite(self.band + f * high);
         self.low = finite(self.low + f * self.band);
@@ -368,6 +367,14 @@ struct CabLane {
     delay_r: DelayLine,
     hp_pole: f32,
     body_alpha: f32,
+    mode1_f: f32,
+    mode2_f: f32,
+    breakup_f: f32,
+    notch_f: f32,
+    proximity_alpha: f32,
+    dynamic_alpha: f32,
+    ribbon_alpha: f32,
+    condenser_alpha: f32,
     position: Smoothed,
     distance: Smoothed,
     mic_kind: Smoothed,
@@ -388,6 +395,14 @@ struct CabControls {
     room_delay: f32,
     room_mix: f32,
     level: f32,
+    mode1_f: f32,
+    mode2_f: f32,
+    breakup_f: f32,
+    notch_f: f32,
+    proximity_alpha: f32,
+    dynamic_alpha: f32,
+    ribbon_alpha: f32,
+    condenser_alpha: f32,
 }
 
 impl CabLane {
@@ -404,6 +419,14 @@ impl CabLane {
             delay_r: DelayLine::new(sr),
             hp_pole: pole(profile.hpf_hz, sr),
             body_alpha: alpha(profile.body_hz, sr),
+            mode1_f: 0.0,
+            mode2_f: 0.0,
+            breakup_f: 0.0,
+            notch_f: 0.0,
+            proximity_alpha: 0.0,
+            dynamic_alpha: 0.0,
+            ribbon_alpha: 0.0,
+            condenser_alpha: 0.0,
             position: Smoothed::new(sr, CONTROL_SMOOTH_SECONDS, 0.2),
             distance: Smoothed::new(sr, CONTROL_SMOOTH_SECONDS, 0.4),
             mic_kind: Smoothed::new(sr, CONTROL_SMOOTH_SECONDS, 0.0),
@@ -440,6 +463,17 @@ impl CabLane {
     fn prepare_coefficients(&mut self) {
         self.hp_pole = pole(self.profile.hpf_hz, self.sample_rate);
         self.body_alpha = alpha(self.profile.body_hz, self.sample_rate);
+        let resonator_f = |frequency: f32| {
+            (2.0 * (std::f32::consts::PI * frequency / self.sample_rate).sin()).clamp(0.0, 0.95)
+        };
+        self.mode1_f = resonator_f(self.profile.resonance_hz);
+        self.mode2_f = resonator_f(self.profile.second_mode_hz);
+        self.breakup_f = resonator_f(self.profile.breakup_hz);
+        self.notch_f = resonator_f(self.profile.notch_hz);
+        self.proximity_alpha = alpha(170.0, self.sample_rate);
+        self.dynamic_alpha = alpha(2_600.0, self.sample_rate);
+        self.ribbon_alpha = alpha(3_650.0, self.sample_rate);
+        self.condenser_alpha = alpha(7_600.0, self.sample_rate);
     }
 
     fn configure(&mut self, model: CabModel, mic: MicModel, position: f32, distance: f32) {
@@ -508,6 +542,14 @@ impl CabLane {
             room_delay: self.room_delay.tick(),
             room_mix: self.room_mix.tick(),
             level: self.level.tick(),
+            mode1_f: self.mode1_f,
+            mode2_f: self.mode2_f,
+            breakup_f: self.breakup_f,
+            notch_f: self.notch_f,
+            proximity_alpha: self.proximity_alpha,
+            dynamic_alpha: self.dynamic_alpha,
+            ribbon_alpha: self.ribbon_alpha,
+            condenser_alpha: self.condenser_alpha,
         }
     }
 
@@ -527,29 +569,21 @@ impl CabLane {
         channel.hp_x = input;
         channel.hp_y = finite(hp);
 
-        let mode1 = channel.mode1.tick(
-            channel.hp_y,
-            profile.resonance_hz,
-            profile.resonance_damping,
-            sample_rate,
-        );
+        let mode1 = channel
+            .mode1
+            .tick(channel.hp_y, controls.mode1_f, profile.resonance_damping);
         let mode2 = channel.mode2.tick(
             channel.hp_y,
-            profile.second_mode_hz,
+            controls.mode2_f,
             (profile.resonance_damping + 0.18).min(1.5),
-            sample_rate,
         );
         channel.body_low += body_alpha * (channel.hp_y - channel.body_low);
         let body = channel.hp_y - channel.body_low;
-        let breakup = channel.breakup.tick(
-            channel.hp_y,
-            profile.breakup_hz,
-            profile.breakup_damping,
-            sample_rate,
-        );
-        let notch = channel
-            .notch
-            .tick(channel.hp_y, profile.notch_hz, 0.72, sample_rate);
+        let breakup =
+            channel
+                .breakup
+                .tick(channel.hp_y, controls.breakup_f, profile.breakup_damping);
+        let notch = channel.notch.tick(channel.hp_y, controls.notch_f, 0.72);
 
         let center = 1.0 - controls.position;
         let mut acoustic = match profile.topology {
@@ -627,19 +661,19 @@ impl CabLane {
         // Position changes proximity and cone breakup as well as high
         // radiation. Distance reduces proximity and introduces a softened,
         // delayed early-room reflection.
-        channel.proximity_low += alpha(170.0, sample_rate) * (acoustic - channel.proximity_low);
+        channel.proximity_low += controls.proximity_alpha * (acoustic - channel.proximity_low);
         let proximity =
             channel.proximity_low * (1.0 - controls.distance) * (0.36 - controls.position * 0.10);
         let close = acoustic + proximity;
 
         // Three capsule topologies, continuously crossfaded for automation.
-        channel.dynamic_mid += alpha(2_600.0, sample_rate) * (close - channel.dynamic_mid);
+        channel.dynamic_mid += controls.dynamic_alpha * (close - channel.dynamic_mid);
         let dynamic = close
             + (close - channel.dynamic_mid) * (0.13 + center * 0.12)
             + breakup * center * 0.035;
-        channel.ribbon_low += alpha(3_650.0, sample_rate) * (close - channel.ribbon_low);
+        channel.ribbon_low += controls.ribbon_alpha * (close - channel.ribbon_low);
         let ribbon = channel.ribbon_low + channel.proximity_low * 0.15 * (1.0 - controls.distance);
-        channel.condenser_low += alpha(7_600.0, sample_rate) * (close - channel.condenser_low);
+        channel.condenser_low += controls.condenser_alpha * (close - channel.condenser_low);
         let condenser = close + (close - channel.condenser_low) * 0.10 + breakup * center * 0.025;
         let mic = if controls.mic_kind <= 1.0 {
             dynamic * (1.0 - controls.mic_kind) + ribbon * controls.mic_kind

@@ -64,6 +64,10 @@ export const CAB_VARIANT_TO_MODEL: Record<string, string> = {
   American2x12: "american_2x12",
   Tweed1x12: "tweed_1x12",
   Modern4x12: "modern_412",
+  OpenBack: "open_back",
+  Vintage2x12: "vintage_212",
+  Oversized4x12: "oversized_412",
+  BassCabinet: "bass_cabinet",
 };
 
 /** Rust `ModModel` variant → editor model id. */
@@ -223,6 +227,11 @@ export function snapshotFromRodhareistState(state: unknown): RigSnapshot | null 
   setVal(plate, "reverb_decay", num(p, "reverb_decay_s"));
   setVal(plate, "reverb_mix", num(p, "reverb_mix"));
   const cab = parameters[stageModels.cab];
+  const micVariant = typeof p.mic_model === "string" ? p.mic_model : "Dynamic";
+  const micIndex: number | undefined = (
+    { Dynamic: 0, Ribbon: 1, Condenser: 2 } as Record<string, number>
+  )[micVariant];
+  setVal(cab, "cab_mic_type", micIndex);
   setVal(cab, "cab_mic", num(p, "cab_mic"));
   setVal(cab, "cab_dist", num(p, "cab_dist"));
 

@@ -269,6 +269,14 @@ pub enum CabModel {
     Tweed1x12,
     /// "Modern 4x12" — tight, scooped, extended highs.
     Modern4x12,
+    /// Wide open-back cabinet with front/rear cancellation.
+    OpenBack,
+    /// Warm, moderately damped vintage 2x12.
+    Vintage2x12,
+    /// Deep, tightly damped oversized closed 4x12.
+    Oversized4x12,
+    /// Extended-low-frequency bass cabinet.
+    BassCabinet,
 }
 
 impl CabModel {
@@ -277,6 +285,10 @@ impl CabModel {
         Self::American2x12,
         Self::Tweed1x12,
         Self::Modern4x12,
+        Self::OpenBack,
+        Self::Vintage2x12,
+        Self::Oversized4x12,
+        Self::BassCabinet,
     ];
 
     pub fn from_model_id(id: &str) -> Option<Self> {
@@ -285,6 +297,10 @@ impl CabModel {
             "american_2x12" => Some(Self::American2x12),
             "tweed_1x12" => Some(Self::Tweed1x12),
             "modern_412" => Some(Self::Modern4x12),
+            "open_back" => Some(Self::OpenBack),
+            "vintage_212" => Some(Self::Vintage2x12),
+            "oversized_412" => Some(Self::Oversized4x12),
+            "bass_cabinet" => Some(Self::BassCabinet),
             _ => None,
         }
     }
@@ -294,6 +310,30 @@ impl CabModel {
             .get(i as usize)
             .copied()
             .unwrap_or(Self::Vintage4x12)
+    }
+}
+
+/// Microphone capsule topology used by the cabinet stage.
+///
+/// APPEND-ONLY: the index is persisted and automated through
+/// `cab_mic_type`; old state defaults to Dynamic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub enum MicModel {
+    #[default]
+    Dynamic,
+    Ribbon,
+    Condenser,
+}
+
+impl MicModel {
+    pub const ALL: &'static [Self] = &[Self::Dynamic, Self::Ribbon, Self::Condenser];
+
+    pub fn from_index(i: u32) -> Self {
+        Self::ALL.get(i as usize).copied().unwrap_or(Self::Dynamic)
+    }
+
+    pub fn index(self) -> u8 {
+        self as u8
     }
 }
 
@@ -398,6 +438,8 @@ pub struct Params {
     pub drive_model: DriveModel,
     pub amp_model: AmpModel,
     pub cab_model: CabModel,
+    #[serde(default)]
+    pub mic_model: MicModel,
     /// Which algorithm the Mod slot runs (shares the `chorus_*` knobs).
     #[serde(default)]
     pub mod_model: ModModel,
@@ -537,6 +579,7 @@ pub fn default_params() -> Params {
         drive_model: DriveModel::Screamer,
         amp_model: AmpModel::Mandarin,
         cab_model: CabModel::Vintage4x12,
+        mic_model: MicModel::Dynamic,
         mod_model: ModModel::Chorus,
         wah_model: WahModel::CryWah,
         tone_engine: ToneEngineKind::Classic,
@@ -774,6 +817,14 @@ pub fn descriptor() -> PluginDescriptor {
                 min: 0.0,
                 max: 100.0,
                 unit: "%",
+            },
+            ParamDescriptor {
+                id: "cab_mic_type",
+                name: "Microphone Type",
+                default_value: 0.0,
+                min: 0.0,
+                max: 2.0,
+                unit: "type",
             },
             ParamDescriptor {
                 id: "wah_pos",
@@ -1045,6 +1096,7 @@ impl Dsp {
             drive_model: params.drive_model,
             amp_model: params.amp_model,
             cab_model: params.cab_model,
+            mic_model: params.mic_model,
             mod_model: params.mod_model,
             wah_model: params.wah_model,
             tone_engine: params.tone_engine,
@@ -1210,7 +1262,8 @@ impl Dsp {
         self.delay
             .configure(p.delay_time_ms, p.delay_fb, p.delay_mix);
         self.reverb.configure(p.reverb_decay_s, p.reverb_mix);
-        self.cab.configure(p.cab_model, p.cab_mic, p.cab_dist);
+        self.cab
+            .configure(p.cab_model, p.mic_model, p.cab_mic, p.cab_dist);
     }
 
     /// Replace the Helix path order (control thread).
@@ -1311,6 +1364,7 @@ pub fn apply_to_params(p: &mut Params, id: &str, value: f32) -> bool {
             p.tone_engine = ToneEngineKind::Classic;
         }
         "cab_model" => p.cab_model = CabModel::from_index(value.round() as u32),
+        "cab_mic_type" => p.mic_model = MicModel::from_index(value.round() as u32),
         "tone_engine" => p.tone_engine = ToneEngineKind::from_index(value.round() as u32),
         "path_slot_0" => p.stage_order[0] = StageKind::from_index(value.round() as i32),
         "path_slot_1" => p.stage_order[1] = StageKind::from_index(value.round() as i32),
@@ -1436,6 +1490,7 @@ pub fn ui_values(p: &Params) -> Vec<(&'static str, f32)> {
     out.push(("reverb_mix", p.reverb_mix));
     out.push(("cab_mic", p.cab_mic));
     out.push(("cab_dist", p.cab_dist));
+    out.push(("cab_mic_type", p.mic_model.index() as f32));
     out.push(("wah_pos", p.wah_pos));
     out.push(("wah_res", p.wah_res));
     out.push(("wah_sens", p.wah_sens));
@@ -1734,13 +1789,6 @@ pub(crate) fn soft_clip(x: f32) -> f32 {
     x.tanh()
 }
 
-/// Asymmetric tube-ish saturation: even-harmonic bias plus soft clipping.
-#[inline]
-pub(crate) fn tube_stage(x: f32, bias: f32, drive: f32) -> f32 {
-    let biased = x * drive + bias;
-    (biased.tanh() - bias.tanh()) / drive.max(1.0e-6)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1836,6 +1884,90 @@ mod tests {
         }
         // The chain must not explode (reverb + delay feedback stay stable).
         assert!(worst < 8.0, "output blew up: peak={worst}");
+    }
+
+    #[test]
+    fn boost_amp_cab_chain_adds_saturation_without_runaway_clipping() {
+        let make = |drive_on: bool| {
+            let mut dsp = Dsp::new(48_000.0);
+            let mut p = default_params();
+            p.stage_order = [None; PATH_SLOTS];
+            p.stage_order[0] = Some(StageKind::Drive);
+            p.stage_order[1] = Some(StageKind::Amp);
+            p.stage_order[2] = Some(StageKind::Cab);
+            p.drive_on = drive_on;
+            p.drive_model = DriveModel::Screamer;
+            p.drive_gain = 2.0;
+            p.drive_tone = 6.5;
+            p.drive_level = 9.0;
+            p.amp_model = AmpModel::Recto;
+            p.amp_gain = 7.5;
+            p.amp_master = 5.0;
+            p.cab_model = CabModel::Modern4x12;
+            p.mic_model = MicModel::Dynamic;
+            dsp.set_params(p);
+            dsp.reset();
+            dsp
+        };
+        let mut boosted = make(true);
+        let mut bare = make(false);
+        let mut difference = 0.0;
+        let mut peak = 0.0f32;
+        for n in 0..24_000 {
+            let t = n as f32 / 48_000.0;
+            let x = (t * 110.0 * std::f32::consts::TAU).sin() * 0.55
+                + (t * 1_700.0 * std::f32::consts::TAU).sin() * 0.04;
+            let with_boost = boosted.process_stereo(x, x).0;
+            let without = bare.process_stereo(x, x).0;
+            assert!(with_boost.is_finite());
+            peak = peak.max(with_boost.abs());
+            if n > 8_000 {
+                difference += (with_boost - without).powi(2);
+            }
+        }
+        let rms_difference = (difference / 16_000.0).sqrt();
+        assert!(rms_difference > 0.005, "boost did not drive the amp");
+        assert!(peak < 4.0, "boost caused uncontrolled clipping: {peak}");
+    }
+
+    #[test]
+    fn amp_cab_chain_is_stable_at_required_rates_and_block_sizes() {
+        for &sample_rate in &[44_100.0, 48_000.0, 96_000.0, 192_000.0] {
+            for &block_size in &[1usize, 16, 64, 128, 512, 2_048] {
+                let mut dsp = Dsp::new(sample_rate);
+                let mut p = default_params();
+                p.stage_order = [None; PATH_SLOTS];
+                p.stage_order[0] = Some(StageKind::Amp);
+                p.stage_order[1] = Some(StageKind::Cab);
+                p.amp_model = AmpModel::Slate;
+                p.amp_gain = 9.0;
+                p.amp_master = 7.0;
+                p.cab_model = CabModel::Oversized4x12;
+                p.mic_model = MicModel::Condenser;
+                dsp.set_params(p);
+                dsp.reset();
+                let mut sample = 0usize;
+                let mut peak = 0.0f32;
+                while sample < 4_096 {
+                    dsp.begin_block();
+                    for _ in 0..block_size.min(4_096 - sample) {
+                        let x = (sample as f32 * 220.0 * std::f32::consts::TAU / sample_rate).sin()
+                            * 0.7;
+                        let (left, right) = dsp.process_stereo(x, -x);
+                        assert!(
+                            left.is_finite() && right.is_finite(),
+                            "rate={sample_rate} block={block_size}"
+                        );
+                        peak = peak.max(left.abs()).max(right.abs());
+                        sample += 1;
+                    }
+                }
+                assert!(
+                    peak > 0.001 && peak < 4.0,
+                    "rate={sample_rate} block={block_size} peak={peak}"
+                );
+            }
+        }
     }
 
     #[test]

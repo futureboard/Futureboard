@@ -81,6 +81,7 @@ pub const UI_PARAM_IDS: &[&str] = &[
     "wah_pos",           // 65
     "wah_res",           // 66
     "wah_sens",          // 67
+    "cab_mic_type",      // 68
 ];
 
 /// String id → wire index. Linear scan over a small table — control/UI
@@ -132,7 +133,7 @@ mod tests {
     /// accidental reorder/insert must fail here, loudly.
     #[test]
     fn wire_indices_are_pinned() {
-        assert_eq!(UI_PARAM_IDS.len(), 68);
+        assert_eq!(UI_PARAM_IDS.len(), 69);
         assert_eq!(ui_param_index("power"), Some(0));
         assert_eq!(ui_param_index("gate_on"), Some(3));
         assert_eq!(ui_param_index("drive_model"), Some(10));
@@ -161,6 +162,7 @@ mod tests {
         assert_eq!(ui_param_index("wah_pos"), Some(65));
         assert_eq!(ui_param_index("wah_res"), Some(66));
         assert_eq!(ui_param_index("wah_sens"), Some(67));
+        assert_eq!(ui_param_index("cab_mic_type"), Some(68));
     }
 
     /// `ui_values` must cover every wire id except `clear_clip` (an action,
@@ -260,7 +262,16 @@ mod tests {
                 "drive `{id}`"
             );
         }
-        let cab = ["vintage_cab", "american_2x12", "tweed_1x12", "modern_412"];
+        let cab = [
+            "vintage_cab",
+            "american_2x12",
+            "tweed_1x12",
+            "modern_412",
+            "open_back",
+            "vintage_212",
+            "oversized_412",
+            "bass_cabinet",
+        ];
         for (i, id) in cab.iter().enumerate() {
             assert_eq!(
                 CabModel::from_model_id(id),

@@ -54,7 +54,7 @@ impl RodhareistState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::default_params;
+    use crate::{CabModel, MicModel, default_params};
 
     #[test]
     fn round_trips_through_json() {
@@ -71,5 +71,30 @@ mod tests {
     fn malformed_json_is_a_clean_error_not_a_panic() {
         assert!(RodhareistState::from_json("not json").is_err());
         assert!(RodhareistState::from_json("{}").is_err());
+    }
+
+    #[test]
+    fn amp_cab_and_microphone_state_round_trips() {
+        let mut params = default_params();
+        params.amp_model = crate::AmpModel::Slate;
+        params.amp_gain = 8.75;
+        params.amp_master = 3.25;
+        params.cab_model = CabModel::Oversized4x12;
+        params.mic_model = MicModel::Condenser;
+        params.cab_mic = 73.0;
+        params.cab_dist = 61.0;
+        let restored =
+            RodhareistState::from_json(&RodhareistState::new(params.clone()).to_json().unwrap())
+                .unwrap();
+        assert_eq!(restored.params, params);
+    }
+
+    #[test]
+    fn legacy_state_without_microphone_type_defaults_to_dynamic() {
+        let state = RodhareistState::new(default_params());
+        let mut value = serde_json::to_value(state).unwrap();
+        value["params"].as_object_mut().unwrap().remove("mic_model");
+        let restored: RodhareistState = serde_json::from_value(value).unwrap();
+        assert_eq!(restored.params.mic_model, MicModel::Dynamic);
     }
 }

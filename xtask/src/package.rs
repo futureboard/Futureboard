@@ -235,11 +235,7 @@ pub fn run(options: &PackageOptions) -> Result<PathBuf> {
     })
     .context("staged package failed validation; previous output left untouched")?;
 
-    // 8. Optional non-GUI smoke check on Windows (does not launch the GUI).
-    #[cfg(windows)]
-    smoke_check(&plan.staging_dir.join(&binary_name));
-
-    // 9. Atomically publish, then tidy the (now empty) staging root.
+    // 8. Atomically publish, then tidy the (now empty) staging root.
     staging::publish(&plan.staging_dir, &plan.final_dir)?;
     staging::cleanup_staging_root_if_empty(&plan.staging_dir);
     eprintln!("[xtask] published package: {}", plan.final_dir.display());
@@ -326,33 +322,6 @@ fn host_target() -> Result<String> {
         .map(|host| host.trim().to_string())
         .ok_or_else(|| anyhow!("rustc -vV did not report a host triple"))
 }
-
-/// Best-effort `FutureboardNative.exe --version`. Never fails the package:
-/// the binary may not implement `--version`, and packaging must not launch the
-/// GUI. Purely informational.
-#[cfg(windows)]
-fn smoke_check(exe: &Path) {
-    use std::process::Command;
-    match Command::new(exe).arg("--version").output() {
-        Ok(output) if output.status.success() => {
-            let text = String::from_utf8_lossy(&output.stdout);
-            eprintln!(
-                "[xtask] smoke check `{} --version`: {}",
-                exe.display(),
-                text.trim()
-            );
-        }
-        Ok(_) => eprintln!(
-            "[xtask] smoke check skipped: `{} --version` returned non-zero (no --version handler)",
-            exe.display()
-        ),
-        Err(error) => eprintln!("[xtask] smoke check skipped: {error}"),
-    }
-}
-
-#[cfg(not(windows))]
-#[allow(dead_code)]
-fn smoke_check(_exe: &Path) {}
 
 #[cfg(test)]
 mod tests {

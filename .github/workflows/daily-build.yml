@@ -32,22 +32,24 @@ jobs:
     name: Build Native (${{ matrix.os }})
     needs: version
     runs-on: ${{ matrix.os }}
+    env:
+      CARGO_BUILD_JOBS: 2
     strategy:
       fail-fast: false
       matrix:
         include:
-          - os: windows-latest
-            platform: win
-            native-artifact-name: futureboard-native-win
-            native-bundle-glob: target/installer/*.exe
           - os: ubuntu-24.04
             platform: linux
             native-artifact-name: futureboard-native-linux
             native-bundle-glob: target/appimage/*.AppImage
           - os: macos-latest
             platform: mac
-            native-artifact-name: futureboard-native-mac
+            native-artifact-name: futureboard-native-macos
             native-bundle-glob: packaging/native/out/*.dmg
+          - os: windows-latest
+            platform: win
+            native-artifact-name: futureboard-native-win
+            native-bundle-glob: target/installer/*.exe
 
     steps:
       - name: Checkout
@@ -148,7 +150,7 @@ jobs:
           echo "xtask package: $package_dir"
 
       - name: Bundle native app (macOS)
-        if: matrix.platform == 'mac'
+        if: matrix.os == 'macos-latest'
         run: |
           bash packaging/native/bundle-macos.sh "$FUTUREBOARD_PACKAGE_DIR" packaging/native/out
           bash packaging/native/bundle-macos-dmg.sh "packaging/native/out/Futureboard Studio.app" packaging/native/out "${{ needs.version.outputs.app-version }}"

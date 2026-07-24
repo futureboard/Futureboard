@@ -98,6 +98,32 @@ mod tests {
         assert_eq!(restored.params.mic_model, MicModel::Dynamic);
     }
 
+    /// The Delay slot grew models and a Tone knob after v3. Both are additive
+    /// with serde defaults, so a v3 blob written before they existed must
+    /// still load — as the tape echo it was saved as.
+    #[test]
+    fn legacy_state_without_delay_model_loads_as_the_tape_echo() {
+        let state = RodhareistState::new(default_params());
+        let mut value = serde_json::to_value(state).unwrap();
+        let params = value["params"].as_object_mut().unwrap();
+        params.remove("delay_model");
+        params.remove("delay_tone");
+        let restored: RodhareistState = serde_json::from_value(value).unwrap();
+        assert_eq!(restored.params.delay_model, crate::DelayModel::Tape);
+        assert_eq!(restored.params.delay_tone, 5.0);
+    }
+
+    #[test]
+    fn delay_model_and_tone_round_trip() {
+        let mut params = default_params();
+        params.delay_model = crate::DelayModel::PingPong;
+        params.delay_tone = 2.75;
+        let restored =
+            RodhareistState::from_json(&RodhareistState::new(params.clone()).to_json().unwrap())
+                .unwrap();
+        assert_eq!(restored.params, params);
+    }
+
     #[test]
     fn legacy_state_without_shimmer_amount_keeps_original_voicing() {
         let state = RodhareistState::new(default_params());

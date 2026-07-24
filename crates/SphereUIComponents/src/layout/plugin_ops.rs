@@ -375,6 +375,34 @@ impl StudioLayout {
                         });
                     }
                 }
+                ClientEvent::Host(HostEvent::BuiltinIrResult {
+                    plugin_instance_id,
+                    ok,
+                    name,
+                    error,
+                    frames,
+                    latency_samples,
+                    stereo,
+                    truncated,
+                }) => {
+                    eprintln!(
+                        "[plugin-bridge] event BuiltinIrResult instance={plugin_instance_id} ok={ok} name={name} error={error:?}"
+                    );
+                    for handle in self.plugin_editors.builtin.values() {
+                        let _ = handle.update(cx, |editor, _window, _cx| {
+                            editor.notify_ir_load_result(
+                                &plugin_instance_id,
+                                ok,
+                                &name,
+                                error.as_deref(),
+                                frames,
+                                latency_samples,
+                                stereo,
+                                truncated,
+                            );
+                        });
+                    }
+                }
                 ClientEvent::Host(HostEvent::PluginLoadFailed {
                     plugin_instance_id,
                     error,
@@ -2009,9 +2037,9 @@ impl StudioLayout {
         cx: &mut Context<Self>,
     ) {
         use crate::components::builtin_plugin_editor_window::{
-            BuiltinEditorHostOps, BuiltinHostStatusSource, BuiltinMeterSource,
-            BuiltinNamLoadForwarder, BuiltinNamLoadRequest, BuiltinParamForwarder,
-            PluginInstanceKey,
+            BuiltinEditorHostOps, BuiltinHostStatusSource, BuiltinIrLoadForwarder,
+            BuiltinIrLoadRequest, BuiltinMeterSource, BuiltinNamLoadForwarder,
+            BuiltinNamLoadRequest, BuiltinParamForwarder, PluginInstanceKey,
         };
 
         let target = PluginInstanceKey {
@@ -2082,6 +2110,33 @@ impl StudioLayout {
                     },
                 ) as BuiltinNamLoadForwarder
             });
+        let load_ir: Option<BuiltinIrLoadForwarder> = bridge_runtime.clone().map(|runtime| {
+            std::sync::Arc::new(
+                move |key: &PluginInstanceKey, request: BuiltinIrLoadRequest| {
+                    use base64::Engine as _;
+                    // Binary through a newline-framed JSON transport: base64
+                    // here, decoded once in the host process.
+                    let command = SpherePluginHost::ipc::HostCommand::LoadBuiltinIr {
+                        plugin_instance_id: key.insert_id.clone(),
+                        name: request.name,
+                        wav_b64: base64::engine::general_purpose::STANDARD.encode(&request.bytes),
+                    };
+                    match runtime.lock() {
+                        Ok(mut bridge) => {
+                            if let Err(error) = bridge.send_raw(&command) {
+                                eprintln!(
+                                    "[BuiltinPluginEditor] loadIr send failed insert={} error={error}",
+                                    key.insert_id
+                                );
+                            }
+                        }
+                        Err(_) => eprintln!(
+                            "[BuiltinPluginEditor] loadIr dropped: bridge runtime poisoned"
+                        ),
+                    }
+                },
+            ) as BuiltinIrLoadForwarder
+        });
         let meter_source: Option<BuiltinMeterSource> = bridge_runtime.clone().map(|runtime| {
             std::sync::Arc::new(move |key: &PluginInstanceKey| {
                 runtime
@@ -2101,6 +2156,7 @@ impl StudioLayout {
         let host_ops = BuiltinEditorHostOps {
             forward_param,
             load_nam_capture,
+            load_ir,
             meter_source,
             host_status_source,
         };

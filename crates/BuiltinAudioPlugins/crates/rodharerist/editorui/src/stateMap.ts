@@ -71,6 +71,7 @@ export const CAB_VARIANT_TO_MODEL: Record<string, string> = {
   Brit4x12: "brit_412",
   Uber4x12: "uber_412",
   Slo4x12: "slo_412",
+  Ir: "ir",
 };
 
 /** Rust `ReverbModel` variant → editor model id. */
@@ -87,6 +88,15 @@ export const MOD_VARIANT_TO_MODEL: Record<string, string> = {
   Phaser: "phaser",
   Flanger: "flanger",
   Tremolo: "tremolo",
+};
+
+/** Rust `DelayModel` variant → editor model id. */
+export const DELAY_VARIANT_TO_MODEL: Record<string, string> = {
+  Tape: "tape",
+  Digital: "digital",
+  Analog: "analog",
+  PingPong: "ping_pong",
+  Dual: "dual",
 };
 
 /** Rust `WahModel` variant → editor model id. */
@@ -156,6 +166,10 @@ export function snapshotFromRodhareistState(state: unknown): RigSnapshot | null 
   const wahVariant = typeof p.wah_model === "string" ? p.wah_model : "";
   if (WAH_VARIANT_TO_MODEL[wahVariant]) {
     stageModels.wah = WAH_VARIANT_TO_MODEL[wahVariant]!;
+  }
+  const delayVariant = typeof p.delay_model === "string" ? p.delay_model : "";
+  if (DELAY_VARIANT_TO_MODEL[delayVariant]) {
+    stageModels.delay = DELAY_VARIANT_TO_MODEL[delayVariant]!;
   }
   const reverbVariant = typeof p.reverb_model === "string" ? p.reverb_model : "";
   if (REVERB_VARIANT_TO_MODEL[reverbVariant]) {
@@ -234,10 +248,13 @@ export function snapshotFromRodhareistState(state: unknown): RigSnapshot | null 
   setVal(wahParams, "wah_pos", num(p, "wah_pos"));
   setVal(wahParams, "wah_res", num(p, "wah_res"));
   setVal(wahParams, "wah_sens", num(p, "wah_sens"));
-  const tape = parameters.tape;
-  setVal(tape, "delay_time", num(p, "delay_time_ms"));
-  setVal(tape, "delay_fb", num(p, "delay_fb"));
-  setVal(tape, "delay_mix", num(p, "delay_mix"));
+  // The Delay slot's voicings share the delay_* ids; only the selected model
+  // receives the blob values (same rule as dist/cab/mod above).
+  const delayParams = parameters[stageModels.delay];
+  setVal(delayParams, "delay_time", num(p, "delay_time_ms"));
+  setVal(delayParams, "delay_fb", num(p, "delay_fb"));
+  setVal(delayParams, "delay_mix", num(p, "delay_mix"));
+  setVal(delayParams, "delay_tone", num(p, "delay_tone"));
   // Reverb voicings share Decay/Mix; Shimmer alone also exposes its octave-up
   // feedback amount. Write only into the active model's param set.
   const verbParams = parameters[stageModels.verb];

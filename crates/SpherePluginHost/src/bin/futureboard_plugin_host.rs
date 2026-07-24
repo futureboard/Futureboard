@@ -238,13 +238,16 @@ type LoadedRegistry = HashMap<String, LoadedPlugin>;
 /// A built-in processor is created on the IPC thread and then owned exclusively
 /// by the audio producer thread. The map only publishes/removes `Arc` handles;
 /// no other thread accesses the DSP inside the cell. The one sanctioned
-/// exception is `nam_loader`: an `Arc`'d pair of wait-free hand-off cells the
-/// IPC thread uses to submit prepared NAM captures (adopted by the producer at
-/// `begin_block`) — it never touches the `Dsp` itself.
+/// exceptions are `nam_loader` and `ir_loader`: `Arc`'d pairs of wait-free
+/// hand-off cells the IPC thread uses to submit prepared NAM captures and
+/// impulse responses (adopted by the producer at `begin_block`) — neither ever
+/// touches the `Dsp` itself.
 struct BuiltinHostProcessor {
     dsp: UnsafeCell<rodharerist::Dsp>,
     /// Control-side NAM capture loader (safe from the IPC thread).
     nam_loader: rodharerist::NamLoader,
+    /// Control-side impulse-response loader (safe from the IPC thread).
+    ir_loader: rodharerist::IrLoader,
     /// Engine sample rate the DSP was built at — needed to validate a `.nam`
     /// capture's declared rate on the IPC thread.
     sample_rate: f32,
@@ -252,7 +255,7 @@ struct BuiltinHostProcessor {
 
 // SAFETY: `process_block` is called only by the single audio producer thread.
 // IPC/UI threads only clone or remove the surrounding Arc map entry, or use
-// the `nam_loader` hand-off cells which are thread-safe by construction.
+// the `nam_loader`/`ir_loader` hand-off cells, thread-safe by construction.
 unsafe impl Send for BuiltinHostProcessor {}
 unsafe impl Sync for BuiltinHostProcessor {}
 
@@ -278,9 +281,11 @@ impl BuiltinHostProcessor {
             }
         }
         let nam_loader = dsp.nam_loader();
+        let ir_loader = dsp.ir_loader();
         Self {
             dsp: UnsafeCell::new(dsp),
             nam_loader,
+            ir_loader,
             sample_rate: sr,
         }
     }
@@ -288,7 +293,7 @@ impl BuiltinHostProcessor {
     fn process_block(&self, in_l: &[f32], in_r: &[f32], interleaved: &mut [f32], frames: usize) {
         // SAFETY: the dedicated producer thread is the sole DSP accessor.
         let dsp = unsafe { &mut *self.dsp.get() };
-        // Block boundary: adopt a pending NAM capture swap (never mid-block).
+        // Block boundary: adopt any pending NAM/IR swap (never mid-block).
         dsp.begin_block();
         for i in 0..frames {
             let (l, r) = dsp.process_stereo(in_l[i], in_r[i]);
@@ -313,11 +318,13 @@ impl BuiltinHostProcessor {
         }
     }
 
-    /// Reported latency in samples (NAM receptive field). Producer thread only.
+    /// Reported latency in samples: the NAM capture's receptive field plus the
+    /// cabinet IR's convolution partition, each counted only while the stage
+    /// carrying it is actually in the path. Producer thread only.
     fn latency_samples(&self) -> usize {
         // SAFETY: the dedicated producer thread is the sole DSP accessor.
         let dsp = unsafe { &*self.dsp.get() };
-        dsp.nam_latency_samples()
+        dsp.latency_samples()
     }
 
     /// Control-rate parameter apply from the shared param ring. Runs only on
@@ -765,6 +772,13 @@ fn boost_audio_producer_thread() {}
 /// it keeps shutdown responsive and sweeps any request whose signal raced the
 /// wait. Without a kick event (no `--parent-pid`, or creation failed) it falls
 /// back to the legacy 250 µs sleep poll.
+/// Stack for the audio producer thread. The block path's own fixed-size
+/// buffers are 272 KiB before any plugin DSP is inlined on top, and the
+/// platform default (2 MiB) left no usable margin — measured, the thread wanted
+/// between 2.0 and 2.5 MiB. 8 MiB costs nothing but address space (stack pages
+/// are committed on use) and takes the whole class of failure off the table.
+const AUDIO_PRODUCER_STACK_BYTES: usize = 8 * 1024 * 1024;
+
 fn run_audio_producer(
     regions: SharedAudioRegions,
     builtins: SharedBuiltinProcessors,
@@ -886,6 +900,14 @@ fn run_ipc_loop(mut out: io::Stdout, shutdown: Arc<AtomicBool>) {
         });
         std::thread::Builder::new()
             .name("plugin-host-audio".into())
+            // `service_audio_bridge` alone puts 272 KiB of fixed-size block
+            // buffers on this thread's stack (`in_l`/`in_r` at MAX_BLOCK_FRAMES
+            // plus `interleaved` at MAX_BLOCK_FRAMES * MAX_CHANNELS), and the
+            // rest of the inlined block path sat just under the 2 MiB default
+            // — close enough that adding DSP to the path overflowed it on
+            // thread entry, aborting the whole host process before any plugin
+            // was even loaded. Ask for a stack that is not a coincidence.
+            .stack_size(AUDIO_PRODUCER_STACK_BYTES)
             .spawn(move || run_audio_producer(slots, builtins, dsp, shutdown, kick))
             .expect("spawn plugin-host audio producer");
     }
@@ -1584,6 +1606,66 @@ fn dispatch(
             };
             let _ = ipc::write_frame(out, &event);
         }
+        HostCommand::LoadBuiltinIr {
+            plugin_instance_id,
+            name,
+            wav_b64,
+        } => {
+            use base64::Engine as _;
+            // IPC thread: decode, resample and FFT here (allocation-heavy,
+            // never on the producer thread), then hand off through the
+            // loader's wait-free cells.
+            let processor = builtin_processors
+                .lock()
+                .ok()
+                .and_then(|processors| processors.get(&plugin_instance_id).cloned());
+            let result = base64::engine::general_purpose::STANDARD
+                .decode(wav_b64.as_bytes())
+                .map_err(|e| format!("IR payload is not valid base64: {e}"))
+                .and_then(|bytes| match processor {
+                    Some(p) => p
+                        .ir_loader
+                        .load_wav(&bytes, name.clone(), p.sample_rate as f64)
+                        .map_err(|e| e.to_string()),
+                    None => Err(format!(
+                        "no built-in DSP instance loaded for {plugin_instance_id}"
+                    )),
+                });
+            let event = match result {
+                Ok(info) => {
+                    eprintln!(
+                        "[plugin-host-ir] loaded instance={plugin_instance_id} name={} frames={} stereo={} truncated={}",
+                        info.name, info.frames, info.stereo, info.truncated
+                    );
+                    HostEvent::BuiltinIrResult {
+                        plugin_instance_id,
+                        ok: true,
+                        name: info.name,
+                        error: None,
+                        frames: info.frames as u64,
+                        latency_samples: info.latency_samples as u64,
+                        stereo: info.stereo,
+                        truncated: info.truncated,
+                    }
+                }
+                Err(error) => {
+                    eprintln!(
+                        "[plugin-host-ir] load FAILED instance={plugin_instance_id} name={name} error={error}"
+                    );
+                    HostEvent::BuiltinIrResult {
+                        plugin_instance_id,
+                        ok: false,
+                        name,
+                        error: Some(error),
+                        frames: 0,
+                        latency_samples: 0,
+                        stereo: false,
+                        truncated: false,
+                    }
+                }
+            };
+            let _ = ipc::write_frame(out, &event);
+        }
         HostCommand::OpenEditorWithParentHwnd {
             track_id,
             track_index,
@@ -1856,58 +1938,37 @@ fn dispatch(
             name,
             bytes,
             plugin_instance_id,
-        } => {
-            #[cfg(windows)]
-            {
-                match SharedAudioRegion::open_named(&name) {
-                    Ok(region) => {
-                        let sr = region.bridge().sample_rate.load(Ordering::Relaxed);
-                        let block = region.bridge().max_block_size.load(Ordering::Relaxed);
-                        eprintln!(
-                            "[plugin-host-bridge] AttachSharedAudio instance={plugin_instance_id} name={name} bytes={bytes} attached=true header_sr={sr} header_block={block}"
-                        );
-                        region.bridge().set_dsp_output_ready(true);
-                        if let Ok(mut slots) = region_slots.lock() {
-                            let key = if plugin_instance_id.is_empty() {
-                                name.clone()
-                            } else {
-                                plugin_instance_id.clone()
-                            };
-                            Arc::make_mut(&mut slots).insert(key, Arc::new(region));
-                        }
-                        preview.lock().set_dsp_ready(true);
-                        log_host_audio_mode();
-                        let _ = ipc::write_frame(
-                            out,
-                            &HostEvent::SharedAudioAttached {
-                                attached: true,
-                                name,
-                                bytes,
-                            },
-                        );
-                    }
-                    Err(error) => {
-                        eprintln!(
-                            "[plugin-host-bridge] AttachSharedAudio name={name} attached=false error={error}"
-                        );
-                        let _ = ipc::write_frame(
-                            out,
-                            &HostEvent::SharedAudioAttached {
-                                attached: false,
-                                name,
-                                bytes,
-                            },
-                        );
-                    }
-                }
-            }
-            #[cfg(not(windows))]
-            {
-                let _ = region_slots;
-                let _ = &plugin_instance_id;
+        } => match SharedAudioRegion::open_named(&name) {
+            Ok(region) => {
+                let sr = region.bridge().sample_rate.load(Ordering::Relaxed);
+                let block = region.bridge().max_block_size.load(Ordering::Relaxed);
                 eprintln!(
-                    "[plugin-host-bridge] AttachSharedAudio unsupported on this platform name={name}"
+                        "[plugin-host-bridge] AttachSharedAudio instance={plugin_instance_id} name={name} bytes={bytes} attached=true header_sr={sr} header_block={block}"
+                    );
+                region.bridge().set_dsp_output_ready(true);
+                if let Ok(mut slots) = region_slots.lock() {
+                    let key = if plugin_instance_id.is_empty() {
+                        name.clone()
+                    } else {
+                        plugin_instance_id.clone()
+                    };
+                    Arc::make_mut(&mut slots).insert(key, Arc::new(region));
+                }
+                preview.lock().set_dsp_ready(true);
+                log_host_audio_mode();
+                let _ = ipc::write_frame(
+                    out,
+                    &HostEvent::SharedAudioAttached {
+                        attached: true,
+                        name,
+                        bytes,
+                    },
                 );
+            }
+            Err(error) => {
+                eprintln!(
+                        "[plugin-host-bridge] AttachSharedAudio name={name} attached=false error={error}"
+                    );
                 let _ = ipc::write_frame(
                     out,
                     &HostEvent::SharedAudioAttached {
@@ -1917,7 +1978,7 @@ fn dispatch(
                     },
                 );
             }
-        }
+        },
         HostCommand::PrepareProcessing {
             plugin_instance_id,
             sample_rate,

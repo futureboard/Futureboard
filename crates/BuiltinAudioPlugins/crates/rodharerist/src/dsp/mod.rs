@@ -5,11 +5,12 @@
 //! signal chain exactly:
 //!
 //! ```text
-//! Gate → Comp → Drive → Amp → EQ → Mod → Tape Delay → Plate Reverb → Cabinet
+//! Gate → Comp → Drive → Amp → EQ → Mod → Delay → Reverb → Cabinet
 //! ```
 //!
-//! (user-reorderable; a Wah stage starts in the rack, and the Mod slot runs
-//! one of chorus / phaser / flanger / tremolo)
+//! (user-reorderable; a Wah stage starts in the rack, the Mod slot runs one of
+//! chorus / phaser / flanger / tremolo, and the Delay slot one of tape /
+//! digital / analog / ping-pong / dual)
 //!
 //! ## Realtime rules
 //!
@@ -33,14 +34,17 @@ mod eq;
 mod flanger;
 mod gate;
 mod handoff;
+mod ir;
 mod mod_stage;
 mod nam;
 mod phaser;
+mod rate;
 mod reverb;
 mod smooth;
 mod tone_stage;
 mod tremolo;
 mod wah;
+mod wav;
 
 use builtin_dsp_core::{
     ParamDescriptor, PluginCategory, PluginDescriptor, StereoEffect, clamp, db_to_linear,
@@ -49,10 +53,14 @@ use builtin_dsp_core::{
 
 use cab::Cabinet;
 use comp::CompStage;
-use delay::TapeDelay;
+use delay::DelayStage;
 use drive::Drive;
 use eq::EqStage;
 use gate::NoiseGate;
+pub use ir::{
+    IrInfo, IrLoadError, IrLoader, MAX_IR_SECONDS, PARTITION as IR_PARTITION_SAMPLES,
+    PreparedIrRuntime, prepare_ir_runtime,
+};
 use mod_stage::ModStage;
 pub use nam::{NamCaptureInfo, NamLoadError, NamLoader, PreparedNamRuntime, prepare_nam_runtime};
 use reverb::PlateReverb;
@@ -286,10 +294,33 @@ pub enum CabModel {
     /// "SLO Custom 4x12" — smooth, singing high-gain closed 4x12
     /// (Soldano-style voicing).
     Slo4x12,
+    /// "Impulse Response" — not a modeled voicing at all: convolution with a
+    /// user-loaded `.wav` IR (see [`ir::IrConvolver`]). The mic position and
+    /// distance knobs do not apply — the IR already is a miked cabinet — and
+    /// the slot passes dry until a file is loaded.
+    Ir,
 }
 
 impl CabModel {
     pub const ALL: &'static [Self] = &[
+        Self::Vintage4x12,
+        Self::American2x12,
+        Self::Tweed1x12,
+        Self::Modern4x12,
+        Self::OpenBack,
+        Self::Vintage2x12,
+        Self::Oversized4x12,
+        Self::BassCabinet,
+        Self::Brit4x12,
+        Self::Uber4x12,
+        Self::Slo4x12,
+        Self::Ir,
+    ];
+
+    /// The modeled voicings only — [`Self::ALL`] minus [`Self::Ir`], which is
+    /// a convolution engine rather than a filter profile. Anything asserting
+    /// or enumerating *voicing* behaviour wants this list, not `ALL`.
+    pub const MODELED: &'static [Self] = &[
         Self::Vintage4x12,
         Self::American2x12,
         Self::Tweed1x12,
@@ -316,6 +347,7 @@ impl CabModel {
             "brit_412" => Some(Self::Brit4x12),
             "uber_412" => Some(Self::Uber4x12),
             "slo_412" => Some(Self::Slo4x12),
+            "ir" => Some(Self::Ir),
             _ => None,
         }
     }
@@ -452,6 +484,53 @@ impl ReverbModel {
     }
 }
 
+/// Echo voicing in the Delay slot, matching the editor's `delay` models. All
+/// share the Time/Feedback/Mix/Tone knobs (`delay_*` wire ids), like the Mod
+/// slot's models share `chorus_*`.
+///
+/// APPEND-ONLY: index into `ALL` is the `delay_model` wire value. `Tape` stays
+/// first — it is what every project saved before this stage grew models
+/// deserializes to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub enum DelayModel {
+    /// "Tape Echo" — warm, saturated repeats with audible wow and flutter.
+    #[default]
+    Tape,
+    /// "Digital Delay" — clean, full-bandwidth, unmoving repeats.
+    Digital,
+    /// "Analog BBD" — dark, thinning, compressed bucket-brigade repeats.
+    Analog,
+    /// "Ping Pong" — repeats alternating across the stereo image.
+    PingPong,
+    /// "Dual Delay" — quarter note left against a dotted eighth right.
+    Dual,
+}
+
+impl DelayModel {
+    pub const ALL: &'static [Self] = &[
+        Self::Tape,
+        Self::Digital,
+        Self::Analog,
+        Self::PingPong,
+        Self::Dual,
+    ];
+
+    pub fn from_model_id(id: &str) -> Option<Self> {
+        match id {
+            "tape" => Some(Self::Tape),
+            "digital" => Some(Self::Digital),
+            "analog" => Some(Self::Analog),
+            "ping_pong" => Some(Self::PingPong),
+            "dual" => Some(Self::Dual),
+            _ => None,
+        }
+    }
+
+    pub fn from_index(i: u32) -> Self {
+        Self::ALL.get(i as usize).copied().unwrap_or(Self::Tape)
+    }
+}
+
 /// Full parameter set. Knob ranges match `editorui/src/data.ts` one-to-one so the
 /// React UI and the bridge speak the same units.
 ///
@@ -499,6 +578,9 @@ pub struct Params {
     /// Which algorithm the Reverb slot runs (shares the `reverb_*` knobs).
     #[serde(default)]
     pub reverb_model: ReverbModel,
+    /// Which algorithm the Delay slot runs (shares the `delay_*` knobs).
+    #[serde(default)]
+    pub delay_model: DelayModel,
 
     /// Which engine the Tone/Amp slot runs: Classic Amp, NAM Capture, or Bypass.
     /// Mutually exclusive — never more than one processes at a time.
@@ -529,10 +611,14 @@ pub struct Params {
     pub chorus_depth: f32, // 0..10
     pub chorus_mix: f32,   // 0..100 %
 
-    // Tape delay.
+    // Delay.
     pub delay_time_ms: f32, // 40..1200
     pub delay_fb: f32,      // 0..100 %
     pub delay_mix: f32,     // 0..100 %
+    /// Feedback-path brightness (0..10, 5 = the selected voicing's own
+    /// centre). Every model reads it; each stays centred on its own colour.
+    #[serde(default = "default_delay_tone")]
+    pub delay_tone: f32,
 
     // Reverb.
     pub reverb_decay_s: f32, // 0.5..15
@@ -590,6 +676,9 @@ pub struct Params {
 fn default_true() -> bool {
     true
 }
+fn default_delay_tone() -> f32 {
+    5.0
+}
 fn default_reverb_shimmer() -> f32 {
     62.0
 }
@@ -644,6 +733,7 @@ pub fn default_params() -> Params {
         mod_model: ModModel::Chorus,
         wah_model: WahModel::CryWah,
         reverb_model: ReverbModel::Plate,
+        delay_model: DelayModel::Tape,
         tone_engine: ToneEngineKind::Classic,
         stage_order: StageKind::default_path(),
         gate_thresh_db: -55.0,
@@ -662,6 +752,7 @@ pub fn default_params() -> Params {
         delay_time_ms: 420.0,
         delay_fb: 35.0,
         delay_mix: 30.0,
+        delay_tone: default_delay_tone(),
         reverb_decay_s: 8.5,
         reverb_mix: 55.0,
         reverb_shimmer: default_reverb_shimmer(),
@@ -850,6 +941,14 @@ pub fn descriptor() -> PluginDescriptor {
                 unit: "%",
             },
             ParamDescriptor {
+                id: "delay_tone",
+                name: "Delay Tone",
+                default_value: 5.0,
+                min: 0.0,
+                max: 10.0,
+                unit: "",
+            },
+            ParamDescriptor {
                 id: "reverb_decay",
                 name: "Reverb Decay",
                 default_value: 8.5,
@@ -1024,7 +1123,16 @@ pub struct Dsp {
     eq_stage: EqStage,
     mod_stage: ModStage,
     wah: Wah,
-    delay: TapeDelay,
+    delay: DelayStage,
+    /// Convolution cabinet, active when `cab_model == CabModel::Ir`.
+    ir: ir::IrConvolver,
+    /// 0 = modeled cabinet, 1 = IR convolution. Ramped so switching cabinet
+    /// engines crossfades instead of cutting. The IR path carries
+    /// [`ir::PARTITION`] samples of latency the modeled path does not, so the
+    /// two are briefly offset in time during the fade — audible as a short
+    /// blur, not a click, and gone once the fade completes.
+    cab_ir_blend: f32,
+    cab_ir_step: f32,
     reverb: PlateReverb,
     cab: Cabinet,
     /// Linear gains derived from `input_trim_db` / `output_trim_db`, recomputed
@@ -1093,6 +1201,10 @@ const CLIP_THRESHOLD: f32 = 1.0;
 /// Glide time for the global input/output trims (see `smooth.rs`).
 const TRIM_SMOOTH_SECONDS: f32 = 0.010;
 
+/// Crossfade time when the Cabinet slot switches between the modeled voicings
+/// and the IR convolution engine.
+const CAB_ENGINE_FADE_SECONDS: f32 = 0.020;
+
 impl Dsp {
     pub fn new(sample_rate: f32) -> Self {
         let sr = sample_rate.max(1.0);
@@ -1106,7 +1218,10 @@ impl Dsp {
             eq_stage: EqStage::new(sr),
             mod_stage: ModStage::new(sr),
             wah: Wah::new(sr),
-            delay: TapeDelay::new(sr),
+            delay: DelayStage::new(sr),
+            ir: ir::IrConvolver::new(sr),
+            cab_ir_blend: 0.0,
+            cab_ir_step: 1.0 / (sr * CAB_ENGINE_FADE_SECONDS).max(1.0),
             reverb: PlateReverb::new(sr),
             cab: Cabinet::new(sr),
             in_gain: smooth::Smoothed::new(sr, TRIM_SMOOTH_SECONDS, 1.0),
@@ -1171,6 +1286,7 @@ impl Dsp {
             mod_model: params.mod_model,
             wah_model: params.wah_model,
             reverb_model: params.reverb_model,
+            delay_model: params.delay_model,
             tone_engine: params.tone_engine,
             stage_order: sanitize_stage_order(params.stage_order),
             gate_thresh_db: clamp(params.gate_thresh_db, -80.0, 0.0),
@@ -1189,6 +1305,7 @@ impl Dsp {
             delay_time_ms: clamp(params.delay_time_ms, 40.0, 1200.0),
             delay_fb: clamp(params.delay_fb, 0.0, 100.0),
             delay_mix: clamp(params.delay_mix, 0.0, 100.0),
+            delay_tone: clamp(params.delay_tone, 0.0, 10.0),
             reverb_decay_s: clamp(params.reverb_decay_s, 0.5, 15.0),
             reverb_mix: clamp(params.reverb_mix, 0.0, 100.0),
             reverb_shimmer: clamp(params.reverb_shimmer, 0.0, 100.0),
@@ -1277,9 +1394,14 @@ impl Dsp {
                 };
                 p.reverb_model = m;
             }
+            "delay" => {
+                let Some(m) = DelayModel::from_model_id(model_id) else {
+                    return false;
+                };
+                p.delay_model = m;
+            }
             // Single-algorithm stages: accept their canonical model ids.
             "gate" if model_id == "gate" => {}
-            "delay" if model_id == "tape" => {}
             "comp" if model_id == "softknee" => {}
             "eq" if model_id == "parametric" => {}
             "cab" => {
@@ -1337,8 +1459,13 @@ impl Dsp {
             .configure(p.mod_model, p.chorus_rate, p.chorus_depth, p.chorus_mix);
         self.wah
             .configure(p.wah_model, p.wah_pos, p.wah_res, p.wah_sens);
-        self.delay
-            .configure(p.delay_time_ms, p.delay_fb, p.delay_mix);
+        self.delay.configure(
+            p.delay_model,
+            p.delay_time_ms,
+            p.delay_fb,
+            p.delay_mix,
+            p.delay_tone,
+        );
         self.reverb.configure(
             p.reverb_model,
             p.reverb_decay_s,
@@ -1360,6 +1487,7 @@ impl Dsp {
     /// the control thread) is adopted — never mid-block, never per-sample.
     pub fn begin_block(&mut self) {
         self.amp_stage.begin_block();
+        self.ir.begin_block();
     }
 
     /// Control thread: parse and build a `.nam` capture, then queue it for the
@@ -1408,11 +1536,66 @@ impl Dsp {
     }
 
     /// Latency contributed by the active NAM capture's receptive field, in
-    /// samples (0 if none loaded). A preallocated sample-rate adapter and
-    /// full plugin-latency reporting are follow-up work; this exposes the raw
-    /// number the capture itself already computes.
+    /// engine samples (0 if none loaded), already accounting for a capture
+    /// running through the rate adapter.
     pub fn nam_latency_samples(&self) -> usize {
         self.amp_stage.nam_latency_samples()
+    }
+
+    /// Control thread: decode and build a `.wav` impulse response, then queue
+    /// it for the audio thread to adopt at the next [`Dsp::begin_block`]. The
+    /// IR only *sounds* once the Cabinet slot is switched to
+    /// [`CabModel::Ir`] — loading and selecting are deliberately separate, so
+    /// a user can audition a file against the modeled cabinet.
+    pub fn load_ir_wav(
+        &mut self,
+        bytes: &[u8],
+        name: impl Into<String>,
+    ) -> Result<IrInfo, IrLoadError> {
+        let prepared = ir::prepare_ir_runtime(bytes, name.into(), self.sample_rate as f64)?;
+        let info = prepared.info();
+        // Opportunistic sweep before handing off the new one.
+        self.ir.poll_garbage();
+        self.ir.submit(Box::new(prepared));
+        Ok(info)
+    }
+
+    /// Control thread: drop any IR the audio thread has retired.
+    pub fn poll_ir_garbage(&mut self) {
+        self.ir.poll_garbage();
+    }
+
+    /// Clone out a control-side IR loader handle, for a control thread in a
+    /// different ownership domain (the plugin-host IPC thread). One control
+    /// thread at a time.
+    pub fn ir_loader(&self) -> IrLoader {
+        self.ir.loader()
+    }
+
+    /// Info about the currently active IR, if one is loaded (regardless of
+    /// whether the Cabinet slot has the IR engine selected).
+    pub fn ir_info(&self) -> Option<IrInfo> {
+        self.ir.active_info()
+    }
+
+    /// Total latency this instance reports to the host, in samples: the NAM
+    /// capture's receptive field plus the IR convolution's partition, counting
+    /// each only while the stage that carries it is actually in the path.
+    pub fn latency_samples(&self) -> usize {
+        let p = &self.params;
+        let in_path = |kind: StageKind| p.stage_order.iter().flatten().any(|s| *s == kind);
+        let nam =
+            if p.amp_on && in_path(StageKind::Amp) && p.tone_engine == ToneEngineKind::NamCapture {
+                self.nam_latency_samples()
+            } else {
+                0
+            };
+        let ir = if p.cab_on && in_path(StageKind::Cab) && p.cab_model == CabModel::Ir {
+            self.ir.latency_samples()
+        } else {
+            0
+        };
+        nam + ir
     }
 }
 
@@ -1443,6 +1626,7 @@ pub fn apply_to_params(p: &mut Params, id: &str, value: f32) -> bool {
         "mod_model" => p.mod_model = ModModel::from_index(value.round() as u32),
         "wah_model" => p.wah_model = WahModel::from_index(value.round() as u32),
         "reverb_model" => p.reverb_model = ReverbModel::from_index(value.round() as u32),
+        "delay_model" => p.delay_model = DelayModel::from_index(value.round() as u32),
         "amp_model" => {
             p.amp_model = AmpModel::from_index(value.round() as u32);
             p.tone_engine = ToneEngineKind::Classic;
@@ -1476,6 +1660,7 @@ pub fn apply_to_params(p: &mut Params, id: &str, value: f32) -> bool {
         "delay_time" => p.delay_time_ms = value,
         "delay_fb" => p.delay_fb = value,
         "delay_mix" => p.delay_mix = value,
+        "delay_tone" => p.delay_tone = value,
         "reverb_decay" => p.reverb_decay_s = value,
         "reverb_mix" => p.reverb_mix = value,
         "reverb_shimmer" => p.reverb_shimmer = value,
@@ -1516,7 +1701,7 @@ pub fn ui_values(p: &Params) -> Vec<(&'static str, f32)> {
     fn model_index<T: PartialEq + Copy>(all: &[T], value: T) -> f32 {
         all.iter().position(|m| *m == value).unwrap_or(0) as f32
     }
-    let mut out = Vec::with_capacity(71);
+    let mut out = Vec::with_capacity(73);
     out.push(("power", b(p.power)));
     out.push(("input_trim", p.input_trim_db));
     out.push(("output_trim", p.output_trim_db));
@@ -1540,6 +1725,7 @@ pub fn ui_values(p: &Params) -> Vec<(&'static str, f32)> {
         "reverb_model",
         model_index(ReverbModel::ALL, p.reverb_model),
     ));
+    out.push(("delay_model", model_index(DelayModel::ALL, p.delay_model)));
     out.push(("tone_engine", p.tone_engine.index() as f32));
     const PATH_SLOT_IDS: [&str; PATH_SLOTS] = [
         "path_slot_0",
@@ -1575,6 +1761,7 @@ pub fn ui_values(p: &Params) -> Vec<(&'static str, f32)> {
     out.push(("delay_time", p.delay_time_ms));
     out.push(("delay_fb", p.delay_fb));
     out.push(("delay_mix", p.delay_mix));
+    out.push(("delay_tone", p.delay_tone));
     out.push(("reverb_decay", p.reverb_decay_s));
     out.push(("reverb_mix", p.reverb_mix));
     out.push(("reverb_shimmer", p.reverb_shimmer));
@@ -1635,6 +1822,7 @@ impl StereoEffect for Dsp {
         self.delay.reset();
         self.reverb.reset();
         self.cab.reset();
+        self.ir.reset();
         self.meters.reset();
         self.in_gain.snap();
         self.out_gain.snap();
@@ -1655,6 +1843,8 @@ impl StereoEffect for Dsp {
         self.delay.set_sample_rate(sr);
         self.reverb.set_sample_rate(sr);
         self.cab.set_sample_rate(sr);
+        self.ir.set_sample_rate(sr);
+        self.cab_ir_step = 1.0 / (sr * CAB_ENGINE_FADE_SECONDS).max(1.0);
         self.meters.rms_coeff = time_constant(sr, 0.300);
         self.apply_params();
     }
@@ -1703,7 +1893,34 @@ impl StereoEffect for Dsp {
                     (l, r) = self.reverb.process(l, r);
                 }
                 StageKind::Cab if self.params.cab_on => {
-                    (l, r) = self.cab.process(l, r);
+                    // Two cabinet engines behind one slot: the modeled
+                    // voicings and the IR convolution. Only the selected one
+                    // runs once the crossfade has resolved.
+                    let target = if self.params.cab_model == CabModel::Ir {
+                        1.0
+                    } else {
+                        0.0
+                    };
+                    self.cab_ir_blend = if self.cab_ir_blend < target {
+                        (self.cab_ir_blend + self.cab_ir_step).min(target)
+                    } else {
+                        (self.cab_ir_blend - self.cab_ir_step).max(target)
+                    };
+                    let blend = self.cab_ir_blend;
+                    (l, r) = if blend <= 0.0 {
+                        self.cab.process(l, r)
+                    } else if blend >= 1.0 {
+                        self.ir.process(l, r)
+                    } else {
+                        let modeled = self.cab.process(l, r);
+                        let convolved = self.ir.process(l, r);
+                        let modeled_gain = (1.0 - blend).sqrt();
+                        let ir_gain = blend.sqrt();
+                        (
+                            modeled.0 * modeled_gain + convolved.0 * ir_gain,
+                            modeled.1 * modeled_gain + convolved.1 * ir_gain,
+                        )
+                    };
                 }
                 StageKind::Comp if self.params.comp_on => {
                     (l, r) = self.comp_stage.process(l, r);
@@ -1943,13 +2160,147 @@ mod tests {
         dsp.poll_nam_garbage();
     }
 
+    /// A capture built at another rate loads and runs through the rate
+    /// adapter; only a ratio the adapter cannot bridge is still refused.
     #[test]
-    fn nam_capture_rejects_sample_rate_mismatch() {
+    fn nam_capture_adapts_a_mismatched_rate_and_still_refuses_an_absurd_one() {
         let mut dsp = Dsp::new(44_100.0);
-        let err = dsp
-            .load_nam_capture_json(TINY_WAVENET_48K, "Bad Rate", false, false)
-            .expect_err("48kHz capture must be rejected at 44.1kHz engine rate");
+        let info = dsp
+            .load_nam_capture_json(TINY_WAVENET_48K, "Other Rate", false, false)
+            .expect("a 48 kHz capture must load in a 44.1 kHz engine");
+        assert_eq!(
+            info.sample_rate, 48_000.0,
+            "info reports the capture's rate"
+        );
+        dsp.begin_block();
+        dsp.apply_ui_param("tone_engine", ToneEngineKind::NamCapture.index() as f32);
+        for n in 0..8_000 {
+            let x = (n as f32 * 0.02).sin() * 0.4;
+            let (l, r) = dsp.process_stereo(x, x);
+            assert!(l.is_finite() && r.is_finite(), "resampled capture blew up");
+        }
+
+        // 48 kHz capture in a 6 kHz engine is an 8x ratio — past what the
+        // adapter supports, so it stays a clean error rather than a load.
+        let mut slow = Dsp::new(6_000.0);
+        let err = slow
+            .load_nam_capture_json(TINY_WAVENET_48K, "Way Off", false, false)
+            .expect_err("an 8x rate ratio must be refused");
         assert!(matches!(err, NamLoadError::SampleRateMismatch { .. }));
+    }
+
+    /// Build a float-WAV IR file around raw samples (mirrors `ir::tests`).
+    fn test_ir_wav(len: usize, rate: u32) -> Vec<u8> {
+        let samples: Vec<f32> = (0..len)
+            .map(|i| {
+                let t = i as f32 / len as f32;
+                ((i as f32 * 0.7).sin() * (1.0 - t) * (1.0 - t)) * 0.5
+            })
+            .collect();
+        let data: Vec<u8> = samples.iter().flat_map(|v| v.to_le_bytes()).collect();
+        let mut fmt = Vec::new();
+        fmt.extend_from_slice(&3u16.to_le_bytes()); // IEEE float
+        fmt.extend_from_slice(&1u16.to_le_bytes()); // mono
+        fmt.extend_from_slice(&rate.to_le_bytes());
+        fmt.extend_from_slice(&(rate * 4).to_le_bytes());
+        fmt.extend_from_slice(&4u16.to_le_bytes());
+        fmt.extend_from_slice(&32u16.to_le_bytes());
+        let mut out = Vec::new();
+        out.extend_from_slice(b"RIFF");
+        out.extend_from_slice(&(4 + 8 + fmt.len() as u32 + 8 + data.len() as u32).to_le_bytes());
+        out.extend_from_slice(b"WAVE");
+        out.extend_from_slice(b"fmt ");
+        out.extend_from_slice(&(fmt.len() as u32).to_le_bytes());
+        out.extend_from_slice(&fmt);
+        out.extend_from_slice(b"data");
+        out.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        out.extend_from_slice(&data);
+        out
+    }
+
+    /// Loading an IR, selecting the IR cabinet engine, and crossfading back to
+    /// a modeled voicing must all stay finite — and only the IR selection may
+    /// report convolution latency.
+    #[test]
+    fn ir_cabinet_loads_selects_and_crossfades_back() {
+        let mut dsp = Dsp::new(48_000.0);
+        let info = dsp
+            .load_ir_wav(&test_ir_wav(512, 48_000), "Test Cab IR")
+            .expect("a well-formed IR must load");
+        assert_eq!(info.name, "Test Cab IR");
+        assert_eq!(info.latency_samples, IR_PARTITION_SAMPLES);
+        assert!(dsp.ir_info().is_none(), "not adopted before begin_block");
+        dsp.begin_block();
+        assert!(dsp.ir_info().is_some(), "adopted at the block boundary");
+
+        // Still on a modeled voicing: no convolution latency is reported.
+        assert_eq!(dsp.latency_samples(), 0);
+
+        assert!(dsp.select_model("cab", "ir"));
+        assert_eq!(dsp.params().cab_model, CabModel::Ir);
+        assert_eq!(dsp.latency_samples(), IR_PARTITION_SAMPLES);
+
+        let mut peak = 0.0f32;
+        for n in 0..24_000 {
+            if n % 128 == 0 {
+                dsp.begin_block();
+            }
+            let x = (n as f32 * 0.03).sin() * 0.4;
+            let (l, r) = dsp.process_stereo(x, x);
+            assert!(l.is_finite() && r.is_finite(), "IR cabinet went non-finite");
+            peak = peak.max(l.abs()).max(r.abs());
+        }
+        assert!(peak > 1.0e-4, "IR cabinet produced silence");
+        assert!(peak < 8.0, "IR cabinet ran away: {peak}");
+
+        // Crossfade back to a modeled cabinet.
+        assert!(dsp.select_model("cab", "modern_412"));
+        assert_eq!(dsp.latency_samples(), 0);
+        for n in 0..8_000 {
+            if n % 128 == 0 {
+                dsp.begin_block();
+            }
+            let x = (n as f32 * 0.03).sin() * 0.4;
+            let (l, r) = dsp.process_stereo(x, x);
+            assert!(
+                l.is_finite() && r.is_finite(),
+                "cab crossfade went non-finite"
+            );
+        }
+        dsp.poll_ir_garbage();
+    }
+
+    /// With the IR engine selected but no file loaded, the cabinet slot must
+    /// pass audio through rather than muting the rig.
+    #[test]
+    fn ir_cabinet_without_a_file_does_not_mute_the_rig() {
+        let mut dsp = Dsp::new(48_000.0);
+        assert!(dsp.select_model("cab", "ir"));
+        assert_eq!(dsp.latency_samples(), 0, "an empty IR slot adds no latency");
+        let mut peak = 0.0f32;
+        for n in 0..12_000 {
+            if n % 128 == 0 {
+                dsp.begin_block();
+            }
+            let x = (n as f32 * 0.03).sin() * 0.4;
+            let (l, r) = dsp.process_stereo(x, x);
+            assert!(l.is_finite() && r.is_finite());
+            if n > 4_000 {
+                peak = peak.max(l.abs()).max(r.abs());
+            }
+        }
+        assert!(peak > 1.0e-3, "an unloaded IR slot muted the rig: {peak}");
+    }
+
+    /// A malformed or unusable IR file is a clean error, never a panic and
+    /// never a half-adopted runtime.
+    #[test]
+    fn a_bad_ir_file_is_a_clean_error() {
+        let mut dsp = Dsp::new(48_000.0);
+        assert!(dsp.load_ir_wav(b"not a wav file at all", "bad").is_err());
+        assert!(dsp.ir_info().is_none());
+        dsp.begin_block();
+        assert!(dsp.ir_info().is_none(), "a failed load must adopt nothing");
     }
 
     fn silence_tail_is_finite(dsp: &mut Dsp) {
@@ -2201,6 +2552,49 @@ mod tests {
             }
             assert!(peak < 8.0, "{model:?} ran away: peak={peak}");
         }
+    }
+
+    /// Every delay voicing must survive maximum feedback through the full
+    /// chain, and `select_model("delay", …)` must reach each of them.
+    #[test]
+    fn all_delay_models_stay_bounded_and_are_selectable() {
+        for &model in DelayModel::ALL {
+            let mut dsp = Dsp::new(48_000.0);
+            let mut p = default_params();
+            p.gate_on = false;
+            p.drive_on = false;
+            p.amp_on = false;
+            p.mod_on = false;
+            p.reverb_on = false;
+            p.cab_on = false;
+            p.delay_model = model;
+            p.delay_time_ms = 90.0; // short + hot feedback is the worst case
+            p.delay_fb = 100.0;
+            p.delay_mix = 100.0;
+            p.delay_tone = 10.0; // brightest feedback path
+            dsp.set_params(p);
+            let mut peak = 0.0f32;
+            for n in 0..48_000 {
+                let x = (n as f32 * 220.0 * std::f32::consts::TAU / 48_000.0).sin() * 0.6;
+                let (l, r) = dsp.process_stereo(x, -x);
+                assert!(l.is_finite() && r.is_finite(), "{model:?} went non-finite");
+                peak = peak.max(l.abs()).max(r.abs());
+            }
+            assert!(peak < 8.0, "{model:?} ran away: peak={peak}");
+        }
+
+        let mut dsp = Dsp::new(48_000.0);
+        for (id, expected) in [
+            ("tape", DelayModel::Tape),
+            ("digital", DelayModel::Digital),
+            ("analog", DelayModel::Analog),
+            ("ping_pong", DelayModel::PingPong),
+            ("dual", DelayModel::Dual),
+        ] {
+            assert!(dsp.select_model("delay", id), "delay model `{id}` rejected");
+            assert_eq!(dsp.params().delay_model, expected);
+        }
+        assert!(!dsp.select_model("delay", "not_a_delay"));
     }
 
     // ---- Dedicated drive-topology battery (ds_one / super_drive /

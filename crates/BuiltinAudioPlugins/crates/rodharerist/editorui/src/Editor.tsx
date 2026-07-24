@@ -693,6 +693,17 @@ export function RodhareistEditor({
     [loadNamCapture],
   );
 
+  /// A successful IR load switches the Cabinet slot to the convolution
+  /// engine — the user clicked an IR to hear it, not to park it. The DSP
+  /// keeps the loaded IR either way, so switching back to a modeled voicing
+  /// (and back again) never needs a reload.
+  const onIrLoaded = useCallback(() => {
+    setStageModels((prev) => ({ ...prev, cab: "ir" }));
+    if (liveRef.current.activeCat === "cab") setActiveModelId("ir");
+    postModel(categories.cab.node, "ir");
+    markDirty();
+  }, [markDirty]);
+
   const bypassCab = useCallback(() => {
     postEnabled(categories.cab.node, false);
     setBypassed((prev) => ({ ...prev, cab: true }));
@@ -1087,6 +1098,7 @@ export function RodhareistEditor({
       buildSavePayload={buildSavePayload}
       buildFactorySnapshot={factorySnapshot}
       onLoadNamFile={loadNamFile}
+      onIrLoaded={onIrLoaded}
       onToggleTest={() => void toggleTest()}
       onSave={saveRig}
       onRevert={revertRig}

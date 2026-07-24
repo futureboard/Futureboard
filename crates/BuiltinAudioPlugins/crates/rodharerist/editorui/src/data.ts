@@ -435,6 +435,30 @@ export const models: Record<CategoryId, Model[]> = {
   ],
   delay: [
     { id: "tape", name: "Tape Echo", short: "Tape", sub: "Warm saturated tape delay" },
+    {
+      id: "digital",
+      name: "Digital Delay",
+      short: "Digital",
+      sub: "Clean full-bandwidth repeats",
+    },
+    {
+      id: "analog",
+      name: "Analog BBD",
+      short: "Analog",
+      sub: "Dark thinning bucket-brigade repeats",
+    },
+    {
+      id: "ping_pong",
+      name: "Ping Pong",
+      short: "Ping",
+      sub: "Repeats alternating left and right",
+    },
+    {
+      id: "dual",
+      name: "Dual Delay",
+      short: "Dual",
+      sub: "Quarter note left, dotted eighth right",
+    },
   ],
   verb: [
     {
@@ -528,6 +552,12 @@ export const models: Record<CategoryId, Model[]> = {
       name: "SLO Custom 4x12",
       short: "SLO",
       sub: "Smooth, singing high-gain 4x12",
+    },
+    {
+      id: "ir",
+      name: "Impulse Response",
+      short: "IR",
+      sub: "Convolution with a loaded .wav cabinet IR",
     },
   ],
 };
@@ -804,6 +834,7 @@ export const parameterDefaults: Record<string, Param[]> = {
     { id: "nam_mix", name: "Mix", min: 0, max: 100, val: 100, unit: "%" },
   ],
   bypass: [],
+  ir: [],
   cry_wah: [
     { id: "wah_pos", name: "Position", min: 0, max: 10, val: 4.5, unit: "" },
     { id: "wah_res", name: "Resonance", min: 0, max: 10, val: 5.0, unit: "" },
@@ -879,6 +910,34 @@ export const parameterDefaults: Record<string, Param[]> = {
       val: 30,
       unit: "%",
     },
+    { id: "delay_tone", name: "Tone", min: 0, max: 10, val: 5, unit: "" },
+  ],
+  // The Delay slot's voicings share Time/Feedback/Mix/Tone (the voicing is the
+  // model, as in the Mod and Reverb slots); Tone is centred on each voicing's
+  // own feedback colour, so 5 means something different on each.
+  digital: [
+    { id: "delay_time", name: "Time", min: 40, max: 1200, val: 380, unit: "ms" },
+    { id: "delay_fb", name: "Feedback", min: 0, max: 100, val: 30, unit: "%" },
+    { id: "delay_mix", name: "Mix", min: 0, max: 100, val: 28, unit: "%" },
+    { id: "delay_tone", name: "Tone", min: 0, max: 10, val: 5, unit: "" },
+  ],
+  analog: [
+    { id: "delay_time", name: "Time", min: 40, max: 1200, val: 320, unit: "ms" },
+    { id: "delay_fb", name: "Feedback", min: 0, max: 100, val: 45, unit: "%" },
+    { id: "delay_mix", name: "Mix", min: 0, max: 100, val: 32, unit: "%" },
+    { id: "delay_tone", name: "Tone", min: 0, max: 10, val: 5, unit: "" },
+  ],
+  ping_pong: [
+    { id: "delay_time", name: "Time", min: 40, max: 1200, val: 300, unit: "ms" },
+    { id: "delay_fb", name: "Feedback", min: 0, max: 100, val: 42, unit: "%" },
+    { id: "delay_mix", name: "Mix", min: 0, max: 100, val: 35, unit: "%" },
+    { id: "delay_tone", name: "Tone", min: 0, max: 10, val: 5, unit: "" },
+  ],
+  dual: [
+    { id: "delay_time", name: "Time", min: 40, max: 1200, val: 500, unit: "ms" },
+    { id: "delay_fb", name: "Feedback", min: 0, max: 100, val: 38, unit: "%" },
+    { id: "delay_mix", name: "Mix", min: 0, max: 100, val: 33, unit: "%" },
+    { id: "delay_tone", name: "Tone", min: 0, max: 10, val: 5, unit: "" },
   ],
   plate: [
     {

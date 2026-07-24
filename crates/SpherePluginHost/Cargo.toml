@@ -36,6 +36,9 @@ sphere_directaudioengine = { path = "../SphereDirectAudioEngine", default-featur
 builtin-dsp-core.workspace = true
 rodharerist.workspace = true
 
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
 # Win32 (COM STA, message pump, HWND validation, self-test windows) for the
 # host binary. The main app already pulls the same workspace `windows` version
 # transitively, so this adds no new toolchain surface.

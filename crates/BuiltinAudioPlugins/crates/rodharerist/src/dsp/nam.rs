@@ -18,20 +18,23 @@ use nam_rs::{Model, NamModel};
 
 use super::StereoBiquad;
 use super::handoff::HandoffCell;
+use super::rate::{MAX_RATIO, MIN_RATIO, RateAdapter};
 
 /// Target integrated loudness (LUFS) captures are normalized to when loudness
 /// normalization is enabled, matching the reference NAM plugin's convention.
 const TARGET_LUFS: f32 = -18.0;
 
-/// A `.nam` file's declared sample rate must match the engine's to within this
-/// many Hz, else the load is rejected (nam-rs does not resample; a mismatch
-/// silently mis-runs the model's dilations/recurrence otherwise).
+/// A `.nam` file's declared sample rate counts as matching the engine's within
+/// this many Hz. Inside the tolerance the capture runs natively; outside it a
+/// [`RateAdapter`] runs the model at its own rate (nam-rs does not resample,
+/// and a mismatched model silently mis-runs its dilations/recurrence).
 const SAMPLE_RATE_TOLERANCE_HZ: f64 = 0.5;
 
 /// Roughly how long a runtime swap crossfades for, in milliseconds.
 const SWAP_FADE_MS: f32 = 8.0;
 
-/// A `.nam` failed to parse/build, or its sample rate doesn't match the engine.
+/// A `.nam` failed to parse/build, or its sample rate is too far from the
+/// engine's for the rate adapter to bridge.
 #[derive(Debug)]
 pub enum NamLoadError {
     Parse(nam_rs::Error),
@@ -44,8 +47,9 @@ impl std::fmt::Display for NamLoadError {
             NamLoadError::Parse(e) => write!(f, "NAM capture failed to load: {e}"),
             NamLoadError::SampleRateMismatch { expected, engine } => write!(
                 f,
-                "NAM capture expects {expected} Hz but the engine runs at {engine} Hz \
-                 (nam-rs does not resample — reload at a matching rate)"
+                "NAM capture expects {expected} Hz but the engine runs at {engine} Hz — \
+                 more than {MAX_RATIO}x apart, too far to adapt (supported: \
+                 {MIN_RATIO}x..{MAX_RATIO}x the engine rate)"
             ),
         }
     }
@@ -81,6 +85,15 @@ pub struct PreparedNamRuntime {
     /// the hot path is a single multiply, not a per-sample dB calculation.
     loudness_gain: f32,
     full_rig: bool,
+    /// Present only when the capture's rate differs from the engine's — it
+    /// runs the model at the capture's own rate from inside the engine's
+    /// stream. `None` is the native, zero-overhead path.
+    adapter: Option<RateAdapter>,
+    /// The capture's total latency in **engine** samples: its receptive field
+    /// converted out of the model's rate, plus whatever the adapter's own
+    /// interpolation contributes. Equals `receptive_field` when running
+    /// natively.
+    latency_samples: usize,
 }
 
 impl std::fmt::Debug for PreparedNamRuntime {
@@ -90,6 +103,7 @@ impl std::fmt::Debug for PreparedNamRuntime {
             .field("sample_rate", &self.sample_rate)
             .field("receptive_field", &self.receptive_field)
             .field("full_rig", &self.full_rig)
+            .field("resampled", &self.adapter.is_some())
             .finish_non_exhaustive()
     }
 }
@@ -97,8 +111,13 @@ impl std::fmt::Debug for PreparedNamRuntime {
 /// Parse and build a `.nam` capture off the audio thread. `stereo` selects
 /// whether a second, independent model is built for the right channel (true
 /// stereo width) or the left model's output is mirrored (mono bus / cheaper).
-/// Rejects a sample-rate mismatch outright rather than silently mis-running —
-/// a resampling adapter is a documented future addition, not implemented yet.
+///
+/// A capture whose declared rate differs from the engine's is *not* rejected:
+/// it gets a [`RateAdapter`] that runs the model at its own rate from inside
+/// the engine's stream, so a 44.1 kHz capture is usable in a 48 kHz session.
+/// Only a ratio outside the adapter's supported range is refused — see
+/// [`NamLoadError::SampleRateMismatch`]. Running the session at the capture's
+/// own rate still sounds better; the adapter is a convenience, not a wash.
 pub fn prepare_nam_runtime(
     json: &str,
     name: String,
@@ -108,12 +127,16 @@ pub fn prepare_nam_runtime(
 ) -> Result<PreparedNamRuntime, NamLoadError> {
     let nam_model = NamModel::from_json_str(json).map_err(NamLoadError::Parse)?;
     let expected = nam_model.expected_sample_rate();
-    if (expected - engine_sample_rate).abs() > SAMPLE_RATE_TOLERANCE_HZ {
-        return Err(NamLoadError::SampleRateMismatch {
-            expected,
-            engine: engine_sample_rate,
-        });
-    }
+    let adapter = if (expected - engine_sample_rate).abs() > SAMPLE_RATE_TOLERANCE_HZ {
+        Some(RateAdapter::new(expected, engine_sample_rate).ok_or(
+            NamLoadError::SampleRateMismatch {
+                expected,
+                engine: engine_sample_rate,
+            },
+        )?)
+    } else {
+        None
+    };
 
     let model_l = Model::from_nam(&nam_model).map_err(NamLoadError::Parse)?;
     let model_r = if stereo {
@@ -126,6 +149,12 @@ pub fn prepare_nam_runtime(
         .loudness()
         .map(|l| 10f32.powf((TARGET_LUFS - l) / 20.0).clamp(0.05, 20.0))
         .unwrap_or(1.0);
+    // The receptive field is counted in the *model's* samples; the host's
+    // delay compensation works in engine samples.
+    let latency_samples = match adapter.as_ref() {
+        Some(a) => a.inner_to_engine_samples(receptive_field) + a.latency_samples(),
+        None => receptive_field,
+    };
 
     Ok(PreparedNamRuntime {
         name,
@@ -135,6 +164,8 @@ pub fn prepare_nam_runtime(
         receptive_field,
         loudness_gain,
         full_rig,
+        adapter,
+        latency_samples,
     })
 }
 
@@ -150,19 +181,39 @@ impl PreparedNamRuntime {
 
     #[inline]
     fn process(&mut self, left: f32, right: f32, loudness_on: bool) -> (f32, f32) {
-        let gain = if loudness_on { self.loudness_gain } else { 1.0 };
-        let l = self.model_l.process_sample(left) * gain;
-        let r = match self.model_r.as_mut() {
-            Some(model_r) => model_r.process_sample(right) * gain,
-            None => l,
+        // Split the borrow so the inference closure and the adapter can be
+        // held mutably at the same time.
+        let Self {
+            model_l,
+            model_r,
+            adapter,
+            loudness_gain,
+            ..
+        } = self;
+        let gain = if loudness_on { *loudness_gain } else { 1.0 };
+        let mut infer = |l: f32, r: f32| {
+            let out_l = model_l.process_sample(l) * gain;
+            let out_r = match model_r.as_mut() {
+                Some(model_r) => model_r.process_sample(r) * gain,
+                None => out_l,
+            };
+            (out_l, out_r)
         };
-        (l, r)
+        match adapter.as_mut() {
+            // Rate-adapted: the model still sees its own rate, one inference
+            // per *model* sample, not per engine sample.
+            Some(adapter) => adapter.run(left, right, infer),
+            None => infer(left, right),
+        }
     }
 
     fn reset(&mut self) {
         self.model_l.reset();
         if let Some(model_r) = self.model_r.as_mut() {
             model_r.reset();
+        }
+        if let Some(adapter) = self.adapter.as_mut() {
+            adapter.reset();
         }
     }
 }
@@ -352,12 +403,14 @@ impl NamCapture {
         self.active.as_ref().map(|rt| rt.info())
     }
 
-    /// Latency contributed by the active capture's receptive field, in
-    /// samples (0 if none loaded or an LSTM capture, which has no warmup).
+    /// Latency contributed by the active capture, in **engine** samples (0 if
+    /// none loaded, or an LSTM capture, which has no warmup). Already accounts
+    /// for a rate-adapted capture, whose receptive field is counted in its own
+    /// rate's samples.
     pub(super) fn latency_samples(&self) -> usize {
         self.active
             .as_ref()
-            .map(|rt| rt.receptive_field)
+            .map(|rt| rt.latency_samples)
             .unwrap_or(0)
     }
 
@@ -446,10 +499,44 @@ mod tests {
         "sample_rate": 48000.0
     }"#;
 
+    /// A rate mismatch inside the adapter's range builds a runtime that runs
+    /// the model at its own rate; the reported latency is in engine samples,
+    /// so it must scale with the ratio rather than echo the raw field.
     #[test]
-    fn rejects_sample_rate_mismatch() {
-        let err = prepare_nam_runtime(TINY_WAVENET_48K, "t".into(), 44_100.0, false, false)
-            .expect_err("mismatched rate must be rejected");
+    fn adapts_a_mismatched_rate_instead_of_rejecting_it() {
+        let native = prepare_nam_runtime(TINY_WAVENET_48K, "t".into(), 48_000.0, false, false)
+            .expect("native rate loads");
+        assert!(native.adapter.is_none(), "matching rate must not resample");
+        assert_eq!(native.latency_samples, native.receptive_field);
+
+        let adapted = prepare_nam_runtime(TINY_WAVENET_48K, "t".into(), 44_100.0, false, false)
+            .expect("a 48 kHz capture must adapt into a 44.1 kHz engine");
+        assert!(adapted.adapter.is_some(), "mismatch must build an adapter");
+        assert_eq!(
+            adapted.sample_rate, 48_000.0,
+            "info keeps the capture's rate"
+        );
+        // 48 kHz model samples are fewer 44.1 kHz engine samples, plus the
+        // adapter's own interpolation delay.
+        assert!(adapted.latency_samples >= adapted.receptive_field * 44_100 / 48_000);
+
+        let mut cap = NamCapture::new(44_100.0);
+        cap.configure(0.0, 0.0, 100.0, false);
+        cap.submit(Box::new(adapted));
+        cap.begin_block();
+        for n in 0..4_000 {
+            let x = (n as f32 * 0.02).sin() * 0.3;
+            let (l, r) = cap.process(x, -x);
+            assert!(l.is_finite() && r.is_finite(), "resampled capture blew up");
+        }
+        assert!(cap.latency_samples() > 0 || cap.active_info().is_some());
+    }
+
+    #[test]
+    fn refuses_a_rate_ratio_beyond_the_adapter_range() {
+        // 48 kHz capture in a 6 kHz engine — an 8x ratio.
+        let err = prepare_nam_runtime(TINY_WAVENET_48K, "t".into(), 6_000.0, false, false)
+            .expect_err("an 8x rate ratio must be refused");
         assert!(matches!(err, NamLoadError::SampleRateMismatch { .. }));
     }
 

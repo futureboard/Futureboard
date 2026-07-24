@@ -161,6 +161,14 @@ pub fn read_file(root: &Path, kind: BuiltinFileKind, file_name: &str) -> io::Res
     fs::read_to_string(root.join(kind.dir_name()).join(clean))
 }
 
+/// Read one sanitized file as raw bytes. IR files are binary `.wav`, so they
+/// cannot go through [`read_file`]'s UTF-8 path.
+pub fn read_file_bytes(root: &Path, kind: BuiltinFileKind, file_name: &str) -> io::Result<Vec<u8>> {
+    let clean = sanitize_file_name(kind, file_name)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "invalid file name"))?;
+    fs::read(root.join(kind.dir_name()).join(clean))
+}
+
 /// Write one sanitized file: temp-then-rename so a crash mid-write never
 /// leaves a truncated preset behind.
 pub fn write_file(

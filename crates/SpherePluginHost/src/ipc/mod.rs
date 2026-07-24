@@ -227,6 +227,19 @@ pub enum HostCommand {
         /// Capture already models amp + cab + mic ("Bypass Cab" hint).
         full_rig: bool,
     },
+    /// Load a `.wav` impulse response into a built-in DSP instance
+    /// (rodharerist's Cabinet slot). `wav_b64` is the raw file, base64-encoded
+    /// because the transport is newline-framed JSON — an IR is tens of KB, far
+    /// inside the 128 MiB line cap. The host decodes, resamples and FFTs on its
+    /// IPC thread and hands the runtime to the audio producer for
+    /// block-boundary adoption; it replies [`HostEvent::BuiltinIrResult`]
+    /// either way.
+    LoadBuiltinIr {
+        plugin_instance_id: String,
+        /// Display name (usually the file name) echoed back in the result.
+        name: String,
+        wav_b64: String,
+    },
     /// Graceful host shutdown: detach everything and exit 0.
     Shutdown,
 }
@@ -388,6 +401,30 @@ pub enum HostEvent {
         #[serde(default)]
         full_rig: bool,
     },
+    /// Reply to [`HostCommand::LoadBuiltinIr`]. On success the IR has been
+    /// submitted and will be adopted at the next audio block; on failure
+    /// `error` carries the human-readable reason (undecodable file, silent or
+    /// too-short IR, unknown instance).
+    BuiltinIrResult {
+        plugin_instance_id: String,
+        ok: bool,
+        /// Display name echoed from the request.
+        name: String,
+        #[serde(default)]
+        error: Option<String>,
+        /// Frames actually convolved, at the engine's rate (0 on failure).
+        #[serde(default)]
+        frames: u64,
+        /// Latency the convolution adds, in samples (0 on failure).
+        #[serde(default)]
+        latency_samples: u64,
+        /// The file carried two distinct channels (true-stereo IR).
+        #[serde(default)]
+        stereo: bool,
+        /// The file was longer than the engine's cap and got cut.
+        #[serde(default)]
+        truncated: bool,
+    },
 }
 
 /// One VST3 parameter entry returned by the plugin host.
@@ -501,6 +538,42 @@ mod tests {
             read_frame::<HostCommand, _>(&mut reader).unwrap(),
             Some(cmd)
         );
+    }
+
+    /// IR payloads are base64 inside a newline-framed JSON line — the one
+    /// place a raw byte could break the framing if the encoding regressed.
+    #[test]
+    fn builtin_ir_load_and_result_round_trip_through_frames() {
+        let cmd = HostCommand::LoadBuiltinIr {
+            plugin_instance_id: "track1:insert3".into(),
+            name: "Vintage 4x12 SM57.wav".into(),
+            // Base64 of bytes that include a newline and other framing-hostile
+            // values, proving the encoding keeps the line intact.
+            wav_b64: "UklGRgoAAABXQVZF\ngAB/AA==".replace('\n', ""),
+        };
+        let mut buf = Vec::new();
+        write_frame(&mut buf, &cmd).unwrap();
+        assert_eq!(buf.iter().filter(|b| **b == b'\n').count(), 1);
+        let mut reader = Cursor::new(buf);
+        assert_eq!(
+            read_frame::<HostCommand, _>(&mut reader).unwrap(),
+            Some(cmd)
+        );
+
+        let ev = HostEvent::BuiltinIrResult {
+            plugin_instance_id: "track1:insert3".into(),
+            ok: true,
+            name: "Vintage 4x12 SM57.wav".into(),
+            error: None,
+            frames: 4_800,
+            latency_samples: 128,
+            stereo: false,
+            truncated: false,
+        };
+        let mut buf = Vec::new();
+        write_frame(&mut buf, &ev).unwrap();
+        let mut reader = Cursor::new(buf);
+        assert_eq!(read_frame::<HostEvent, _>(&mut reader).unwrap(), Some(ev));
     }
 
     #[test]

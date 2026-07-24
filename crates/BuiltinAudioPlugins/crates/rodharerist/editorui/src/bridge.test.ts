@@ -8,6 +8,7 @@ import {
   AMP_MODEL_INDEX,
   CAB_MODEL_INDEX,
   DRIVE_MODEL_INDEX,
+  DELAY_MODEL_INDEX,
   REVERB_MODEL_INDEX,
   TONE_ENGINE_INDEX,
   __flushParamEditsForTest,
@@ -87,6 +88,7 @@ describe("model-select wire values", () => {
       brit_412: 8,
       uber_412: 9,
       slo_412: 10,
+      ir: 11,
     });
   });
 
@@ -97,6 +99,23 @@ describe("model-select wire values", () => {
       hall: 2,
       shimmer: 3,
     });
+  });
+
+  test("delay map mirrors DelayModel::ALL order", () => {
+    expect(DELAY_MODEL_INDEX).toEqual({
+      tape: 0,
+      digital: 1,
+      analog: 2,
+      ping_pong: 3,
+      dual: 4,
+    });
+  });
+
+  test("postModel forwards a delay voicing as delay_model", () => {
+    const batches = captureBatches();
+    postModel("delay", "ping_pong");
+    __flushParamEditsForTest();
+    expect(batches).toEqual([[{ id: "delay_model", value: 3 }]]);
   });
 
   test("tone engine indices match ToneEngineKind", () => {

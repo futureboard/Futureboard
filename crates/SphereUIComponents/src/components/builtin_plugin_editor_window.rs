@@ -250,6 +250,26 @@ struct NamCaptureResultMsg {
     full_rig: bool,
 }
 
+/// Native -> React: async outcome of a `futureboard.loadIr` request.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct IrLoadResultMsg {
+    r#type: &'static str,
+    protocol_version: u32,
+    instance_id: String,
+    ok: bool,
+    name: String,
+    error: Option<String>,
+    /// Frames actually convolved, at the engine's rate (0 on failure).
+    frames: u64,
+    /// Latency the convolution adds, in samples (0 on failure).
+    latency_samples: u64,
+    /// The file carried two distinct channels (true-stereo IR).
+    stereo: bool,
+    /// The file was longer than the engine's cap and got cut.
+    truncated: bool,
+}
+
 /// One parameter edit inside a `futureboard.setParams` batch. `id` is the
 /// editor's string param id (the `Dsp::apply_ui_param` contract); it is
 /// resolved to the plugin's u32 wire index before leaving the UI thread.
@@ -338,6 +358,19 @@ enum InboundMsg {
         stereo: bool,
         full_rig: bool,
     },
+    /// Load a `.wav` impulse response into the bound instance's Cabinet slot.
+    /// Same staleness rules as `setParams`. Unlike `loadNamCapture` the page
+    /// sends only a *file name* from the plugin's IRs folder — a `.wav` is
+    /// binary, and native already owns that folder, so the bytes never have to
+    /// be encoded through the webview.
+    #[serde(rename = "futureboard.loadIr", rename_all = "camelCase")]
+    LoadIr {
+        #[allow(dead_code)]
+        plugin_id: String,
+        instance_id: String,
+        binding_generation: u64,
+        file_name: String,
+    },
     #[serde(other)]
     Unknown,
 }
@@ -366,6 +399,19 @@ pub struct BuiltinNamLoadRequest {
 pub type BuiltinNamLoadForwarder =
     std::sync::Arc<dyn Fn(&PluginInstanceKey, BuiltinNamLoadRequest)>;
 
+/// A validated IR load request on its way to the plugin-host process. The
+/// bytes are the raw `.wav` file, already read from the plugin's IRs folder.
+#[derive(Debug, Clone)]
+pub struct BuiltinIrLoadRequest {
+    pub name: String,
+    pub bytes: Vec<u8>,
+}
+
+/// Forwards an IR load toward the plugin-host bridge
+/// (`HostCommand::LoadBuiltinIr`). UI thread; the host replies asynchronously
+/// with `BuiltinIrResult`, routed back through `notify_ir_load_result`.
+pub type BuiltinIrLoadForwarder = std::sync::Arc<dyn Fn(&PluginInstanceKey, BuiltinIrLoadRequest)>;
+
 /// Polls the latest telemetry frame for an instance's shared region (pure
 /// atomic loads). UI thread, ~30 Hz.
 pub type BuiltinMeterSource = std::sync::Arc<
@@ -384,6 +430,7 @@ pub type BuiltinHostStatusSource =
 pub struct BuiltinEditorHostOps {
     pub forward_param: Option<BuiltinParamForwarder>,
     pub load_nam_capture: Option<BuiltinNamLoadForwarder>,
+    pub load_ir: Option<BuiltinIrLoadForwarder>,
     pub meter_source: Option<BuiltinMeterSource>,
     pub host_status_source: Option<BuiltinHostStatusSource>,
 }
@@ -392,6 +439,7 @@ impl BuiltinEditorHostOps {
     fn is_empty(&self) -> bool {
         self.forward_param.is_none()
             && self.load_nam_capture.is_none()
+            && self.load_ir.is_none()
             && self.meter_source.is_none()
             && self.host_status_source.is_none()
     }
@@ -932,6 +980,81 @@ impl BuiltinPluginEditorWindow {
                     },
                 );
             }
+            InboundMsg::LoadIr {
+                instance_id,
+                binding_generation,
+                file_name,
+                ..
+            } => {
+                use crate::components::builtin_plugin_files as files;
+                if binding_generation != self.binding_generation {
+                    eprintln!(
+                        "[plugin-bridge] loadIr stale plugin={} instance={instance_id}",
+                        self.plugin_id
+                    );
+                    return;
+                }
+                // Clone the key up front: reading the IRs folder needs
+                // `&mut self`, which cannot coexist with a borrow of
+                // `active_instance`.
+                let Some(active) = self.active_instance.clone() else {
+                    return;
+                };
+                if wire_instance_id(&active) != instance_id {
+                    eprintln!(
+                        "[plugin-bridge] loadIr instance mismatch plugin={} got={instance_id}",
+                        self.plugin_id
+                    );
+                    return;
+                }
+                if self.host_ops.load_ir.is_none() {
+                    eprintln!(
+                        "[plugin-bridge] loadIr dropped (bridge not wired) plugin={}",
+                        self.plugin_id
+                    );
+                    return;
+                }
+                // The read is small (an IR is tens of KB) but still filesystem
+                // I/O; the *host* does the decode/FFT work off this thread.
+                let read = self
+                    .ensure_files_root()
+                    .ok_or_else(|| "user folder unavailable".to_string())
+                    .and_then(|root| {
+                        files::read_file_bytes(&root, files::BuiltinFileKind::Irs, &file_name)
+                            .map_err(|e| e.to_string())
+                    });
+                let bytes = match read {
+                    Ok(bytes) => bytes,
+                    Err(error) => {
+                        let insert_id = active.insert_id.clone();
+                        self.notify_ir_load_result(
+                            &insert_id,
+                            false,
+                            &file_name,
+                            Some(&error),
+                            0,
+                            0,
+                            false,
+                            false,
+                        );
+                        return;
+                    }
+                };
+                eprintln!(
+                    "[plugin-bridge] loadIr plugin={} instance={instance_id} file={file_name} bytes={}",
+                    self.plugin_id,
+                    bytes.len()
+                );
+                if let Some(forwarder) = self.host_ops.load_ir.as_ref() {
+                    forwarder(
+                        &active,
+                        BuiltinIrLoadRequest {
+                            name: file_name,
+                            bytes,
+                        },
+                    );
+                }
+            }
             InboundMsg::Unknown => {}
         }
     }
@@ -963,6 +1086,41 @@ impl BuiltinPluginEditorWindow {
             error: error.map(str::to_string),
             receptive_field,
             full_rig,
+        });
+    }
+
+    /// Route a host `BuiltinIrResult` into the page, if this window's bound
+    /// instance matches the reporting insert. Called from
+    /// `poll_plugin_bridge_runtime` in `plugin_ops.rs`.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn notify_ir_load_result(
+        &self,
+        plugin_instance_id: &str,
+        ok: bool,
+        name: &str,
+        error: Option<&str>,
+        frames: u64,
+        latency_samples: u64,
+        stereo: bool,
+        truncated: bool,
+    ) {
+        let Some(active) = self.active_instance.as_ref() else {
+            return;
+        };
+        if active.insert_id != plugin_instance_id {
+            return;
+        }
+        self.post_to_view(&IrLoadResultMsg {
+            r#type: "futureboard.irLoadResult",
+            protocol_version: BRIDGE_PROTOCOL_VERSION,
+            instance_id: wire_instance_id(active),
+            ok,
+            name: name.to_string(),
+            error: error.map(str::to_string),
+            frames,
+            latency_samples,
+            stereo,
+            truncated,
         });
     }
 
@@ -2004,6 +2162,35 @@ mod tests {
                 assert_eq!(instance_id, "track-3::insert-9");
             }
             other => panic!("expected RequestSelectInstance, got {other:?}"),
+        }
+    }
+
+    /// The IR load carries a file name, not the file: native reads the bytes
+    /// from the plugin's IRs folder itself. Anything that changes that shape
+    /// silently breaks IR loading, so pin it.
+    #[test]
+    fn inbound_load_ir_parses_by_tag_and_carries_only_a_file_name() {
+        let raw = br#"{
+            "type":"futureboard.loadIr",
+            "protocolVersion":1,
+            "pluginId":"rodharerist",
+            "instanceId":"track-3::insert-9",
+            "bindingGeneration":7,
+            "fileName":"Vintage 4x12 SM57.wav"
+        }"#;
+        let msg: InboundMsg = serde_json::from_slice(raw).unwrap();
+        match msg {
+            InboundMsg::LoadIr {
+                instance_id,
+                binding_generation,
+                file_name,
+                ..
+            } => {
+                assert_eq!(instance_id, "track-3::insert-9");
+                assert_eq!(binding_generation, 7);
+                assert_eq!(file_name, "Vintage 4x12 SM57.wav");
+            }
+            other => panic!("expected LoadIr, got {other:?}"),
         }
     }
 

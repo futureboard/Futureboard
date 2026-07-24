@@ -707,6 +707,9 @@ enum Backing {
     /// OS file mapping; held only to keep the view alive (unmapped on drop).
     #[cfg(windows)]
     Mapping(#[allow(dead_code)] imp::WinMapping),
+    /// POSIX shared-memory mapping; the creator unlinks its name on drop.
+    #[cfg(unix)]
+    PosixMapping(#[allow(dead_code)] imp::UnixMapping),
 }
 
 impl SharedAudioRegion {
@@ -738,17 +741,23 @@ impl SharedAudioRegion {
     }
 
     /// Create a **named** shared region (engine side). Stamps the header.
-    #[cfg(windows)]
+    #[cfg(any(windows, unix))]
     pub fn create_named(
         name: &str,
         sample_rate: u32,
         max_block_size: u32,
         channels: u32,
     ) -> std::io::Result<Self> {
+        #[cfg(windows)]
         let mapping = imp::WinMapping::create(name, SharedAudioBridge::SIZE)?;
+        #[cfg(unix)]
+        let mapping = imp::UnixMapping::create(name, SharedAudioBridge::SIZE)?;
         let region = Self {
             ptr: mapping.ptr() as *mut SharedAudioBridge,
+            #[cfg(windows)]
             backing: Backing::Mapping(mapping),
+            #[cfg(unix)]
+            backing: Backing::PosixMapping(mapping),
         };
         region
             .bridge()
@@ -757,12 +766,18 @@ impl SharedAudioRegion {
     }
 
     /// Open an existing **named** shared region (host side). Validates the header.
-    #[cfg(windows)]
+    #[cfg(any(windows, unix))]
     pub fn open_named(name: &str) -> std::io::Result<Self> {
+        #[cfg(windows)]
         let mapping = imp::WinMapping::open(name, SharedAudioBridge::SIZE)?;
+        #[cfg(unix)]
+        let mapping = imp::UnixMapping::open(name, SharedAudioBridge::SIZE)?;
         let region = Self {
             ptr: mapping.ptr() as *mut SharedAudioBridge,
+            #[cfg(windows)]
             backing: Backing::Mapping(mapping),
+            #[cfg(unix)]
+            backing: Backing::PosixMapping(mapping),
         };
         if !region.bridge().header_valid() {
             return Err(std::io::Error::new(
@@ -782,6 +797,8 @@ impl Drop for SharedAudioRegion {
             },
             #[cfg(windows)]
             Backing::Mapping(_) => { /* WinMapping::Drop unmaps + closes handles */ }
+            #[cfg(unix)]
+            Backing::PosixMapping(_) => { /* UnixMapping::Drop unmaps + unlinks owner */ }
         }
     }
 }
@@ -792,22 +809,19 @@ impl Drop for SharedAudioRegion {
 
 /// Name of the named auto-reset event the engine signals after every
 /// `request_seq` bump so the host's audio producer wakes immediately instead of
-/// sleeping on a Windows timer tick (whose resolution — 1 ms to 15.6 ms,
-/// per-process since Win10 2004 — the host cannot rely on at audio block
-/// cadence). Scoped to one engine/host **process pair** so a second host
-/// process (e.g. a legacy editor-window spawn) can never steal wakeups.
+/// sleeping on a timer tick. Scoped to one engine/host **process pair** so a
+/// second host process (e.g. a legacy editor-window spawn) can never steal
+/// wakeups.
 pub fn bridge_kick_event_name(engine_pid: u32, host_pid: u32) -> String {
     format!("Local\\FutureboardAudioBridgeKick-{engine_pid}__{host_pid}")
 }
 
-/// Named cross-process auto-reset event for the block handshake.
+/// Named cross-process wake event for the block handshake.
 ///
-/// Both sides call [`BridgeKickEvent::create_named`] (`CreateEventW` creates
-/// the event or opens the existing one, so engine and host may initialize in
-/// either order). The engine-side sink calls [`BridgeKickEvent::set`] from the
-/// audio callback — a non-blocking kernel signal, the same class of syscall as
-/// the WASAPI period event — and the host producer blocks in
-/// [`BridgeKickEvent::wait`] until a block is requested.
+/// Both sides call [`BridgeKickEvent::create_named`], so engine and host may
+/// initialize in either order. The engine-side sink calls
+/// [`BridgeKickEvent::set`] from the audio callback and the host producer
+/// blocks in [`BridgeKickEvent::wait`] until a block is requested.
 #[cfg(windows)]
 pub struct BridgeKickEvent {
     handle: windows::Win32::Foundation::HANDLE,
@@ -859,12 +873,104 @@ impl Drop for BridgeKickEvent {
     }
 }
 
-/// Non-Windows stub: the named shared region itself is Windows-only, so the
-/// kick degrades to a timeout-paced poll (`wait` sleeps, `set` is a no-op).
-#[cfg(not(windows))]
+#[cfg(unix)]
+pub struct BridgeKickEvent {
+    semaphore: *mut libc::sem_t,
+    name: std::ffi::CString,
+    owner: bool,
+}
+
+#[cfg(unix)]
+unsafe impl Send for BridgeKickEvent {}
+#[cfg(unix)]
+unsafe impl Sync for BridgeKickEvent {}
+
+#[cfg(unix)]
+impl BridgeKickEvent {
+    pub fn create_named(name: &str) -> std::io::Result<Self> {
+        let name = imp::posix_name("kick", name)?;
+        let mode = libc::S_IRUSR | libc::S_IWUSR;
+        let created =
+            unsafe { libc::sem_open(name.as_ptr(), libc::O_CREAT | libc::O_EXCL, mode, 0u32) };
+        if created != libc::SEM_FAILED {
+            return Ok(Self {
+                semaphore: created,
+                name,
+                owner: true,
+            });
+        }
+        let create_error = std::io::Error::last_os_error();
+        if create_error.kind() != std::io::ErrorKind::AlreadyExists {
+            return Err(create_error);
+        }
+        let semaphore = unsafe { libc::sem_open(name.as_ptr(), 0) };
+        if semaphore == libc::SEM_FAILED {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(Self {
+            semaphore,
+            name,
+            owner: false,
+        })
+    }
+
+    pub fn set(&self) {
+        // Coalesce repeated requests like a Windows auto-reset event. The
+        // sequence counters in the shared region remain the source of truth.
+        let mut value = 0;
+        if unsafe { libc::sem_getvalue(self.semaphore, &mut value) } == 0 && value > 0 {
+            return;
+        }
+        unsafe {
+            let _ = libc::sem_post(self.semaphore);
+        }
+    }
+
+    pub fn wait(&self, timeout_ms: u32) -> bool {
+        if timeout_ms == 0 {
+            return unsafe { libc::sem_trywait(self.semaphore) } == 0;
+        }
+        let mut deadline = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        if unsafe { libc::clock_gettime(libc::CLOCK_REALTIME, &mut deadline) } != 0 {
+            return false;
+        }
+        deadline.tv_sec += (timeout_ms / 1_000) as libc::time_t;
+        deadline.tv_nsec += ((timeout_ms % 1_000) * 1_000_000) as libc::c_long;
+        if deadline.tv_nsec >= 1_000_000_000 {
+            deadline.tv_sec += 1;
+            deadline.tv_nsec -= 1_000_000_000;
+        }
+        loop {
+            if unsafe { libc::sem_timedwait(self.semaphore, &deadline) } == 0 {
+                return true;
+            }
+            if std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted {
+                return false;
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+impl Drop for BridgeKickEvent {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = libc::sem_close(self.semaphore);
+            if self.owner {
+                let _ = libc::sem_unlink(self.name.as_ptr());
+            }
+        }
+    }
+}
+
+/// Unsupported-platform fallback: timeout-paced polling.
+#[cfg(not(any(windows, unix)))]
 pub struct BridgeKickEvent;
 
-#[cfg(not(windows))]
+#[cfg(not(any(windows, unix)))]
 impl BridgeKickEvent {
     pub fn create_named(_name: &str) -> std::io::Result<Self> {
         Ok(Self)
@@ -972,6 +1078,135 @@ mod imp {
             unsafe {
                 let _ = UnmapViewOfFile(self.view);
                 let _ = CloseHandle(self.handle);
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+mod imp {
+    use std::ffi::CString;
+
+    /// Convert the platform-neutral bridge name to a short POSIX IPC name.
+    /// FNV-1a is fixed across processes and avoids `/` and platform name limits.
+    pub(super) fn posix_name(namespace: &str, source: &str) -> std::io::Result<CString> {
+        let mut hash = 0xcbf29ce484222325u64;
+        for byte in source.as_bytes() {
+            hash ^= u64::from(*byte);
+            hash = hash.wrapping_mul(0x100000001b3);
+        }
+        CString::new(format!("/futureboard_{namespace}_{hash:016x}"))
+            .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "invalid IPC name"))
+    }
+
+    pub struct UnixMapping {
+        ptr: *mut core::ffi::c_void,
+        size: usize,
+        name: CString,
+        owner: bool,
+    }
+
+    unsafe impl Send for UnixMapping {}
+    unsafe impl Sync for UnixMapping {}
+
+    impl UnixMapping {
+        pub fn create(name: &str, size: usize) -> std::io::Result<Self> {
+            let name = posix_name("audio", name)?;
+            let fd = unsafe {
+                libc::shm_open(
+                    name.as_ptr(),
+                    libc::O_RDWR | libc::O_CREAT | libc::O_EXCL | libc::O_CLOEXEC,
+                    libc::S_IRUSR | libc::S_IWUSR,
+                )
+            };
+            if fd < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            if unsafe { libc::ftruncate(fd, size as libc::off_t) } != 0 {
+                let error = std::io::Error::last_os_error();
+                unsafe {
+                    libc::close(fd);
+                    libc::shm_unlink(name.as_ptr());
+                }
+                return Err(error);
+            }
+            Self::map_fd(fd, size, name, true)
+        }
+
+        pub fn open(name: &str, size: usize) -> std::io::Result<Self> {
+            let name = posix_name("audio", name)?;
+            let fd = unsafe { libc::shm_open(name.as_ptr(), libc::O_RDWR | libc::O_CLOEXEC, 0) };
+            if fd < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+            if unsafe { libc::fstat(fd, &mut stat) } != 0 {
+                let error = std::io::Error::last_os_error();
+                unsafe {
+                    libc::close(fd);
+                }
+                return Err(error);
+            }
+            if stat.st_size < size as libc::off_t {
+                unsafe {
+                    libc::close(fd);
+                }
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "shared audio bridge is smaller than expected",
+                ));
+            }
+            Self::map_fd(fd, size, name, false)
+        }
+
+        fn map_fd(
+            fd: libc::c_int,
+            size: usize,
+            name: CString,
+            owner: bool,
+        ) -> std::io::Result<Self> {
+            let ptr = unsafe {
+                libc::mmap(
+                    std::ptr::null_mut(),
+                    size,
+                    libc::PROT_READ | libc::PROT_WRITE,
+                    libc::MAP_SHARED,
+                    fd,
+                    0,
+                )
+            };
+            let map_error = std::io::Error::last_os_error();
+            unsafe {
+                libc::close(fd);
+            }
+            if ptr == libc::MAP_FAILED {
+                if owner {
+                    unsafe {
+                        libc::shm_unlink(name.as_ptr());
+                    }
+                }
+                return Err(map_error);
+            }
+            Ok(Self {
+                ptr,
+                size,
+                name,
+                owner,
+            })
+        }
+
+        pub fn ptr(&self) -> *mut core::ffi::c_void {
+            self.ptr
+        }
+    }
+
+    impl Drop for UnixMapping {
+        fn drop(&mut self) {
+            unsafe {
+                libc::munmap(self.ptr, self.size);
+                if self.owner {
+                    libc::shm_unlink(self.name.as_ptr());
+                }
             }
         }
     }
@@ -1161,7 +1396,7 @@ mod tests {
 
     /// A second creator on an already-taken section name must be rejected rather
     /// than silently handed the existing region (name-squatting defence).
-    #[cfg(windows)]
+    #[cfg(any(windows, unix))]
     #[test]
     fn create_named_rejects_squatted_name() {
         let name = format!("Local\\FutureboardBridgeSquatTest-{}", std::process::id());
@@ -1172,10 +1407,25 @@ mod tests {
         drop(first);
     }
 
+    #[cfg(any(windows, unix))]
+    #[test]
+    fn named_region_maps_the_same_audio_bridge() {
+        let name = format!("Local\\FutureboardBridgeMapTest-{}", std::process::id());
+        let engine =
+            SharedAudioRegion::create_named(&name, 48_000, 256, 2).expect("create shared region");
+        let host = SharedAudioRegion::open_named(&name).expect("open shared region");
+
+        assert_eq!(host.bridge().sample_rate.load(Ordering::Relaxed), 48_000);
+        engine.bridge().request_seq.store(42, Ordering::Release);
+        assert_eq!(host.bridge().request_seq.load(Ordering::Acquire), 42);
+        host.bridge().done_seq.store(42, Ordering::Release);
+        assert_eq!(engine.bridge().done_seq.load(Ordering::Acquire), 42);
+    }
+
     /// The producer-wake event pairs a creator and an opener on the same name:
     /// `set` on one handle wakes a `wait` on the other, and the auto-reset
     /// consumes each signal exactly once.
-    #[cfg(windows)]
+    #[cfg(any(windows, unix))]
     #[test]
     fn kick_event_wakes_waiter_and_auto_resets() {
         // Unique per test process; 0xFFFF_FFFF is never a real host pid.

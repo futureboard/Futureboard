@@ -2,7 +2,7 @@
 //!
 //! Engine-agnostic like the other `BuiltinAudioPlugins` cores: it exposes a
 //! realtime-safe [`StereoEffect`](builtin_dsp_core::StereoEffect) chain
-//! (`Gate → Drive → Amp → Chorus → Delay → Reverb → Cabinet`) plus the metadata
+//! (`Gate → Drive → Amp → Mod → Delay → Reverb → Cabinet`) plus the metadata
 //! and parameter model the React editor drives. Host/bridge wiring (C entry
 //! points, embedded-UI table) is layered on separately.
 
@@ -12,10 +12,11 @@ pub mod ui;
 mod wire;
 
 pub use dsp::{
-    AmpModel, CabModel, DriveModel, Dsp, MicModel, ModModel, NamCaptureInfo, NamLoadError,
-    NamLoader, PATH_SLOTS, PLUGIN_ID, Params, PreparedNamRuntime, ReverbModel, StageKind,
-    ToneEngineKind, WahModel, apply_to_params, default_params, descriptor, prepare_nam_runtime,
-    ui_values,
+    AmpModel, CabModel, DelayModel, DriveModel, Dsp, IR_PARTITION_SAMPLES, IrInfo, IrLoadError,
+    IrLoader, MAX_IR_SECONDS, MicModel, ModModel, NamCaptureInfo, NamLoadError, NamLoader,
+    PATH_SLOTS, PLUGIN_ID, Params, PreparedIrRuntime, PreparedNamRuntime, ReverbModel, StageKind,
+    ToneEngineKind, WahModel, apply_to_params, default_params, descriptor, prepare_ir_runtime,
+    prepare_nam_runtime, ui_values,
 };
 pub use state::{RodhareistState, SCHEMA_VERSION};
 pub use wire::{UI_PARAM_IDS, ui_param_id, ui_param_index};

@@ -226,45 +226,37 @@ impl PluginBridgeRuntime {
         if self.shared_audio.contains_key(instance_id) {
             return;
         }
-        #[cfg(windows)]
-        {
-            use SpherePluginHost::audio_bridge::SharedAudioRegion;
-            let name = bridge_region_name(instance_id);
-            match SharedAudioRegion::create_named(&name, sample_rate, max_block_size, 2) {
-                Ok(region) => {
-                    let bytes = region.bytes();
-                    eprintln!(
-                        "[plugin-bridge] shared audio region created instance={instance_id} name={name} bytes={bytes} sr={sample_rate} block={max_block_size}"
-                    );
-                    eprintln!(
-                        "[plugin-bridge] sending AttachSharedAudio instance={instance_id} name={name} bytes={bytes}"
-                    );
-                    match self.client.attach_shared_audio(
-                        name.clone(),
-                        bytes,
-                        instance_id.to_string(),
-                    ) {
-                        Ok(()) => {
-                            self.shared_audio
-                                .insert(instance_id.to_string(), Arc::new(region));
-                        }
-                        Err(error) => {
-                            eprintln!(
-                                "[plugin-bridge] AttachSharedAudio send failed instance={instance_id}: {error}"
-                            )
-                        }
+        use SpherePluginHost::audio_bridge::SharedAudioRegion;
+        let name = bridge_region_name(instance_id);
+        match SharedAudioRegion::create_named(&name, sample_rate, max_block_size, 2) {
+            Ok(region) => {
+                let bytes = region.bytes();
+                eprintln!(
+                    "[plugin-bridge] shared audio region created instance={instance_id} name={name} bytes={bytes} sr={sample_rate} block={max_block_size}"
+                );
+                eprintln!(
+                    "[plugin-bridge] sending AttachSharedAudio instance={instance_id} name={name} bytes={bytes}"
+                );
+                match self
+                    .client
+                    .attach_shared_audio(name.clone(), bytes, instance_id.to_string())
+                {
+                    Ok(()) => {
+                        self.shared_audio
+                            .insert(instance_id.to_string(), Arc::new(region));
+                    }
+                    Err(error) => {
+                        eprintln!(
+                            "[plugin-bridge] AttachSharedAudio send failed instance={instance_id}: {error}"
+                        )
                     }
                 }
-                Err(error) => {
-                    eprintln!(
-                        "[plugin-bridge] shared audio region create failed instance={instance_id}: {error}"
-                    )
-                }
             }
-        }
-        #[cfg(not(windows))]
-        {
-            let _ = (instance_id, sample_rate, max_block_size);
+            Err(error) => {
+                eprintln!(
+                    "[plugin-bridge] shared audio region create failed instance={instance_id}: {error}"
+                )
+            }
         }
     }
 

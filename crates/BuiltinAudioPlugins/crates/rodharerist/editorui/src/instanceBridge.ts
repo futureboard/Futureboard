@@ -91,6 +91,24 @@ export type NamCaptureResultMessage = {
   fullRig: boolean;
 };
 
+/** Native -> React: async outcome of a `loadIr` request. */
+export type IrLoadResultMessage = {
+  type: "futureboard.irLoadResult";
+  protocolVersion: number;
+  instanceId: string;
+  ok: boolean;
+  name: string;
+  error?: string | null;
+  /** Frames actually convolved, at the engine's rate (0 on failure). */
+  frames: number;
+  /** Latency the convolution adds, in samples (0 on failure). */
+  latencySamples: number;
+  /** The file carried two distinct channels (true-stereo IR). */
+  stereo: boolean;
+  /** The file was longer than the engine's cap and got cut. */
+  truncated: boolean;
+};
+
 /** Which per-plugin user folder a file message targets. */
 export type FileKind = "presets" | "irs" | "nams";
 
@@ -135,6 +153,7 @@ export type NativeMessage =
   | MetersMessage
   | HostStatusMessage
   | NamCaptureResultMessage
+  | IrLoadResultMessage
   | FileListMessage
   | FileContentMessage
   | FileWrittenMessage;
@@ -145,6 +164,7 @@ const NATIVE_MESSAGE_TYPES = new Set([
   "futureboard.meters",
   "futureboard.hostStatus",
   "futureboard.namCaptureResult",
+  "futureboard.irLoadResult",
   "futureboard.fileList",
   "futureboard.fileContent",
   "futureboard.fileWritten",
@@ -338,6 +358,26 @@ export function postLoadNamCaptureForBoundInstance(
     json,
     stereo: opts.stereo,
     fullRig: opts.fullRig,
+  });
+}
+
+/**
+ * Ask native to load `fileName` from the plugin's IRs folder into the bound
+ * instance's cabinet slot. Unlike `loadNamCapture` this carries only the name:
+ * a `.wav` is binary, and native already owns that folder, so the bytes never
+ * cross the webview. Silent no-op when nothing is bound. The result arrives
+ * asynchronously as a `futureboard.irLoadResult` native message.
+ */
+export function postLoadIrForBoundInstance(fileName: string): void {
+  const binding = activeParamBinding;
+  if (!binding) return;
+  post({
+    type: "futureboard.loadIr",
+    protocolVersion: BRIDGE_PROTOCOL_VERSION,
+    pluginId: binding.pluginId,
+    instanceId: binding.instanceId,
+    bindingGeneration: binding.bindingGeneration,
+    fileName,
   });
 }
 

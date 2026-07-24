@@ -8,6 +8,7 @@ import {
   CAB_VARIANT_TO_MODEL,
   DRIVE_VARIANT_TO_MODEL,
   MOD_VARIANT_TO_MODEL,
+  DELAY_VARIANT_TO_MODEL,
   REVERB_VARIANT_TO_MODEL,
   STAGE_VARIANT_TO_CATEGORY,
   WAH_VARIANT_TO_MODEL,
@@ -51,9 +52,11 @@ const FIXTURE = {
     chorus_rate: 1,
     chorus_depth: 2,
     chorus_mix: 33,
+    delay_model: "Analog",
     delay_time_ms: 640,
     delay_fb: 45,
     delay_mix: 25,
+    delay_tone: 7.5,
     reverb_decay_s: 3.5,
     reverb_mix: 60,
     reverb_shimmer: 74,
@@ -93,10 +96,11 @@ describe("snapshotFromRodhareistState", () => {
     expect(Object.keys(STAGE_VARIANT_TO_CATEGORY)).toHaveLength(10);
     expect(Object.keys(AMP_VARIANT_TO_MODEL)).toHaveLength(8);
     expect(Object.keys(DRIVE_VARIANT_TO_MODEL)).toHaveLength(10);
-    expect(Object.keys(CAB_VARIANT_TO_MODEL)).toHaveLength(11);
+    expect(Object.keys(CAB_VARIANT_TO_MODEL)).toHaveLength(12);
     expect(Object.keys(MOD_VARIANT_TO_MODEL)).toHaveLength(4);
     expect(Object.keys(WAH_VARIANT_TO_MODEL)).toHaveLength(2);
     expect(Object.keys(REVERB_VARIANT_TO_MODEL)).toHaveLength(4);
+    expect(Object.keys(DELAY_VARIANT_TO_MODEL)).toHaveLength(5);
   });
 
   test("maps a serde fixture field-for-field", () => {
@@ -116,7 +120,13 @@ describe("snapshotFromRodhareistState", () => {
     expect(param(snap, "gate", "gate_thresh")).toBe(-40);
     expect(param(snap, "rat", "drive_gain")).toBe(8.5);
     expect(param(snap, "recto", "amp_master")).toBe(5);
-    expect(param(snap, "tape", "delay_time")).toBe(640);
+    expect(snap.stageModels.delay).toBe("analog");
+    expect(param(snap, "analog", "delay_time")).toBe(640);
+    expect(param(snap, "analog", "delay_tone")).toBe(7.5);
+    // The unselected tape voicing keeps its own default.
+    expect(param(snap, "tape", "delay_time")).toBe(
+      defaultValueFor("tape", "delay_time"),
+    );
     expect(param(snap, "plate", "reverb_decay")).toBe(3.5);
     expect(param(snap, "tweed_1x12", "cab_mic")).toBe(80);
     expect(param(snap, "tweed_1x12", "cab_mic_type")).toBe(1);

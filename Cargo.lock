@@ -6669,6 +6669,7 @@ dependencies = [
  "builtin_dsp_core",
  "builtin_ui_embed",
  "nam-rs",
+ "rustfft",
  "serde",
  "serde_json",
 ]
@@ -7417,6 +7418,7 @@ dependencies = [
  "crossbeam-channel",
  "dirs 5.0.1",
  "embed-resource",
+ "libc",
  "napi",
  "napi-build",
  "napi-derive",

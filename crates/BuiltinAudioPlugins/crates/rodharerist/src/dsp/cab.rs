@@ -321,6 +321,11 @@ impl CabProfile {
                 compression: 0.14,
                 output_gain: 0.90,
             },
+            // Not a modeled voicing: the IR engine (`dsp::ir`) owns this
+            // selection and the modeled lane is faded out while it is
+            // active. A profile is still needed so the standby lane holds
+            // something valid — the most neutral voicing in the set.
+            CabModel::Ir => Self::for_model(CabModel::Vintage4x12),
         }
     }
 }
@@ -911,7 +916,9 @@ mod tests {
 
     #[test]
     fn cabinets_band_limit_speaker_output() {
-        for model in CabModel::ALL {
+        // `MODELED`, not `ALL`: the IR selection has no filter profile of its
+        // own — `dsp::ir` owns it, and its own tests cover it.
+        for model in CabModel::MODELED {
             let mid = sine_level(*model, MicModel::Dynamic, 0.0, 0.0, 1_000.0);
             let fizz = sine_level(*model, MicModel::Dynamic, 0.0, 0.0, 12_000.0);
             assert!(mid > 0.002, "{model:?} muted the midrange");
@@ -924,7 +931,7 @@ mod tests {
 
     #[test]
     fn cabinet_families_and_microphones_are_distinct() {
-        let cabinets: Vec<_> = CabModel::ALL
+        let cabinets: Vec<_> = CabModel::MODELED
             .iter()
             .map(|m| render(*m, MicModel::Dynamic, 30.0, 25.0))
             .collect();
@@ -941,8 +948,8 @@ mod tests {
                 assert!(
                     diff > 0.0005,
                     "{:?} == {:?}",
-                    CabModel::ALL[i],
-                    CabModel::ALL[j]
+                    CabModel::MODELED[i],
+                    CabModel::MODELED[j]
                 );
             }
         }

@@ -23,6 +23,7 @@ import {
   getActiveParamBinding,
   onNativeMessage,
   onParamBindingReset,
+  postLoadIrForBoundInstance,
   postLoadNamCaptureForBoundInstance,
   postSetParams,
 } from "./instanceBridge";
@@ -191,6 +192,7 @@ export const CAB_MODEL_INDEX: Record<string, number> = {
   brit_412: 8,
   uber_412: 9,
   slo_412: 10,
+  ir: 11,
 };
 
 /** `ReverbModel` indices (mirrors Rust `ReverbModel::ALL`). */
@@ -199,6 +201,15 @@ export const REVERB_MODEL_INDEX: Record<string, number> = {
   room: 1,
   hall: 2,
   shimmer: 3,
+};
+
+/** `DelayModel` indices (mirrors Rust `DelayModel::ALL`). */
+export const DELAY_MODEL_INDEX: Record<string, number> = {
+  tape: 0,
+  digital: 1,
+  analog: 2,
+  ping_pong: 3,
+  dual: 4,
 };
 
 /** `ModModel` indices (mirrors Rust `ModModel::ALL`). */
@@ -267,8 +278,13 @@ export function postModel(category: string, modelId: string): void {
       if (i !== undefined) postParam("reverb_model", i);
       return;
     }
+    case "delay": {
+      const i = DELAY_MODEL_INDEX[modelId];
+      if (i !== undefined) postParam("delay_model", i);
+      return;
+    }
     default:
-      // Single-algorithm stages (gate/delay) have no model select.
+      // Single-algorithm stages (gate/comp/eq) have no model select.
       return;
   }
 }
@@ -285,6 +301,46 @@ export function postLoadNamCapture(json: string, opts: NamCaptureLoadOptions): v
     name: opts.name,
     stereo: opts.stereo,
     fullRig: opts.fullRig,
+  });
+}
+
+/** One IR load's outcome, mirroring the Rust `IrInfo` in `rodharerist`. */
+export type IrLoadResult = {
+  ok: boolean;
+  name: string;
+  error?: string | null;
+  frames: number;
+  latencySamples: number;
+  stereo: boolean;
+  truncated: boolean;
+};
+
+/**
+ * Load a `.wav` impulse response from the plugin's IRs folder into the cabinet
+ * slot. Only the file name travels — native reads the bytes itself. The result
+ * arrives asynchronously through {@link subscribeIrLoadResult}. Loading and
+ * *selecting* the IR cabinet are separate: the DSP keeps the loaded IR ready
+ * regardless of which cabinet model is active.
+ */
+export function postLoadIr(fileName: string): void {
+  postLoadIrForBoundInstance(fileName);
+}
+
+/** Subscribe to IR load outcomes for the bound instance. */
+export function subscribeIrLoadResult(sink: (result: IrLoadResult) => void): () => void {
+  return onNativeMessage((msg) => {
+    if (msg.type !== "futureboard.irLoadResult") return;
+    const binding = getActiveParamBinding();
+    if (binding && msg.instanceId !== binding.instanceId) return;
+    sink({
+      ok: msg.ok,
+      name: msg.name,
+      error: msg.error,
+      frames: msg.frames,
+      latencySamples: msg.latencySamples,
+      stereo: msg.stereo,
+      truncated: msg.truncated,
+    });
   });
 }
 

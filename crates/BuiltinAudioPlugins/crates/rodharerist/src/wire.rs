@@ -84,6 +84,8 @@ pub const UI_PARAM_IDS: &[&str] = &[
     "cab_mic_type",      // 68
     "reverb_model",      // 69
     "reverb_shimmer",    // 70
+    "delay_model",       // 71
+    "delay_tone",        // 72
 ];
 
 /// String id → wire index. Linear scan over a small table — control/UI
@@ -102,8 +104,8 @@ pub fn ui_param_id(index: u32) -> Option<&'static str> {
 mod tests {
     use super::*;
     use crate::dsp::{
-        AmpModel, CabModel, DriveModel, Dsp, ModModel, ReverbModel, StageKind, ToneEngineKind,
-        WahModel, apply_to_params, default_params, ui_values,
+        AmpModel, CabModel, DelayModel, DriveModel, Dsp, ModModel, ReverbModel, StageKind,
+        ToneEngineKind, WahModel, apply_to_params, default_params, ui_values,
     };
 
     #[test]
@@ -135,7 +137,7 @@ mod tests {
     /// accidental reorder/insert must fail here, loudly.
     #[test]
     fn wire_indices_are_pinned() {
-        assert_eq!(UI_PARAM_IDS.len(), 71);
+        assert_eq!(UI_PARAM_IDS.len(), 73);
         assert_eq!(ui_param_index("power"), Some(0));
         assert_eq!(ui_param_index("gate_on"), Some(3));
         assert_eq!(ui_param_index("drive_model"), Some(10));
@@ -167,6 +169,8 @@ mod tests {
         assert_eq!(ui_param_index("cab_mic_type"), Some(68));
         assert_eq!(ui_param_index("reverb_model"), Some(69));
         assert_eq!(ui_param_index("reverb_shimmer"), Some(70));
+        assert_eq!(ui_param_index("delay_model"), Some(71));
+        assert_eq!(ui_param_index("delay_tone"), Some(72));
     }
 
     /// `ui_values` must cover every wire id except `clear_clip` (an action,
@@ -204,6 +208,8 @@ mod tests {
         src.cab_model = CabModel::Tweed1x12;
         src.reverb_model = ReverbModel::Shimmer;
         src.reverb_shimmer = 37.0;
+        src.delay_model = DelayModel::PingPong;
+        src.delay_tone = 8.25;
         src.mod_model = ModModel::Phaser;
         src.wah_model = WahModel::TouchWah;
         src.wah_on = false;
@@ -277,6 +283,11 @@ mod tests {
             "vintage_212",
             "oversized_412",
             "bass_cabinet",
+            "brit_412",
+            "uber_412",
+            "slo_412",
+            // Not a modeled voicing — the convolution engine (`dsp::ir`).
+            "ir",
         ];
         for (i, id) in cab.iter().enumerate() {
             assert_eq!(
@@ -299,6 +310,14 @@ mod tests {
                 ModModel::from_model_id(id),
                 Some(ModModel::ALL[i]),
                 "mod `{id}`"
+            );
+        }
+        let delay = ["tape", "digital", "analog", "ping_pong", "dual"];
+        for (i, id) in delay.iter().enumerate() {
+            assert_eq!(
+                DelayModel::from_model_id(id),
+                Some(DelayModel::ALL[i]),
+                "delay `{id}`"
             );
         }
         let wah = ["cry_wah", "touch_wah"];

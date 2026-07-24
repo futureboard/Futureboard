@@ -2,8 +2,13 @@
 // Documents/Futureboard Studio/Rodhareist/{Presets, IRs, NAMs} via the
 // native file bridge (list/read/write postMessages). Listings rebuild
 // wholesale on tab switch and after every write — never diffed.
+//
+// Presets and NAMs are text, so they come back through `readFile`. IRs are
+// binary `.wav`: the page sends only the file name (`postLoadIr`) and native
+// reads the bytes itself — see `instanceBridge.ts`.
 
 import { useEffect, useRef, useState } from "react";
+import { postLoadIr, subscribeIrLoadResult } from "../bridge";
 import {
   onNativeMessage,
   postListFiles,
@@ -30,6 +35,9 @@ type PresetBrowserProps = {
   buildFactorySnapshot: (id: string) => RigSnapshot | null;
   /** Route a `.nam` file's text into the amp slot's NAM engine. */
   onLoadNamFile: (name: string, json: string) => void;
+  /** Called after an IR loads, so the editor can switch the cabinet slot to
+   * the convolution engine — loading and selecting are separate steps. */
+  onIrLoaded?: (name: string) => void;
 };
 
 const TABS: { kind: FileKind; label: string }[] = [
@@ -55,6 +63,7 @@ export function PresetBrowser({
   buildSavePayload,
   buildFactorySnapshot,
   onLoadNamFile,
+  onIrLoaded,
 }: PresetBrowserProps) {
   const [tab, setTab] = useState<FileKind>("presets");
   const [query, setQuery] = useState("");
@@ -62,6 +71,8 @@ export function PresetBrowser({
   const [saving, setSaving] = useState(false);
   const [saveName, setSaveName] = useState("");
   const [status, setStatus] = useState<string | null>(null);
+  /** File name of the IR the DSP currently has loaded, if any. */
+  const [loadedIr, setLoadedIr] = useState<string | null>(null);
   const seededRef = useRef(false);
   const pendingSeedWrites = useRef(0);
 
@@ -119,6 +130,30 @@ export function PresetBrowser({
       }),
     // Stable callbacks come from Editor's useCallback wrappers.
     [buildFactorySnapshot, onLoadPresetFile, onLoadNamFile],
+  );
+
+  // IR loads report back on their own channel (the bytes never came through
+  // the page, so there is no `fileContent` message to hang this off).
+  useEffect(
+    () =>
+      subscribeIrLoadResult((result) => {
+        if (!result.ok) {
+          setLoadedIr(null);
+          setStatus(`IR failed: ${result.error ?? "unknown"}`);
+          return;
+        }
+        setLoadedIr(result.name);
+        const detail = [
+          result.stereo ? "stereo" : "mono",
+          `${result.frames} frames`,
+          result.truncated ? "truncated" : null,
+        ]
+          .filter(Boolean)
+          .join(" · ");
+        setStatus(`IR loaded: ${detail}`);
+        onIrLoaded?.(result.name);
+      }),
+    [onIrLoaded],
   );
 
   // Initial + per-tab listing.
@@ -185,9 +220,10 @@ export function PresetBrowser({
         )}
         {entries.map((f) => {
           const { pid, pname } = displayParts(f.fileName);
-          const active = tab === "presets" && pid === currentPresetId;
+          const active =
+            (tab === "presets" && pid === currentPresetId) ||
+            (tab === "irs" && f.fileName === loadedIr);
           const dirty = tab === "presets" && !!modifiedIds?.has(pid);
-          const disabled = tab === "irs"; // browse-only until convolution lands
           return (
             <button
               key={f.fileName}
@@ -195,11 +231,14 @@ export function PresetBrowser({
               role="option"
               aria-selected={active}
               className={`preset-item${active ? " active" : ""}`}
-              disabled={disabled}
-              title={disabled ? "IR loading coming soon" : f.fileName}
+              title={f.fileName}
               onClick={() => {
                 if (tab === "presets") postReadFile("presets", f.fileName);
                 else if (tab === "nams") postReadFile("nams", f.fileName);
+                else if (tab === "irs") {
+                  setStatus(`Loading ${f.fileName}…`);
+                  postLoadIr(f.fileName);
+                }
               }}
             >
               <span className="dot" />
@@ -212,8 +251,6 @@ export function PresetBrowser({
           );
         })}
       </div>
-
-      {tab === "irs" && <div className="browser-note">IR loading coming soon</div>}
 
       {tab === "presets" && (
         <div className="browser-save">
